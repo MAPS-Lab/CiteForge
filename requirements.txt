@@ -1,0 +1,19 @@
+# CiteForge Requirements
+# Zero-dependency design - uses only Python standard library (3.10+)
+# No external packages required for core functionality
+
+# Python version requirement
+# python>=3.10
+
+# Optional: Development and testing tools (not required for production use)
+# These are suggestions for contributors, not runtime dependencies
+
+# Development tools (optional)
+# pytest>=7.0.0          # For running tests
+# black>=22.0.0          # Code formatting
+# flake8>=5.0.0          # Linting
+# mypy>=1.0.0            # Type checking
+
+# Note: CiteForge is designed to work with Python 3.10+ standard library only.
+# All functionality is available without installing any external packages.
+# API keys are loaded from the keys/ directory (see README.md for details).

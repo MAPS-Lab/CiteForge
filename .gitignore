@@ -1,0 +1,65 @@
+# IDE and Editor directories
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+third-party/*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# Testing
+.pytest_cache/
+.coverage
+.tox/
+htmlcov/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# User data and API keys
+keys/
+data/
+output/
+reports/
+*.key
+*.keys
+.env
+.env.local
+
+# Temporary files
+*.log
+*.tmp
+temp/
+tmp/
