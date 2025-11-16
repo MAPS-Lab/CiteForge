@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .bibtex_utils import short_filename_for_entry, bibtex_from_dict
@@ -53,6 +54,20 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
                 merged[k] = v
                 field_sources[k] = src
                 continue
+
+            # special handling for DOI field: prefer non-arXiv DOIs over arXiv DOIs
+            if k == "doi":
+                cur_is_arxiv = bool(re.search(r'10\.48550/arxiv', str(cur), re.IGNORECASE))
+                new_is_arxiv = bool(re.search(r'10\.48550/arxiv', str(v), re.IGNORECASE))
+                # if current is arXiv DOI but new one isn't, always prefer the non-arXiv DOI
+                if cur_is_arxiv and not new_is_arxiv:
+                    merged[k] = v
+                    field_sources[k] = src
+                    continue
+                # if new is arXiv DOI but current isn't, keep current
+                if not cur_is_arxiv and new_is_arxiv:
+                    continue
+
             # only replace if new source is more trustworthy
             if type_rank.get(src, 99) < type_rank.get(cur_src, 99):
                 merged[k] = v
@@ -84,6 +99,19 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
         if not doi_is_trusted:
             merged.pop("doi", None)
 
+    # remove internal tracking fields
+    merged.pop("x_scholar_citation_id", None)
+
+    # normalize arXiv metadata to standard BibTeX fields
+    from .id_utils import normalize_arxiv_metadata
+    merged = normalize_arxiv_metadata(merged)
+
+    # remove fields that should not be saved
+    # keywords and copyright often come from DOI BibTeX responses but are not needed
+    unwanted_fields = {"keywords", "copyright"}
+    for field in unwanted_fields:
+        merged.pop(field, None)
+
     # only keep URLs from trusted sources (DOI resolver or arXiv)
     url_val = (merged.get("url") or "").strip()
     allowed = allowlisted_url(url_val)
@@ -92,49 +120,83 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
     elif allowed:
         merged["url"] = allowed
 
-    # if we have both DOI and arXiv, DOI wins - move arXiv to note field
+    # handle published papers with arXiv preprint: keep both DOI and eprint fields
+    # for pure arXiv preprints with arXiv DOI, the eprint fields are the primary reference
     doi_val = merged.get("doi")
     arxiv_id = extract_arxiv_eprint({"fields": merged})
-    if doi_val and arxiv_id:
-        note_prev = (merged.get("note") or "").strip()
-        note_ax = f"arXiv: {arxiv_id}"
 
-        # Check if arXiv ID is already in the note field to avoid duplication
-        if note_prev and arxiv_id in note_prev:
-            # arXiv already mentioned in note, don't duplicate
-            pass
-        else:
-            # Add arXiv to note field
-            merged["note"] = (f"{note_prev}; {note_ax}" if note_prev else note_ax)
-
+    # when a published DOI exists alongside arXiv, remove eprint fields
+    # (DOI is the primary identifier for published papers)
+    if doi_val and arxiv_id and not re.search(r'10\.48550/arxiv', doi_val, re.IGNORECASE):
+        # remove eprint fields since DOI is the primary identifier
         merged.pop("eprint", None)
         merged.pop("archiveprefix", None)
         merged.pop("primaryclass", None)
 
-    # remove internal tracking fields
-    merged.pop("x_scholar_citation_id", None)
+    # re-validate entry type based on venue content
+    # enrichers can provide incorrect types, so always check venue keywords
+    from .bibtex_build import determine_entry_type, get_container_field
 
-    # Heuristic type upgrade if still 'misc'
-    if etype == "misc":
-        journal = (merged.get("journal") or "").strip()
-        booktitle = (merged.get("booktitle") or "").strip()
-        if journal:
-            etype = "article"
-        elif booktitle:
-            etype = "inproceedings"
+    venue_type = determine_entry_type(
+        {
+            "journal": merged.get("journal"),
+            "booktitle": merged.get("booktitle"),
+            "howpublished": merged.get("howpublished"),
+            "publisher": merged.get("publisher"),
+            "pages": merged.get("pages")
+        },
+        type_field="type",
+        venue_hints={}  # no hints - rely only on keyword detection
+    )
 
-    # Enforce container field exclusivity based on entry type
-    # BibTeX standard: @article uses journal, @inproceedings uses booktitle, not both
-    from .bibtex_build import get_container_field
+    # if venue clearly indicates conference, override enricher type
+    if venue_type == "inproceedings":
+        etype = "inproceedings"
+    # if venue clearly indicates book chapter, override enricher type
+    elif venue_type == "incollection":
+        etype = "incollection"
+    elif etype == "misc":
+        # for misc entries, use full logic with venue hints
+        venue_type_with_hints = determine_entry_type(
+            {
+                "journal": merged.get("journal"),
+                "booktitle": merged.get("booktitle"),
+                "howpublished": merged.get("howpublished"),
+                "publisher": merged.get("publisher"),
+                "pages": merged.get("pages")
+            },
+            type_field="type",
+            venue_hints={"journal": "article", "booktitle": "inproceedings"}
+        )
+
+        if venue_type_with_hints != "misc":
+            etype = venue_type_with_hints
+        else:
+            # fallback to simple field presence check
+            journal = (merged.get("journal") or "").strip()
+            booktitle = (merged.get("booktitle") or "").strip()
+            if journal:
+                etype = "article"
+            elif booktitle:
+                etype = "inproceedings"
+
+    # for book chapters, convert howpublished to booktitle if booktitle is missing
+    if etype == "incollection":
+        if not merged.get("booktitle") and merged.get("howpublished"):
+            merged["booktitle"] = merged["howpublished"]
+            merged.pop("howpublished", None)
+
+    # enforce container field exclusivity per BibTeX standards
     expected_container = get_container_field(etype)
 
     if expected_container == "journal":
-        # Keep journal, remove booktitle
         merged.pop("booktitle", None)
+        merged.pop("howpublished", None)
     elif expected_container == "booktitle":
-        # Keep booktitle, remove journal
+        if merged.get("journal") and not merged.get("booktitle"):
+            merged["booktitle"] = merged["journal"]
         merged.pop("journal", None)
-    # For 'misc' or other types with howpublished, keep both removed unless howpublished
+        merged.pop("howpublished", None)
 
     return {"type": etype, "key": primary.get("key"), "fields": merged}
 

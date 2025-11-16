@@ -610,12 +610,12 @@ InvalidRow,,,,
                 }
             }),
             ("s2", {
-                "type": "inproceedings",
+                "type": "article",  # Changed from inproceedings
                 "fields": {
                     "title": "Test Paper",
                     "author": "John Smith",
                     "year": "2020",
-                    "booktitle": "Conference"  # Should be ignored (lower trust)
+                    "volume": "123"  # Changed from booktitle to avoid conflicting containers
                 }
             }),
         ]

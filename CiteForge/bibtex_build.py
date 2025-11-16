@@ -10,11 +10,12 @@ from .text_utils import extract_year_from_any
 def get_container_field(entry_type: str) -> str:
     """
     Choose the BibTeX field that should store the venue for this entry type,
-    such as journal for articles or booktitle for conference papers.
+    such as journal for articles, booktitle for conference papers and book
+    chapters, or howpublished for miscellaneous entries.
     """
     return (
         "journal" if entry_type == "article"
-        else "booktitle" if entry_type == "inproceedings"
+        else "booktitle" if entry_type in ("inproceedings", "incollection")
         else "howpublished"
     )
 
@@ -147,8 +148,8 @@ def determine_entry_type(
 ) -> str:
     """
     Guess whether a publication should be treated as a journal article,
-    conference paper, or miscellaneous entry by inspecting type fields and
-    venue hints.
+    conference paper, book chapter, or miscellaneous entry by inspecting type
+    fields and venue hints.
     """
     if obj is None:
         return "misc"
@@ -160,6 +161,8 @@ def determine_entry_type(
             return "article"
         if "proceed" in typ or typ in ("proceedings-article", "paper-conference", "inproceedings", "conference"):
             return "inproceedings"
+        if "chapter" in typ or typ in ("book-chapter", "book_chapter", "incollection"):
+            return "incollection"
         return "misc"
 
     # dict - try multiple strategies
@@ -173,6 +176,8 @@ def determine_entry_type(
                     return "article"
                 if any("conference" in t or "proceed" in t or t == "inproceedings" for t in pub_types_lower):
                     return "inproceedings"
+                if any("chapter" in t or t in ("bookchapter", "incollection") for t in pub_types_lower):
+                    return "incollection"
 
         # check type field (Crossref/CSL)
         typ = (obj.get(type_field) or "").lower()
@@ -181,6 +186,34 @@ def determine_entry_type(
                 return "article"
             if "proceed" in typ or typ in ("proceedings-article", "paper-conference", "inproceedings", "conference"):
                 return "inproceedings"
+            if "chapter" in typ or typ in ("book-chapter", "book_chapter", "incollection"):
+                return "incollection"
+
+        # check for book chapter indicators
+        # The combination of howpublished + publisher + pages (without journal/booktitle)
+        # is a strong indicator of a book chapter, as these fields together suggest
+        # a chapter within a published book rather than a journal article or conference paper
+        howpublished = obj.get("howpublished")
+        publisher = obj.get("publisher")
+        pages = obj.get("pages")
+        has_journal = obj.get("journal")
+        has_booktitle = obj.get("booktitle")
+
+        if howpublished and publisher and pages and not has_journal and not has_booktitle:
+            # First check for explicit book series/chapter keywords
+            howpub_lower = str(howpublished).lower()
+            book_series_keywords = [
+                "lecture notes", "series", "handbook", "advances in",
+                "studies in", "chapter"
+            ]
+            if any(keyword in howpub_lower for keyword in book_series_keywords):
+                return "incollection"
+
+            # Also check publisher name patterns common for book publishers
+            pub_lower = str(publisher).lower() if publisher else ""
+            book_publisher_keywords = ["springer", "elsevier", "wiley", "crc press", "cambridge", "oxford"]
+            if any(keyword in pub_lower for keyword in book_publisher_keywords):
+                return "incollection"
 
         # check venue content for conference keywords before trusting venue_hints
         # this catches cases where "journal" field contains conference proceedings
@@ -191,7 +224,9 @@ def determine_entry_type(
                 # conference indicators
                 conference_keywords = [
                     "proceedings", "conference", "symposium", "workshop",
-                    "meeting", "summit", "congress", "colloquium"
+                    "meeting", "summit", "congress", "colloquium",
+                    "chapter of the association",  # NAACL, EACL, AACL, etc.
+                    "findings of",  # ACL/EMNLP workshop findings
                 ]
                 if any(keyword in venue_lower for keyword in conference_keywords):
                     return "inproceedings"

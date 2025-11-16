@@ -95,7 +95,7 @@ The `summary.csv` file tracks which sources enriched each entry, with columns fo
 Edit `CiteForge/config.py` to customize:
 
 ```python
-CONTRIBUTION_WINDOW_YEARS = 2           # Time window for publications
+CONTRIBUTION_WINDOW_YEARS = 3           # Time window for publications
 PUBLICATIONS_PER_YEAR = 50              # Publications per year
 SIM_MERGE_DUPLICATE_THRESHOLD = 0.85    # Deduplication threshold
 REQUEST_DELAY_BETWEEN_ARTICLES = 0.5    # Rate limiting
@@ -155,7 +155,7 @@ python3 tests/run.py
 
 Run specific test suites:
 ```bash
-python3 tests/core.py      # Core utilities
+python3 tests/core.py       # Core utilities
 python3 tests/apis.py       # API integrations
 python3 tests/pipeline.py   # Pipeline components
 ```
@@ -176,18 +176,6 @@ python3 tests/pipeline.py   # Pipeline components
 **Low enrichment quality**
 - Check `output/summary.csv` for entries with low `trust_hits`
 - Consider enabling optional API keys (Semantic Scholar, Gemini)
-
-## Contributing
-
-Contributions are welcome. Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests to ensure everything passes
-5. Submit a pull request
-
-See `CONTRIBUTING.md` for detailed guidelines.
 
 ## License
 

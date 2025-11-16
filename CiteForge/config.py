@@ -23,7 +23,7 @@ DEFAULT_DICTIONARY_FILE = "data/dictionary.json"
 
 DEFAULT_OUT_DIR = "output"
 PAPERS_DIR = "papers"
-CONTRIBUTION_WINDOW_YEARS = 2
+CONTRIBUTION_WINDOW_YEARS = 3
 
 # Publications per year to fetch from Scholar
 # Adjust this if authors in your field publish more or fewer papers per year
@@ -31,8 +31,8 @@ PUBLICATIONS_PER_YEAR = 50
 
 # Maximum publications to fetch from Scholar in initial bulk request
 # Calculated dynamically: 50 publications/year × contribution window
-# For CONTRIBUTION_WINDOW_YEARS=1 (default), this fetches 50 publications
-# For CONTRIBUTION_WINDOW_YEARS=2, this fetches 100 publications
+# For CONTRIBUTION_WINDOW_YEARS=1, this fetches 50 publications
+# For CONTRIBUTION_WINDOW_YEARS=3 (default), this fetches 150 publications
 # For CONTRIBUTION_WINDOW_YEARS=5, this fetches 250 publications
 MAX_PUBLICATIONS_PER_AUTHOR = PUBLICATIONS_PER_YEAR * CONTRIBUTION_WINDOW_YEARS
 
