@@ -105,14 +105,28 @@ def allowlisted_url(url: Optional[str]) -> Optional[str]:
     """
     Accept only URLs that point to trusted resolvers such as doi.org or
     arxiv.org and discard links to generic publisher pages.
+
+    Normalizes DOI URLs to use HTTPS and the modern doi.org domain.
     """
     if not url:
         return None
     u = url.strip()
-    if re.search(r'^https?://(dx\.)?doi\.org/\S+$', u, flags=re.IGNORECASE):
-        return u
-    if re.search(r'^https?://arxiv\.org/(abs|pdf)/\S+$', u, flags=re.IGNORECASE):
-        return u
+
+    # Check for DOI URLs and normalize them
+    doi_match = re.search(r'^https?://(dx\.)?doi\.org/(\S+)$', u, flags=re.IGNORECASE)
+    if doi_match:
+        # Normalize to https://doi.org/...
+        doi_suffix = doi_match.group(2)
+        return f"https://doi.org/{doi_suffix}"
+
+    # Check for arXiv URLs and normalize to HTTPS
+    arxiv_match = re.search(r'^https?://arxiv\.org/(abs|pdf)/(\S+)$', u, flags=re.IGNORECASE)
+    if arxiv_match:
+        # Normalize to https://arxiv.org/...
+        arxiv_type = arxiv_match.group(1)
+        arxiv_id = arxiv_match.group(2)
+        return f"https://arxiv.org/{arxiv_type}/{arxiv_id}"
+
     return None
 
 

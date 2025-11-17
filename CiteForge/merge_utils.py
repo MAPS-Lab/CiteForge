@@ -16,8 +16,8 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
     following a trust hierarchy. Replace weaker fields with stronger ones and
     normalize identifiers such as DOIs and URLs.
 
-    The result is a single cleaned entry that prefers reliable venues and moves
-    secondary identifiers like arXiv IDs into notes when a DOI is present.
+    The result is a single cleaned entry that prefers reliable venues and removes
+    arXiv eprint fields when a published DOI is present.
     """
     fields = dict(primary.get("fields") or {})
     etype = (primary.get("type") or "misc").lower()

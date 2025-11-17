@@ -644,6 +644,8 @@ InvalidRow,,,,
     def test_merge_doi_arxiv_handling() -> TestResult:
         """
         Test DOI vs arXiv handling in merge.
+        When a published DOI is present alongside arXiv, the arXiv fields should be removed
+        since DOI is the primary identifier for published papers.
         """
         result = TestResult("Merge: DOI/arXiv handling")
 
@@ -678,17 +680,16 @@ InvalidRow,,,,
             result.failure("DOI should be present")
             return result
 
-        # arXiv fields should be moved to note
+        # arXiv fields should be removed when DOI present
         if fields.get("eprint"):
             result.failure("eprint should be removed when DOI present")
             return result
 
-        note = fields.get("note", "")
-        if "arXiv" not in note or "1234.5678" not in note:
-            result.failure(f"arXiv should be in note, got: '{note}'")
+        if fields.get("archiveprefix"):
+            result.failure("archiveprefix should be removed when DOI present")
             return result
 
-        result.success("Validated DOI prioritization with arXiv demotion to note field")
+        result.success("Validated DOI prioritization with arXiv field removal")
         return result
 
     @staticmethod

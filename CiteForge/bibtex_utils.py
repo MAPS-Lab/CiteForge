@@ -108,12 +108,59 @@ def parse_bibtex_to_dict(bibtex: str) -> Optional[Dict[str, Any]]:
     """
     Turn a BibTeX string into a dictionary that separates the entry type, key,
     and field values while handling nested braces and multi-line fields.
+    Also handles single-line BibTeX entries common in API responses.
     """
     head = _parse_bibtex_head(bibtex)
     if not head:
         return None
     fields: Dict[str, str] = {}
 
+    # Check if this is a single-line entry by looking for the pattern
+    # where fields are comma-separated all on one line after the entry key
+    # Example: @type{key, field1={val}, field2={val}, ...}
+    single_line_pattern = re.search(
+        r'@\s*[a-zA-Z]+\s*\{\s*[^,\s]+\s*,\s*(.+)\s*\}\s*$',
+        bibtex,
+        re.DOTALL
+    )
+
+    if single_line_pattern and '\n' not in bibtex.strip():
+        # Parse single-line format by splitting on commas outside of braces
+        fields_text = single_line_pattern.group(1).strip()
+
+        # Split by commas while respecting brace nesting
+        current_pos = 0
+        depth = 0
+        field_start = 0
+        field_parts = []
+
+        for i, char in enumerate(fields_text):
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+            elif char == ',' and depth == 0:
+                # Found a field separator
+                field_parts.append(fields_text[field_start:i].strip())
+                field_start = i + 1
+
+        # Don't forget the last field
+        if field_start < len(fields_text):
+            last_part = fields_text[field_start:].strip()
+            if last_part:
+                field_parts.append(last_part)
+
+        # Now parse each field
+        for part in field_parts:
+            m = re.match(r'^\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*=\s*(.*)$', part)
+            if m:
+                field_name = m.group(1).lower()
+                field_value = m.group(2).strip()
+                _assign_field_value(fields, field_name, field_value)
+
+        return {"type": head["type"].lower(), "key": head["key"], "fields": fields}
+
+    # Multi-line format parsing (original logic)
     # state machine for multi-line values
     current_field = None
     accumulator = []
