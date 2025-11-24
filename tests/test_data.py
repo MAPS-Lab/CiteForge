@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Well-known papers for testing
+# Well-known papers for testing, including complex edge cases
 KNOWN_PAPERS = [
     {
         "name": "attention_is_all_you_need",
@@ -12,12 +12,12 @@ KNOWN_PAPERS = [
         "venue": "NeurIPS",
         "doi": "10.48550/arXiv.1706.03762",
         "arxiv_id": "1706.03762",
-        "scholar_id": "2mSj3aYYXo0J",  # Scholar cluster ID
+        "scholar_id": "2mSj3aYYXo0J",
         "dblp_key": "conf/nips/VaswaniSPUJGKP17",
-        "s2_id": "204e3073870fae3d05bcbc2f6a8e263d9b72e776",  # Semantic Scholar corpus ID
-        "openalex_id": "W2964148859",  # OpenAlex work ID
-        "pubmed_id": None,  # Not in PubMed (CS paper)
-        "pmc_id": None,  # Not in PMC
+        "s2_id": "204e3073870fae3d05bcbc2f6a8e263d9b72e776",
+        "openalex_id": "W2964148859",
+        "pubmed_id": None,
+        "pmc_id": None,
     },
     {
         "name": "alexnet",
@@ -27,13 +27,13 @@ KNOWN_PAPERS = [
         "year": 2012,
         "venue": "NeurIPS",
         "doi": "10.1145/3065386",
-        "arxiv_id": None,  # Not on arXiv originally
+        "arxiv_id": None,
         "scholar_id": "U0nTddPJCXcJ",
         "dblp_key": "conf/nips/KrizhevskySH12",
         "s2_id": "abd1c342495432171beb7ca8fd9551ef13cbd0ff",
-        "openalex_id": "W2963159135",  # OpenAlex work ID
-        "pubmed_id": None,  # Not in PubMed (CS paper)
-        "pmc_id": None,  # Not in PMC
+        "openalex_id": "W2963159135",
+        "pubmed_id": None,
+        "pmc_id": None,
     },
     {
         "name": "bert",
@@ -47,9 +47,9 @@ KNOWN_PAPERS = [
         "scholar_id": "df2b0e26d0599ce3e70df8a9da02e51594e0e992",
         "dblp_key": "conf/naacl/DevlinCLT19",
         "s2_id": "df2b0e26d0599ce3e70df8a9da02e51594e0e992",
-        "openalex_id": "W2963403456",  # OpenAlex work ID
-        "pubmed_id": None,  # Not in PubMed (CS paper)
-        "pmc_id": None,  # Not in PMC
+        "openalex_id": "W2963403456",
+        "pubmed_id": None,
+        "pmc_id": None,
     },
     {
         "name": "resnet",
@@ -63,9 +63,9 @@ KNOWN_PAPERS = [
         "scholar_id": "1KiE26eQMfsJ",
         "dblp_key": "conf/cvpr/HeZRS16",
         "s2_id": "2c03df8b48bf3fa39054345bafabfeff15bfd11d",
-        "openalex_id": "W2157791381",  # OpenAlex work ID
-        "pubmed_id": None,  # Not in PubMed (CS paper)
-        "pmc_id": None,  # Not in PMC
+        "openalex_id": "W2157791381",
+        "pubmed_id": None,
+        "pmc_id": None,
     },
     {
         "name": "crispr_cas9",
@@ -76,13 +76,106 @@ KNOWN_PAPERS = [
         "year": 2012,
         "venue": "Science",
         "doi": "10.1126/science.1225829",
-        "arxiv_id": None,  # Not on arXiv (biomedical paper)
+        "arxiv_id": None,
         "scholar_id": "KOYnGWpLN9IC",
-        "dblp_key": None,  # Not in DBLP (biomedical)
+        "dblp_key": None,
         "s2_id": "13853cf7b0e556b6e7c0b419813ef7c45ce7d07a",
-        "openalex_id": "W2129288563",  # OpenAlex work ID
-        "pubmed_id": "22745249",  # PubMed ID
-        "pmc_id": "PMC6286148",  # PubMed Central ID
+        "openalex_id": "W2129288563",
+        "pubmed_id": "22745249",
+        "pmc_id": "PMC6286148",
+    },
+    # --- COMPLEX / EDGE CASE PAPERS ---
+    {
+        "name": "higgs_boson",
+        "title": "Observation of a new particle in the search for the Standard Model Higgs boson with the ATLAS detector at the LHC",
+        "authors": ["Georges Aad", "Brad Abbott", "J. Abdallah", "et al."],  # 2932 authors in reality
+        "first_author": "Aad",
+        "year": 2012,
+        "venue": "Physics Letters B",
+        "doi": "10.1016/j.physletb.2012.08.020",
+        "arxiv_id": "1207.7214",
+        "scholar_id": "8k8ZJ-4AAAAJ",
+        "dblp_key": None,
+        "s2_id": "547565d7663435b54558936022139c74257743c5",
+        "openalex_id": "W2089136360",
+        "pubmed_id": None,
+        "pmc_id": None,
+        "notes": "Extreme author count test case",
+    },
+    {
+        "name": "alphafold",
+        "title": "Highly accurate protein structure prediction with AlphaFold",
+        "authors": ["John Jumper", "Richard Evans", "Alexander Pritzel", "Tim Green", "Michael Figurnov",
+                    "Olaf Ronneberger", "Kathryn Tunyasuvunakool", "Russ Bates", "Augustin Žídek",
+                    "Anna Potapenko", "Alex Bridgland", "Clemens Meyer", "Simon A. A. Kohl",
+                    "Andrew J. Ballard", "Andrew Cowie", "Bernardino Romera-Paredes", "Stanislav Nikolov",
+                    "Rishub Jain", "Jonas Adler", "Trevor Back", "Stig Petersen", "David Reiman",
+                    "Ellen Clancy", "Michal Zielinski", "Martin Steinegger", "Michalina Pacholska",
+                    "Tamish Berghammer", "Sebastian Bodenstein", "David Silver", "Oriol Vinyals",
+                    "Andrew W. Senior", "Koray Kavukcuoglu", "Pushmeet Kohli", "Demis Hassabis"],
+        "first_author": "Jumper",
+        "year": 2021,
+        "venue": "Nature",
+        "doi": "10.1038/s41586-021-03819-2",
+        "arxiv_id": None,
+        "scholar_id": "UeHAZ0UAAAAJ",
+        "dblp_key": "journals/nature/JumperEPGFBRTBR21",
+        "s2_id": "15c8d726213a5b1c5570e15f61727c56262092ee",
+        "openalex_id": "W3181579737",
+        "pubmed_id": "34265844",
+        "pmc_id": "PMC8371605",
+        "notes": "Large author list with complex affiliations (in reality)",
+    },
+    {
+        "name": "latex_title",
+        "title": "On the $\\sqrt{2}$ approximation and $\\pi$ estimation",
+        "authors": ["Test Mathematician"],
+        "first_author": "Mathematician",
+        "year": 2020,
+        "venue": "Journal of Testing",
+        "doi": "10.1234/latex.test",
+        "arxiv_id": None,
+        "scholar_id": None,
+        "dblp_key": None,
+        "s2_id": None,
+        "openalex_id": None,
+        "pubmed_id": None,
+        "pmc_id": None,
+        "notes": "LaTeX math in title test case",
+    },
+    {
+        "name": "unicode_authors",
+        "title": "International Collaboration Study",
+        "authors": ["Jürgen Müller", "François Dubois", "Åsa Sørensen", "José María González"],
+        "first_author": "Müller",
+        "year": 2022,
+        "venue": "Global Science",
+        "doi": "10.1234/unicode.test",
+        "arxiv_id": None,
+        "scholar_id": None,
+        "dblp_key": None,
+        "s2_id": None,
+        "openalex_id": None,
+        "pubmed_id": None,
+        "pmc_id": None,
+        "notes": "Unicode/Accented characters test case",
+    },
+    {
+        "name": "long_title",
+        "title": "A very long title that goes on and on to test the buffer limits and similarity matching algorithms of the system to ensure that it does not crash or produce incorrect results when faced with an unusually verbose publication title that might occur in certain fields like medicine or humanities where titles can be descriptive paragraphs",
+        "authors": ["Verbose Author"],
+        "first_author": "Author",
+        "year": 2023,
+        "venue": "Journal of Verbosity",
+        "doi": "10.1234/long.test",
+        "arxiv_id": None,
+        "scholar_id": None,
+        "dblp_key": None,
+        "s2_id": None,
+        "openalex_id": None,
+        "pubmed_id": None,
+        "pmc_id": None,
+        "notes": "Long title test case (>300 chars)",
     },
 ]
 
