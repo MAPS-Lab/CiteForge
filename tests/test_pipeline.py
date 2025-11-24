@@ -5,9 +5,9 @@ from unittest.mock import patch
 import urllib.error
 import pytest
 
-from CiteForge import bibtex_utils as bt, api_clients as api
-from CiteForge.doi_utils import validate_doi_candidate, process_validated_doi
-from CiteForge.exceptions import ALL_API_ERRORS
+from src import bibtex_utils as bt, api_clients as api
+from src.doi_utils import validate_doi_candidate, process_validated_doi
+from src.exceptions import ALL_API_ERRORS
 
 # ===== DOI VALIDATION PIPELINE TESTS =====
 

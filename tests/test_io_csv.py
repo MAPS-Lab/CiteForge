@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from textwrap import dedent
 import pytest
-from CiteForge import io_utils
+from src import io_utils
 
 def test_read_records_from_csv(tmp_path):
     """

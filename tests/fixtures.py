@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from CiteForge import io_utils
-from CiteForge.exceptions import FILE_IO_ERRORS
+from src import io_utils
+from src.exceptions import FILE_IO_ERRORS
 from tests.test_data import API_CONFIGS
 
 

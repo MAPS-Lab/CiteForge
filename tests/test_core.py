@@ -3,9 +3,9 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 import pytest
-from CiteForge import text_utils, id_utils, config, bibtex_utils as bt, io_utils, merge_utils
-from CiteForge import exceptions, http_utils
-from CiteForge.models import Record
+from src import text_utils, id_utils, config, bibtex_utils as bt, io_utils, merge_utils
+from src import exceptions, http_utils
+from src.models import Record
 
 # ===== TEXT NORMALIZATION =====
 

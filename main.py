@@ -5,34 +5,36 @@ import re
 import time
 from typing import List, Optional, Dict, Any, Tuple, Callable
 
-from CiteForge import bibtex_utils as bt, api_clients as api, merge_utils as mu
-from CiteForge import id_utils as idu
-from CiteForge.doi_utils import process_validated_doi
-from CiteForge.config import (
-    DEFAULT_INPUT,
-    DEFAULT_KEY_FILE,
-    DEFAULT_S2_KEY_FILE,
-    DEFAULT_OUT_DIR,
-    CONTRIBUTION_WINDOW_YEARS,
-    SIM_MERGE_DUPLICATE_THRESHOLD,
-    REQUEST_DELAY_BETWEEN_ARTICLES,
+from src import bibtex_utils as bt, api_clients as api, merge_utils as mu
+from src import id_utils as idu
+from src.doi_utils import process_validated_doi
+from src.config import (
+    DATA_FILE,
+    OUTPUT_DIR,
+    REPORTS_DIR,
+    SUMMARY_CSV,
+    TRUST_ORDER,
     SKIP_SERPAPI_FOR_EXISTING_FILES,
+    REQUEST_DELAY_BETWEEN_ARTICLES,
+    CONTRIBUTION_WINDOW_YEARS,
 )
-from CiteForge.exceptions import (
+from src.exceptions import (
     ALL_API_ERRORS,
-    PARSE_ERRORS,
-    FILE_IO_ERRORS,
-    FILE_READ_ERRORS,
-    FULL_OPERATION_ERRORS,
+    RateLimitException,
+    NetworkException,
+    DataParsingException,
+    FileIOException,
+    ConfigurationException,
 )
-from CiteForge.http_utils import (
-    http_get_text,
+from src.http_utils import (
+    fetch_url_json,
+    fetch_url_text,
 )
-from CiteForge.io_utils import read_api_key, read_semantic_api_key, read_records, read_openreview_credentials, \
-    read_gemini_api_key, init_summary_csv, append_summary_to_csv
-from CiteForge.log_utils import logger
-from CiteForge.models import Record
-from CiteForge.text_utils import trim_title_default
+from src.io_utils import read_api_key, read_semantic_api_key, read_records, read_openreview_credentials, \
+    init_summary_csv, append_summary_to_csv, save_bibtex_file, load_existing_bibtex_files
+from src.log_utils import logger
+from src.models import Record
+from src.text_utils import trim_title_default
 
 
 def _try_multiple_candidates(

@@ -1,5 +1,5 @@
 import pytest
-from CiteForge.config import (
+from src.config import (
     CONTRIBUTION_WINDOW_YEARS,
     PUBLICATIONS_PER_YEAR,
     MAX_PUBLICATIONS_PER_AUTHOR,

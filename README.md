@@ -92,7 +92,7 @@ The `summary.csv` file tracks which sources enriched each entry, with columns fo
 
 ### Configuration
 
-Edit `CiteForge/config.py` to customize:
+Edit `src/config.py` to customize:
 
 ```python
 CONTRIBUTION_WINDOW_YEARS = 3           # Time window for publications

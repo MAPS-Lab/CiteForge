@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 import pytest
-from CiteForge import api_clients, api_generics, bibtex_utils, api_configs, doi_utils
+from src import api_clients, api_generics, bibtex_utils, api_configs, doi_utils
 from tests.fixtures import load_api_keys
 from tests.test_data import KNOWN_PAPERS, API_SPECIFIC_PAPERS
 

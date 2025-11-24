@@ -5,11 +5,11 @@ import urllib.error
 from pathlib import Path
 from textwrap import dedent
 import pytest
-from CiteForge import api_clients
-from CiteForge import bibtex_utils
-from CiteForge import merge_utils
-from CiteForge.models import Record
-from CiteForge.config import CONTRIBUTION_WINDOW_YEARS
+from src import api_clients
+from src import bibtex_utils
+from src import merge_utils
+from src.models import Record
+from src.config import CONTRIBUTION_WINDOW_YEARS
 from tests.fixtures import load_api_keys
 from tests.test_data import TEST_AUTHOR, KNOWN_PAPERS, REQUIRED_FIELDS
 
@@ -222,7 +222,7 @@ def test_csv_summary_integration(tmp_path):
     """
     Confirm that CSV summary export integrates correctly with the processing pipeline.
     """
-    from CiteForge.io_utils import init_summary_csv, append_summary_to_csv
+    from src.io_utils import init_summary_csv, append_summary_to_csv
 
     out_dir = tmp_path
     csv_path = out_dir / 'summary.csv'

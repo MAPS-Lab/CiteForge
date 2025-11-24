@@ -102,7 +102,7 @@ def read_api_key(path: str = DEFAULT_KEY_FILE) -> str:
     Load the SerpAPI key from a configuration file, trying the preferred path
     and an older legacy filename in a few common locations.
     """
-    lines = _read_key_file(path, legacy="CiteForge.key", required=True, expected_lines=1)
+    lines = _read_key_file(path, legacy="src.key", required=True, expected_lines=1)
     return lines[0] if lines else ""
 
 

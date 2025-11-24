@@ -1,5 +1,5 @@
 [project]
-name = "CiteForge"
+name = "src"
 version = "1.0.0"
 description = "Automated BibTeX generation and metadata enrichment tool"
 requires-python = ">=3.10"
