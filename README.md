@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-45%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-56%20passing-brightgreen.svg)](tests/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success.svg)](requirements.txt)
 
 A zero-dependency Python tool for automated bibliographic data collection and enrichment. CiteForge aggregates publication metadata from 12 academic sources, validates and merges them using trust-based policies, and exports clean BibTeX entries.
@@ -16,7 +16,7 @@ A zero-dependency Python tool for automated bibliographic data collection and en
 - **Smart caching**: Reduces API calls from 1+N to 1 per author on subsequent runs
 - **Quality tracking**: CSV reports showing enrichment coverage per entry
 - **Fuzzy matching**: Validates metadata consistency across sources
-- **45 tests**: All core functionality is tested
+- **56 tests**: All core functionality is tested
 
 ## Quick Start
 
@@ -150,14 +150,15 @@ Fields are selected based on source reliability (highest to lowest):
 
 Run all tests:
 ```bash
-python3 tests/run.py
+pytest
 ```
 
 Run specific test suites:
 ```bash
-python3 tests/core.py       # Core utilities
-python3 tests/apis.py       # API integrations
-python3 tests/pipeline.py   # Pipeline components
+pytest tests/test_core.py       # Core utilities
+pytest tests/test_apis.py       # API integrations
+pytest tests/test_pipeline.py   # Pipeline components
+pytest tests/test_integration.py # End-to-end integration
 ```
 
 ## Troubleshooting
