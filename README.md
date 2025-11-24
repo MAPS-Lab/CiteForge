@@ -114,13 +114,13 @@ SKIP_SERPAPI_FOR_EXISTING_FILES = True  # Smart caching
 
 **Biomedical:**
 - PubMed
-- Europe PMC
 - OpenAlex
+- Europe PMC
 
 **Utilities:**
-- DataCite
 - ORCID
-- Google Gemini
+- DataCite
+- Google Gemini (short title generation)
 
 ## Architecture
 
