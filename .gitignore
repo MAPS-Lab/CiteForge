@@ -43,6 +43,7 @@ ENV/
 .pytest_cache/
 .coverage
 .tox/
+A2I2/
 htmlcov/
 .mypy_cache/
 .dmypy.json
