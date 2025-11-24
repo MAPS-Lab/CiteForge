@@ -542,6 +542,16 @@ def extract_authors_from_any(
             # BibTeX style
             parts = [p.strip() for p in obj_str.split(" and ")]
             authors = [p for p in parts if p]
+        elif " et al." in obj_str or " et al" in obj_str:
+            # Handle "Name et al." pattern
+            clean_str = obj_str.replace(" et al.", "").replace(" et al", "")
+            # If there are commas, split by comma
+            if "," in clean_str:
+                parts = [p.strip() for p in clean_str.split(",")]
+                authors = [p for p in parts if p]
+                authors.append("et al.")
+            else:
+                authors = [clean_str, "et al."]
         elif ";" in obj_str:
             # semicolon-separated
             parts = [p.strip() for p in obj_str.split(";")]
