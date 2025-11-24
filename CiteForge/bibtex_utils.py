@@ -125,21 +125,24 @@ def parse_bibtex_to_dict(bibtex: str) -> Optional[Dict[str, Any]]:
     )
 
     if single_line_pattern and '\n' not in bibtex.strip():
-        # Parse single-line format by splitting on commas outside of braces
+        # Parse single-line format by splitting on commas outside of braces AND quotes
         fields_text = single_line_pattern.group(1).strip()
 
-        # Split by commas while respecting brace nesting
+        # Split by commas while respecting brace nesting and quotes
         current_pos = 0
-        depth = 0
+        brace_depth = 0
+        in_quote = False
         field_start = 0
         field_parts = []
 
         for i, char in enumerate(fields_text):
-            if char == '{':
-                depth += 1
-            elif char == '}':
-                depth -= 1
-            elif char == ',' and depth == 0:
+            if char == '{' and not in_quote:
+                brace_depth += 1
+            elif char == '}' and not in_quote:
+                brace_depth -= 1
+            elif char == '"' and brace_depth == 0:
+                in_quote = not in_quote
+            elif char == ',' and brace_depth == 0 and not in_quote:
                 # Found a field separator
                 field_parts.append(fields_text[field_start:i].strip())
                 field_start = i + 1

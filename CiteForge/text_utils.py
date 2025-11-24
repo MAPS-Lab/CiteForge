@@ -577,6 +577,9 @@ def extract_authors_from_any(
                     if all(abbreviated_pattern.match(p) for p in parts):
                         # Both parts look like abbreviated names - treat as list
                         authors = parts
+                    elif all(" " in p.strip() for p in parts):
+                        # Both parts contain spaces (e.g. "First Last, First Last") - treat as list
+                        authors = parts
                     else:
                         # Likely "Last, First" format for a single author
                         authors = [obj_str]
