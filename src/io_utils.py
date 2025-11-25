@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import json
 import os
 from typing import Any, Dict, List, Optional
@@ -137,7 +138,7 @@ def read_gemini_api_key(path: str = DEFAULT_GEMINI_KEY_FILE) -> Optional[str]:
 def read_records(path: str = DEFAULT_INPUT) -> List[Record]:
     """
     Load author records from a CSV file, skip empty rows, and keep only entries
-    with a Scholar ID so the main pipeline has usable input.
+    with at least one valid identifier (Scholar or DBLP).
     """
     records: List[Record] = []
     candidates = _candidate_paths(path)
@@ -149,13 +150,34 @@ def read_records(path: str = DEFAULT_INPUT) -> List[Record]:
                     # skip empty rows
                     if not any(row.values()):
                         continue
+
+                    name = (row.get("Name") or "").strip()
+                    scholar_link = (row.get("Scholar Link") or "").strip()
+                    dblp_link = (row.get("DBLP Link") or "").strip()
+
+                    # Extract Scholar ID
+                    scholar_id = ""
+                    if scholar_link:
+                        m = re.search(r"user=([^&]+)", scholar_link)
+                        if m:
+                            scholar_id = m.group(1)
+
+                    # Extract DBLP ID
+                    dblp_id = ""
+                    if dblp_link:
+                        # Handle full URL or just ID if user provided that
+                        if "/pid/" in dblp_link:
+                            m = re.search(r"/pid/(.+?)(?:\.[a-z0-9]+)?$", dblp_link)
+                            if m:
+                                dblp_id = m.group(1)
+                        else:
+                            dblp_id = dblp_link
+
                     records.append(
                         Record(
-                            name=(row.get("Name") or "").strip(),
-                            email=(row.get("Email") or "").strip(),
-                            scholar_id=(row.get("Scholar") or "").strip(),
-                            orcid=(row.get("ORCID") or "").strip(),
-                            dblp=(row.get("DBLP") or "").strip(),
+                            name=name,
+                            scholar_id=scholar_id,
+                            dblp=dblp_id,
                         )
                     )
             break
@@ -164,10 +186,10 @@ def read_records(path: str = DEFAULT_INPUT) -> List[Record]:
     else:
         raise FileNotFoundError(f"Input file not found (tried: {', '.join(candidates)})")
 
-    # need Scholar IDs to do anything useful
-    records = [r for r in records if r.scholar_id]
+    # need at least one ID to do anything useful
+    records = [r for r in records if r.scholar_id or r.dblp]
     if not records:
-        raise ValueError("No valid records with Scholar author_id found in input file.")
+        raise ValueError("No valid records with Scholar ID or DBLP ID found in input file.")
     return records
 
 

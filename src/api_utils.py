@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Tuple, Optional, Callable
 
 from . import bibtex_utils as bt
 from .exceptions import ALL_API_ERRORS
-from .log_utils import logger
+from .log_utils import logger, LogSource, LogCategory
 
 
 class EnrichmentSource(str, Enum):
@@ -46,38 +46,39 @@ def enrich_from_source(
     when successful.
     """
     source_name = source.value if isinstance(source, EnrichmentSource) else str(source)
-    display_name = _format_display_name(source)
 
-    logger.info(f"{display_name}: search and build BibTeX")
+
+    log_source = _get_log_source(source)
+    logger.info("Search and build BibTeX", category=LogCategory.SEARCH, source=log_source)
 
     try:
         result = search_func(title, author, **search_kwargs)
 
         if not result:
-            logger.info(f"{display_name}: no result")
+            logger.info("No result", category=LogCategory.SKIP, source=log_source)
             return False
 
         bibtex = build_func(result, keyhint=keyhint)
 
         if not bibtex:
-            logger.info(f"{display_name}: build failed")
+            logger.info("Build failed", category=LogCategory.DEBUG, source=log_source)
             return False
 
         # Validate against baseline
         baseline_bib = bt.bibtex_from_dict(baseline_entry)
         if not bt.bibtex_entries_match_strict(baseline_bib, bibtex):
-            logger.info(f"{display_name} did not match baseline; skipped")
+            logger.info("Did not match baseline; skipped", category=LogCategory.SKIP, source=log_source)
             return False
 
         # Success - add to enrichment list
         entry_dict = bt.parse_bibtex_to_dict(bibtex)
         enr_list.append((source_name, entry_dict))
         flags[source_name] = True
-        logger.success(f"{display_name} matched and added")
+        logger.success("Matched and added", category=LogCategory.MATCH, source=log_source)
         return True
 
     except ALL_API_ERRORS as e:
-        logger.warn(f"{display_name} enrich error: {e}")
+        logger.warn(f"Enrich error: {e}", category=LogCategory.ERROR, source=log_source)
         return False
 
 
@@ -101,3 +102,25 @@ def _format_display_name(source: EnrichmentSource) -> str:
         EnrichmentSource.ORCID: "ORCID",
     }
     return display_names.get(source, source.value)
+
+
+def _get_log_source(source: EnrichmentSource) -> str:
+    """
+    Map EnrichmentSource to LogSource for coloring.
+    """
+    mapping = {
+        EnrichmentSource.SCHOLAR_BIB: LogSource.SCHOLAR,
+        EnrichmentSource.SCHOLAR_PAGE: LogSource.SCHOLAR,
+        EnrichmentSource.SEMANTIC_SCHOLAR: LogSource.S2,
+        EnrichmentSource.CROSSREF: LogSource.CROSSREF,
+        EnrichmentSource.OPENREVIEW: LogSource.OPENREVIEW,
+        EnrichmentSource.ARXIV: LogSource.ARXIV,
+        EnrichmentSource.OPENALEX: LogSource.OPENALEX,
+        EnrichmentSource.PUBMED: LogSource.PUBMED,
+        EnrichmentSource.EUROPEPMC: LogSource.EUROPEPMC,
+        EnrichmentSource.DOI_CSL: LogSource.DOI,
+        EnrichmentSource.DOI_BIBTEX: LogSource.DOI,
+        EnrichmentSource.DATACITE: LogSource.DOI,
+        EnrichmentSource.ORCID: "ORCID",
+    }
+    return mapping.get(source, LogSource.SYSTEM)

@@ -51,9 +51,7 @@ dmypy.json
 
 # User data and API keys
 keys/
-data/
-output/
-reports/
+data/cache.json
 *.key
 *.keys
 .env

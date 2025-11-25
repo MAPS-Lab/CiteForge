@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable
 
 from .bibtex_utils import make_bibkey
-from .log_utils import logger
+from .log_utils import logger, LogSource, LogCategory
 from .config import (
     SERPAPI_BASE,
+    HTTP_TIMEOUT_SHORT,
     ARXIV_BASE,
     OPENREVIEW_BASE,
     DBLP_BASE,
@@ -1085,7 +1086,7 @@ def dblp_fetch_publications(pid: str) -> List[Dict[str, Any]]:
         return []
     url = f"{DBLP_PERSON_BASE}/{pid}.xml"
     try:
-        xml = http_get_text(url)
+        xml = http_get_text(url, timeout=HTTP_TIMEOUT_SHORT)
     except NETWORK_ERRORS:
         return []
     try:
@@ -1453,10 +1454,10 @@ def gemini_generate_short_title(
                     short_title = short_title.replace(" ", "")
                     # validate it's reasonable (not empty, not too long)
                     if short_title and len(short_title) <= 100:
-                        logger.info(f"Gemini generated title: {short_title}", indent=2)
+                        logger.info(f"Generated title: {short_title}", category=LogCategory.DEBUG, source=LogSource.SYSTEM)
                         return short_title
 
-        logger.warn("Gemini returned no valid candidates in response", indent=2)
+        logger.warn("Returned no valid candidates in response", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         return None
 
     except urllib.error.HTTPError as e:
@@ -1465,17 +1466,17 @@ def gemini_generate_short_title(
             error_body = json.loads(e.read().decode("utf-8"))
             error_msg = error_body.get("error", {}).get("message", str(e.reason))
             if e.code == 503:
-                logger.warn(f"Gemini API overloaded (503), falling back to default algorithm", indent=2)
+                logger.warn(f"API overloaded (503), falling back to default algorithm", category=LogCategory.ERROR, source=LogSource.SYSTEM)
             elif e.code == 429:
-                logger.warn(f"Gemini API quota exceeded (429), falling back to default algorithm", indent=2)
+                logger.warn(f"API quota exceeded (429), falling back to default algorithm", category=LogCategory.ERROR, source=LogSource.SYSTEM)
             else:
-                logger.warn(f"Gemini API error {e.code}: {error_msg}", indent=2)
+                logger.warn(f"API error {e.code}: {error_msg}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         except FIELD_ACCESS_ERRORS:
             # Failed to parse error response, use basic HTTP error info
-            logger.warn(f"Gemini API HTTP {e.code}: {e.reason}", indent=2)
+            logger.warn(f"API HTTP {e.code}: {e.reason}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         return None
     except Exception as e:
-        logger.warn(f"Gemini API call failed: {type(e).__name__}: {e}", indent=2)
+        logger.warn(f"API call failed: {type(e).__name__}: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         return None
 
 

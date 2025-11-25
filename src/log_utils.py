@@ -15,22 +15,103 @@ logging.addLevelName(STEP_LEVEL, "STEP")
 logging.addLevelName(SUCCESS_LEVEL, "SUCCESS")
 
 
+class LogSource:
+    """
+    Constants for data sources to ensure consistent naming and coloring.
+    """
+    SCHOLAR = "Scholar"
+    DBLP = "DBLP"
+    S2 = "Semantic Scholar"
+    CROSSREF = "Crossref"
+    OPENREVIEW = "OpenReview"
+    ARXIV = "arXiv"
+    OPENALEX = "OpenAlex"
+    PUBMED = "PubMed"
+    EUROPEPMC = "Europe PMC"
+    DOI = "DOI"
+    SYSTEM = "System"
+
+
+class LogCategory:
+    """
+    Constants for log categories to replace indentation with semantic tagging.
+    """
+    AUTHOR = "AUTHOR"
+    ARTICLE = "ARTICLE"
+    FETCH = "FETCH"
+    SEARCH = "SEARCH"
+    MATCH = "MATCH"
+    SAVE = "SAVE"
+    SKIP = "SKIP"
+    ERROR = "ERROR"
+    DEBUG = "DEBUG"
+    PLAN = "PLAN"
+
+
 class ColoredFormatter(logging.Formatter):
     """
     Custom formatter that adds ANSI color codes to log messages for terminal output,
-    making different log levels easily distinguishable at a glance.
+    making different log levels, sources, and categories easily distinguishable.
     """
 
-    COLORS = {
-        "DEBUG": "\033[36m",      # Cyan
-        "INFO": "\033[37m",       # White
-        "STEP": "\033[96m",       # Bright cyan
-        "SUCCESS": "\033[92m",    # Bright green
-        "WARNING": "\033[93m",    # Bright yellow
-        "ERROR": "\033[91m",      # Bright red
-        "CRITICAL": "\033[91m",   # Bright red
-    }
+    # ANSI Color Codes
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    BOLD_CYAN = "\033[1;36m"
+    BOLD_GREEN = "\033[1;32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    BOLD_RED = "\033[1;31m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    GREEN = "\033[32m"
+    LIGHT_MAGENTA = "\033[95m"
+    LIGHT_BLUE = "\033[94m"
+    LIGHT_CYAN = "\033[96m"
+    DARK_GRAY = "\033[90m"
+    BOLD_MAGENTA = "\033[1;35m"
+    BOLD_BLUE = "\033[1;34m"
     RESET = "\033[0m"
+
+    # Level colors
+    LEVEL_COLORS = {
+        "DEBUG": CYAN,
+        "INFO": WHITE,
+        "STEP": BOLD_CYAN,
+        "SUCCESS": BOLD_GREEN,
+        "WARNING": YELLOW,
+        "ERROR": RED,
+        "CRITICAL": BOLD_RED,
+    }
+
+    # Source colors (background or distinct foreground)
+    SOURCE_COLORS = {
+        LogSource.SCHOLAR: BLUE,
+        LogSource.DBLP: CYAN,
+        LogSource.S2: MAGENTA,
+        LogSource.CROSSREF: YELLOW,
+        LogSource.OPENREVIEW: RED,
+        LogSource.ARXIV: GREEN,
+        LogSource.OPENALEX: LIGHT_MAGENTA,
+        LogSource.PUBMED: LIGHT_BLUE,
+        LogSource.EUROPEPMC: LIGHT_CYAN,
+        LogSource.DOI: DARK_GRAY,
+        LogSource.SYSTEM: WHITE,
+    }
+
+    # Category colors
+    CATEGORY_COLORS = {
+        LogCategory.AUTHOR: BOLD_MAGENTA,
+        LogCategory.ARTICLE: BOLD_BLUE,
+        LogCategory.FETCH: CYAN,
+        LogCategory.SEARCH: YELLOW,
+        LogCategory.MATCH: BOLD_GREEN,
+        LogCategory.SAVE: GREEN,
+        LogCategory.SKIP: DARK_GRAY,
+        LogCategory.ERROR: RED,
+        LogCategory.DEBUG: DARK_GRAY,
+        LogCategory.PLAN: MAGENTA,
+    }
 
     def __init__(self, fmt: str, use_color: bool = True):
         """
@@ -41,83 +122,113 @@ class ColoredFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """
-        Format the log record with optional color codes based on the log level.
+        Format the log record with optional color codes based on the log level, source, and category.
         """
+        # Save original message to restore later
+        original_msg = record.msg
+        
+        # Extract source and category if present
+        source = getattr(record, "source", None)
+        category = getattr(record, "category", None)
+        
+        if self.use_color:
+            # Colorize level name
+            if record.levelname in self.LEVEL_COLORS:
+                record.levelname = f"{self.LEVEL_COLORS[record.levelname]}{record.levelname}{self.RESET}"
+            
+            parts = []
+            
+            # Add colored source tag
+            if source:
+                if source in self.SOURCE_COLORS:
+                    source_color = self.SOURCE_COLORS[source]
+                    parts.append(f"{source_color}[{source}]{self.RESET}")
+                else:
+                    parts.append(f"[{source}]")
+            
+            # Add colored category tag
+            if category:
+                if category in self.CATEGORY_COLORS:
+                    cat_color = self.CATEGORY_COLORS[category]
+                    parts.append(f"{cat_color}[{category}]{self.RESET}")
+                else:
+                    parts.append(f"[{category}]")
+            
+            # Combine parts with message
+            if parts:
+                record.msg = f"{' '.join(parts)} {record.msg}"
+
         formatted = super().format(record)
-        if self.use_color and record.levelname in self.COLORS:
-            color = self.COLORS[record.levelname]
-            return f"{color}{formatted}{self.RESET}"
+        
+        # Restore original message
+        record.msg = original_msg
+        
         return formatted
 
 
-class IndentAdapter(logging.LoggerAdapter):
+class CategoryAdapter(logging.LoggerAdapter):
     """
-    Adapter that adds indentation support to log messages for visual hierarchy,
-    allowing nested operations to be clearly distinguished in the output.
+    Adapter that adds category support to log messages.
     """
 
     def process(self, msg: str, kwargs: dict) -> tuple[str, dict]:
         """
-        Add indentation prefix to messages based on the indent level in extra data.
+        Pass source and category to extra dict.
         """
-        # Extract indent from extra dict
         extra = kwargs.get("extra", {})
-        indent = extra.pop("indent", 0)
-        prefix = "    " * indent  # 4 spaces per indent level
-        return f"{prefix}{msg}", kwargs
+        
+        source = kwargs.pop("source", None)
+        if source:
+            extra["source"] = source
+            
+        category = kwargs.pop("category", None)
+        if category:
+            extra["category"] = category
+            
+        kwargs["extra"] = extra
+        return msg, kwargs
 
 
 class Logger:
     """
     Enhanced logger using Python's standard logging module with support for
-    colors, custom levels (STEP, SUCCESS), file mirroring, and indentation.
-
-    This implementation is compatible with PyCharm and other IDEs that support
-    standard Python logging formats, enabling syntax highlighting and log filtering.
+    colors, custom levels (STEP, SUCCESS), file mirroring, and categories.
     """
+
+    LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(message)s"
 
     def __init__(self):
         """
-        Initialize the logger with console and optional file handlers, detecting
-        terminal capabilities for color support.
+        Initialize the logger with console and optional file handlers.
         """
         self._logger = logging.getLogger("CiteForge")
         self._logger.setLevel(logging.DEBUG)
-        self._logger.propagate = False  # Prevent duplicate logs from root logger
+        self._logger.propagate = False
 
-        # Remove any existing handlers to avoid duplicates
         self._logger.handlers.clear()
 
-        # Console handler with color support
         self._console_handler = logging.StreamHandler(sys.stdout)
         self._console_handler.setLevel(logging.DEBUG)
 
-        # Detect if terminal supports colors
         use_color = sys.stdout.isatty()
 
-        # Standard format compatible with PyCharm and most log viewers
-        # Format: 2025-01-13 14:23:45 [INFO    ] Processing article...
-        log_format = "%(asctime)s [%(levelname)-8s] %(message)s"
         date_format = "%Y-%m-%d %H:%M:%S"
 
-        console_formatter = ColoredFormatter(log_format, use_color=use_color)
+        console_formatter = ColoredFormatter(self.LOG_FORMAT, use_color=use_color)
         console_formatter.datefmt = date_format
         self._console_handler.setFormatter(console_formatter)
         self._logger.addHandler(self._console_handler)
 
-        # File handler (added later via set_log_file)
         self._file_handler: Optional[logging.FileHandler] = None
         self.log_file_path: Optional[str] = None
 
-        # Adapter for indentation support
-        self._adapter = IndentAdapter(self._logger, {})
+        self._adapter = CategoryAdapter(self._logger, {})
 
-        # Add custom level methods to the logger
         self._add_custom_methods()
 
     def _add_custom_methods(self):
         """
-        Add custom logging methods for STEP and SUCCESS levels to the underlying logger.
+        Add custom logging methods for STEP and SUCCESS levels.
         """
         def step_method(msg: str, *args, **kwargs):
             if self._logger.isEnabledFor(STEP_LEVEL):
@@ -127,14 +238,12 @@ class Logger:
             if self._logger.isEnabledFor(SUCCESS_LEVEL):
                 self._logger._log(SUCCESS_LEVEL, msg, args, **kwargs)
 
-        # Attach to logger instance
         self._logger.step = step_method
         self._logger.success = success_method
 
     def set_log_file(self, path: str):
         """
-        Start mirroring all log messages to the specified file, creating parent
-        directories as needed and using a plain format without colors.
+        Start mirroring all log messages to the specified file.
         """
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -142,19 +251,15 @@ class Logger:
             pass
 
         try:
-            # Remove existing file handler if present
             if self._file_handler:
                 self._logger.removeHandler(self._file_handler)
                 self._file_handler.close()
 
-            # Create new file handler
             self._file_handler = logging.FileHandler(path, mode="w", encoding="utf-8")
             self._file_handler.setLevel(logging.DEBUG)
 
-            # Plain format for file (no colors)
-            log_format = "%(asctime)s [%(levelname)-8s] %(message)s"
             date_format = "%Y-%m-%d %H:%M:%S"
-            file_formatter = logging.Formatter(log_format, datefmt=date_format)
+            file_formatter = logging.Formatter(self.LOG_FORMAT, datefmt=date_format)
             self._file_handler.setFormatter(file_formatter)
 
             self._logger.addHandler(self._file_handler)
@@ -162,13 +267,11 @@ class Logger:
         except OSError as e:
             self._file_handler = None
             self.log_file_path = None
-            # Log error to console only
             self._logger.error(f"Failed to open log file {path}: {e}")
 
     def close(self):
         """
-        Stop logging to file by removing and closing the file handler while
-        preserving console logging.
+        Stop logging to file.
         """
         if self._file_handler:
             self._logger.removeHandler(self._file_handler)
@@ -176,54 +279,47 @@ class Logger:
             self._file_handler = None
             self.log_file_path = None
 
-    def step(self, msg: str):
+    def step(self, msg: str, source: Optional[str] = None, category: Optional[str] = None):
         """
-        Log a top-level workflow step (e.g., starting work on a new author),
-        highlighted prominently with no indentation.
+        Log a top-level workflow step.
         """
-        self._adapter.log(STEP_LEVEL, msg, extra={"indent": 0})
+        self._adapter.log(STEP_LEVEL, msg, source=source, category=category)
 
-    def substep(self, msg: str):
+    def substep(self, msg: str, source: Optional[str] = None, category: Optional[str] = None):
         """
-        Log a nested step under the current operation (e.g., processing an article),
-        indented one level for visual hierarchy.
+        Log a nested step (deprecated, maps to step with category).
         """
-        self._adapter.log(STEP_LEVEL, msg, extra={"indent": 1})
+        self._adapter.log(STEP_LEVEL, msg, source=source, category=category)
 
-    def info(self, msg: str, *, indent: int = 1):
+    def info(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
         """
-        Log informational messages about normal progress and decisions, with
-        optional indentation to reflect workflow structure.
+        Log informational messages.
         """
-        self._adapter.info(msg, extra={"indent": indent})
+        self._adapter.info(msg, source=source, category=category)
 
-    def warn(self, msg: str, *, indent: int = 1):
+    def warn(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
         """
-        Log warnings for recoverable issues that do not stop processing
-        (e.g., missing fields, skipped enrichments).
+        Log warnings.
         """
-        self._adapter.warning(msg, extra={"indent": indent})
+        self._adapter.warning(msg, source=source, category=category)
 
-    def error(self, msg: str, *, indent: int = 1):
+    def error(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
         """
-        Log errors for failures that prevent a step from completing as expected,
-        routed to stderr for visibility while allowing the pipeline to continue.
+        Log errors.
         """
-        # Switch error handler to stderr
         old_stream = self._console_handler.stream
         self._console_handler.setStream(sys.stderr)
         try:
-            self._adapter.error(msg, extra={"indent": indent})
+            self._adapter.error(msg, source=source, category=category)
         finally:
             self._console_handler.setStream(old_stream)
 
-    def success(self, msg: str, *, indent: int = 1):
+    def success(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
         """
-        Log successful operations and milestones (e.g., file saved, enrichment complete),
-        highlighted in green for easy identification.
+        Log successful operations.
         """
-        self._adapter.log(SUCCESS_LEVEL, msg, extra={"indent": indent})
+        self._adapter.log(SUCCESS_LEVEL, msg, source=source, category=category)
 
 
-# Global logger instance for use across the application
+# Global logger instance
 logger = Logger()

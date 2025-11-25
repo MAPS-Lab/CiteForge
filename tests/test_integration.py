@@ -28,9 +28,7 @@ def test_fetch_and_merge(api_keys):
     # build test record for known author with both Scholar and DBLP presence
     rec = Record(
         name=TEST_AUTHOR['name'],
-        email=TEST_AUTHOR['email'],
         scholar_id=TEST_AUTHOR['scholar_id'],
-        orcid="",
         dblp=TEST_AUTHOR['dblp']
     )
 

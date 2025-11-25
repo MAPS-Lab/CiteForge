@@ -53,8 +53,7 @@ def test_validate_doi_candidate_both_formats_match():
                 csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
                     doi="10.48550/arXiv.1706.03762",
                     baseline_entry=baseline_entry,
-                    result_id="test",
-                    is_early=False
+                    result_id="test"
                 )
 
     # both formats should validate successfully
@@ -105,8 +104,7 @@ def test_validate_doi_candidate_csl_only_matches():
                 csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
                     doi="10.48550/arXiv.1706.03762",
                     baseline_entry=baseline_entry,
-                    result_id="test",
-                    is_early=False
+                    result_id="test"
                 )
 
     # CSL should validate, BibTeX should be rejected
@@ -149,8 +147,7 @@ def test_validate_doi_candidate_neither_matches():
                 csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
                     doi="10.18653/v1/N19-1423", # Real DOI for BERT
                     baseline_entry=baseline_entry,
-                    result_id="test",
-                    is_early=False
+                    result_id="test"
                 )
 
     # neither format should match; DOI should be rejected entirely
@@ -179,8 +176,7 @@ def test_validate_doi_candidate_network_errors():
             csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
                 doi="10.48550/arXiv.1706.03762",
                 baseline_entry=baseline_entry,
-                result_id="test",
-                is_early=False
+                result_id="test"
             )
 
     # should gracefully return False without raising exceptions
@@ -221,7 +217,7 @@ def test_validate_doi_candidate_early_vs_late():
             with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex):
                 csl_matched_early, _, _, _ = validate_doi_candidate(
                     doi="10.48550/arXiv.1706.03762", baseline_entry=baseline_entry,
-                    result_id="test", is_early=True
+                    result_id="test"
                 )
 
     # test late validation (DOI found during enrichment)
@@ -230,7 +226,7 @@ def test_validate_doi_candidate_early_vs_late():
             with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex):
                 csl_matched_late, _, _, _ = validate_doi_candidate(
                     doi="10.48550/arXiv.1706.03762", baseline_entry=baseline_entry,
-                    result_id="test", is_early=False
+                    result_id="test"
                 )
 
     # both stages should produce identical validation results
@@ -273,7 +269,7 @@ def test_process_validated_doi_success():
             with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex):
                 doi_matched = process_validated_doi(
                     doi="10.48550/arXiv.1706.03762", baseline_entry=baseline_entry,
-                    result_id="test", enr_list=enr_list, flags=flags, is_early=False
+                    result_id="test", enr_list=enr_list, flags=flags
                 )
 
     # validation should succeed and populate structures
@@ -325,7 +321,7 @@ def test_process_validated_doi_failure():
             with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex_wrong):
                 doi_matched = process_validated_doi(
                     doi="10.18653/v1/N19-1423", baseline_entry=baseline_entry,
-                    result_id="test", enr_list=enr_list, flags=flags, is_early=False
+                    result_id="test", enr_list=enr_list, flags=flags
                 )
 
     # validation should fail and leave structures unchanged

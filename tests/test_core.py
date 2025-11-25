@@ -378,28 +378,30 @@ def test_read_records_from_csv(tmp_path):
 
     # Write test CSV
     csv_content = dedent("""
-        Name,Email,Scholar,ORCID,DBLP
-        Ashish Vaswani,avaswani@google.com,Scholar123,0000-0001-2345-6789,vaswani/a
-        Noam Shazeer,noam@google.com,Scholar456,,
-        ,,,Scholar789,,
-        InvalidRow,,,,
+        Name,Scholar Link,DBLP Link
+        Ashish Vaswani,https://scholar.google.com/citations?user=Scholar123,https://dblp.org/pid/vaswani/a
+        Noam Shazeer,https://scholar.google.com/citations?user=Scholar456,
+        ,https://scholar.google.com/citations?user=Scholar789,
+        InvalidRow,,
     """).strip()
     io_utils.safe_write_file(csv_path_str, csv_content)
 
     # Read records
     records = io_utils.read_records(csv_path_str)
 
-    # Should only have 2 valid records (Scholar123 and Scholar456)
-    # Scholar789 has no name, InvalidRow has no Scholar ID
-    assert len(records) == 2, f"Expected 2 records, got {len(records)}"
+    # Should have 3 valid records (Scholar123, Scholar456, Scholar789)
+    # InvalidRow has no IDs, so it should be filtered
+    assert len(records) == 3, f"Expected 3 records, got {len(records)}"
 
     # Verify first record
     assert records[0].name == "Ashish Vaswani"
     assert records[0].scholar_id == "Scholar123"
+    assert records[0].dblp == "vaswani/a"
 
-    # Verify empty records are filtered
+    # Verify records with missing IDs are filtered
+    # (InvalidRow should be filtered out)
     for r in records:
-        assert r.scholar_id, "Records without Scholar ID should be filtered"
+        assert r.scholar_id or r.dblp, "Records without any ID should be filtered"
 
 # ===== BIBTEX MERGING =====
 

@@ -253,11 +253,15 @@ def format_author_dirname(author_name: Optional[str], author_id: str) -> str:
     """
     Format author directory name as "LastName (author_id)".
     Falls back to just author_id if name extraction fails.
+    If author_id is empty, uses LastName.
     """
+    last_name = extract_last_name(author_name)
+    
     if not author_id:
+        if last_name and last_name != "Unknown":
+            return last_name
         return "unknown"
 
-    last_name = extract_last_name(author_name)
     if last_name and last_name != "Unknown":
         return f"{last_name} ({author_id})"
 

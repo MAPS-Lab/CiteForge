@@ -2,109 +2,76 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-56%20passing-brightgreen.svg)](tests/)
-[![Dependencies](https://img.shields.io/badge/dependencies-zero-success.svg)](requirements.txt)
+[![Tests](https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml/badge.svg)](https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml)
 
-A zero-dependency Python tool for automated bibliographic data collection and enrichment. CiteForge aggregates publication metadata from 12 academic sources, validates and merges them using trust-based policies, and exports clean BibTeX entries.
+CiteForge is a comprehensive Python tool designed for automated bibliographic data collection and enrichment. It aggregates publication metadata from over 12 academic sources, validates and merges them using trust-based policies, and exports clean, high-quality BibTeX entries.
 
-## Features
+## Key Features
 
-- **Multi-source aggregation**: Fetches from 12 academic APIs (Scholar, Crossref, arXiv, PubMed, OpenAlex, etc.)
-- **Zero dependencies**: Pure Python 3.10+ with no external packages
-- **Trust-based merging**: Intelligent metadata selection based on source reliability
-- **DOI validation**: Two-stage pipeline for early and late DOI discovery
-- **Smart caching**: Reduces API calls from 1+N to 1 per author on subsequent runs
-- **Quality tracking**: CSV reports showing enrichment coverage per entry
-- **Fuzzy matching**: Validates metadata consistency across sources
-- **56 tests**: All core functionality is tested
+- **Multi-Source Aggregation**: Seamlessly fetches data from major academic APIs including Google Scholar, Crossref, arXiv, PubMed, OpenAlex, and more.
+- **Standard Library Implementation**: Built entirely using the Python 3.10+ standard library, ensuring stability and ease of deployment.
+- **Trust-Based Merging**: Implements intelligent metadata selection algorithms that prioritize data based on source reliability (e.g., DOI resolvers > web scrapes).
+- **DOI Validation**: Features a robust two-stage pipeline for both early and late DOI discovery and verification.
+- **Smart Caching**: Optimizes API usage by caching results, significantly reducing the number of requests on subsequent runs.
+- **Quality Assurance**: Generates detailed CSV reports (`summary.csv`) tracking enrichment coverage and source contribution for every entry.
+- **Fuzzy Matching**: Utilizes advanced matching logic to validate metadata consistency across different sources.
+- **Semantic Logging**: Replaces traditional indentation with a category-based logging system (`[FETCH]`, `[SEARCH]`, `[MATCH]`) for clearer, context-rich output.
+- **Comprehensive Testing**: Fully tested core functionality with a suite of 56 automated tests.
 
 ## Quick Start
 
-```bash
-# Clone and navigate
-git clone https://github.com/gabrielspadon/CiteForge.git
-cd CiteForge
+### Prerequisites
 
-# Set up SerpAPI key
-mkdir -p keys
-echo "your_serpapi_key" > keys/SerpAPI.key
+- Python 3.10 or higher
+- A [SerpAPI](https://serpapi.com) key (required for Google Scholar data)
 
-# Create input file
-echo "Name,Email,Scholar,ORCID,DBLP" > data/data.csv
-echo "Gabriel Spadon,spadon@dal.ca,bfdGsGUAAAAJ,0000-0001-8437-4349,/192/1659" >> data/data.csv
+### Installation
 
-# Run
-python3 main.py
-```
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/gabrielspadon/CiteForge.git
+    cd CiteForge
+    ```
 
-Output will be in the `output/` directory with individual BibTeX files per publication.
+2.  **Configure API Keys:**
+    Create a `keys/` directory and add your SerpAPI key.
+    ```bash
+    mkdir -p keys
+    echo "your_serpapi_key" > keys/SerpAPI.key
+    ```
 
-## Installation
+### Usage
 
-**Requirements:**
-- Python 3.10+
-- SerpAPI key (required)
+1.  **Prepare Input Data:**
+    Create a `data/input.csv` file with the authors you wish to process.
+    ```bash
+    echo "Name,Scholar Link,DBLP Link" > data/input.csv
+    echo "Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659" >> data/input.csv
+    ```
 
-**Optional API keys** (for enhanced enrichment):
-- Semantic Scholar
-- Google Gemini (for automated title generation)
-- OpenReview
+2.  **Run CiteForge:**
+    ```bash
+    python3 main.py
+    ```
 
-Create a `keys/` directory and add your API keys:
-```bash
-mkdir -p keys
-echo "your_serpapi_key" > keys/SerpAPI.key
-echo "your_semantic_key" > keys/Semantic.key  # Optional
-```
+3.  **View Results:**
+    Output files will be generated in the `output/` directory, organized by author.
 
-## Usage
+## Configuration
 
-### Input Format
+CiteForge is highly configurable via `src/config.py`. Key parameters include:
 
-Create `data/data.csv` with author information:
-
-```csv
-Name,Email,Scholar,ORCID,DBLP
-Gabriel Spadon,spadon@dal.ca,bfdGsGUAAAAJ,0000-0001-8437-4349,/192/1659
-```
-
-**Required fields:**
-- `Name`: Author's full name
-- `Scholar`: Google Scholar profile ID
-
-**Optional fields:**
-- `Email`: Contact email
-- `ORCID`: ORCID identifier
-- `DBLP`: DBLP person ID
-
-### Output Structure
-
-```
-output/
-├── run.log                          # Execution log
-├── summary.csv                      # Enrichment statistics
-└── LastName (ScholarID)/
-    ├── Author2024-Title.bib
-    └── ...
-```
-
-The `summary.csv` file tracks which sources enriched each entry, with columns for each API (scholar_bib, crossref, arxiv, etc.) and a `trust_hits` count showing total enrichments.
-
-### Configuration
-
-Edit `src/config.py` to customize:
-
-```python
-CONTRIBUTION_WINDOW_YEARS = 3           # Time window for publications
-PUBLICATIONS_PER_YEAR = 50              # Publications per year
-SIM_MERGE_DUPLICATE_THRESHOLD = 0.85    # Deduplication threshold
-REQUEST_DELAY_BETWEEN_ARTICLES = 0.5    # Rate limiting
-SKIP_SERPAPI_FOR_EXISTING_FILES = True  # Smart caching
-```
+- `CONTRIBUTION_WINDOW_YEARS`: Time window for fetching publications (default: 3 years).
+- `PUBLICATIONS_PER_YEAR`: Target number of publications to fetch per year.
+- `SIM_MERGE_DUPLICATE_THRESHOLD`: Threshold for deduplicating entries.
+- `REQUEST_DELAY_BETWEEN_ARTICLES`: Rate limiting to respect API usage policies.
+- `HTTP_TIMEOUT_SHORT`: Timeout for short API requests (e.g., DBLP), set to 60s for reliability.
 
 ## Data Sources
 
-**Primary:**
+CiteForge aggregates data from a wide range of sources, categorized by their primary domain:
+
+**Primary Sources:**
 - Google Scholar (via SerpAPI)
 - DBLP
 - Semantic Scholar
@@ -112,72 +79,44 @@ SKIP_SERPAPI_FOR_EXISTING_FILES = True  # Smart caching
 - arXiv
 - OpenReview
 
-**Biomedical:**
+**Biomedical & Life Sciences:**
 - PubMed
 - OpenAlex
 - Europe PMC
 
-**Utilities:**
+**Utilities & Metadata:**
 - ORCID
 - DataCite
-- Google Gemini (short title generation)
+- Google Gemini (for automated short title generation)
 
 ## Architecture
 
-### Trust Hierarchy
+The system operates on a strict **Trust Hierarchy**, ensuring that the most reliable data sources take precedence:
 
-Fields are selected based on source reliability (highest to lowest):
-1. CSL-JSON via DOI
-2. BibTeX via DOI
-3. DataCite
-4. PubMed
-5. Europe PMC
-6. Crossref
-7. OpenAlex
-8. Scholar page metadata
-9. Semantic Scholar
-10. arXiv
-11. OpenReview
-12. DBLP
-
-### Pipeline Flow
-
-1. **Author Processing**: Fetch from Scholar/DBLP, merge and deduplicate
-2. **Article Processing**: Establish baseline, validate DOI, enrich from sources, merge
-3. **Output**: Generate citekey, render BibTeX, save to file
+1.  **CSL-JSON via DOI** (Highest Trust)
+2.  **BibTeX via DOI**
+3.  **DataCite**
+4.  **PubMed**
+5.  **Europe PMC**
+6.  **Crossref**
+7.  **OpenAlex**
+8.  **Semantic Scholar**
+9.  **ORCID**
+10. **OpenReview**
+11. **arXiv**
+12. **Scholar Page Metadata**
+13. **Scholar Baseline**
 
 ## Testing
 
-Run all tests:
+The project includes a comprehensive test suite. To run the tests:
+
 ```bash
 pytest
 ```
 
-Run specific test suites:
-```bash
-pytest tests/test_core.py       # Core utilities
-pytest tests/test_apis.py       # API integrations
-pytest tests/test_pipeline.py   # Pipeline components
-pytest tests/test_integration.py # End-to-end integration
-```
-
-## Troubleshooting
-
-**"SerpAPI key not found"**
-- Ensure `keys/SerpAPI.key` exists with a valid key from https://serpapi.com
-
-**"Rate limit exceeded"**
-- Increase `REQUEST_DELAY_BETWEEN_ARTICLES` in `config.py`
-
-**"No publications found"**
-- Verify Google Scholar ID is correct
-- Check publications are within the contribution window
-- Review `output/run.log`
-
-**Low enrichment quality**
-- Check `output/summary.csv` for entries with low `trust_hits`
-- Consider enabling optional API keys (Semantic Scholar, Gemini)
-
 ## License
 
-[MIT License](LICENSE) - Copyright (c) 2025 Gabriel Spadon
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+Copyright (c) 2025 Gabriel Spadon

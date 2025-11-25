@@ -11,7 +11,5 @@ class Record:
     publications and metadata in a consistent way.
     """
     name: str
-    email: str
-    scholar_id: str  # Google Scholar author ID
-    orcid: str  # ORCID identifier
-    dblp: str  # DBLP person ID
+    scholar_id: str = ""  # Google Scholar author ID (optional)
+    dblp: str = ""  # DBLP person ID (optional)

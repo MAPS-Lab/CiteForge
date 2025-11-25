@@ -14,12 +14,12 @@ EUROPEPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 DATACITE_BASE = "https://api.datacite.org/dois"
 ORCID_BASE = "https://pub.orcid.org/v3.0"
 
-DEFAULT_INPUT = "data/data.csv"
+DEFAULT_INPUT = "data/input.csv"
 DEFAULT_KEY_FILE = "keys/SerpAPI.key"
 DEFAULT_S2_KEY_FILE = "keys/Semantic.key"
 DEFAULT_OR_KEY_FILE = "keys/OpenReview.key"
 DEFAULT_GEMINI_KEY_FILE = "keys/Gemini.key"
-DEFAULT_DICTIONARY_FILE = "data/dictionary.json"
+DEFAULT_DICTIONARY_FILE = "data/cache.json"
 
 DEFAULT_OUT_DIR = "output"
 PAPERS_DIR = "papers"
@@ -118,13 +118,13 @@ _DOI_REGEX = r'\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b'
 
 # HTTP request configuration
 # Default timeout for HTTP requests (in seconds)
-HTTP_TIMEOUT_DEFAULT = 30.0
-HTTP_TIMEOUT_SHORT = 20.0
+HTTP_TIMEOUT_DEFAULT = 5.0
+HTTP_TIMEOUT_SHORT = 60.0
 
 # Exponential backoff configuration for retries
 HTTP_BACKOFF_INITIAL = 0.25  # Initial backoff delay in seconds
 HTTP_BACKOFF_MAX = 16.0      # Maximum backoff delay in seconds
-HTTP_MAX_RETRIES = 5         # Maximum number of retry attempts
+HTTP_MAX_RETRIES = 2         # Maximum number of retry attempts
 
 # HTTP status codes that should trigger retries
 HTTP_RETRY_STATUS_CODES = (408, 429, 500, 502, 503, 504)
