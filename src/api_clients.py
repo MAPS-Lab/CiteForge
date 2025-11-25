@@ -1126,12 +1126,21 @@ def dblp_fetch_publications(pid: str) -> List[Dict[str, Any]]:
             except PARSE_ERRORS:
                 year = 0
         authors = []
+        # DBLP uses <author> for regular publications and <editor> for proceedings/books
         for ael in child.findall("author"):
             nm = _xml_text(ael)
             if nm:
                 nm = _sanitize_dblp_author(nm)
                 if nm:
                     authors.append(nm)
+        # If no authors found, check for editors (proceedings/books)
+        if not authors:
+            for eel in child.findall("editor"):
+                nm = _xml_text(eel)
+                if nm:
+                    nm = _sanitize_dblp_author(nm)
+                    if nm:
+                        authors.append(nm)
         # URLs: ee (electronic edition), url (DBLP page)
         ee = _xml_text(child.find("ee"))
         dburl = _xml_text(child.find("url"))

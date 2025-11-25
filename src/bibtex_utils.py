@@ -46,7 +46,7 @@ def build_minimal_bibtex(title: str, authors: List[str], year: int, keyhint: str
     if lines and lines[-1].endswith(","):
         lines[-1] = lines[-1][:-1]
     lines.append("}")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def _parse_bibtex_head(bibtex: str) -> Optional[Dict[str, str]]:

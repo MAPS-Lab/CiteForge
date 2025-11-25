@@ -235,9 +235,12 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
         if prefer_path and os.path.abspath(existing_path) == os.path.abspath(prefer_path):
             break
         # if content is identical, reuse this file (avoid creating -N duplicates)
+        # Compare with normalized trailing whitespace to handle newline differences
         try:
             with open(existing_path, "r", encoding="utf-8") as ef:
-                if ef.read() == new_content:
+                existing_content = ef.read()
+                # Compare with rstrip to ignore trailing newline differences
+                if existing_content.rstrip() == new_content.rstrip():
                     # Prefer canonical base filename when possible
                     break
         except OSError:
