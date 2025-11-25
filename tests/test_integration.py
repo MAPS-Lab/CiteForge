@@ -2,6 +2,7 @@ import os
 import shutil
 import sys
 import urllib.error
+import requests
 from pathlib import Path
 from textwrap import dedent
 import pytest
@@ -88,8 +89,9 @@ def test_full_enrichment_pipeline(api_keys):
             api_keys['serpapi'],
             cite_link
         )
-    except urllib.error.HTTPError as e:
-        if e.code == 403:
+    except (urllib.error.HTTPError, requests.exceptions.HTTPError) as e:
+        code = getattr(e, 'code', None) or getattr(e.response, 'status_code', None)
+        if code == 403:
             print("⚠️  Google Scholar blocked the request (403). Using fallback BibTeX.")
             # Fallback to known BibTeX for this paper to allow pipeline testing to continue
             baseline_bib = dedent("""
