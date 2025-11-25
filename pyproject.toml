@@ -8,12 +8,3 @@ license = { text = "MIT" }
 
 [project.optional-dependencies]
 dev = []
-
-[tool.python]
-# Minimum Python version: 3.10
-# Recommended: Python 3.10 or higher
-# Code uses modern Python features:
-# - Type hints with native generics (list[str], dict[str, Any])
-# - Pattern matching (if used)
-# - Structural pattern matching
-# - Better error messages
