@@ -228,8 +228,8 @@ def test_bibtex_matching():
           year = {2017}
         }
     """).strip()
-    assert bt.bibtex_entries_match_strict(bib1, bib2), "Exact entries should match"
-
+    assert bt.bibtex_entries_match_strict(bt.parse_bibtex_to_dict(bib1), bt.parse_bibtex_to_dict(bib2)), "Exact entries should match"
+    
     # With normalization
     bib3 = dedent("""
         @inproceedings{Vaswani2017_Caps,
@@ -238,7 +238,7 @@ def test_bibtex_matching():
           year = {2017}
         }
     """).strip()
-    assert bt.bibtex_entries_match_strict(bib1, bib3), "Case/punctuation differences should match"
+    assert bt.bibtex_entries_match_strict(bt.parse_bibtex_to_dict(bib1), bt.parse_bibtex_to_dict(bib3)), "Case/punctuation differences should match"
 
     # Abbreviated authors
     bib4 = dedent("""
@@ -255,7 +255,7 @@ def test_bibtex_matching():
           year = {2016}
         }
     """).strip()
-    assert bt.bibtex_entries_match_strict(bib4, bib5), "Abbreviated authors should match"
+    assert bt.bibtex_entries_match_strict(bt.parse_bibtex_to_dict(bib4), bt.parse_bibtex_to_dict(bib5)), "Abbreviated authors should match"
 
     # Should NOT match
     bib6 = dedent("""
@@ -272,7 +272,7 @@ def test_bibtex_matching():
           year = {2016}
         }
     """).strip()
-    assert not bt.bibtex_entries_match_strict(bib6, bib7), "Different titles should NOT match"
+    assert not bt.bibtex_entries_match_strict(bt.parse_bibtex_to_dict(bib6), bt.parse_bibtex_to_dict(bib7)), "Different titles should NOT match"
 
 def test_bibtex_extra_fields():
     """
@@ -295,7 +295,7 @@ def test_bibtex_extra_fields():
           doi = {10.5555/3295222.3295349}
         }
     """).strip()
-    assert bt.bibtex_entries_match_strict(minimal, enriched), "Extra fields should not prevent matching"
+    assert bt.bibtex_entries_match_strict(bt.parse_bibtex_to_dict(minimal), bt.parse_bibtex_to_dict(enriched)), "Extra fields should not prevent matching"
 
 # ===== CONFIGURATION =====
 
