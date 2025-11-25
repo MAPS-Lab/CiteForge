@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import random
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
 from typing import Dict, Any, Optional, Callable, TypeVar
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .exceptions import DECODE_ERRORS, NUMERIC_ERRORS, NETWORK_ERRORS, ALL_API_ERRORS
 from .config import (
@@ -36,6 +38,20 @@ DEFAULT_BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+# Global session for connection pooling
+_SESSION = requests.Session()
+
+# Configure retries
+_RETRY_STRATEGY = Retry(
+    total=HTTP_MAX_RETRIES,
+    backoff_factor=HTTP_BACKOFF_INITIAL,
+    status_forcelist=HTTP_RETRY_STATUS_CODES,
+    allowed_methods=["GET", "POST"]
+)
+_ADAPTER = HTTPAdapter(max_retries=_RETRY_STRATEGY)
+_SESSION.mount("https://", _ADAPTER)
+_SESSION.mount("http://", _ADAPTER)
 
 
 def handle_api_errors(default_return=None):
@@ -87,64 +103,13 @@ def http_fetch_bytes(
     """
     Perform an HTTP GET request with retries, exponential backoff, and basic
     rate limit awareness, returning the response body as raw bytes.
-    """
-    backoff = max(0.0, backoff_initial)
-    last_err: Optional[Exception] = None
-
-    def _sleep_for_with_deadline(delay_secs: float, err: Exception) -> float:
-        if overall_deadline is not None:
-            remaining = overall_deadline - time.time()
-            if remaining <= 0:
-                raise err
-            return min(delay_secs, max(0.0, remaining))
-        return delay_secs
-
-    for attempt in range(1, max(1, attempts) + 1):
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except urllib.error.HTTPError as e:
-            # only retry transient errors like rate limits and server issues
-            if e.code in retry_for_status:
-                # check if server told us when to retry
-                ra_secs = _parse_retry_after(e.headers.get("Retry-After") if getattr(e, "headers", None) else None)
-
-                # check rate limit reset headers (unix timestamp)
-                reset_secs = 0.0
-                if getattr(e, "headers", None):
-                    for h in ("X-RateLimit-Reset", "RateLimit-Reset"):
-                        val = e.headers.get(h)
-                        if val and val.isdigit():
-                            try:
-                                reset_at = float(val)
-                                reset_secs = max(0.0, reset_at - time.time())
-                                break
-                            except NUMERIC_ERRORS:
-                                reset_secs = 0.0
-
-                # use the longest wait time (server hint vs our backoff)
-                sleep_for = max(ra_secs, reset_secs, backoff + random.uniform(0, max(0.01, backoff / 2)))
-                sleep_for = _sleep_for_with_deadline(sleep_for, e)
-
-                time.sleep(sleep_for)
-                backoff = min(backoff * 2, backoff_max)  # exponential backoff
-                last_err = e
-                continue
-            # other HTTP errors probably aren't transient
-            raise
-        except NETWORK_ERRORS as e:
-            # network issues or timeouts - worth retrying
-            sleep_for = backoff + random.uniform(0, max(0.01, backoff / 2))
-            sleep_for = _sleep_for_with_deadline(sleep_for, e)
-            time.sleep(sleep_for)
-            backoff = min(backoff * 2, backoff_max)
-            last_err = e
-            continue
-
-    if last_err:
-        raise last_err
-    raise RuntimeError("HTTP fetch failed without exception")
+    """    
+    try:
+        resp = _SESSION.get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        return resp.content
+    except requests.exceptions.RequestException as e:
+        raise e
 
 
 def _fetch_bytes_simple(url: str, headers: Dict[str, str], timeout: float) -> bytes:

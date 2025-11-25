@@ -5,6 +5,7 @@ import json
 import socket
 import urllib.error
 import xml.etree.ElementTree as ElementTree
+import requests
 
 __all__ = [
     "HTTP_ERRORS",
@@ -27,7 +28,7 @@ __all__ = [
 ]
 
 # errors raised by urllib when an HTTP request fails or a URL cannot be reached
-HTTP_ERRORS = (urllib.error.HTTPError, urllib.error.URLError)
+HTTP_ERRORS = (urllib.error.HTTPError, urllib.error.URLError, requests.exceptions.RequestException)
 
 # errors that signal an operation has taken too long and hit a timeout at the OS or socket level
 TIMEOUT_ERRORS = (TimeoutError, socket.timeout)

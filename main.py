@@ -80,7 +80,7 @@ def _try_multiple_candidates(
             if isinstance(candidate_title, list):
                 candidate_title = candidate_title[0] if candidate_title else ''
 
-            if bt.bibtex_entries_match_strict(bt.bibtex_from_dict(baseline_entry), candidate_bib):
+            if bt.bibtex_entries_match_strict(baseline_entry, candidate_dict):
                 enr_list.append((flag_key, candidate_dict))
                 flags[flag_key] = True
                 logger.success(f"Validated: {candidate_title}", category=LogCategory.MATCH)

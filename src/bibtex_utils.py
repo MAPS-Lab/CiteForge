@@ -486,24 +486,22 @@ def _extract_year_int(year_str: Optional[str]) -> Optional[int]:
     return extract_year_from_any(year_str, fallback=None)
 
 
-def bibtex_entries_match_strict(bib_a: str, bib_b: str) -> bool:
+def bibtex_entries_match_strict(entry_a: Dict[str, Any], entry_b: Dict[str, Any]) -> bool:
     """
     Decide whether two BibTeX records refer to the same publication by comparing
     DOI or arXiv identifiers first and then falling back to title, year, and
     authors with fuzzy matching to handle formatting variations from different sources.
     """
-    a = parse_bibtex_to_dict(bib_a)
-    b = parse_bibtex_to_dict(bib_b)
-    if not a or not b:
+    if not entry_a or not entry_b:
         return False
-    af = a.get("fields") or {}
-    bf = b.get("fields") or {}
+    af = entry_a.get("fields") or {}
+    bf = entry_b.get("fields") or {}
     a_doi = _norm_doi(af.get("doi"))
     b_doi = _norm_doi(bf.get("doi"))
     if a_doi and b_doi:
         return a_doi == b_doi
-    a_ax = extract_arxiv_eprint(a) or ""
-    b_ax = extract_arxiv_eprint(b) or ""
+    a_ax = extract_arxiv_eprint(entry_a) or ""
+    b_ax = extract_arxiv_eprint(entry_b) or ""
     if a_ax and b_ax:
         return a_ax == b_ax
 

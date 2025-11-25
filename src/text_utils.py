@@ -284,7 +284,11 @@ def title_similarity(a: Optional[str], b: Optional[str]) -> float:
     Compute a similarity score between two titles after normalization, returning
     a value between 0 and 1 where higher means more similar.
     """
-    return SequenceMatcher(None, normalize_title(a or ""), normalize_title(b or "")).ratio()
+    norm_a = normalize_title(a or "")
+    norm_b = normalize_title(b or "")
+    if norm_a == norm_b:
+        return 1.0
+    return SequenceMatcher(None, norm_a, norm_b).ratio()
 
 
 def authors_overlap(authors_a: Optional[str], authors_b: Optional[str]) -> bool:
