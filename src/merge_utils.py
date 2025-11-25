@@ -112,6 +112,11 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
     for field in unwanted_fields:
         merged.pop(field, None)
 
+    # remove PMID notes from PubMed/Europe PMC enrichment
+    note_val = merged.get("note", "")
+    if note_val and note_val.strip().startswith("PMID:"):
+        merged.pop("note", None)
+
     # only keep URLs from trusted sources (DOI resolver or arXiv)
     url_val = (merged.get("url") or "").strip()
     allowed = allowlisted_url(url_val)

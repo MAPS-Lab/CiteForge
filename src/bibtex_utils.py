@@ -273,7 +273,7 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
     if len(lines) > 1 and lines[-1].endswith(','):
         lines[-1] = lines[-1][:-1]
     lines.append("}")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def sanitize_bibtex_remove_placeholders(bibtex: str) -> str:
