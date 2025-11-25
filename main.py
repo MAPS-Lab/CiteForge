@@ -26,6 +26,7 @@ from src.exceptions import (
     FULL_OPERATION_ERRORS,
     FILE_IO_ERRORS,
     FILE_READ_ERRORS,
+    PARSE_ERRORS,
 )
 from src.http_utils import http_get_text
 

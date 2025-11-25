@@ -19,10 +19,11 @@ def _validate_csl(
         csl = api.fetch_csl_via_doi(doi)
         if csl:
             csl_bib = api.bibtex_from_csl(csl, keyhint=result_id)
-            if csl_bib and bt.bibtex_entries_match_strict(bt.bibtex_from_dict(baseline_entry), csl_bib):
+            if csl_bib:
                 csl_entry = bt.parse_bibtex_to_dict(csl_bib)
-                logger.success(f"{doi}: CSL format validated and added", category=LogCategory.MATCH, source=LogSource.DOI)
-                return True, csl_entry, csl
+                if csl_entry and bt.bibtex_entries_match_strict(baseline_entry, csl_entry):
+                    logger.success(f"{doi}: CSL format validated and added", category=LogCategory.MATCH, source=LogSource.DOI)
+                    return True, csl_entry, csl
     except ALL_API_ERRORS as e:
         logger.warn(f"{doi}: CSL fetch failed: {e}", category=LogCategory.ERROR, source=LogSource.DOI)
     
@@ -38,10 +39,11 @@ def _validate_bibtex(
     """
     try:
         doi_bib = api.fetch_bibtex_via_doi(doi)
-        if doi_bib and bt.bibtex_entries_match_strict(bt.bibtex_from_dict(baseline_entry), doi_bib):
+        if doi_bib:
             bibtex_entry = bt.parse_bibtex_to_dict(doi_bib)
-            logger.success(f"{doi}: BibTeX format validated and added", category=LogCategory.MATCH, source=LogSource.DOI)
-            return True, bibtex_entry, doi_bib
+            if bibtex_entry and bt.bibtex_entries_match_strict(baseline_entry, bibtex_entry):
+                logger.success(f"{doi}: BibTeX format validated and added", category=LogCategory.MATCH, source=LogSource.DOI)
+                return True, bibtex_entry, doi_bib
     except ALL_API_ERRORS as e:
         logger.warn(f"{doi}: BibTeX fetch failed: {e}", category=LogCategory.ERROR, source=LogSource.DOI)
     
