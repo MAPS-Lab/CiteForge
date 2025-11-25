@@ -103,9 +103,14 @@ def _best_item_by_score(
     return best if best_s >= threshold else None
 
 
-def fetch_author_publications(api_key: str, author_id: str, num: int = 100, start: int = 0) -> Dict[str, Any]:
+def fetch_author_publications(api_key: str, author_id: str, num: int = 100, start: int = 0, sort_by: str = "pubdate") -> Dict[str, Any]:
     """
     Fetch publications for an author from Google Scholar via SerpAPI.
+
+    By default, sorts by publication date (newest first) to ensure recent publications
+    are included in the results. This is important because the contribution window
+    typically focuses on recent years, and Google Scholar's default sort (by citations)
+    would return older, highly-cited papers first.
     """
     from .http_utils import handle_api_errors
 
@@ -117,6 +122,7 @@ def fetch_author_publications(api_key: str, author_id: str, num: int = 100, star
             "api_key": api_key,
             "num": num,
             "start": start,
+            "sort": sort_by,
         }
         url = build_url(SERPAPI_BASE, params)
         return http_get_json(url)

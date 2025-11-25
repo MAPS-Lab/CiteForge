@@ -18,6 +18,7 @@ from src.config import (
     SKIP_SERPAPI_FOR_EXISTING_FILES,
     REQUEST_DELAY_BETWEEN_ARTICLES,
     CONTRIBUTION_WINDOW_YEARS,
+    MAX_PUBLICATIONS_PER_AUTHOR,
     SIM_MERGE_DUPLICATE_THRESHOLD,
 )
 from src.exceptions import (
@@ -70,7 +71,7 @@ def _try_multiple_candidates(
         try:
             candidate_bib = build_func(candidate, keyhint=result_id)
             if not candidate_bib:
-                logger.info(f"Candidate {idx}: BibTeX build failed", category=LogCategory.DEBUG)
+                # Skip candidates with missing required fields (title or authors)
                 continue
 
             # Parse candidate once to get title and other fields
@@ -621,14 +622,37 @@ def process_record(api_key: str, rec: Record, out_dir: str, max_pubs: Optional[i
     scholar_windowed = []
     if rec.scholar_id:
         logger.info("Request author publications", category=LogCategory.FETCH, source=LogSource.SCHOLAR)
-        data = api.fetch_author_publications(api_key, rec.scholar_id, num=150)
 
-        status = (data.get("search_metadata") or {}).get("status")
-        if status and status.lower() == "error":
-            err = data.get("error") or "Unknown error"
-            raise RuntimeError(f"CiteForge error for author {rec.scholar_id}: {err}")
+        # SerpAPI limits each request to 100 results, so we need pagination for MAX_PUBLICATIONS_PER_AUTHOR > 100
+        scholar_articles = []
+        start = 0
+        batch_size = 100  # SerpAPI maximum per request
+        total_requested = MAX_PUBLICATIONS_PER_AUTHOR
 
-        scholar_articles = data.get("articles", [])
+        while start < total_requested:
+            remaining = total_requested - start
+            num_this_batch = min(batch_size, remaining)
+
+            data = api.fetch_author_publications(api_key, rec.scholar_id, num=num_this_batch, start=start)
+
+            status = (data.get("search_metadata") or {}).get("status")
+            if status and status.lower() == "error":
+                err = data.get("error") or "Unknown error"
+                raise RuntimeError(f"CiteForge error for author {rec.scholar_id}: {err}")
+
+            batch_articles = data.get("articles", [])
+            if not batch_articles:
+                # No more articles available, stop pagination
+                break
+
+            scholar_articles.extend(batch_articles)
+
+            # If we got fewer articles than requested, there are no more
+            if len(batch_articles) < num_this_batch:
+                break
+
+            start += len(batch_articles)
+
         if not scholar_articles:
             logger.info("No articles returned", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
             scholar_articles = []
