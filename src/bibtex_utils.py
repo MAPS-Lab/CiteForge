@@ -235,6 +235,18 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
         if title_val is None:
             return None
         t = str(title_val).strip()
+
+        # Remove duplicated suffix after colon
+        if ':' in t:
+            parts = t.split(':')
+            if len(parts) >= 3:  # Has at least 2 colons
+                # Check if last two parts are the same (after stripping whitespace)
+                last_part = parts[-1].strip()
+                second_last_part = parts[-2].strip()
+                if last_part and last_part == second_last_part:
+                    # Remove the duplicated last part
+                    t = ':'.join(parts[:-1]).strip()
+
         # trim trailing periods unless it's an ellipsis
         if t.endswith("...") or t.endswith("…"):
             return t
@@ -424,10 +436,14 @@ def build_standard_citekey(entry: Dict[str, Any], gemini_api_key: Optional[str] 
     return f"{last_cap}{y}:{short}"
 
 
-def short_filename_for_entry(entry: Dict[str, Any], gemini_api_key: Optional[str] = None) -> str:
+def short_filename_for_entry(entry: Dict[str, Any], gemini_api_key: Optional[str] = None,
+                             existing_files: Optional[set] = None, max_words: int = 2) -> str:
     """
     Construct a concise .bib filename from the first author's name, the year,
     and a shortened title so that exported files are easy to identify.
+
+    If existing_files is provided, will ensure filename uniqueness by using
+    more title words when collisions occur.
     """
     fields = entry.get("fields") or {}
     author = fields.get("author") or ""
@@ -437,12 +453,30 @@ def short_filename_for_entry(entry: Dict[str, Any], gemini_api_key: Optional[str
     y_int = extract_year_from_any(year, fallback=None)
     y = str(y_int) if y_int else "0000"
     title = fields.get("title") or ""
-    short = _short_title_for_key(title, max_words=2, gemini_api_key=gemini_api_key) or "Title"
-    base = f"{last_cap}{y}-{short}"
-    base = re.sub(r"[^A-Za-z0-9_\-]+", "", base)
-    if len(base) > BIBTEX_FILENAME_MAX_LENGTH:
-        base = base[:BIBTEX_FILENAME_MAX_LENGTH]
-    return f"{base}.bib"
+
+    # Try with increasing number of words until we get a unique filename
+    for num_words in range(max_words, min(6, max_words + 4)):
+        short = _short_title_for_key(title, max_words=num_words, gemini_api_key=gemini_api_key) or "Title"
+        base = f"{last_cap}{y}-{short}"
+        base = re.sub(r"[^A-Za-z0-9_\-]+", "", base)
+        if len(base) > BIBTEX_FILENAME_MAX_LENGTH:
+            base = base[:BIBTEX_FILENAME_MAX_LENGTH]
+
+        filename = f"{base}.bib"
+
+        # If we're not checking for uniqueness, or filename is unique, use it
+        if existing_files is None or filename not in existing_files:
+            return filename
+
+    # Fallback: if still not unique after trying more words, add counter
+    base_final = base
+    counter = 1
+    while True:
+        filename = f"{base_final}.bib"
+        if existing_files is None or filename not in existing_files:
+            return filename
+        base_final = f"{base}{counter}"
+        counter += 1
 
 
 def _extract_year_int(year_str: Optional[str]) -> Optional[int]:

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .bibtex_utils import short_filename_for_entry, bibtex_from_dict
 from .config import TRUST_ORDER
 from .id_utils import _norm_doi, extract_arxiv_eprint, allowlisted_url
-from .text_utils import has_placeholder, format_author_dirname
+from .text_utils import has_placeholder, format_author_dirname, title_similarity
 
 
 def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
@@ -68,6 +68,14 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
                 if not cur_is_arxiv and new_is_arxiv:
                     continue
 
+            # special handling for pages field: must be actual page numbers only
+            if k == "pages":
+                new_str = str(v)
+                # Validate: pages must start with a digit (page numbers only)
+                if not re.match(r'^\d', new_str):
+                    # New value is not a valid page number (starts with non-digit)
+                    continue
+
             # only replace if new source is more trustworthy
             if type_rank.get(src, 99) < type_rank.get(cur_src, 99):
                 merged[k] = v
@@ -111,6 +119,11 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
     unwanted_fields = {"keywords", "copyright"}
     for field in unwanted_fields:
         merged.pop(field, None)
+
+    # validate and clean pages field: must contain actual page numbers only
+    pages_val = merged.get("pages", "")
+    if pages_val and not re.match(r'^\d', str(pages_val)):
+        merged.pop("pages", None)
 
     # remove PMID notes from PubMed/Europe PMC enrichment
     note_val = merged.get("note", "")
@@ -221,7 +234,8 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
     author_dir = os.path.join(out_dir, author_dirname)
     os.makedirs(author_dir, exist_ok=True)
 
-    base_filename = short_filename_for_entry(entry, gemini_api_key=gemini_api_key)
+    # Generate unique filename by checking against existing files
+    base_filename = short_filename_for_entry(entry, gemini_api_key=gemini_api_key, existing_files=None)
     filename = base_filename
     counter = 1
 
@@ -243,6 +257,34 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
                 if existing_content.rstrip() == new_content.rstrip():
                     # Prefer canonical base filename when possible
                     break
+
+                # Check if same publication by DOI or citation key (different metadata formatting)
+                from . import bibtex_utils as bt
+                existing_entry = bt.parse_bibtex_to_dict(existing_content)
+                if existing_entry:
+                    existing_fields = existing_entry.get('fields', {})
+                    new_fields = entry.get('fields', {})
+
+                    # Compare by DOI (most reliable)
+                    existing_doi = existing_fields.get('doi', '').strip().lower()
+                    new_doi = new_fields.get('doi', '').strip().lower()
+                    if existing_doi and new_doi and existing_doi == new_doi:
+                        # Same publication, overwrite with enriched version
+                        break
+
+                    # Compare by citation key as fallback
+                    existing_key = existing_entry.get('key', '').strip()
+                    new_key = entry.get('key', '').strip()
+                    if existing_key and new_key and existing_key == new_key:
+                        # Same publication, overwrite with enriched version
+                        break
+
+                    # Compare by Title Similarity
+                    existing_title = existing_fields.get('title', '')
+                    new_title = new_fields.get('title', '')
+                    sim = title_similarity(existing_title, new_title)
+                    if sim > 0.9:
+                         break
         except OSError:
             pass
         # otherwise add a number

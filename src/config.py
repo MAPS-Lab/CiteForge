@@ -119,7 +119,7 @@ _DOI_REGEX = r'\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b'
 # HTTP request configuration
 # Default timeout for HTTP requests (in seconds)
 HTTP_TIMEOUT_DEFAULT = 5.0
-HTTP_TIMEOUT_SHORT = 60.0
+HTTP_TIMEOUT_SHORT = 10.0
 
 # Exponential backoff configuration for retries
 HTTP_BACKOFF_INITIAL = 0.25  # Initial backoff delay in seconds
