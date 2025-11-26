@@ -600,7 +600,7 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
             )
 
         if total_true == 0:
-            logger.warn("Entry was not enriched by any source; resulting BibTeX may be incomplete", category=LogCategory.ERROR, source=LogSource.SYSTEM)
+            logger.info("Entry saved with Scholar/DBLP data only; no additional enrichment available", category=LogCategory.SAVE, source=LogSource.SYSTEM)
     except (PARSE_ERRORS, OSError, RuntimeError) as e:
         logger.error(f"Merge error: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         return 0

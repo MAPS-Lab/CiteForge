@@ -405,10 +405,17 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
                     # Keep the generated filename with correct year
                     pass
                 else:
-                    # Year unchanged, reuse existing filename
+                    # Year unchanged, reuse existing filename AND citation key
                     filename = os.path.basename(duplicate_path)
+                    # Reuse the existing citation key to match the filename
+                    existing_key = existing_entry.get('key', '')
+                    if existing_key:
+                        entry['key'] = existing_key
             else:
                 filename = os.path.basename(duplicate_path)
+                # Reuse existing key if available
+                if existing_entry and existing_entry.get('key'):
+                    entry['key'] = existing_entry['key']
         except OSError:
             filename = os.path.basename(duplicate_path)
 
@@ -492,6 +499,13 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
             existing_entry = bt.parse_bibtex_to_dict(existing_content)
 
             if existing_entry:
+                # IMPORTANT: Keep citation key synchronized with filename
+                # If we're updating an existing file, reuse its citation key
+                # to prevent filename/key mismatches
+                existing_key = existing_entry.get('key', '')
+                if existing_key:
+                    entry['key'] = existing_key
+
                 # Count non-empty fields in each entry
                 existing_fields = {k: v for k, v in existing_entry.get('fields', {}).items() if v}
                 new_fields = {k: v for k, v in entry.get('fields', {}).items() if v}
@@ -514,7 +528,9 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
             pass
 
     if should_write:
+        # Re-render content to ensure citation key matches any updates made
+        final_content = bibtex_from_dict(entry)
         with open(path, "w", encoding="utf-8") as f:
-            f.write(new_content)
+            f.write(final_content)
 
     return path
