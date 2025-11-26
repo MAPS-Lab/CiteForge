@@ -67,7 +67,7 @@ def _try_multiple_candidates(
         return False, None
 
     candidates_to_try = candidates[:max_candidates]
-    logger.info(f"Trying {len(candidates_to_try)} candidate(s)", category=LogCategory.SEARCH, source=source_name)
+    logger.info(f"Found {len(candidates_to_try)} candidate(s), validating against baseline", category=LogCategory.SEARCH, source=source_name)
 
     for idx, candidate in enumerate(candidates_to_try, 1):
         try:
@@ -85,11 +85,11 @@ def _try_multiple_candidates(
             if bt.bibtex_entries_match_strict(baseline_entry, candidate_dict):
                 enr_list.append((flag_key, candidate_dict))
                 flags[flag_key] = True
-                logger.success(f"Validated: {candidate_title}", category=LogCategory.MATCH)
+                logger.success("Match validated and added to enrichment", category=LogCategory.MATCH, source=source_name)
                 return True, candidate
 
         except Exception as e:
-            logger.info(f"Candidate {idx}: error - {e}", category=LogCategory.DEBUG)
+            logger.info(f"Candidate {idx}: error - {e}", category=LogCategory.DEBUG, source=source_name)
             continue
 
     return False, None
@@ -152,7 +152,15 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
     if src:
         meta_bits.append(src)
     meta = ", ".join(meta_bits)
-    logger.substep(f"{idx_prefix}Article: {title}{(' (' + meta + ')') if meta else ''}", category=LogCategory.ARTICLE)
+
+    # Professional article header
+    logger.substep("", category=LogCategory.ARTICLE)
+    logger.substep(f"{idx_prefix}Processing Article", category=LogCategory.ARTICLE)
+    logger.info(f"Title: {title}", category=LogCategory.ARTICLE)
+    if year_hint:
+        logger.info(f"Year: {year_hint}", category=LogCategory.ARTICLE)
+    if src:
+        logger.info(f"Source: {src}", category=LogCategory.ARTICLE)
 
     # Check if BibTeX file already exists for this article (optimization to reduce SerpAPI usage)
     from src.text_utils import format_author_dirname
@@ -187,8 +195,8 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                             existing_file_path = file_path
                             existing_file_loaded = True
                             logger.info(
-                                f"Existing BibTeX found: {filename}. Using existing file as baseline seed - will update/enrich with fresh data",
-                                category=LogCategory.SKIP
+                                f"Using existing BibTeX as baseline: {filename}",
+                                category=LogCategory.ARTICLE, source=LogSource.SYSTEM
                             )
                             break
                 except (OSError, ValueError, TypeError):
@@ -197,7 +205,7 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
 
     # If no existing file found, build minimal BibTeX baseline
     if not existing_file_loaded:
-        logger.info("Building minimal BibTeX baseline", category=LogCategory.ARTICLE, source=LogSource.SYSTEM)
+        logger.info("Creating baseline BibTeX entry", category=LogCategory.ARTICLE, source=LogSource.SYSTEM)
         authors_list = api.extract_authors_from_article(art) or []
         year = api.get_article_year(art)
         scholar_bib = bt.build_minimal_bibtex(title, authors_list, year, keyhint=result_id)
@@ -272,12 +280,16 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
 
     enr_list: List[Tuple[str, Dict[str, Any]]] = []
 
+    # ===== PHASE 1: Early DOI Validation =====
+    logger.info("", category=LogCategory.ARTICLE)
+    logger.info("▶ Phase 1: Early DOI Validation", category=LogCategory.ARTICLE)
+
     # if the baseline already has a DOI, use it to get better metadata early on
     doi_validated = False  # Track if we successfully validated the DOI
     try:
         doi_early = idu.normalize_doi((baseline_entry.get("fields") or {}).get("doi"))
         if doi_early:
-            logger.info(f"DOI negotiation (early): validating baseline DOI {doi_early}", category=LogCategory.SEARCH)
+            logger.info(f"Validating DOI: {doi_early}", category=LogCategory.SEARCH, source=LogSource.DOI)
             doi_matched = process_validated_doi(
                 doi_early, baseline_entry, result_id, enr_list, flags
             )
@@ -285,17 +297,22 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
             # If DOI failed validation, remove it from baseline
             if not doi_matched:
                 baseline_entry.get("fields", {}).pop("doi", None)
-                logger.warn(f"Removed unvalidated DOI {doi_early} from baseline", category=LogCategory.ARTICLE)
+                logger.warn(f"DOI validation failed, removed from baseline", category=LogCategory.ARTICLE, source=LogSource.DOI)
             else:
                 doi_validated = True
+                logger.success(f"DOI validated successfully", category=LogCategory.MATCH, source=LogSource.DOI)
     except PARSE_ERRORS:
         pass
 
+    # ===== PHASE 2: API Enrichment =====
+    logger.info("", category=LogCategory.ARTICLE)
+    logger.info("▶ Phase 2: API Enrichment", category=LogCategory.ARTICLE)
+
     # Skip SerpAPI citation fetch if we loaded an existing file (optimization to reduce API usage)
     if existing_file_loaded:
-        logger.info("Scholar citation: skipped (existing file loaded)", category=LogCategory.SKIP)
+        logger.info("Skipped (using existing file as baseline)", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
     else:
-        logger.info("Fetch via SerpAPI", category=LogCategory.FETCH, source=LogSource.SCHOLAR)
+        logger.info("Fetching citation metadata", category=LogCategory.FETCH, source=LogSource.SCHOLAR)
         if citation_id:
             try:
                 fields = api.fetch_scholar_citation_via_serpapi(api_key, rec.scholar_id, citation_id)
@@ -306,26 +323,26 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                         if sch_page_dict and bt.bibtex_entries_match_strict(baseline_entry, sch_page_dict):
                             enr_list.append(("scholar_page", sch_page_dict))
                             flags["scholar_page"] = True
-                            logger.success("Citation matched and added", category=LogCategory.MATCH, source=LogSource.SCHOLAR)
+                            logger.success("Match validated and added to enrichment", category=LogCategory.MATCH, source=LogSource.SCHOLAR)
                         else:
-                            logger.info("Citation did not match baseline; skipped", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
+                            logger.info("Citation did not match baseline", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
                     else:
-                        logger.info("No BibTeX generated from citation", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
+                        logger.info("No BibTeX generated", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
                 else:
-                    logger.info("No data returned from SerpAPI", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
+                    logger.info("No data returned", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
             except ALL_API_ERRORS as e:
                 logger.warn(f"Citation fetch error: {e}", category=LogCategory.ERROR, source=LogSource.SCHOLAR)
         else:
             logger.info("No citation_id available; skipped", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
 
-    logger.info(MSG_SEARCHING, category=LogCategory.SEARCH, source=LogSource.S2)
+    logger.info("Searching for matching publication", category=LogCategory.SEARCH, source=LogSource.S2)
     s2_paper = None
     if s2_api_key:
         try:
             s2_papers = api.s2_search_papers_multiple(title, rec.name, s2_api_key, max_results=5)
             if s2_papers:
                 matched, s2_paper = _try_multiple_candidates(
-                    "Semantic Scholar",
+                    LogSource.S2,
                     s2_papers,
                     api.build_bibtex_from_s2,
                     baseline_entry,
@@ -336,22 +353,22 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                     max_candidates=5
                 )
                 if not matched:
-                    logger.info(MSG_NO_CANDIDATES, category=LogCategory.SKIP, source=LogSource.S2)
+                    logger.info("No candidates matched baseline", category=LogCategory.SKIP, source=LogSource.S2)
                     s2_paper = None
             else:
-                logger.info(MSG_NO_MATCH, category=LogCategory.SKIP, source=LogSource.S2)
+                logger.info("No matching publication found", category=LogCategory.SKIP, source=LogSource.S2)
         except ALL_API_ERRORS as e:
             logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.S2)
     else:
         logger.info("Skipped (no API key)", category=LogCategory.SKIP, source=LogSource.S2)
 
-    logger.info(MSG_SEARCHING, category=LogCategory.SEARCH, source=LogSource.CROSSREF)
+    logger.info("Searching for matching publication", category=LogCategory.SEARCH, source=LogSource.CROSSREF)
     cr_item = None
     try:
         cr_items = api.crossref_search_multiple(title, rec.name, max_results=5)
         if cr_items:
             matched, cr_item = _try_multiple_candidates(
-                "Crossref",
+                LogSource.CROSSREF,
                 cr_items,
                 api.build_bibtex_from_crossref,
                 baseline_entry,
@@ -362,19 +379,19 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                 max_candidates=5
             )
             if not matched:
-                logger.info(MSG_NO_CANDIDATES, category=LogCategory.SKIP, source=LogSource.CROSSREF)
+                logger.info("No candidates matched baseline", category=LogCategory.SKIP, source=LogSource.CROSSREF)
                 cr_item = None
         else:
-            logger.info(MSG_NO_MATCH, category=LogCategory.SKIP, source=LogSource.CROSSREF)
+            logger.info("No matching publication found", category=LogCategory.SKIP, source=LogSource.CROSSREF)
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.CROSSREF)
 
-    logger.info(MSG_SEARCHING, category=LogCategory.SEARCH, source=LogSource.OPENREVIEW)
+    logger.info("Searching for matching publication", category=LogCategory.SEARCH, source=LogSource.OPENREVIEW)
     try:
         or_notes = api.openreview_search_papers_multiple(title, rec.name, or_creds, max_results=5)
         if or_notes:
             matched, _or_note = _try_multiple_candidates(
-                "OpenReview",
+                LogSource.OPENREVIEW,
                 or_notes,
                 api.build_bibtex_from_openreview,
                 baseline_entry,
@@ -385,19 +402,19 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                 max_candidates=5
             )
             if not matched:
-                logger.info(MSG_NO_CANDIDATES, category=LogCategory.SKIP, source=LogSource.OPENREVIEW)
+                logger.info("No candidates matched baseline", category=LogCategory.SKIP, source=LogSource.OPENREVIEW)
         else:
-            logger.info(MSG_NO_MATCH, category=LogCategory.SKIP, source=LogSource.OPENREVIEW)
+            logger.info("No matching publication found", category=LogCategory.SKIP, source=LogSource.OPENREVIEW)
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.OPENREVIEW)
 
-    logger.info(MSG_SEARCHING, category=LogCategory.SEARCH, source=LogSource.ARXIV)
+    logger.info("Searching for matching publication", category=LogCategory.SEARCH, source=LogSource.ARXIV)
     arxiv_entry = None
     try:
         arxiv_entries = api.arxiv_search(title, rec.name, year_hint)
         if arxiv_entries:
             matched, arxiv_entry = _try_multiple_candidates(
-                "arXiv",
+                LogSource.ARXIV,
                 arxiv_entries,
                 api.build_bibtex_from_arxiv,
                 baseline_entry,
@@ -408,20 +425,20 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                 max_candidates=5
             )
             if not matched:
-                logger.info(MSG_NO_CANDIDATES, category=LogCategory.SKIP, source=LogSource.ARXIV)
+                logger.info("No candidates matched baseline", category=LogCategory.SKIP, source=LogSource.ARXIV)
                 arxiv_entry = None
         else:
-            logger.info(MSG_NO_MATCH, category=LogCategory.SKIP, source=LogSource.ARXIV)
+            logger.info("No matching publication found", category=LogCategory.SKIP, source=LogSource.ARXIV)
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.ARXIV)
 
-    logger.info(MSG_SEARCHING, category=LogCategory.SEARCH, source=LogSource.OPENALEX)
+    logger.info("Searching for matching publication", category=LogCategory.SEARCH, source=LogSource.OPENALEX)
     oa_work = None
     try:
         oa_works = api.openalex_search_multiple(title, rec.name, max_results=5)
         if oa_works:
             matched, oa_work = _try_multiple_candidates(
-                "OpenAlex",
+                LogSource.OPENALEX,
                 oa_works,
                 api.build_bibtex_from_openalex,
                 baseline_entry,
@@ -432,20 +449,20 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                 max_candidates=5
             )
             if not matched:
-                logger.info(MSG_NO_CANDIDATES, category=LogCategory.SKIP, source=LogSource.OPENALEX)
+                logger.info("No candidates matched baseline", category=LogCategory.SKIP, source=LogSource.OPENALEX)
                 oa_work = None
         else:
-            logger.info(MSG_NO_MATCH, category=LogCategory.SKIP, source=LogSource.OPENALEX)
+            logger.info("No matching publication found", category=LogCategory.SKIP, source=LogSource.OPENALEX)
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.OPENALEX)
 
-    logger.info(MSG_SEARCHING, category=LogCategory.SEARCH, source=LogSource.PUBMED)
+    logger.info("Searching for matching publication", category=LogCategory.SEARCH, source=LogSource.PUBMED)
     pm_article = None
     try:
         pm_articles = api.pubmed_search_papers_multiple(title, rec.name, max_results=5)
         if pm_articles:
             matched, pm_article = _try_multiple_candidates(
-                "PubMed",
+                LogSource.PUBMED,
                 pm_articles,
                 api.build_bibtex_from_pubmed,
                 baseline_entry,
@@ -456,20 +473,20 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                 max_candidates=5
             )
             if not matched:
-                logger.info(MSG_NO_CANDIDATES, category=LogCategory.SKIP, source=LogSource.PUBMED)
+                logger.info("No candidates matched baseline", category=LogCategory.SKIP, source=LogSource.PUBMED)
                 pm_article = None
         else:
-            logger.info(MSG_NO_MATCH, category=LogCategory.SKIP, source=LogSource.PUBMED)
+            logger.info("No matching publication found", category=LogCategory.SKIP, source=LogSource.PUBMED)
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.PUBMED)
 
-    logger.info(MSG_SEARCHING, category=LogCategory.SEARCH, source=LogSource.EUROPEPMC)
+    logger.info("Searching for matching publication", category=LogCategory.SEARCH, source=LogSource.EUROPEPMC)
     epmc_article = None
     try:
         epmc_articles = api.europepmc_search_papers_multiple(title, rec.name, max_results=5)
         if epmc_articles:
             matched, epmc_article = _try_multiple_candidates(
-                "Europe PMC",
+                LogSource.EUROPEPMC,
                 epmc_articles,
                 api.build_bibtex_from_europepmc,
                 baseline_entry,
@@ -480,16 +497,20 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                 max_candidates=5
             )
             if not matched:
-                logger.info(MSG_NO_CANDIDATES, category=LogCategory.SKIP, source=LogSource.EUROPEPMC)
+                logger.info("No candidates matched baseline", category=LogCategory.SKIP, source=LogSource.EUROPEPMC)
                 epmc_article = None
         else:
-            logger.info(MSG_NO_MATCH, category=LogCategory.SKIP, source=LogSource.EUROPEPMC)
+            logger.info("No matching publication found", category=LogCategory.SKIP, source=LogSource.EUROPEPMC)
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.EUROPEPMC)
 
+    # ===== PHASE 3: Late DOI Discovery =====
+    logger.info("", category=LogCategory.ARTICLE)
+    logger.info("▶ Phase 3: Late DOI Discovery", category=LogCategory.ARTICLE)
+
     # Only do late DOI negotiation if we haven't already validated a DOI early
     if not doi_validated:
-        logger.info("Discover CSL/BibTeX via DOI", category=LogCategory.SEARCH, source=LogSource.DOI)
+        logger.info("Extracting DOI candidates from enrichment sources", category=LogCategory.SEARCH, source=LogSource.DOI)
         try:
             doi_candidates: List[str] = []
             # Only extract DOIs from API results that successfully matched baseline
@@ -572,7 +593,11 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
     else:
         logger.info("DOI already validated early; skipping late DOI negotiation", category=LogCategory.SKIP, source=LogSource.DOI)
 
-    logger.info("Merge: apply trust policy and save", category=LogCategory.SAVE, source=LogSource.SYSTEM)
+    # ===== PHASE 4: Merge & Save =====
+    logger.info("", category=LogCategory.ARTICLE)
+    logger.info("▶ Phase 4: Merge & Save", category=LogCategory.ARTICLE)
+
+    logger.info("Applying trust policy and merging enrichments", category=LogCategory.SAVE, source=LogSource.SYSTEM)
     try:
         merged = mu.merge_with_policy(baseline_entry, enr_list)
         merged["key"] = bt.build_standard_citekey(merged, gemini_api_key=gemini_api_key) or merged.get("key") or "Entry"
@@ -589,7 +614,50 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
             rel = path2
         total_true = sum(1 for v in flags.values() if v)
 
+        # ===== Enrichment Summary =====
+        logger.info("", category=LogCategory.ARTICLE)
+        logger.info("▶ Enrichment Summary", category=LogCategory.ARTICLE)
 
+        # Count total enrichment sources (excluding doi_csl and doi_bibtex as they're part of doi_validated)
+        enrichment_sources = {
+            "scholar_page": "Scholar Citation",
+            "s2": "Semantic Scholar",
+            "crossref": "Crossref",
+            "openreview": "OpenReview",
+            "arxiv": "arXiv",
+            "openalex": "OpenAlex",
+            "pubmed": "PubMed",
+            "europepmc": "Europe PMC",
+        }
+
+        # Log DOI status separately
+        if flags.get("doi_csl") or flags.get("doi_bibtex"):
+            doi_status = []
+            if flags.get("doi_csl"):
+                doi_status.append("CSL")
+            if flags.get("doi_bibtex"):
+                doi_status.append("BibTeX")
+            logger.success(f"DOI: {' + '.join(doi_status)}", category=LogCategory.SAVE, source=LogSource.DOI)
+
+        # Count and log enrichment sources
+        enriched_count = sum(1 for k in enrichment_sources.keys() if flags.get(k))
+        total_sources = len(enrichment_sources)
+
+        logger.info(f"Coverage: {enriched_count}/{total_sources} sources", category=LogCategory.SAVE, source=LogSource.SYSTEM)
+
+        # Group matched and unmatched sources
+        matched = []
+        unmatched = []
+        for flag_key, source_label in enrichment_sources.items():
+            if flags.get(flag_key):
+                matched.append(source_label)
+            else:
+                unmatched.append(source_label)
+
+        if matched:
+            logger.success(f"Matched: {', '.join(matched)}", category=LogCategory.SAVE, source=LogSource.SYSTEM)
+        if unmatched:
+            logger.info(f"Not matched: {', '.join(unmatched)}", category=LogCategory.SKIP, source=LogSource.SYSTEM)
 
         # Write summary to CSV if path is provided
         if summary_csv_path:
@@ -599,9 +667,6 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                 total_true,
                 flags
             )
-
-        if total_true == 0:
-            logger.info("Entry saved with Scholar/DBLP data only; no additional enrichment available", category=LogCategory.SAVE, source=LogSource.SYSTEM)
     except (PARSE_ERRORS, OSError, RuntimeError) as e:
         logger.error(f"Merge error: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         return 0
@@ -740,6 +805,26 @@ def process_record(api_key: str, rec: Record, out_dir: str, max_pubs: Optional[i
         logger.close()
 
 
+def count_existing_papers(rec: Record, out_dir: str) -> int:
+    """
+    Count the number of existing .bib files for an author.
+
+    Returns the count of .bib files in the author's directory.
+    """
+    effective_id = rec.scholar_id or rec.dblp or ""
+    author_dirname = format_author_dirname(rec.name, effective_id)
+    author_dir = os.path.join(out_dir, author_dirname)
+
+    if not os.path.exists(author_dir):
+        return 0
+
+    try:
+        bib_files = [f for f in os.listdir(author_dir) if f.endswith('.bib')]
+        return len(bib_files)
+    except (OSError, PermissionError):
+        return 0
+
+
 def main() -> int:
     """
     Set up the run by creating output directories, loading API keys and
@@ -793,6 +878,18 @@ def main() -> int:
         logger.close()
         return 2
 
+    # Sort authors by existing paper count (descending) so authors with more papers finish first
+    logger.info("Sorting authors by existing paper count (authors with more papers will be processed first)", category=LogCategory.PLAN)
+    records_with_counts = [(rec, count_existing_papers(rec, out_dir)) for rec in records]
+    records_with_counts.sort(key=lambda x: x[1], reverse=True)
+    records = [rec for rec, count in records_with_counts]
+
+    # Log sorting results
+    if records_with_counts:
+        max_papers = records_with_counts[0][1]
+        min_papers = records_with_counts[-1][1]
+        logger.info(f"Author range: {max_papers} papers (max) to {min_papers} papers (min)", category=LogCategory.PLAN)
+
     summary_csv_path = os.path.join(out_dir, "summary.csv")
     try:
         init_summary_csv(summary_csv_path)
@@ -803,35 +900,43 @@ def main() -> int:
 
     total_saved = 0
     processed = 0
-    
-    max_workers = 8  # Execute author processing in parallel using a thread pool.    
+
+    max_workers = 12  # Execute author processing in parallel using a thread pool.
     logger.step(f"Starting parallel execution with {max_workers} workers", category=LogCategory.PLAN)
-    
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_author = {
-            executor.submit(
-                process_record, 
-                api_key, 
-                rec, 
-                out_dir, 
-                max_pubs=None, 
+        # Submit all tasks and track them
+        future_to_author = {}
+        for idx, rec in enumerate(records, 1):
+            effective_id = rec.scholar_id or rec.dblp or "N/A"
+            logger.info(f"[{idx}/{len(records)}] Queued: {rec.name} (ID: {effective_id})", category=LogCategory.PLAN)
+
+            future = executor.submit(
+                process_record,
+                api_key,
+                rec,
+                out_dir,
+                max_pubs=None,
                 s2_api_key=s2_api_key,
-                or_creds=or_creds, 
+                or_creds=or_creds,
                 delay=REQUEST_DELAY_BETWEEN_ARTICLES,
-                gemini_api_key=gemini_api_key, 
+                gemini_api_key=gemini_api_key,
                 summary_csv_path=summary_csv_path
-            ): rec for rec in records
-        }
-        
+            )
+            future_to_author[future] = rec
+
+        logger.step(f"All {len(records)} authors queued for processing", category=LogCategory.PLAN)
+
         for future in as_completed(future_to_author):
             rec = future_to_author[future]
             try:
                 saved = future.result()
                 total_saved += saved
                 processed += 1
-                logger.success(f"Finished author: {rec.name} ({saved} files saved)", category=LogCategory.AUTHOR)
+                logger.success(f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)", category=LogCategory.AUTHOR)
             except Exception as e:
-                logger.error(f"Author error for {rec.name} ({rec.scholar_id}): {e}", category=LogCategory.ERROR)
+                processed += 1
+                logger.error(f"[{processed}/{len(records)}] Error processing {rec.name} ({rec.scholar_id or rec.dblp}): {e}", category=LogCategory.ERROR)
 
     logger.step("Run complete", category=LogCategory.PLAN)
     logger.info(f"Records processed: {processed}", category=LogCategory.PLAN)

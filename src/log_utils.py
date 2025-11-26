@@ -343,6 +343,13 @@ class Logger:
         """
         self._adapter.log(SUCCESS_LEVEL, msg, source=source, category=category)
 
+    @property
+    def log_file_path(self) -> Optional[str]:
+        """
+        Get the log file path for the current thread.
+        """
+        return getattr(self._thread_local, "log_file_path", None)
+
 
 # Global logger instance
 logger = Logger()
