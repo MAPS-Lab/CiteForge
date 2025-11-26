@@ -235,19 +235,23 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
     os.makedirs(author_dir, exist_ok=True)
 
     # Collect existing files to enable collision detection
-    # Exclude prefer_path from collision detection if provided
-    existing_files = set()
+    existing_files_for_collision = set()
+    existing_files_for_duplicate_scan = set()
+
     if os.path.exists(author_dir):
         all_files = {f for f in os.listdir(author_dir) if f.endswith('.bib')}
-        # If prefer_path is provided, exclude it from collision detection
+        existing_files_for_duplicate_scan = all_files
+
+        # If prefer_path is provided, exclude it from collision avoidance only
+        # but still check it for duplicate detection
         if prefer_path:
             prefer_filename = os.path.basename(prefer_path)
-            existing_files = all_files - {prefer_filename}
+            existing_files_for_collision = all_files - {prefer_filename}
         else:
-            existing_files = all_files
+            existing_files_for_collision = all_files
 
-    # Generate unique filename by checking against existing files
-    base_filename = short_filename_for_entry(entry, gemini_api_key=gemini_api_key, existing_files=existing_files)
+    # Generate unique filename by checking against existing files (excluding prefer_path)
+    base_filename = short_filename_for_entry(entry, gemini_api_key=gemini_api_key, existing_files=existing_files_for_collision)
     filename = base_filename
     counter = 1
 
@@ -259,10 +263,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
     duplicate_found = False
     duplicate_path = None
 
-    for existing_filename in existing_files:
-        if existing_filename == filename:
-            continue  # Will handle exact filename match in next loop
-
+    for existing_filename in existing_files_for_duplicate_scan:
         existing_path = os.path.join(author_dir, existing_filename)
         try:
             with open(existing_path, "r", encoding="utf-8") as ef:
@@ -357,6 +358,30 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
 
     path = os.path.join(author_dir, filename)
 
+    # If file exists, check which version is better before overwriting
+    should_write = True
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing_content = f.read()
+
+            from . import bibtex_utils as bt
+            existing_entry = bt.parse_bibtex_to_dict(existing_content)
+
+            if existing_entry:
+                # Count non-empty fields in each entry
+                existing_fields = {k: v for k, v in existing_entry.get('fields', {}).items() if v}
+                new_fields = {k: v for k, v in entry.get('fields', {}).items() if v}
+
+                # If existing has more fields, don't overwrite (keep better version)
+                # This prevents downgrading enriched entries with minimal baseline data
+                # Apply this check even for prefer_path updates to prevent failed enrichments
+                # from downgrading existing good data
+                if len(existing_fields) > len(new_fields):
+                    should_write = False
+        except OSError:
+            pass
+
     # clean up old file if we're moving to a new location
     if prefer_path and os.path.abspath(prefer_path) != os.path.abspath(path):
         try:
@@ -365,6 +390,8 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
         except OSError:
             pass
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(new_content)
+    if should_write:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
     return path
