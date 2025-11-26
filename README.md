@@ -136,9 +136,9 @@ CiteForge is highly configurable via `src/config.py`. Key parameters include:
 
 ### Publication Fetching
 
-- `CONTRIBUTION_WINDOW_YEARS`: Time window for fetching publications (default: 3 years)
+- `CONTRIBUTION_WINDOW_YEARS`: Time window for fetching publications (default: 5 years)
 - `PUBLICATIONS_PER_YEAR`: Target publications to fetch per year (default: 50)
-- `MAX_PUBLICATIONS_PER_AUTHOR`: Calculated as PUBLICATIONS_PER_YEAR × CONTRIBUTION_WINDOW_YEARS (default: 150)
+- `MAX_PUBLICATIONS_PER_AUTHOR`: Calculated as PUBLICATIONS_PER_YEAR × CONTRIBUTION_WINDOW_YEARS (default: 250)
 - `SKIP_SERPAPI_FOR_EXISTING_FILES`: Reuse existing BibTeX files as enrichment seeds to dramatically reduce SerpAPI usage—drops from 1+N to just 1 request per author (default: True, **highly recommended**)
 
 ### Duplicate Detection & Matching

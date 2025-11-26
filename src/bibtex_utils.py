@@ -436,6 +436,10 @@ def build_standard_citekey(entry: Dict[str, Any], gemini_api_key: Optional[str] 
     """
     Build a human-readable citation key such as "Smith2024:MachineLearning" by
     combining the first author's name, the year, and key title words.
+
+    Uses BIBTEX_KEY_MAX_WORDS (default 4) to generate more distinctive citation keys,
+    which helps avoid collisions for papers with similar titles like
+    "Dairy DigiD: keypoint..." vs "Dairy DigiD: Edge-Cloud..."
     """
     fields = entry.get("fields") or {}
     title = (fields.get("title") or "").strip()
@@ -447,7 +451,9 @@ def build_standard_citekey(entry: Dict[str, Any], gemini_api_key: Optional[str] 
     author = fields.get("author") or ""
     last = _first_author_lastname(author) or "anon"
     last_cap = last[:1].upper() + last[1:] if last else "Anon"
-    short = _short_title_for_key(title, max_words=2, gemini_api_key=gemini_api_key) or "Title"
+    # Use BIBTEX_KEY_MAX_WORDS instead of hardcoded 2 to get more distinctive keys
+    # This also enables cache usage when gemini_api_key is provided
+    short = _short_title_for_key(title, max_words=BIBTEX_KEY_MAX_WORDS, gemini_api_key=gemini_api_key) or "Title"
     return f"{last_cap}{y}:{short}"
 
 
