@@ -227,6 +227,7 @@ def determine_entry_type(
                     "meeting", "summit", "congress", "colloquium",
                     "chapter of the association",  # NAACL, EACL, AACL, etc.
                     "findings of",  # ACL/EMNLP workshop findings
+                    "lecture notes in computer science",  # LNCS is a conference proceedings series
                 ]
                 if any(keyword in venue_lower for keyword in conference_keywords):
                     return "inproceedings"

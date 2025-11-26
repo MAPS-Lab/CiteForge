@@ -187,6 +187,17 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
         if journal_cleaned != journal_val:
             merged["journal"] = journal_cleaned.strip()
 
+    # strip HTML/XML tags from text fields (prevents LaTeX compilation errors)
+    # Common tags from publishers: <scp>, <i>, <b>, <sup>, <sub>, <em>, <strong>
+    text_fields_to_clean = ["title", "journal", "booktitle", "series"]
+    for field in text_fields_to_clean:
+        field_val = merged.get(field, "")
+        if field_val and isinstance(field_val, str):
+            # Remove HTML/XML tags: <tag>, </tag>, <tag attr="value">
+            cleaned = re.sub(r'<[^>]+>', '', field_val)
+            if cleaned != field_val:
+                merged[field] = cleaned.strip()
+
     # remove PMID notes from PubMed/Europe PMC enrichment
     note_val = merged.get("note", "")
     if note_val and note_val.strip().startswith("PMID:"):
