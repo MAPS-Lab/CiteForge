@@ -254,6 +254,57 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
     # Render once for comparison
     new_content = bibtex_from_dict(entry)
 
+    # First, check ALL existing files for duplicates (not just filename collisions)
+    # This catches cases where Gemini/cache returns different short titles for same publication
+    duplicate_found = False
+    duplicate_path = None
+
+    for existing_filename in existing_files:
+        if existing_filename == filename:
+            continue  # Will handle exact filename match in next loop
+
+        existing_path = os.path.join(author_dir, existing_filename)
+        try:
+            with open(existing_path, "r", encoding="utf-8") as ef:
+                existing_content = ef.read()
+                from . import bibtex_utils as bt
+                existing_entry = bt.parse_bibtex_to_dict(existing_content)
+
+                if existing_entry:
+                    existing_fields = existing_entry.get('fields', {})
+                    new_fields = entry.get('fields', {})
+
+                    # Compare by DOI (most reliable)
+                    existing_doi = existing_fields.get('doi', '').strip().lower()
+                    new_doi = new_fields.get('doi', '').strip().lower()
+                    if existing_doi and new_doi and existing_doi == new_doi:
+                        duplicate_found = True
+                        duplicate_path = existing_path
+                        break
+
+                    # Compare by citation key
+                    existing_key = existing_entry.get('key', '').strip()
+                    new_key = entry.get('key', '').strip()
+                    if existing_key and new_key and existing_key == new_key:
+                        duplicate_found = True
+                        duplicate_path = existing_path
+                        break
+
+                    # Compare by title similarity
+                    existing_title = existing_fields.get('title', '')
+                    new_title = new_fields.get('title', '')
+                    sim = title_similarity(existing_title, new_title)
+                    if sim > 0.9:
+                        duplicate_found = True
+                        duplicate_path = existing_path
+                        break
+        except OSError:
+            pass
+
+    # If duplicate found in a different file, use that file instead
+    if duplicate_found and duplicate_path:
+        filename = os.path.basename(duplicate_path)
+
     # avoid overwriting unless it's the file we wrote earlier or content is identical
     while os.path.exists(os.path.join(author_dir, filename)):
         existing_path = os.path.join(author_dir, filename)
@@ -296,7 +347,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
                     new_title = new_fields.get('title', '')
                     sim = title_similarity(existing_title, new_title)
                     if sim > 0.9:
-                         break
+                        break
         except OSError:
             pass
         # otherwise add a number
