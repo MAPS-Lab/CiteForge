@@ -352,16 +352,24 @@ def _short_title_for_key(
     join them into a compact phrase that works well in keys or filenames.
 
     If a Gemini API key is provided, this function will:
-    1. Check the dictionary file for a previously generated short title
+    1. Check the dictionary file for a previously generated short title (only for default max_words)
     2. If not found, use the Gemini API to generate a short title
     3. Fall back to the original algorithm if Gemini fails or no API key is provided
     4. Save successful Gemini responses to the dictionary for future use
+
+    IMPORTANT: Cache is only used when max_words equals the default value (BIBTEX_KEY_MAX_WORDS).
+    When max_words is greater than default, we're disambiguating filename collisions,
+    so we bypass the cache and use the algorithmic approach to get more title words.
     """
     # normalize the title for cache lookup (consistent format)
     normalized_title = normalize_title(title)
 
-    # try to use Gemini if API key is available
-    if gemini_api_key:
+    # Only use cache for default max_words requests
+    # When max_words > default, we're disambiguating collisions and need fresh results
+    use_cache = (max_words == BIBTEX_KEY_MAX_WORDS)
+
+    # try to use Gemini if API key is available and we're using default max_words
+    if gemini_api_key and use_cache:
         # check dictionary first
         dictionary = _load_title_dictionary()
         if normalized_title in dictionary:
@@ -378,12 +386,16 @@ def _short_title_for_key(
         gemini_result = gemini_generate_short_title(title, gemini_api_key, max_words)
 
         if gemini_result:
-            # save the result to dictionary
+            # save the result to dictionary (only for default max_words)
             dictionary[normalized_title] = gemini_result
             _save_title_dictionary(dictionary)
             return gemini_result
 
-    # fallback to original algorithm if no API key, cache miss, or Gemini failed
+    # fallback to original algorithm if:
+    # - no API key
+    # - cache miss
+    # - Gemini failed
+    # - max_words > default (disambiguation mode)
     stop = {"a", "an", "the", "on", "for", "of", "and", "to", "in", "with", "using", "via", "from", "by", "at", "into",
             "through"}
     words = [w for w in re.split(r"[^A-Za-z0-9]+", title) if w]
