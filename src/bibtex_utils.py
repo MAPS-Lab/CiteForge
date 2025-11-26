@@ -367,7 +367,10 @@ def _short_title_for_key(
         if normalized_title in dictionary:
             saved_short = dictionary[normalized_title]
             if saved_short:  # ensure it's not empty
-                return saved_short
+                # sanitize cached value (remove newlines, tabs, etc from old cache entries)
+                saved_short = saved_short.replace("\n", "").replace("\r", "").replace("\t", "")
+                if saved_short:  # ensure still not empty after sanitization
+                    return saved_short
 
         # not in dictionary, try Gemini API
         # import here to avoid circular dependency
@@ -455,7 +458,8 @@ def short_filename_for_entry(entry: Dict[str, Any], gemini_api_key: Optional[str
     title = fields.get("title") or ""
 
     # Try with increasing number of words until we get a unique filename
-    for num_words in range(max_words, min(6, max_words + 4)):
+    # Start with max_words, try up to 10 words from the title
+    for num_words in range(max_words, 11):
         short = _short_title_for_key(title, max_words=num_words, gemini_api_key=gemini_api_key) or "Title"
         base = f"{last_cap}{y}-{short}"
         base = re.sub(r"[^A-Za-z0-9_\-]+", "", base)
@@ -468,15 +472,14 @@ def short_filename_for_entry(entry: Dict[str, Any], gemini_api_key: Optional[str
         if existing_files is None or filename not in existing_files:
             return filename
 
-    # Fallback: if still not unique after trying more words, add counter
-    base_final = base
-    counter = 1
-    while True:
-        filename = f"{base_final}.bib"
-        if existing_files is None or filename not in existing_files:
-            return filename
-        base_final = f"{base}{counter}"
-        counter += 1
+    # Last resort: use full title if even 10 words didn't work
+    # This should be extremely rare
+    short = _short_title_for_key(title, max_words=20, gemini_api_key=gemini_api_key) or "Title"
+    base = f"{last_cap}{y}-{short}"
+    base = re.sub(r"[^A-Za-z0-9_\-]+", "", base)
+    if len(base) > BIBTEX_FILENAME_MAX_LENGTH:
+        base = base[:BIBTEX_FILENAME_MAX_LENGTH]
+    return f"{base}.bib"
 
 
 def _extract_year_int(year_str: Optional[str]) -> Optional[int]:

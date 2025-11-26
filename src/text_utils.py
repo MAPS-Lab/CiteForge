@@ -256,17 +256,26 @@ def format_author_dirname(author_name: Optional[str], author_id: str) -> str:
     If author_id is empty, uses LastName.
     """
     last_name = extract_last_name(author_name)
-    
-    if not author_id:
+
+    # Sanitize author_id by replacing reserved path characters
+    # "/" is used in path separators and must be replaced
+    # Other reserved characters: \ : * ? " < > |
+    sanitized_id = author_id.replace("/", "-").replace("\\", "-")
+    sanitized_id = sanitized_id.replace(":", "-").replace("*", "-")
+    sanitized_id = sanitized_id.replace("?", "-").replace('"', "-")
+    sanitized_id = sanitized_id.replace("<", "-").replace(">", "-")
+    sanitized_id = sanitized_id.replace("|", "-")
+
+    if not sanitized_id:
         if last_name and last_name != "Unknown":
             return last_name
         return "unknown"
 
     if last_name and last_name != "Unknown":
-        return f"{last_name} ({author_id})"
+        return f"{last_name} ({sanitized_id})"
 
-    # Fallback to just the ID if we can't extract a name
-    return author_id
+    # Fallback to just the sanitized ID if we can't extract a name
+    return sanitized_id
 
 
 def parse_authors_any(authors: Any) -> List[str]:

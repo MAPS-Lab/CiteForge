@@ -1465,8 +1465,8 @@ def gemini_generate_short_title(
                     short_title = parts[0]["text"].strip()
                     # clean up the response - remove quotes, extra whitespace
                     short_title = short_title.strip('"\'').strip()
-                    # remove all spaces to ensure CamelCase without spaces
-                    short_title = short_title.replace(" ", "")
+                    # remove all spaces and newlines to ensure CamelCase without spaces
+                    short_title = short_title.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
 
                     # validate word count by counting capital letters (CamelCase convention)
                     if short_title:

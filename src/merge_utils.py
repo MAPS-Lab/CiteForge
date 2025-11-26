@@ -76,6 +76,39 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
                     # New value is not a valid page number (starts with non-digit)
                     continue
 
+            # special handling for journal field: never downgrade from published journal to preprint server
+            if k == "journal":
+                # List of preprint servers (not peer-reviewed journals)
+                preprint_servers = {
+                    'arxiv', 'biorxiv', 'medrxiv', 'chemrxiv', 'research square',
+                    'ssrn', 'preprints', 'psyarxiv', 'socarxiv', 'edarxiv',
+                    'arxiv e-prints', 'e-prints', 'preprint'
+                }
+                cur_journal_lower = str(cur).lower() if cur else ''
+                new_journal_lower = str(v).lower()
+
+                # Check if current is NOT a preprint but new IS a preprint
+                cur_is_preprint = any(ps in cur_journal_lower for ps in preprint_servers)
+                new_is_preprint = any(ps in new_journal_lower for ps in preprint_servers)
+
+                # Never replace a published journal with a preprint server
+                if not cur_is_preprint and new_is_preprint:
+                    continue
+
+            # special handling for title field: prefer longer, more descriptive titles
+            if k == "title":
+                cur_len = len(str(cur)) if cur else 0
+                new_len = len(str(v))
+
+                # If new title is significantly shorter (< 70% of current length),
+                # only replace if it comes from a MUCH more trusted source
+                # (at least 3 positions higher in trust order)
+                if cur_len > 0 and new_len < (cur_len * 0.7):
+                    trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
+                    if trust_diff < 3:
+                        # New source isn't significantly more trusted, keep longer title
+                        continue
+
             # only replace if new source is more trustworthy
             if type_rank.get(src, 99) < type_rank.get(cur_src, 99):
                 merged[k] = v
@@ -88,8 +121,21 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
     else:
         merged.pop("doi", None)
 
+    # Validate DOI consistency: if enrichers have contradicting DOIs, keep the primary
+    # Different DOIs indicate different papers that should not be merged
+    primary_doi = _norm_doi(primary.get("fields", {}).get("doi"))
+    has_doi_conflict = False
+
+    if primary_doi and merged.get("doi"):
+        merged_doi_norm = _norm_doi(merged.get("doi"))
+        if merged_doi_norm and merged_doi_norm != primary_doi:
+            # Enricher has different DOI - they're different papers, keep primary
+            merged["doi"] = primary_doi
+            has_doi_conflict = True
+
     # only trust DOIs from reliable sources (not random snippets)
-    if merged.get("doi"):
+    # UNLESS there was a DOI conflict (in which case we already kept the primary)
+    if merged.get("doi") and not has_doi_conflict:
         # Trust DOIs from DOI registration agencies and authoritative databases
         # DataCite: DOI registration agency for datasets/software
         # PubMed/Europe PMC: NIH and European government biomedical databases
@@ -124,6 +170,22 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
     pages_val = merged.get("pages", "")
     if pages_val and not re.match(r'^\d', str(pages_val)):
         merged.pop("pages", None)
+
+    # remove volume if it equals year (common error in conference proceedings)
+    # Conference volumes are typically series numbers, not years
+    year_val = merged.get("year", "")
+    volume_val = merged.get("volume", "")
+    if year_val and volume_val and str(year_val) == str(volume_val):
+        merged.pop("volume", None)
+
+    # clean journal names: remove descriptive suffixes from preprint servers
+    # PubMed/Europe PMC add descriptive text like " : the preprint server for biology"
+    journal_val = merged.get("journal", "")
+    if journal_val:
+        # Remove " : the preprint server for X" patterns
+        journal_cleaned = re.sub(r'\s*:\s*the preprint server for [\w\s]+$', '', journal_val, flags=re.IGNORECASE)
+        if journal_cleaned != journal_val:
+            merged["journal"] = journal_cleaned.strip()
 
     # remove PMID notes from PubMed/Europe PMC enrichment
     note_val = merged.get("note", "")
@@ -224,11 +286,13 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
     """
     Write a BibTeX entry to disk inside an author-specific output directory,
     choosing a short descriptive filename from the entry fields. It reuses a
-    previous path when possible, otherwise appends a counter to avoid collisions
-    and can remove an obsolete file when the location changes.
+    previous path when possible and can remove an obsolete file when the location changes.
+
+    For filename collisions with different publications, more words from the title
+    are used to create a unique filename (never appending numeric counters).
 
     If a colliding filename already exists with identical content, it will be
-    reused (overwritten) instead of creating a numbered duplicate.
+    reused (overwritten) instead of creating a duplicate.
     """
     author_dirname = format_author_dirname(author_name, author_id)
     author_dir = os.path.join(out_dir, author_dirname)
@@ -251,9 +315,9 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
             existing_files_for_collision = all_files
 
     # Generate unique filename by checking against existing files (excluding prefer_path)
+    # short_filename_for_entry will automatically use more words from the title if needed
     base_filename = short_filename_for_entry(entry, gemini_api_key=gemini_api_key, existing_files=existing_files_for_collision)
     filename = base_filename
-    counter = 1
 
     # Render once for comparison
     new_content = bibtex_from_dict(entry)
@@ -278,10 +342,20 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
                     # Compare by DOI (most reliable)
                     existing_doi = existing_fields.get('doi', '').strip().lower()
                     new_doi = new_fields.get('doi', '').strip().lower()
+
+                    # If both have DOIs and they're SAME, it's a duplicate
                     if existing_doi and new_doi and existing_doi == new_doi:
                         duplicate_found = True
                         duplicate_path = existing_path
                         break
+
+                    # If both have DOIs and they're DIFFERENT, NOT a duplicate (different papers)
+                    # Skip ALL other checks (citation key, title) since DOIs are authoritative
+                    if existing_doi and new_doi and existing_doi != new_doi:
+                        continue
+
+                    # Only check citation key and title if DOIs don't contradict
+                    # (either both missing, or only one present)
 
                     # Compare by citation key
                     existing_key = existing_entry.get('key', '').strip()
@@ -302,9 +376,30 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
         except OSError:
             pass
 
-    # If duplicate found in a different file, use that file instead
+    # If duplicate found in a different file, check if we should rename due to metadata changes
     if duplicate_found and duplicate_path:
-        filename = os.path.basename(duplicate_path)
+        # Check if year changed (year corrections should trigger rename)
+        try:
+            with open(duplicate_path, "r", encoding="utf-8") as ef:
+                existing_content = ef.read()
+            from . import bibtex_utils as bt
+            existing_entry = bt.parse_bibtex_to_dict(existing_content)
+
+            if existing_entry:
+                existing_year = existing_entry.get('fields', {}).get('year', '')
+                new_year = entry.get('fields', {}).get('year', '')
+
+                # If year changed, use new filename (don't reuse old one)
+                if existing_year and new_year and existing_year != new_year:
+                    # Keep the generated filename with correct year
+                    pass
+                else:
+                    # Year unchanged, reuse existing filename
+                    filename = os.path.basename(duplicate_path)
+            else:
+                filename = os.path.basename(duplicate_path)
+        except OSError:
+            filename = os.path.basename(duplicate_path)
 
     # avoid overwriting unless it's the file we wrote earlier or content is identical
     while os.path.exists(os.path.join(author_dir, filename)):
@@ -332,29 +427,46 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
                     # Compare by DOI (most reliable)
                     existing_doi = existing_fields.get('doi', '').strip().lower()
                     new_doi = new_fields.get('doi', '').strip().lower()
+
+                    # If both have DOIs and they're SAME, it's the same publication
                     if existing_doi and new_doi and existing_doi == new_doi:
                         # Same publication, overwrite with enriched version
                         break
 
-                    # Compare by citation key as fallback
-                    existing_key = existing_entry.get('key', '').strip()
-                    new_key = entry.get('key', '').strip()
-                    if existing_key and new_key and existing_key == new_key:
-                        # Same publication, overwrite with enriched version
-                        break
+                    # If both have DOIs and they're DIFFERENT, NOT the same paper
+                    # This should never happen because short_filename_for_entry should have
+                    # created a unique filename. If it does, it's an error.
+                    if existing_doi and new_doi and existing_doi != new_doi:
+                        # Different papers with same filename - this is a bug
+                        pass  # Fall through to raise error
 
-                    # Compare by Title Similarity
-                    existing_title = existing_fields.get('title', '')
-                    new_title = new_fields.get('title', '')
-                    sim = title_similarity(existing_title, new_title)
-                    if sim > 0.9:
-                        break
+                    # Only check citation key and title if DOIs don't contradict
+                    elif existing_key or new_key:
+                        # Compare by citation key as fallback
+                        existing_key = existing_entry.get('key', '').strip()
+                        new_key = entry.get('key', '').strip()
+                        if existing_key and new_key and existing_key == new_key:
+                            # Same publication, overwrite with enriched version
+                            break
+
+                        # Compare by Title Similarity
+                        existing_title = existing_fields.get('title', '')
+                        new_title = new_fields.get('title', '')
+                        sim = title_similarity(existing_title, new_title)
+                        if sim > 0.9:
+                            break
         except OSError:
             pass
-        # otherwise add a number
-        name, ext = os.path.splitext(base_filename)
-        filename = f"{name}-{counter}{ext}"
-        counter += 1
+
+        # If we reach here, it means the file exists but it's a different publication
+        # This should never happen because short_filename_for_entry should have created
+        # a unique filename by using more words from the title
+        # If it does happen, it indicates a bug in the filename generation logic
+        raise ValueError(
+            f"Cannot save entry: filename '{filename}' already exists with different content. "
+            f"This suggests the title '{entry.get('fields', {}).get('title', '')}' is too similar "
+            f"to an existing publication. Please check for duplicate entries or title conflicts."
+        )
 
     path = os.path.join(author_dir, filename)
 
