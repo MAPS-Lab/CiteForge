@@ -4,6 +4,7 @@ import csv
 import re
 import json
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 from .config import DEFAULT_KEY_FILE, DEFAULT_S2_KEY_FILE, DEFAULT_INPUT, DEFAULT_OR_KEY_FILE, DEFAULT_GEMINI_KEY_FILE
@@ -27,6 +28,9 @@ _SUMMARY_CSV_FIELDNAMES = [
     "doi_csl",
     "doi_bibtex",
 ]
+
+# Lock for synchronizing CSV writes
+_CSV_LOCK = threading.Lock()
 
 
 def _project_root() -> str:
@@ -303,33 +307,36 @@ def append_summary_to_csv(csv_path: str, file_path: str, trust_hits: int, flags:
 
     If an entry with the same file_path already exists in the CSV, it will be updated
     instead of creating a duplicate row.
+    
+    This function is thread-safe and uses a lock to prevent concurrent write issues.
     """
-    # Read existing entries
-    existing_entries = _read_existing_summary(csv_path)
+    with _CSV_LOCK:
+        # Read existing entries
+        existing_entries = _read_existing_summary(csv_path)
 
-    # Build new row
-    new_row = {
-        "file_path": file_path,
-        "trust_hits": trust_hits,
-        "scholar_bib": 1 if flags.get("scholar_bib", False) else 0,
-        "scholar_page": 1 if flags.get("scholar_page", False) else 0,
-        "s2": 1 if flags.get("s2", False) else 0,
-        "crossref": 1 if flags.get("crossref", False) else 0,
-        "openreview": 1 if flags.get("openreview", False) else 0,
-        "arxiv": 1 if flags.get("arxiv", False) else 0,
-        "openalex": 1 if flags.get("openalex", False) else 0,
-        "pubmed": 1 if flags.get("pubmed", False) else 0,
-        "europepmc": 1 if flags.get("europepmc", False) else 0,
-        "doi_csl": 1 if flags.get("doi_csl", False) else 0,
-        "doi_bibtex": 1 if flags.get("doi_bibtex", False) else 0,
-    }
+        # Build new row
+        new_row = {
+            "file_path": file_path,
+            "trust_hits": trust_hits,
+            "scholar_bib": 1 if flags.get("scholar_bib", False) else 0,
+            "scholar_page": 1 if flags.get("scholar_page", False) else 0,
+            "s2": 1 if flags.get("s2", False) else 0,
+            "crossref": 1 if flags.get("crossref", False) else 0,
+            "openreview": 1 if flags.get("openreview", False) else 0,
+            "arxiv": 1 if flags.get("arxiv", False) else 0,
+            "openalex": 1 if flags.get("openalex", False) else 0,
+            "pubmed": 1 if flags.get("pubmed", False) else 0,
+            "europepmc": 1 if flags.get("europepmc", False) else 0,
+            "doi_csl": 1 if flags.get("doi_csl", False) else 0,
+            "doi_bibtex": 1 if flags.get("doi_bibtex", False) else 0,
+        }
 
-    # Update or add the entry
-    existing_entries[file_path] = new_row
+        # Update or add the entry
+        existing_entries[file_path] = new_row
 
-    # Rewrite entire CSV with updated data (ensures no duplicates)
-    with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
-        writer.writeheader()
-        for row in existing_entries.values():
-            writer.writerow(row)
+        # Rewrite entire CSV with updated data (ensures no duplicates)
+        with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            for row in existing_entries.values():
+                writer.writerow(row)

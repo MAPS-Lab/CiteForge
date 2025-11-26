@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from typing import Optional
 
 
@@ -189,10 +190,33 @@ class CategoryAdapter(logging.LoggerAdapter):
         return msg, kwargs
 
 
+class MainThreadFilter(logging.Filter):
+    """
+    Filter that only allows log records from the main thread.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        return threading.current_thread() is threading.main_thread()
+
+
+class ThreadLocalFileHandler(logging.Handler):
+    """
+    Handler that delegates to a thread-local file handler if one exists.
+    """
+    def __init__(self, thread_local_storage: threading.local):
+        super().__init__()
+        self._tls = thread_local_storage
+
+    def emit(self, record: logging.LogRecord):
+        handler = getattr(self._tls, "handler", None)
+        if handler:
+            handler.emit(record)
+
+
 class Logger:
     """
     Enhanced logger using Python's standard logging module with support for
     colors, custom levels (STEP, SUCCESS), file mirroring, and categories.
+    Supports thread-local log files and restricts console output to the main thread.
     """
 
     LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(message)s"
@@ -207,11 +231,12 @@ class Logger:
 
         self._logger.handlers.clear()
 
+        # Console handler - only for main thread
         self._console_handler = logging.StreamHandler(sys.stdout)
         self._console_handler.setLevel(logging.DEBUG)
+        self._console_handler.addFilter(MainThreadFilter())
 
         use_color = sys.stdout.isatty()
-
         date_format = "%Y-%m-%d %H:%M:%S"
 
         console_formatter = ColoredFormatter(self.LOG_FORMAT, use_color=use_color)
@@ -219,8 +244,12 @@ class Logger:
         self._console_handler.setFormatter(console_formatter)
         self._logger.addHandler(self._console_handler)
 
-        self._file_handler: Optional[logging.FileHandler] = None
-        self.log_file_path: Optional[str] = None
+        # Thread-local storage for file handlers
+        self._thread_local = threading.local()
+        
+        # Thread-local delegating handler
+        self._tl_handler = ThreadLocalFileHandler(self._thread_local)
+        self._logger.addHandler(self._tl_handler)
 
         self._adapter = CategoryAdapter(self._logger, {})
 
@@ -243,7 +272,7 @@ class Logger:
 
     def set_log_file(self, path: str):
         """
-        Start mirroring all log messages to the specified file.
+        Start mirroring all log messages to the specified file for the current thread.
         """
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -251,33 +280,32 @@ class Logger:
             pass
 
         try:
-            if self._file_handler:
-                self._logger.removeHandler(self._file_handler)
-                self._file_handler.close()
+            # Close existing handler for this thread if any
+            if hasattr(self._thread_local, "handler") and self._thread_local.handler:
+                self._thread_local.handler.close()
 
-            self._file_handler = logging.FileHandler(path, mode="w", encoding="utf-8")
-            self._file_handler.setLevel(logging.DEBUG)
+            handler = logging.FileHandler(path, mode="w", encoding="utf-8")
+            handler.setLevel(logging.DEBUG)
 
             date_format = "%Y-%m-%d %H:%M:%S"
             file_formatter = logging.Formatter(self.LOG_FORMAT, datefmt=date_format)
-            self._file_handler.setFormatter(file_formatter)
+            handler.setFormatter(file_formatter)
 
-            self._logger.addHandler(self._file_handler)
-            self.log_file_path = path
+            self._thread_local.handler = handler
+            self._thread_local.log_file_path = path
         except OSError as e:
-            self._file_handler = None
-            self.log_file_path = None
+            self._thread_local.handler = None
+            self._thread_local.log_file_path = None
             self._logger.error(f"Failed to open log file {path}: {e}")
 
     def close(self):
         """
-        Stop logging to file.
+        Stop logging to file for the current thread.
         """
-        if self._file_handler:
-            self._logger.removeHandler(self._file_handler)
-            self._file_handler.close()
-            self._file_handler = None
-            self.log_file_path = None
+        if hasattr(self._thread_local, "handler") and self._thread_local.handler:
+            self._thread_local.handler.close()
+            self._thread_local.handler = None
+            self._thread_local.log_file_path = None
 
     def step(self, msg: str, source: Optional[str] = None, category: Optional[str] = None):
         """
@@ -307,12 +335,7 @@ class Logger:
         """
         Log errors.
         """
-        old_stream = self._console_handler.stream
-        self._console_handler.setStream(sys.stderr)
-        try:
-            self._adapter.error(msg, source=source, category=category)
-        finally:
-            self._console_handler.setStream(old_stream)
+        self._adapter.error(msg, source=source, category=category)
 
     def success(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
         """

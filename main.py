@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Dict, Any, Tuple, Callable
 
 from src import bibtex_utils as bt, api_clients as api, merge_utils as mu
@@ -34,7 +35,7 @@ from src.io_utils import read_api_key, read_semantic_api_key, read_records, read
     init_summary_csv, append_summary_to_csv, read_gemini_api_key
 from src.log_utils import logger, LogSource, LogCategory
 from src.models import Record
-from src.text_utils import trim_title_default
+from src.text_utils import trim_title_default, format_author_dirname
 
 
 # Log Messages
@@ -608,6 +609,8 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
     return 1
 
 
+
+
 def process_record(api_key: str, rec: Record, out_dir: str, max_pubs: Optional[int] = 1,
                    s2_api_key: Optional[str] = None, or_creds: Optional[tuple] = None, delay: float = 0.0,
                    gemini_api_key: Optional[str] = None, summary_csv_path: Optional[str] = None) -> int:
@@ -618,112 +621,123 @@ def process_record(api_key: str, rec: Record, out_dir: str, max_pubs: Optional[i
     process_article on each selected item. Returns the number of BibTeX files
     successfully written for this author.
     """
-    logger.step(f"Author: {rec.name} (Scholar={rec.scholar_id or 'N/A'}, DBLP={rec.dblp or 'N/A'})", category=LogCategory.AUTHOR, source=LogSource.SYSTEM)
+    # Setup thread-local logging for this author
+    effective_id = rec.scholar_id or rec.dblp or ""
+    author_dirname = format_author_dirname(rec.name, effective_id)
+    author_log_path = os.path.join(out_dir, author_dirname, "author.log")
     
-    current_year = api.get_current_year()
-    min_year = current_year - (CONTRIBUTION_WINDOW_YEARS - 1)
+    logger.set_log_file(author_log_path)
+    
+    try:
+        logger.step(f"Author: {rec.name} (Scholar={rec.scholar_id or 'N/A'}, DBLP={rec.dblp or 'N/A'})", category=LogCategory.AUTHOR, source=LogSource.SYSTEM)
+        
+        current_year = api.get_current_year()
+        min_year = current_year - (CONTRIBUTION_WINDOW_YEARS - 1)
 
-    scholar_windowed = []
-    if rec.scholar_id:
-        logger.info("Request author publications", category=LogCategory.FETCH, source=LogSource.SCHOLAR)
+        scholar_windowed = []
+        if rec.scholar_id:
+            logger.info("Request author publications", category=LogCategory.FETCH, source=LogSource.SCHOLAR)
 
-        # SerpAPI limits each request to 100 results, so we need pagination for MAX_PUBLICATIONS_PER_AUTHOR > 100
-        scholar_articles = []
-        start = 0
-        batch_size = 100  # SerpAPI maximum per request
-        total_requested = MAX_PUBLICATIONS_PER_AUTHOR
-
-        while start < total_requested:
-            remaining = total_requested - start
-            num_this_batch = min(batch_size, remaining)
-
-            data = api.fetch_author_publications(api_key, rec.scholar_id, num=num_this_batch, start=start)
-
-            status = (data.get("search_metadata") or {}).get("status")
-            if status and status.lower() == "error":
-                err = data.get("error") or "Unknown error"
-                raise RuntimeError(f"CiteForge error for author {rec.scholar_id}: {err}")
-
-            batch_articles = data.get("articles", [])
-            if not batch_articles:
-                # No more articles available, stop pagination
-                break
-
-            scholar_articles.extend(batch_articles)
-
-            # If we got fewer articles than requested, there are no more
-            if len(batch_articles) < num_this_batch:
-                break
-
-            start += len(batch_articles)
-
-        if not scholar_articles:
-            logger.info("No articles returned", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
+            # SerpAPI limits each request to 100 results, so we need pagination for MAX_PUBLICATIONS_PER_AUTHOR > 100
             scholar_articles = []
+            start = 0
+            batch_size = 100  # SerpAPI maximum per request
+            total_requested = MAX_PUBLICATIONS_PER_AUTHOR
+
+            while start < total_requested:
+                remaining = total_requested - start
+                num_this_batch = min(batch_size, remaining)
+
+                data = api.fetch_author_publications(api_key, rec.scholar_id, num=num_this_batch, start=start)
+
+                status = (data.get("search_metadata") or {}).get("status")
+                if status and status.lower() == "error":
+                    err = data.get("error") or "Unknown error"
+                    raise RuntimeError(f"CiteForge error for author {rec.scholar_id}: {err}")
+
+                batch_articles = data.get("articles", [])
+                if not batch_articles:
+                    # No more articles available, stop pagination
+                    break
+
+                scholar_articles.extend(batch_articles)
+
+                # If we got fewer articles than requested, there are no more
+                if len(batch_articles) < num_this_batch:
+                    break
+
+                start += len(batch_articles)
+
+            if not scholar_articles:
+                logger.info("No articles returned", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
+                scholar_articles = []
+            else:
+                # Pre-clean titles to handle trailing periods consistently
+                for a in scholar_articles:
+                    try:
+                        if a.get("title"):
+                            a["title"] = trim_title_default(api.strip_html_tags(a.get("title") or ""))
+                    except (TypeError, AttributeError):
+                        pass
+                logger.info(f"{len(scholar_articles)} article(s) fetched", category=LogCategory.FETCH, source=LogSource.SCHOLAR)
+
+            scholar_windowed = [a for a in scholar_articles if (api.get_article_year(a) or 0) >= min_year]
+            logger.info(
+                f"{len(scholar_windowed)}/{len(scholar_articles)} within "
+                f"{CONTRIBUTION_WINDOW_YEARS}y window (>= {min_year})",
+                category=LogCategory.FETCH,
+                source=LogSource.SCHOLAR
+            )
         else:
-            # Pre-clean titles to handle trailing periods consistently
-            for a in scholar_articles:
-                try:
-                    if a.get("title"):
-                        a["title"] = trim_title_default(api.strip_html_tags(a.get("title") or ""))
-                except (TypeError, AttributeError):
-                    pass
-            logger.info(f"{len(scholar_articles)} article(s) fetched", category=LogCategory.FETCH, source=LogSource.SCHOLAR)
+            logger.info("Skipped (no ID)", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
 
-        scholar_windowed = [a for a in scholar_articles if (api.get_article_year(a) or 0) >= min_year]
+        # also grab stuff from DBLP if we can
+        dblp_items = []
+        if rec.dblp:
+            try:
+                dblp_items = api.dblp_fetch_for_author(rec.name, rec.dblp, min_year)
+                logger.info(f"{len(dblp_items)} item(s) fetched within window", category=LogCategory.FETCH, source=LogSource.DBLP)
+            except FULL_OPERATION_ERRORS as e:
+                logger.warn(f"Fetch failed: {e}", category=LogCategory.ERROR, source=LogSource.DBLP)
+        else:
+            logger.info("Skipped (no ID)", category=LogCategory.SKIP, source=LogSource.DBLP)
+
+        if not scholar_windowed and not dblp_items:
+            logger.info(f"No articles within last {CONTRIBUTION_WINDOW_YEARS} years", category=LogCategory.SKIP)
+            return 0
+
+        # merge Scholar and DBLP with full deduplication (within and across sources)
+        merged_list = api.merge_publication_lists(scholar_windowed, dblp_items, target_author=rec.name)
         logger.info(
-            f"{len(scholar_windowed)}/{len(scholar_articles)} within "
-            f"{CONTRIBUTION_WINDOW_YEARS}y window (>= {min_year})",
-            category=LogCategory.FETCH,
-            source=LogSource.SCHOLAR
+            f"Union: Scholar={len(scholar_windowed)}, DBLP={len(dblp_items)} "
+            f"→ {len(merged_list)} unique publications (threshold={SIM_MERGE_DUPLICATE_THRESHOLD})",
+            category=LogCategory.PLAN
         )
-    else:
-        logger.info("Skipped (no ID)", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
 
-    # also grab stuff from DBLP if we can
-    dblp_items = []
-    if rec.dblp:
-        try:
-            dblp_items = api.dblp_fetch_for_author(rec.name, rec.dblp, min_year)
-            logger.info(f"{len(dblp_items)} item(s) fetched within window", category=LogCategory.FETCH, source=LogSource.DBLP)
-        except FULL_OPERATION_ERRORS as e:
-            logger.warn(f"Fetch failed: {e}", category=LogCategory.ERROR, source=LogSource.DBLP)
-    else:
-        logger.info("Skipped (no ID)", category=LogCategory.SKIP, source=LogSource.DBLP)
+        articles_sorted = api.sort_articles_by_year_current_first(merged_list)
+        total_entries = len(articles_sorted) if max_pubs is None else min(len(articles_sorted), max_pubs)
+        logger.info(
+            f"Plan: process {total_entries}/{len(articles_sorted)} item(s) "
+            f"(limit={'all' if max_pubs is None else max_pubs})",
+            category=LogCategory.PLAN
+        )
 
-    if not scholar_windowed and not dblp_items:
-        logger.info(f"No articles within last {CONTRIBUTION_WINDOW_YEARS} years", category=LogCategory.SKIP)
-        return 0
-
-    # merge Scholar and DBLP with full deduplication (within and across sources)
-    merged_list = api.merge_publication_lists(scholar_windowed, dblp_items, target_author=rec.name)
-    logger.info(
-        f"Union: Scholar={len(scholar_windowed)}, DBLP={len(dblp_items)} "
-        f"→ {len(merged_list)} unique publications (threshold={SIM_MERGE_DUPLICATE_THRESHOLD})",
-        category=LogCategory.PLAN
-    )
-
-    articles_sorted = api.sort_articles_by_year_current_first(merged_list)
-    total_entries = len(articles_sorted) if max_pubs is None else min(len(articles_sorted), max_pubs)
-    logger.info(
-        f"Plan: process {total_entries}/{len(articles_sorted)} item(s) "
-        f"(limit={'all' if max_pubs is None else max_pubs})",
-        category=LogCategory.PLAN
-    )
-
-    saved = 0
-    for idx, art in enumerate(articles_sorted):
-        if max_pubs is not None and idx >= max_pubs:
-            break
-        try:
-            saved += process_article(rec, art, api_key, out_dir, s2_api_key, or_creds, idx=idx + 1, total=total_entries,
-                                     gemini_api_key=gemini_api_key, summary_csv_path=summary_csv_path)
-        except FULL_OPERATION_ERRORS as e:
-            logger.error(f"Article error: {e}", category=LogCategory.ERROR)
-        if delay > 0:
-            time.sleep(delay)
-    logger.info(f"Author done: saved {saved} file(s)", category=LogCategory.PLAN)
-    return saved
+        saved = 0
+        for idx, art in enumerate(articles_sorted):
+            if max_pubs is not None and idx >= max_pubs:
+                break
+            try:
+                saved += process_article(rec, art, api_key, out_dir, s2_api_key, or_creds, idx=idx + 1, total=total_entries,
+                                         gemini_api_key=gemini_api_key, summary_csv_path=summary_csv_path)
+            except FULL_OPERATION_ERRORS as e:
+                logger.error(f"Article error: {e}", category=LogCategory.ERROR)
+            if delay > 0:
+                time.sleep(delay)
+        logger.info(f"Author done: saved {saved} file(s)", category=LogCategory.PLAN)
+        return saved
+    finally:
+        # Close the thread-local log file handler
+        logger.close()
 
 
 def main() -> int:
@@ -741,6 +755,7 @@ def main() -> int:
         logger.error(f"Cannot create output directory '{out_dir}': {e}", category=LogCategory.ERROR)
         return 2
 
+    # Set main thread log file
     logger.set_log_file(os.path.join(out_dir, "run.log"))
     logger.step("CiteForge run started", category=LogCategory.PLAN)
 
@@ -788,14 +803,35 @@ def main() -> int:
 
     total_saved = 0
     processed = 0
-    for rec in records:
-        try:
-            total_saved += process_record(api_key, rec, out_dir, max_pubs=None, s2_api_key=s2_api_key,
-                                          or_creds=or_creds, delay=REQUEST_DELAY_BETWEEN_ARTICLES,
-                                          gemini_api_key=gemini_api_key, summary_csv_path=summary_csv_path)
-        except FULL_OPERATION_ERRORS as e:
-            logger.error(f"Author error for {rec.name} ({rec.scholar_id}): {e}", category=LogCategory.ERROR)
-        processed += 1
+    
+    max_workers = 8  # Execute author processing in parallel using a thread pool.    
+    logger.step(f"Starting parallel execution with {max_workers} workers", category=LogCategory.PLAN)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_author = {
+            executor.submit(
+                process_record, 
+                api_key, 
+                rec, 
+                out_dir, 
+                max_pubs=None, 
+                s2_api_key=s2_api_key,
+                or_creds=or_creds, 
+                delay=REQUEST_DELAY_BETWEEN_ARTICLES,
+                gemini_api_key=gemini_api_key, 
+                summary_csv_path=summary_csv_path
+            ): rec for rec in records
+        }
+        
+        for future in as_completed(future_to_author):
+            rec = future_to_author[future]
+            try:
+                saved = future.result()
+                total_saved += saved
+                processed += 1
+                logger.success(f"Finished author: {rec.name} ({saved} files saved)", category=LogCategory.AUTHOR)
+            except Exception as e:
+                logger.error(f"Author error for {rec.name} ({rec.scholar_id}): {e}", category=LogCategory.ERROR)
 
     logger.step("Run complete", category=LogCategory.PLAN)
     logger.info(f"Records processed: {processed}", category=LogCategory.PLAN)
