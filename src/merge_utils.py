@@ -234,8 +234,20 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
     author_dir = os.path.join(out_dir, author_dirname)
     os.makedirs(author_dir, exist_ok=True)
 
+    # Collect existing files to enable collision detection
+    # Exclude prefer_path from collision detection if provided
+    existing_files = set()
+    if os.path.exists(author_dir):
+        all_files = {f for f in os.listdir(author_dir) if f.endswith('.bib')}
+        # If prefer_path is provided, exclude it from collision detection
+        if prefer_path:
+            prefer_filename = os.path.basename(prefer_path)
+            existing_files = all_files - {prefer_filename}
+        else:
+            existing_files = all_files
+
     # Generate unique filename by checking against existing files
-    base_filename = short_filename_for_entry(entry, gemini_api_key=gemini_api_key, existing_files=None)
+    base_filename = short_filename_for_entry(entry, gemini_api_key=gemini_api_key, existing_files=existing_files)
     filename = base_filename
     counter = 1
 

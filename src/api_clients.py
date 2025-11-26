@@ -1467,6 +1467,20 @@ def gemini_generate_short_title(
                     short_title = short_title.strip('"\'').strip()
                     # remove all spaces to ensure CamelCase without spaces
                     short_title = short_title.replace(" ", "")
+
+                    # validate word count by counting capital letters (CamelCase convention)
+                    if short_title:
+                        word_count = sum(1 for c in short_title if c.isupper())
+                        if word_count > max_words:
+                            # Gemini exceeded max_words - fall back to default algorithm
+                            logger.warn(
+                                f"Gemini returned {word_count} words (expected max {max_words}): '{short_title}'. "
+                                f"Falling back to default algorithm.",
+                                category=LogCategory.DEBUG,
+                                source=LogSource.SYSTEM
+                            )
+                            return None  # Caller will use fallback algorithm
+
                     # validate it's reasonable (not empty, not too long)
                     if short_title and len(short_title) <= 100:
                         logger.info(f"Generated title: {short_title}", category=LogCategory.DEBUG, source=LogSource.SYSTEM)

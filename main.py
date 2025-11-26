@@ -300,13 +300,16 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
                 fields = api.fetch_scholar_citation_via_serpapi(api_key, rec.scholar_id, citation_id)
                 if fields:
                     sch_page_bib = api.build_bibtex_from_scholar_fields(fields, keyhint=result_id)
-                    baseline_bib = bt.bibtex_from_dict(baseline_entry)
-                    if sch_page_bib and bt.bibtex_entries_match_strict(baseline_bib, sch_page_bib):
-                        enr_list.append(("scholar_page", bt.parse_bibtex_to_dict(sch_page_bib)))
-                        flags["scholar_page"] = True
-                        logger.success("Citation matched and added", category=LogCategory.MATCH, source=LogSource.SCHOLAR)
+                    if sch_page_bib:
+                        sch_page_dict = bt.parse_bibtex_to_dict(sch_page_bib)
+                        if sch_page_dict and bt.bibtex_entries_match_strict(baseline_entry, sch_page_dict):
+                            enr_list.append(("scholar_page", sch_page_dict))
+                            flags["scholar_page"] = True
+                            logger.success("Citation matched and added", category=LogCategory.MATCH, source=LogSource.SCHOLAR)
+                        else:
+                            logger.info("Citation did not match baseline; skipped", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
                     else:
-                        logger.info("Citation did not match baseline; skipped", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
+                        logger.info("No BibTeX generated from citation", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
                 else:
                     logger.info("No data returned from SerpAPI", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
             except ALL_API_ERRORS as e:
