@@ -6,18 +6,6 @@
 
 CiteForge collects publication metadata from multiple academic APIs, merges them based on source reliability, and outputs BibTeX files.
 
-## Table of Contents
-
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Data Sources](#data-sources)
-- [Architecture](#architecture)
-- [Testing](#testing)
-- [Contributing](#contributing)
-- [License](#license)
-
 ## Features
 
 - Fetches data from 12+ academic APIs (Google Scholar, Crossref, arXiv, PubMed, Semantic Scholar, etc.)
@@ -102,15 +90,6 @@ Edit `src/config.py` to adjust settings:
 |--------|---------|
 | Google Scholar (via SerpAPI) | Required |
 | Semantic Scholar | Recommended |
-| Crossref | No |
-| arXiv | No |
-| PubMed | No |
-| OpenAlex | No |
-| DBLP | No |
-| Europe PMC | No |
-| DOI.org | No |
-| DataCite | No |
-| ORCID | No |
 | OpenReview | Optional |
 | Google Gemini | Optional |
 
