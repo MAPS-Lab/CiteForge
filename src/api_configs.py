@@ -1,8 +1,8 @@
 from typing import Any, Dict
-import re
 
 from .config import S2_BASE, CROSSREF_BASE, OPENALEX_BASE, PUBMED_BASE, EUROPEPMC_BASE
 from .api_generics import APISearchConfig, APIFieldMapping
+from .text_utils import extract_year_from_any
 
 S2_SEARCH_CONFIG = APISearchConfig(
     api_name="semantic_scholar",
@@ -206,10 +206,7 @@ PUBMED_FIELD_MAPPING = APIFieldMapping(
         for author in article.get("authors") or []
         if author.get("name", "").strip()
     ],
-    custom_year_extractor=lambda article: (
-        (lambda pd: int(match.group(0)) if (match := re.search(r"(19|20)\d{2}", pd)) else 0)
-        (article.get("pubdate") or "")
-    )
+    custom_year_extractor=lambda article: extract_year_from_any(article.get("pubdate"), fallback=0) or 0
 )
 
 EUROPEPMC_FIELD_MAPPING = APIFieldMapping(

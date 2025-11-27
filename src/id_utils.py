@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Dict, Any, Optional
 
-from .config import _DOI_REGEX
+from .config import _DOI_REGEX, ARXIV_DOI_EXTRACT_PATTERN
 
 
 def _norm_doi(doi: Optional[str]) -> Optional[str]:
@@ -173,7 +173,7 @@ def normalize_arxiv_metadata(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not arxiv_id:
         doi = fields.get("doi", "")
         if doi:
-            m = re.search(r'(?i)10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5})', doi)
+            m = re.search(ARXIV_DOI_EXTRACT_PATTERN, doi)
             if m:
                 arxiv_id = _norm_arxiv_id(m.group(1))
 

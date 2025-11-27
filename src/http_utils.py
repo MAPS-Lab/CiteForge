@@ -94,22 +94,38 @@ def http_fetch_bytes(
         url: str,
         headers: Dict[str, str],
         timeout: float,
-        attempts: int = HTTP_MAX_RETRIES,
-        retry_for_status: tuple = HTTP_RETRY_STATUS_CODES,
-        backoff_initial: float = HTTP_BACKOFF_INITIAL,
-        backoff_max: float = HTTP_BACKOFF_MAX,
-        overall_deadline: Optional[float] = None,
 ) -> bytes:
     """
     Perform an HTTP GET request with retries, exponential backoff, and basic
     rate limit awareness, returning the response body as raw bytes.
-    """    
-    try:
-        resp = _SESSION.get(url, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        return resp.content
-    except requests.exceptions.RequestException as e:
-        raise e
+
+    Retry logic is handled at the session level via urllib3.Retry. This function
+    adds Retry-After header handling for rate-limited responses (429/503).
+    """
+    max_rate_limit_retries = 3
+
+    for attempt in range(max_rate_limit_retries):
+        try:
+            resp = _SESSION.get(url, headers=headers, timeout=timeout)
+
+            # Handle rate limiting with Retry-After header
+            if resp.status_code in (429, 503) and attempt < max_rate_limit_retries - 1:
+                retry_after = _parse_retry_after(resp.headers.get('Retry-After'))
+                wait_time = retry_after if retry_after > 0 else (2 ** attempt) + random.uniform(0, 1)
+                time.sleep(min(wait_time, HTTP_BACKOFF_MAX))
+                continue
+
+            resp.raise_for_status()
+            return resp.content
+        except requests.exceptions.RequestException as e:
+            # Let session-level retry handle transient errors
+            # Only re-raise if all retries exhausted
+            if attempt == max_rate_limit_retries - 1:
+                raise e
+            time.sleep((2 ** attempt) + random.uniform(0, 1))
+
+    # Should not reach here, but satisfy type checker
+    raise requests.exceptions.RequestException(f"Failed to fetch {url}")
 
 
 def _fetch_bytes_simple(url: str, headers: Dict[str, str], timeout: float) -> bytes:

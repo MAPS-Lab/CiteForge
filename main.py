@@ -175,7 +175,8 @@ def process_article(rec: Record, art: Dict[str, Any], api_key: str, out_dir: str
     # Try to find existing BibTeX file to use as enrichment seed
     # If found, load it and use as baseline - enrichment process will update/fix fields
     if SKIP_SERPAPI_FOR_EXISTING_FILES and os.path.exists(author_dir):
-        for filename in os.listdir(author_dir):
+        # Sort filenames for deterministic iteration order
+        for filename in sorted(os.listdir(author_dir)):
             if filename.endswith('.bib'):
                 file_path = os.path.join(author_dir, filename)
                 try:
@@ -810,6 +811,8 @@ def count_existing_papers(rec: Record, out_dir: str) -> int:
     Count the number of existing .bib files for an author.
 
     Returns the count of .bib files in the author's directory.
+    Note: This function is used for sorting authors by existing paper count,
+    so the actual files don't need to be sorted - only the count matters.
     """
     effective_id = rec.scholar_id or rec.dblp or ""
     author_dirname = format_author_dirname(rec.name, effective_id)
@@ -879,9 +882,10 @@ def main() -> int:
         return 2
 
     # Sort authors by existing paper count (descending) so authors with more papers finish first
+    # Use (count desc, name, id) for deterministic ordering when counts are equal
     logger.info("Sorting authors by existing paper count (authors with more papers will be processed first)", category=LogCategory.PLAN)
     records_with_counts = [(rec, count_existing_papers(rec, out_dir)) for rec in records]
-    records_with_counts.sort(key=lambda x: x[1], reverse=True)
+    records_with_counts.sort(key=lambda x: (-x[1], x[0].name.lower(), x[0].scholar_id or x[0].dblp or ""))
     records = [rec for rec, count in records_with_counts]
 
     # Log sorting results

@@ -5,7 +5,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .bibtex_utils import short_filename_for_entry, bibtex_from_dict
-from .config import TRUST_ORDER
+from .config import TRUST_ORDER, ARXIV_DOI_CHECK_PATTERN
 from .id_utils import _norm_doi, extract_arxiv_eprint, allowlisted_url
 from .text_utils import has_placeholder, format_author_dirname, title_similarity
 
@@ -57,8 +57,8 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
 
             # special handling for DOI field: prefer non-arXiv DOIs over arXiv DOIs
             if k == "doi":
-                cur_is_arxiv = bool(re.search(r'10\.48550/arxiv', str(cur), re.IGNORECASE))
-                new_is_arxiv = bool(re.search(r'10\.48550/arxiv', str(v), re.IGNORECASE))
+                cur_is_arxiv = bool(re.search(ARXIV_DOI_CHECK_PATTERN, str(cur), re.IGNORECASE))
+                new_is_arxiv = bool(re.search(ARXIV_DOI_CHECK_PATTERN, str(v), re.IGNORECASE))
                 # if current is arXiv DOI but new one isn't, always prefer the non-arXiv DOI
                 if cur_is_arxiv and not new_is_arxiv:
                     merged[k] = v
@@ -218,7 +218,7 @@ def merge_with_policy(primary: Dict[str, Any], enrichers: List[Tuple[str, Dict[s
 
     # when a published DOI exists alongside arXiv, remove eprint fields
     # (DOI is the primary identifier for published papers)
-    if doi_val and arxiv_id and not re.search(r'10\.48550/arxiv', doi_val, re.IGNORECASE):
+    if doi_val and arxiv_id and not re.search(ARXIV_DOI_CHECK_PATTERN, doi_val, re.IGNORECASE):
         # remove eprint fields since DOI is the primary identifier
         merged.pop("eprint", None)
         merged.pop("archiveprefix", None)
@@ -310,20 +310,21 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
     os.makedirs(author_dir, exist_ok=True)
 
     # Collect existing files to enable collision detection
+    # Use sorted lists for deterministic iteration order
     existing_files_for_collision = set()
-    existing_files_for_duplicate_scan = set()
+    existing_files_for_duplicate_scan_list = []
 
     if os.path.exists(author_dir):
-        all_files = {f for f in os.listdir(author_dir) if f.endswith('.bib')}
-        existing_files_for_duplicate_scan = all_files
+        all_files = sorted(f for f in os.listdir(author_dir) if f.endswith('.bib'))
+        existing_files_for_duplicate_scan_list = all_files
 
         # If prefer_path is provided, exclude it from collision avoidance only
         # but still check it for duplicate detection
         if prefer_path:
             prefer_filename = os.path.basename(prefer_path)
-            existing_files_for_collision = all_files - {prefer_filename}
+            existing_files_for_collision = set(all_files) - {prefer_filename}
         else:
-            existing_files_for_collision = all_files
+            existing_files_for_collision = set(all_files)
 
     # Generate unique filename by checking against existing files (excluding prefer_path)
     # short_filename_for_entry will automatically use more words from the title if needed
@@ -335,10 +336,11 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
 
     # First, check ALL existing files for duplicates (not just filename collisions)
     # This catches cases where Gemini/cache returns different short titles for same publication
+    # Use sorted list for deterministic iteration order
     duplicate_found = False
     duplicate_path = None
 
-    for existing_filename in existing_files_for_duplicate_scan:
+    for existing_filename in existing_files_for_duplicate_scan_list:
         existing_path = os.path.join(author_dir, existing_filename)
         try:
             with open(existing_path, "r", encoding="utf-8") as ef:
@@ -397,11 +399,22 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
             existing_entry = bt.parse_bibtex_to_dict(existing_content)
 
             if existing_entry:
-                existing_year = existing_entry.get('fields', {}).get('year', '')
-                new_year = entry.get('fields', {}).get('year', '')
+                existing_fields = existing_entry.get('fields', {})
+                new_fields = entry.get('fields', {})
+                existing_year = existing_fields.get('year', '')
+                new_year = new_fields.get('year', '')
+                existing_doi = existing_fields.get('doi', '').strip()
+                new_doi = new_fields.get('doi', '').strip()
 
-                # If year changed, use new filename (don't reuse old one)
+                # If year changed, check if this is preprint → published transition
                 if existing_year and new_year and existing_year != new_year:
+                    # If new entry has DOI and existing doesn't, this is a published
+                    # version replacing a preprint - delete the old preprint file
+                    if new_doi and not existing_doi:
+                        try:
+                            os.remove(duplicate_path)
+                        except OSError:
+                            pass
                     # Keep the generated filename with correct year
                     pass
                 else:

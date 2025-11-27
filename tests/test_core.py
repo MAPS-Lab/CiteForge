@@ -553,3 +553,76 @@ def test_http_error_decorator():
 
     ret = failing_func()
     assert ret == "fallback", f"Expected 'fallback', got '{ret}'"
+
+
+# ===== DATA QUALITY TESTS =====
+
+def test_no_duplicate_titles_per_author():
+    """
+    Test that no author has two publications with title similarity >= 90%.
+
+    This catches preprint/published duplicates and other duplicate entries
+    that should have been deduplicated during processing.
+    """
+    output_dir = Path(__file__).parent.parent / "output"
+
+    if not output_dir.exists():
+        pytest.skip("Output directory does not exist")
+
+    duplicates = []
+
+    for author_dir in sorted(output_dir.iterdir()):
+        if not author_dir.is_dir():
+            continue
+
+        bib_files = sorted(author_dir.glob("*.bib"))
+        entries = []
+
+        for bib_file in bib_files:
+            try:
+                content = bib_file.read_text(encoding="utf-8")
+                entry = bt.parse_bibtex_to_dict(content)
+                if entry:
+                    entry["_filename"] = bib_file.name
+                    entries.append(entry)
+            except Exception:
+                pass
+
+        # Compare all pairs within this author
+        for i, e1 in enumerate(entries):
+            for e2 in entries[i + 1:]:
+                t1 = e1.get("fields", {}).get("title", "")
+                t2 = e2.get("fields", {}).get("title", "")
+
+                if not t1 or not t2:
+                    continue
+
+                sim = text_utils.title_similarity(t1, t2)
+
+                if sim >= 0.9:
+                    # Check if DOIs are different (different papers with similar titles)
+                    d1 = e1.get("fields", {}).get("doi", "").strip().lower()
+                    d2 = e2.get("fields", {}).get("doi", "").strip().lower()
+
+                    # If both have DOIs and they differ, these are different papers
+                    if d1 and d2 and d1 != d2:
+                        continue
+
+                    duplicates.append({
+                        "author": author_dir.name,
+                        "file1": e1["_filename"],
+                        "file2": e2["_filename"],
+                        "similarity": sim,
+                        "title1": t1[:60] + "..." if len(t1) > 60 else t1,
+                        "title2": t2[:60] + "..." if len(t2) > 60 else t2,
+                    })
+
+    if duplicates:
+        msg_lines = ["Found duplicate entries that should be deduplicated:"]
+        for d in duplicates:
+            msg_lines.append(f"\n  Author: {d['author']}")
+            msg_lines.append(f"    {d['file1']}: {d['title1']}")
+            msg_lines.append(f"    {d['file2']}: {d['title2']}")
+            msg_lines.append(f"    Similarity: {d['similarity']:.1%}")
+
+        pytest.fail("\n".join(msg_lines))

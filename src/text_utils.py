@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 import urllib.parse
-from difflib import SequenceMatcher
 from typing import Any, Optional, Dict, List
+
+from rapidfuzz.fuzz import ratio as fuzz_ratio
+from unidecode import unidecode
 
 from .exceptions import PARSE_ERRORS, DECODE_ERRORS, NUMERIC_ERRORS
 from .config import VALID_YEAR_MIN, VALID_YEAR_MAX
@@ -102,10 +103,11 @@ def strip_accents(s: str) -> str:
     """
     Remove accents and diacritics from a string so visually similar text from
     different locales can be compared more reliably.
+
+    Uses unidecode library for comprehensive Unicode to ASCII transliteration.
     """
     try:
-        nfkd = unicodedata.normalize("NFKD", s)
-        return "".join(ch for ch in nfkd if unicodedata.category(ch) != "Mn")
+        return unidecode(s)
     except PARSE_ERRORS + DECODE_ERRORS:
         return s
 
@@ -257,14 +259,9 @@ def format_author_dirname(author_name: Optional[str], author_id: str) -> str:
     """
     last_name = extract_last_name(author_name)
 
-    # Sanitize author_id by replacing reserved path characters
-    # "/" is used in path separators and must be replaced
-    # Other reserved characters: \ : * ? " < > |
-    sanitized_id = author_id.replace("/", "-").replace("\\", "-")
-    sanitized_id = sanitized_id.replace(":", "-").replace("*", "-")
-    sanitized_id = sanitized_id.replace("?", "-").replace('"', "-")
-    sanitized_id = sanitized_id.replace("<", "-").replace(">", "-")
-    sanitized_id = sanitized_id.replace("|", "-")
+    # Sanitize author_id by replacing reserved path characters with dashes
+    # Reserved characters: / \ : * ? " < > |
+    sanitized_id = re.sub(r'[/\\:*?"<>|]+', '-', author_id)
 
     if not sanitized_id:
         if last_name and last_name != "Unknown":
@@ -292,12 +289,15 @@ def title_similarity(a: Optional[str], b: Optional[str]) -> float:
     """
     Compute a similarity score between two titles after normalization, returning
     a value between 0 and 1 where higher means more similar.
+
+    Uses rapidfuzz for ~10-100x faster fuzzy matching than difflib.SequenceMatcher.
     """
     norm_a = normalize_title(a or "")
     norm_b = normalize_title(b or "")
     if norm_a == norm_b:
         return 1.0
-    return SequenceMatcher(None, norm_a, norm_b).ratio()
+    # rapidfuzz.fuzz.ratio returns 0-100, normalize to 0-1
+    return fuzz_ratio(norm_a, norm_b) / 100.0
 
 
 def authors_overlap(authors_a: Optional[str], authors_b: Optional[str]) -> bool:

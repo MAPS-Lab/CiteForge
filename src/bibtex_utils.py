@@ -4,6 +4,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+from slugify import slugify
+
 from .config import DEFAULT_DICTIONARY_FILE, BIBTEX_KEY_MAX_WORDS, BIBTEX_FILENAME_MAX_LENGTH
 from .id_utils import _norm_doi, extract_arxiv_eprint
 from .io_utils import safe_read_json, safe_write_json
@@ -231,6 +233,33 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
     citation fields first and writing remaining fields in a stable order.
     """
 
+    def _normalize_to_ascii(val: str) -> str:
+        """
+        Normalize Unicode characters to ASCII equivalents for BibTeX compatibility.
+        Fixes issues like:
+        - ' (U+2019 right single quote) → ' (ASCII apostrophe)
+        - " " (U+201C/U+201D curly quotes) → " (ASCII quote)
+        - " '21" (space before apostrophe) → "'21"
+        """
+        # Replace Unicode quotation marks with ASCII equivalents
+        replacements = {
+            '\u2019': "'",  # Right single quotation mark → apostrophe
+            '\u2018': "'",  # Left single quotation mark → apostrophe
+            '\u201C': '"',  # Left double quotation mark → quote
+            '\u201D': '"',  # Right double quotation mark → quote
+            '\u2013': '-',  # En dash → hyphen
+            '\u2014': '--', # Em dash → double hyphen
+            '\u2026': '...', # Horizontal ellipsis → three dots
+            '\u00A0': ' ',  # Non-breaking space → regular space
+        }
+        for unicode_char, ascii_char in replacements.items():
+            val = val.replace(unicode_char, ascii_char)
+
+        # Fix space before apostrophe in year abbreviations (e.g., " '21" → "'21")
+        val = re.sub(r"\s+'(\d{2})\b", r"'\1", val)
+
+        return val
+
     def _sanitize_title(title_val: Optional[str]) -> Optional[str]:
         if title_val is None:
             return None
@@ -270,14 +299,17 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
         val = fields.get(k)
         if val is not None and str(val).strip():
             used.add(k)
+            val = _normalize_to_ascii(str(val))
             if k == "title":
                 val = _sanitize_title(val)
             lines.append(f"  {k} = {{{val}}},")
-    # then write everything else
-    for k, val in fields.items():
+    # then write everything else in sorted order for deterministic output
+    for k in sorted(fields.keys()):
         if k in used:
             continue
+        val = fields[k]
         if val is not None and str(val).strip():
+            val = _normalize_to_ascii(str(val))
             if k == "title":
                 val = _sanitize_title(val)
             lines.append(f"  {k} = {{{val}}},")
@@ -307,11 +339,10 @@ def sanitize_bibtex_remove_placeholders(bibtex: str) -> str:
 def _slugify(text: str) -> str:
     """
     Convert free-form text into a lowercase, URL-friendly slug by replacing non-alphanumeric runs with single dashes.
+
+    Uses python-slugify library for robust Unicode handling and edge case coverage.
     """
-    t = text.lower().strip()
-    t = re.sub(r"[^a-z0-9]+", "-", t)
-    t = re.sub(r"-+", "-", t).strip("-")
-    return t
+    return slugify(text, lowercase=True)
 
 
 def _load_title_dictionary(dict_path: str = DEFAULT_DICTIONARY_FILE) -> Dict[str, str]:

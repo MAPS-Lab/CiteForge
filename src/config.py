@@ -116,6 +116,12 @@ SIM_MERGE_DUPLICATE_THRESHOLD = 0.9
 # DOIs start with "10." then have a directory code and a suffix
 _DOI_REGEX = r'\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b'
 
+# arXiv DOI patterns (arXiv uses DOI prefix 10.48550)
+# Simple check pattern for whether a DOI is an arXiv DOI
+ARXIV_DOI_CHECK_PATTERN = r'10\.48550/arxiv'
+# Extraction pattern to capture the arXiv ID from an arXiv DOI
+ARXIV_DOI_EXTRACT_PATTERN = r'(?i)10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5})'
+
 # HTTP request configuration
 # Default timeout for HTTP requests (in seconds)
 HTTP_TIMEOUT_DEFAULT = 5.0

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -215,13 +216,27 @@ def get_article_year(art: Dict[str, Any]) -> int:
 def sort_articles_by_year_current_first(articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Sort articles with current year first, then descending by year.
+
+    Uses a stable, deterministic sort key: (year_group, -year, normalized_title, first_author)
+    This ensures the same articles always appear in the same order regardless of
+    API response ordering, making the process reproducible across runs.
     """
     cur = get_current_year()
 
     def key_func(a: Dict[str, Any]):
         y = get_article_year(a)
         group = 0 if y == cur else 1
-        return group, -y
+        # Add stable secondary keys for deterministic ordering
+        title = normalize_title(a.get("title") or "")
+        # Get first author for tertiary sort
+        authors = a.get("authors") or []
+        if isinstance(authors, list) and authors:
+            first_author = (authors[0].get("name") if isinstance(authors[0], dict) else str(authors[0])).lower()
+        elif isinstance(authors, str):
+            first_author = authors.split(",")[0].split(" and ")[0].strip().lower()
+        else:
+            first_author = ""
+        return (group, -y, title, first_author)
 
     return sorted(articles, key=key_func)
 
@@ -455,9 +470,9 @@ def fetch_bibtex_from_cite(api_key: str, cite_url: str) -> str:
     new_query = urllib.parse.urlencode({k: v[0] if isinstance(v, list) else v for k, v in q.items()})
     cite_with_key = urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-    # Get the cite dialog JSON (with more retry attempts since this can be flaky)
+    # Get the cite dialog JSON (retries are handled by session-level retry strategy)
     json_headers = DEFAULT_JSON_HEADERS.copy()
-    raw = http_fetch_bytes(cite_with_key, json_headers, timeout=30.0, attempts=8)
+    raw = http_fetch_bytes(cite_with_key, json_headers, timeout=30.0)
     try:
         cite_json = json.loads(raw.decode("utf-8"))
     except DECODE_ERRORS:
@@ -507,7 +522,7 @@ def fetch_bibtex_from_cite(api_key: str, cite_url: str) -> str:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    raw_bib = http_fetch_bytes(bib_link, text_headers, timeout=30.0, attempts=8)
+    raw_bib = http_fetch_bytes(bib_link, text_headers, timeout=30.0)
     try:
         return raw_bib.decode("utf-8")
     except DECODE_ERRORS:
@@ -617,7 +632,6 @@ def s2_search_paper(title: str, author_name: Optional[str], api_key: Optional[st
     # Create a copy of config with the formatted query
     config = S2_SEARCH_CONFIG
     # Override additional_params to include the formatted query
-    import copy
     config_copy = copy.copy(config)
     config_copy.additional_params = {
         **config.additional_params,
@@ -648,7 +662,6 @@ def crossref_search(title: str, author_name: Optional[str]) -> Optional[Dict[str
 
     from .api_generics import search_api_generic
     from .api_configs import CROSSREF_SEARCH_CONFIG
-    import copy
 
     # Adjust config based on whether we have an author
     config = copy.copy(CROSSREF_SEARCH_CONFIG)
@@ -721,7 +734,18 @@ def bibtex_from_csl(csl: Dict[str, Any], keyhint: str) -> str:
     from .bibtex_build import build_bibtex_entry, determine_entry_type
     from .text_utils import extract_year_from_any, extract_authors_from_any, safe_get_field
 
+    # CSL-JSON often separates main title and subtitle into different fields
+    # Combine them to preserve the full title (e.g., "Raptor: GPU-based Analytics")
     title = safe_get_field(csl, "title") or ""
+    subtitle_raw = csl.get("subtitle")
+    # Subtitle can be a string or a list of strings
+    if isinstance(subtitle_raw, list):
+        subtitle = subtitle_raw[0] if subtitle_raw else ""
+    else:
+        subtitle = subtitle_raw or ""
+    if subtitle:
+        # Combine title and subtitle with colon separator
+        title = f"{title}: {subtitle}" if title else subtitle
 
     # Get authors from CSL's format
     authors = extract_authors_from_any(csl, field_names=["author"])
@@ -1176,20 +1200,39 @@ def build_synthetic_article_from_dblp(item: Dict[str, Any]) -> Dict[str, Any]:
     return dict(item)
 
 
-def _deduplicate_publication_list(pubs: List[Dict[str, Any]], target_author: Optional[str]) -> List[Dict[str, Any]]:
+def _deduplicate_publication_list(pubs: List[Dict[str, Any]], _target_author: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Remove internal duplicates from a single publication list.
 
     For each publication, check if it's similar to any previously added publication.
     Only keep publications that don't match any existing entries above the
     deduplication threshold.
+
+    Publications are sorted first by (year desc, normalized title, first author) for
+    deterministic ordering, ensuring the same duplicates are removed regardless of
+    input ordering from APIs.
     """
     if not pubs:
         return []
 
+    # Sort publications for deterministic deduplication order
+    # This ensures the same publications are kept/removed regardless of API response order
+    def sort_key(pub: Dict[str, Any]) -> tuple:
+        year = extract_year_from_any(pub.get("year"), fallback=0) or 0
+        title = normalize_title(pub.get("title") or "")
+        authors = pub.get("authors") or []
+        if isinstance(authors, list) and authors:
+            first_author = (authors[0].get("name") if isinstance(authors[0], dict) else str(authors[0])).lower()
+        elif isinstance(authors, str):
+            first_author = authors.split(",")[0].split(" and ")[0].strip().lower()
+        else:
+            first_author = ""
+        return (-year, title, first_author)
+
+    sorted_pubs = sorted(pubs, key=sort_key)
     deduplicated: List[Dict[str, Any]] = []
 
-    for pub in pubs:
+    for pub in sorted_pubs:
         # Trim title for consistent matching
         p_title_raw = pub.get("title") or ""
         p_title = trim_title_default(p_title_raw)
@@ -1596,14 +1639,7 @@ def pubmed_search_paper(title: str, author_name: Optional[str]) -> Optional[Dict
         return a.get("title") or ""
 
     def get_pubmed_year(a: Dict[str, Any]) -> Optional[int]:
-        pubdate = a.get("pubdate") or ""
-        match = re.search(r"(19|20)\d{2}", pubdate)
-        if match:
-            try:
-                return int(match.group(0))
-            except NUMERIC_ERRORS:
-                return None
-        return None
+        return extract_year_from_any(a.get("pubdate"), fallback=None)
 
     def get_pubmed_authors(a: Dict[str, Any]) -> List[str]:
         authors = []
@@ -1643,14 +1679,7 @@ def build_bibtex_from_pubmed(article: Dict[str, Any], keyhint: str) -> Optional[
     authors = extract_author_names(article.get("authors"), name_key="name")
 
     # Extract year from pubdate
-    year = 0
-    pubdate = article.get("pubdate") or ""
-    match = re.search(r"(19|20)\d{2}", pubdate)
-    if match:
-        try:
-            year = int(match.group(0))
-        except NUMERIC_ERRORS:
-            year = 0
+    year = extract_year_from_any(article.get("pubdate"), fallback=0) or 0
 
     # Get journal name 
     venue = safe_get_field(article, "fulljournalname") or safe_get_field(article, "source")
@@ -1707,7 +1736,6 @@ def europepmc_search_paper(title: str, author_name: Optional[str]) -> Optional[D
 
     from .api_generics import search_api_generic
     from .api_configs import EUROPEPMC_SEARCH_CONFIG
-    import copy
 
     # Build the custom query format for Europe PMC
     query = f'TITLE:"{title}"'
@@ -2025,7 +2053,6 @@ def s2_search_papers_multiple(
         query_parts.append(author_name)
 
     from .api_configs import S2_SEARCH_CONFIG
-    import copy
 
     config = copy.copy(S2_SEARCH_CONFIG)
     
@@ -2116,7 +2143,6 @@ def europepmc_search_papers_multiple(
         return []
 
     from .api_configs import EUROPEPMC_SEARCH_CONFIG
-    import copy
 
     query = f'TITLE:"{title}"'
     if author_name:
@@ -2150,7 +2176,6 @@ def crossref_search_multiple(title: str, author_name: Optional[str], max_results
 
     from .api_generics import search_api_generic_multiple
     from .api_configs import CROSSREF_SEARCH_CONFIG
-    import copy
 
     config = copy.copy(CROSSREF_SEARCH_CONFIG)
     # Adjust config based on whether we have an author
