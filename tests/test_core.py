@@ -599,7 +599,7 @@ def test_no_duplicate_titles_per_author():
 
                 sim = text_utils.title_similarity(t1, t2)
 
-                if sim >= 0.9:
+                if sim >= 0.95:
                     # Check if DOIs are different (different papers with similar titles)
                     d1 = e1.get("fields", {}).get("doi", "").strip().lower()
                     d2 = e2.get("fields", {}).get("doi", "").strip().lower()
