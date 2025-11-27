@@ -370,17 +370,29 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
                     # Only check citation key and title if DOIs don't contradict
                     # (either both missing, or only one present)
 
-                    # Compare by citation key
+                    # Get titles for comparison (used in both checks below)
+                    existing_title = existing_fields.get('title', '')
+                    new_title = new_fields.get('title', '')
+
+                    # Compare by citation key - BUT also verify titles are similar
+                    # This prevents false positives when Gemini generates the same
+                    # short title for different papers (e.g., both "LexicalBiasResolution"
+                    # for "Resolving Lexical Bias in Model Editing" and
+                    # "Resolving Lexical Bias in Edit Scoping with Projector Editor Networks")
                     existing_key = existing_entry.get('key', '').strip()
                     new_key = entry.get('key', '').strip()
                     if existing_key and new_key and existing_key == new_key:
-                        duplicate_found = True
-                        duplicate_path = existing_path
-                        break
+                        # Citation keys match - verify titles are actually similar
+                        key_title_sim = title_similarity(existing_title, new_title)
+                        if key_title_sim > 0.9:
+                            duplicate_found = True
+                            duplicate_path = existing_path
+                            break
+                        # Keys match but titles differ significantly - NOT a duplicate
+                        # (Gemini generated same short title for different papers)
+                        continue
 
-                    # Compare by title similarity
-                    existing_title = existing_fields.get('title', '')
-                    new_title = new_fields.get('title', '')
+                    # Compare by title similarity alone
                     sim = title_similarity(existing_title, new_title)
                     if sim > 0.9:
                         duplicate_found = True

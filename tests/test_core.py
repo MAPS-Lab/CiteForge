@@ -207,6 +207,232 @@ def test_bibtex_building():
     bibtex2 = bt.bibtex_from_dict(entry)
     assert bibtex2 and '@article' in bibtex2, "Invalid BibTeX from dict"
 
+
+def test_bibtex_latex_stripping():
+    """
+    Test LaTeX formatting removal in BibTeX output.
+    Tests the _strip_latex_formatting function indirectly via bibtex_from_dict.
+    """
+    import re
+
+    def extract_field(bibtex_str, field_name):
+        """Helper to extract a field value from BibTeX output (handles nested braces)."""
+        # Find the field start
+        pattern = rf'{field_name}\s*=\s*\{{'
+        match = re.search(pattern, bibtex_str)
+        if not match:
+            return None
+        # Extract content with balanced braces
+        start = match.end() - 1  # Position of opening brace
+        depth = 0
+        for i in range(start, len(bibtex_str)):
+            if bibtex_str[i] == '{':
+                depth += 1
+            elif bibtex_str[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    return bibtex_str[start + 1:i]
+        return None
+
+    # Test cases: (input_title, expected_title)
+    test_cases = [
+        # Basic formatting commands
+        (r"\textit{Machine Learning} for NLP", "Machine Learning for NLP"),
+        (r"\textbf{Deep} Neural Networks", "Deep Neural Networks"),
+        (r"\emph{Important} Findings", "Important Findings"),
+        (r"\textsc{Small Caps} Text", "Small Caps Text"),
+        (r"\texttt{Monospace} Code", "Monospace Code"),
+        (r"\textrm{Roman} Text", "Roman Text"),
+        (r"\textsf{Sans Serif} Font", "Sans Serif Font"),
+        (r"\underline{Underlined} Word", "Underlined Word"),
+        (r"\mbox{No Break}", "No Break"),
+
+        # Old-style LaTeX formatting
+        (r"{\it Italic} text here", "Italic text here"),
+        (r"{\bf Bold} text here", "Bold text here"),
+        (r"{\em Emphasized} text", "Emphasized text"),
+        (r"{\sc Small Caps} style", "Small Caps style"),
+        (r"{\tt Typewriter} font", "Typewriter font"),
+        (r"{\rm Roman} font", "Roman font"),
+        (r"{\sf Sans} font", "Sans font"),
+
+        # Nested formatting commands
+        (r"\textbf{\textit{Nested}} formatting", "Nested formatting"),
+        (r"\emph{\textbf{Double}} nested", "Double nested"),
+
+        # Special escaped characters
+        (r"Research \& Development", "Research & Development"),
+        (r"50\% Improvement", "50% Improvement"),
+        (r"Price is \$100", "Price is $100"),
+        (r"Item \#1", "Item #1"),
+        (r"Under\_score", "Under_score"),
+        (r"Curly \{brace\}", "Curly {brace}"),
+
+        # Dashes
+        ("Long---dash", "Long-dash"),
+        ("Medium--dash", "Medium-dash"),
+        ("En---and em--dashes together", "En-and em-dashes together"),
+
+        # Tilde (non-breaking space)
+        # Note: trailing period is stripped by _sanitize_title for titles
+        ("Smith~et~al.", "Smith et al"),
+
+        # Combined cases
+        (r"\textit{Deep Learning}---A \textbf{Survey}", "Deep Learning-A Survey"),
+        (r"The \emph{Art} of \textbf{Programming}: 50\% Complete", "The Art of Programming: 50% Complete"),
+
+        # Edge cases - no LaTeX (should pass through unchanged)
+        ("Plain text title", "Plain text title"),
+        ("Title with: colon and punctuation!", "Title with: colon and punctuation!"),
+
+        # Multiple spaces should be collapsed
+        (r"\textit{Word}   multiple   spaces", "Word multiple spaces"),
+    ]
+
+    for input_title, expected_title in test_cases:
+        entry = {"type": "article", "key": "test", "fields": {"title": input_title}}
+        result = bt.bibtex_from_dict(entry)
+        actual_title = extract_field(result, "title")
+
+        assert actual_title == expected_title, (
+            f"LaTeX stripping failed:\n"
+            f"  Input:    {input_title!r}\n"
+            f"  Expected: {expected_title!r}\n"
+            f"  Got:      {actual_title!r}"
+        )
+
+
+def test_bibtex_unicode_normalization():
+    """
+    Test Unicode to ASCII normalization in BibTeX output.
+    Tests the _normalize_to_ascii function indirectly via bibtex_from_dict.
+    """
+    import re
+
+    def extract_field(bibtex_str, field_name):
+        """Helper to extract a field value from BibTeX output (handles nested braces)."""
+        pattern = rf'{field_name}\s*=\s*\{{'
+        match = re.search(pattern, bibtex_str)
+        if not match:
+            return None
+        start = match.end() - 1
+        depth = 0
+        for i in range(start, len(bibtex_str)):
+            if bibtex_str[i] == '{':
+                depth += 1
+            elif bibtex_str[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    return bibtex_str[start + 1:i]
+        return None
+
+    # Test cases: (input_value, expected_value)
+    test_cases = [
+        # Accented characters (via unidecode)
+        ("Café Society", "Cafe Society"),
+        ("Naïve Bayes", "Naive Bayes"),
+        ("José García", "Jose Garcia"),
+        ("Müller and Schröder", "Muller and Schroder"),
+        ("François Dubois", "Francois Dubois"),
+        ("Jørgen Ødegård", "Jorgen Odegard"),
+        ("Łukasz Kowalski", "Lukasz Kowalski"),
+
+        # Nordic characters
+        ("Søren Kierkegaard", "Soren Kierkegaard"),
+        ("Bjørn Borg", "Bjorn Borg"),
+        ("Ærodynamics", "AErodynamics"),
+
+        # Unicode quotation marks
+        ("It\u2019s a \u201Ctest\u201D", "It's a \"test\""),
+        ("\u2018Single\u2019 quotes", "'Single' quotes"),
+        ("\u201CDouble\u201D quotes", "\"Double\" quotes"),
+
+        # Unicode dashes
+        ("En–dash", "En-dash"),
+        ("Em—dash", "Em--dash"),
+
+        # Ellipsis
+        ("Trailing…", "Trailing..."),
+
+        # Non-breaking space
+        ("Non\u00A0breaking", "Non breaking"),
+
+        # Year abbreviation fix
+        ("Class of '21", "Class of'21"),
+        ("Back in '99", "Back in'99"),
+
+        # Combined Unicode and special chars
+        ("José's café—open 24/7", "Jose's cafe--open 24/7"),
+    ]
+
+    for input_val, expected_val in test_cases:
+        entry = {"type": "article", "key": "test", "fields": {"author": input_val}}
+        result = bt.bibtex_from_dict(entry)
+        actual_val = extract_field(result, "author")
+
+        assert actual_val == expected_val, (
+            f"Unicode normalization failed:\n"
+            f"  Input:    {input_val!r}\n"
+            f"  Expected: {expected_val!r}\n"
+            f"  Got:      {actual_val!r}"
+        )
+
+
+def test_bibtex_latex_and_unicode_combined():
+    """
+    Test that LaTeX stripping and Unicode normalization work together.
+    """
+    import re
+
+    def extract_field(bibtex_str, field_name):
+        """Helper to extract a field value from BibTeX output (handles nested braces)."""
+        pattern = rf'{field_name}\s*=\s*\{{'
+        match = re.search(pattern, bibtex_str)
+        if not match:
+            return None
+        start = match.end() - 1
+        depth = 0
+        for i in range(start, len(bibtex_str)):
+            if bibtex_str[i] == '{':
+                depth += 1
+            elif bibtex_str[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    return bibtex_str[start + 1:i]
+        return None
+
+    # Combined test cases
+    test_cases = [
+        # LaTeX + accents
+        (r"\textit{Café} Culture", "Cafe Culture"),
+        (r"The \emph{naïve} approach", "The naive approach"),
+
+        # LaTeX + Unicode quotes
+        ("\\textbf{\u201CImportant\u201D} finding", "\"Important\" finding"),
+
+        # LaTeX + dashes + accents
+        (r"\emph{José}—A \textbf{Survey}", "Jose--A Survey"),
+
+        # Special chars + accents
+        (r"50\% of café visitors", "50% of cafe visitors"),
+
+        # Full complex case
+        ("\\textit{François}'s \\textbf{café}—50\\% \u201Cdiscount\u201D",
+         "Francois's cafe--50% \"discount\""),
+    ]
+
+    for input_title, expected_title in test_cases:
+        entry = {"type": "article", "key": "test", "fields": {"title": input_title}}
+        result = bt.bibtex_from_dict(entry)
+        actual_title = extract_field(result, "title")
+
+        assert actual_title == expected_title, (
+            f"Combined LaTeX+Unicode normalization failed:\n"
+            f"  Input:    {input_title!r}\n"
+            f"  Expected: {expected_title!r}\n"
+            f"  Got:      {actual_title!r}"
+        )
+
 # ===== BIBTEX MATCHING =====
 
 def test_bibtex_matching():

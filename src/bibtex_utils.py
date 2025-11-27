@@ -233,6 +233,117 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
     citation fields first and writing remaining fields in a stable order.
     """
 
+    def _strip_latex_formatting(val: str) -> str:
+        r"""
+        Remove LaTeX formatting commands while preserving the content inside.
+        Handles commands like:
+        - \textit{content} -> content
+        - \textbf{content} -> content
+        - \emph{content} -> content
+        - \textsc{content} -> content
+        - \texttt{content} -> content
+        - \textrm{content} -> content
+        - \textsf{content} -> content
+        - \underline{content} -> content
+        - \uppercase{content} -> content
+        - \lowercase{content} -> content
+        - \mbox{content} -> content
+        - \hbox{content} -> content
+        - {\it content} -> content (old-style)
+        - {\bf content} -> content (old-style)
+        - {\em content} -> content (old-style)
+        - {\sc content} -> content (old-style)
+        - {\tt content} -> content (old-style)
+        - {\rm content} -> content (old-style)
+        - {\sf content} -> content (old-style)
+        Also handles:
+        - \& -> &
+        - \% -> %
+        - \$ -> $
+        - \# -> #
+        - \_ -> _
+        - \{ -> {
+        - \} -> }
+        - ~ (non-breaking space) -> space
+        - -- (en dash) -> -
+        - --- (em dash) -> --
+        """
+        # List of LaTeX formatting commands to strip (command name without backslash)
+        formatting_commands = [
+            'textit', 'textbf', 'emph', 'textsc', 'texttt', 'textrm', 'textsf',
+            'underline', 'uppercase', 'lowercase', 'mbox', 'hbox', 'text'
+        ]
+
+        # Process \command{content} style - iterate until no more changes
+        # (handles nested commands)
+        prev_val = None
+        while prev_val != val:
+            prev_val = val
+            for cmd in formatting_commands:
+                # Match \command{...} with balanced braces
+                pattern = r'\\' + cmd + r'\s*\{'
+                while True:
+                    match = re.search(pattern, val)
+                    if not match:
+                        break
+                    # Find the matching closing brace
+                    start = match.end() - 1  # Position of opening brace
+                    depth = 0
+                    end = start
+                    for i in range(start, len(val)):
+                        if val[i] == '{':
+                            depth += 1
+                        elif val[i] == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end = i
+                                break
+                    if depth == 0:
+                        # Extract content and replace
+                        content = val[start + 1:end]
+                        val = val[:match.start()] + content + val[end + 1:]
+                    else:
+                        # Unbalanced braces, skip this match
+                        break
+
+        # Process old-style {\xx content} commands
+        old_style_commands = ['it', 'bf', 'em', 'sc', 'tt', 'rm', 'sf', 'sl']
+        for cmd in old_style_commands:
+            # Match {\xx content} or {\xx{content}}
+            pattern = r'\{\\' + cmd + r'\s+([^}]+)\}'
+            val = re.sub(pattern, r'\1', val)
+            # Also handle {\xx{content}}
+            pattern2 = r'\{\\' + cmd + r'\s*\{([^}]+)\}\}'
+            val = re.sub(pattern2, r'\1', val)
+
+        # Handle escaped special characters
+        special_chars = {
+            r'\&': '&',
+            r'\%': '%',
+            r'\$': '$',
+            r'\#': '#',
+            r'\_': '_',
+            r'\{': '{',
+            r'\}': '}',
+        }
+        for latex_char, plain_char in special_chars.items():
+            val = val.replace(latex_char, plain_char)
+
+        # Handle tilde (non-breaking space in LaTeX) → regular space
+        # But be careful not to replace tildes that are part of URLs
+        # Only replace standalone ~ not preceded by http/ftp/etc
+        val = re.sub(r'(?<!:/)~', ' ', val)
+
+        # Handle dashes: --- → --, -- → - (for plain text, not BibTeX)
+        # Actually, keep -- as - and --- as -- for readability
+        val = val.replace('---', '--')
+        val = val.replace('--', '-')
+
+        # Clean up any double spaces that might result
+        val = re.sub(r'  +', ' ', val)
+
+        return val
+
     def _normalize_to_ascii(val: str) -> str:
         """
         Normalize Unicode characters to ASCII equivalents for BibTeX compatibility.
@@ -240,8 +351,18 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
         - ' (U+2019 right single quote) → ' (ASCII apostrophe)
         - " " (U+201C/U+201D curly quotes) → " (ASCII quote)
         - " '21" (space before apostrophe) → "'21"
+        - Accented characters: æ → ae, ø → o, é → e, etc.
+        - LaTeX formatting commands: \textit{}, \textbf{}, etc.
         """
+        # First, strip LaTeX formatting commands (preserving content)
+        val = _strip_latex_formatting(val)
+
+        # Use strip_accents (unidecode) for comprehensive Unicode to ASCII conversion
+        # This handles accented characters like æ → ae, ø → o, é → e, ú → u, etc.
+        val = strip_accents(val)
+
         # Replace Unicode quotation marks with ASCII equivalents
+        # (some may survive unidecode or come from different sources)
         replacements = {
             '\u2019': "'",  # Right single quotation mark → apostrophe
             '\u2018': "'",  # Left single quotation mark → apostrophe
