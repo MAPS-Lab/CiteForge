@@ -384,7 +384,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
                     if existing_key and new_key and existing_key == new_key:
                         # Citation keys match - verify titles are actually similar
                         key_title_sim = title_similarity(existing_title, new_title)
-                        if key_title_sim > 0.9:
+                        if key_title_sim > 0.95:
                             duplicate_found = True
                             duplicate_path = existing_path
                             break
@@ -394,7 +394,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
 
                     # Compare by title similarity alone
                     sim = title_similarity(existing_title, new_title)
-                    if sim > 0.9:
+                    if sim > 0.95:
                         duplicate_found = True
                         duplicate_path = existing_path
                         break
@@ -496,7 +496,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: Dict[str, Any], pref
                         existing_title = existing_fields.get('title', '')
                         new_title = new_fields.get('title', '')
                         sim = title_similarity(existing_title, new_title)
-                        if sim > 0.9:
+                        if sim > 0.95:
                             break
         except OSError:
             pass
