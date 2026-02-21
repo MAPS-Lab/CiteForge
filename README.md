@@ -1,28 +1,35 @@
 <h1 align="center">CiteForge</h1>
 
 <p align="center">
+  <strong>Automated academic citation enrichment from 13 scholarly APIs.</strong>
+</p>
+
+<p align="center">
   <a href="https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml"><img src="https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python 3.10+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
 </p>
 
+<p align="center">
+  CiteForge fetches, validates, deduplicates, and merges bibliographic metadata so you don't have to.<br>
+  Given a list of authors, it produces clean BibTeX files ready for LaTeX.
+</p>
+
 ---
 
-## Why?
+## The Problem
 
-Researchers routinely maintain BibTeX files for their publications and collaborators, but keeping citation metadata accurate and complete is tedious. Google Scholar entries are often truncated, missing DOIs, or formatted inconsistently. Manually cross-referencing Crossref, Semantic Scholar, arXiv, PubMed, and other databases to fill in gaps is time-consuming and error-prone, especially for authors with large publication records spanning multiple venues and disciplines.
+Google Scholar entries are often truncated, missing DOIs, or formatted inconsistently. Manually cross-referencing Crossref, Semantic Scholar, arXiv, PubMed, and other databases is tedious and error-prone — especially for authors with large publication records across multiple venues.
 
-## What?
+## The Solution
 
-CiteForge automates this process by querying 13 academic APIs, deduplicating results through fuzzy title and author matching, and merging metadata according to a trust hierarchy that prioritizes authoritative sources (DOI resolvers, PubMed) over less reliable ones (web-scraped Scholar pages). The output is a set of clean, enriched BibTeX files organized by author, ready for use in LaTeX workflows.
+CiteForge queries 13 academic APIs, deduplicates results through fuzzy title and author matching, and merges metadata using a trust hierarchy that prefers authoritative sources (DOI resolvers, PubMed) over less reliable ones (web-scraped Scholar pages).
 
-## How?
+---
 
-Given a CSV of authors with their Google Scholar and DBLP identifiers, CiteForge fetches each author's publications and processes every article through a four-phase enrichment pipeline: DOI validation, parallel API enrichment, late DOI discovery, and trust-based metadata merging. Authors are processed concurrently using a thread pool, while API responses are cached locally to minimize redundant requests. The result is a per-author directory of BibTeX files alongside a CSV summary reporting enrichment coverage.
+## Getting Started
 
-## Quick Start
-
-You'll need Python 3.10+ and a [SerpAPI](https://serpapi.com/) key for Google Scholar access.
+**Requirements:** Python 3.10+ and a [SerpAPI](https://serpapi.com/) key.
 
 ```bash
 git clone https://github.com/gabrielspadon/CiteForge.git && cd CiteForge
@@ -38,20 +45,20 @@ echo "your_semantic_key" > keys/Semantic.key        # Recommended
 echo "your_gemini_key" > keys/Gemini.key            # Optional
 ```
 
-Create `data/input.csv` with authors to process:
+Create `data/input.csv`:
 
 ```csv
 Name,Scholar Link,DBLP Link
 John Smith,https://scholar.google.com/citations?user=ABC123,https://dblp.org/pid/smith/john
 ```
 
-Run:
+Run the pipeline:
 
 ```bash
 python3 main.py
 ```
 
-Output is organized by author:
+Output:
 
 ```
 output/
@@ -63,84 +70,64 @@ output/
     └── ...
 ```
 
-## Architecture
+---
 
-```
-data/input.csv → main.py (ThreadPoolExecutor, 12 workers)
-  → per-author: fetch Scholar + DBLP publications
-    → per-article: 4-phase pipeline
-      Phase 1: DOI Validation (CSL → BibTeX fallback)
-      Phase 2: API Enrichment (S2, Crossref, arXiv, OpenReview, OpenAlex, PubMed, Europe PMC)
-      Phase 3: Late DOI Discovery (published DOIs preferred over preprint/data DOIs)
-      Phase 4: Trust-Based Merge → Save BibTeX (with file-level deduplication)
-  → output/{author_id}/*.bib + output/summary.csv
-```
+## How It Works
 
-### Module Layout
+Each article goes through a **four-phase enrichment pipeline**:
 
-| Module | Purpose |
-|--------|---------|
-| `main.py` | Orchestrator: ThreadPoolExecutor, 4-phase pipeline, CLI entry |
-| `src/clients/scholar.py` | Google Scholar (SerpAPI) and DBLP clients |
-| `src/clients/search_apis.py` | Search API clients (S2, Crossref, arXiv, OpenReview, OpenAlex, PubMed, Europe PMC) |
-| `src/clients/utility_apis.py` | Utility API clients (DataCite, ORCID, DOI resolvers) |
-| `src/clients/helpers.py` | Shared client helpers (scoring, deduplication) |
-| `src/api_generics.py` | Generic search/build abstractions (APISearchConfig, APIFieldMapping) |
-| `src/api_configs.py` | Per-API field mapping configurations |
-| `src/merge_utils.py` | Trust hierarchy merge, save_entry_to_file, file-level dedup |
-| `src/bibtex_utils.py` | BibTeX parse/serialize, citation keys, entry-level dedup |
-| `src/bibtex_build.py` | Entry building, scoring factory, type determination |
-| `src/text_utils.py` | LaTeX/Unicode normalization, similarity, author parsing |
-| `src/doi_utils.py` | DOI validation, CSL/BibTeX fallback chain |
-| `src/id_utils.py` | DOI normalization/classification, arXiv ID extraction |
-| `src/http_utils.py` | HTTP session, retry, exponential backoff, rate-limit |
-| `src/cache.py` | Disk-based API response cache with monthly expiry |
-| `src/config.py` | All thresholds, trust order, HTTP params, API URLs |
-| `src/io_utils.py` | CSV I/O, key loading, thread-safe file helpers |
-| `src/log_utils.py` | Thread-local logging, per-author log files |
-| `src/models.py` | Record dataclass, EnrichmentSource enum |
-| `src/exceptions.py` | Error hierarchy tuples |
-| `src/api_utils.py` | API utility helpers |
+1. **DOI Validation** — Resolve DOIs via CSL-JSON and BibTeX fallback
+2. **API Enrichment** — Query Semantic Scholar, Crossref, arXiv, OpenReview, OpenAlex, PubMed, and Europe PMC
+3. **Late DOI Discovery** — Collect DOIs from matched sources, preferring published over preprint
+4. **Trust-Based Merge** — Combine fields using a 14-level source hierarchy, then deduplicate
+
+Authors are processed in parallel (12 workers) and API responses are cached locally.
+
+### Trust Hierarchy
+
+Fields from higher-ranked sources override lower ones:
+
+> CSL > DOI BibTeX > DataCite > PubMed > Europe PMC > Crossref > OpenAlex > Semantic Scholar > ORCID > OpenReview > arXiv > Scholar Page > Scholar Minimal
+
+### Data Quality
+
+The merge engine enforces additional rules:
+
+- Prefer published DOIs over preprint/data repository DOIs (arXiv, Figshare, Zenodo)
+- Reject SAGE/Wiley article IDs masquerading as page numbers
+- Never downgrade a published journal name to a preprint server
+- Replace generic series names ("Lecture Notes in Computer Science") with actual conference names
+- Strip publisher PDF artifacts ("Check for updates") and decode HTML entities
+- Reject single-word titles (Scholar scraping artifacts)
+- Catch near-duplicates via composite scoring (title similarity + author overlap)
+
+---
 
 ## Data Sources
 
-| Source | API Key |
-|--------|---------|
-| Google Scholar (SerpAPI) | Required |
+| Source | Key Required |
+|--------|:---:|
+| Google Scholar (via SerpAPI) | Yes |
 | Semantic Scholar | Recommended |
-| Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DataCite, ORCID, DBLP, DOI resolver | None |
+| Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DataCite, ORCID, DBLP | No |
 | OpenReview | Optional |
 | Google Gemini (citation key generation) | Optional |
 
-When merging, fields are prioritized by source reliability: DOI resolvers (CSL-JSON, BibTeX) > curated databases (DataCite, PubMed, Europe PMC) > broad registries (Crossref, OpenAlex, Semantic Scholar) > author-verified (ORCID) > community platforms (OpenReview, arXiv) > web-scraped (Scholar).
-
-### Data Quality Rules
-
-The merge engine applies several data quality rules beyond trust ordering:
-
-- **DOI selection**: Published DOIs are preferred over preprint (arXiv, PsyArXiv) and data repository (Figshare, Zenodo) DOIs
-- **Pages validation**: SAGE/Wiley article IDs (16+ digit numeric strings) are rejected; only real page numbers accepted
-- **Journal protection**: Published journal names are never downgraded to preprint server names
-- **Booktitle resolution**: Generic series names (e.g., "Lecture Notes in Computer Science") are replaced with actual conference names when available from enrichment sources
-- **Title sanitization**: Publisher PDF artifacts (e.g., "Check for updates" prefix) and HTML entities are cleaned
-- **Minimum title length**: Single-word titles (Scholar scraping artifacts) are rejected
-- **arXiv consistency**: Pure arXiv preprints are consistently typed as @article with `journal = {arXiv e-prints}`
-- **Multi-signal dedup**: Entries with strong author overlap (>=90%) and moderate title similarity are caught by composite scoring
+---
 
 ## Configuration
 
-All parameters live in `src/config.py`:
+All parameters live in [`src/config.py`](src/config.py):
 
 | Parameter | Default | Description |
-|-----------|---------|-------------|
-| `CONTRIBUTION_WINDOW_YEARS` | `5` | Years of publications to fetch |
-| `PUBLICATIONS_PER_YEAR` | `50` | Target publications per year |
-| `SIM_MERGE_DUPLICATE_THRESHOLD` | `0.9` | Title similarity for deduplication |
-| `REQUEST_DELAY_BETWEEN_ARTICLES` | `0.5` | Delay between API requests (seconds) |
-| `SKIP_SERPAPI_FOR_EXISTING_FILES` | `True` | Reuse existing BibTeX files as seeds |
-| `CACHE_ENABLED` | `True` | Enable local API response caching |
-| `PAGES_MAX_DIGITS` | `8` | Max digits per page component (rejects article IDs) |
-| `MIN_TITLE_WORDS` | `2` | Minimum words in title (rejects artifacts) |
+|-----------|:-------:|-------------|
+| `CONTRIBUTION_WINDOW_YEARS` | 5 | Years of publications to fetch |
+| `PUBLICATIONS_PER_YEAR` | 50 | Target publications per year |
+| `SIM_MERGE_DUPLICATE_THRESHOLD` | 0.9 | Title similarity for deduplication |
+| `REQUEST_DELAY_BETWEEN_ARTICLES` | 0.5s | Courtesy delay between API requests |
+| `CACHE_ENABLED` | True | Enable local API response caching |
+
+---
 
 ## Testing
 
@@ -149,42 +136,56 @@ pip install -e .[dev]
 pytest tests/ -v --tb=short
 ```
 
-Test modules:
+116 tests across 9 modules. Integration tests that require API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
-| Module | Coverage |
-|--------|----------|
-| `tests/test_core.py` | Core logic: normalization, parsing, matching, merge |
-| `tests/test_apis.py` | API client connectivity and response building |
-| `tests/test_pipeline.py` | DOI validation and pipeline processing |
-| `tests/test_regression.py` | Regression tests: parser edge cases, data quality fixes |
-| `tests/test_deduplication.py` | File-level deduplication |
-| `tests/test_integration.py` | End-to-end enrichment pipeline |
-| `tests/test_cache.py` | Disk cache operations and expiry |
-| `tests/test_io_csv.py` | CSV I/O operations |
-| `tests/test_config.py` | Configuration validation |
+---
 
-Integration tests that require API keys are automatically skipped when keys are unavailable.
+<details>
+<summary><strong>Module Layout</strong></summary>
+
+| Module | Purpose |
+|--------|---------|
+| `main.py` | Orchestrator: thread pool, 4-phase pipeline, CLI entry |
+| `src/clients/scholar.py` | Google Scholar (SerpAPI) and DBLP clients |
+| `src/clients/search_apis.py` | Search API clients (S2, Crossref, arXiv, OpenReview, OpenAlex, PubMed, Europe PMC) |
+| `src/clients/utility_apis.py` | Utility API clients (DataCite, ORCID, DOI resolvers) |
+| `src/clients/helpers.py` | Shared client helpers (scoring, deduplication) |
+| `src/api_generics.py` | Generic search/build abstractions |
+| `src/api_configs.py` | Per-API field mapping configurations |
+| `src/merge_utils.py` | Trust hierarchy merge, file save, deduplication |
+| `src/bibtex_utils.py` | BibTeX parsing, serialization, citation keys |
+| `src/bibtex_build.py` | Entry building, scoring, type determination |
+| `src/text_utils.py` | LaTeX/Unicode normalization, similarity, author parsing |
+| `src/doi_utils.py` | DOI validation, CSL/BibTeX fallback chain |
+| `src/id_utils.py` | DOI classification, arXiv ID extraction |
+| `src/cache.py` | Disk-based API response cache |
+| `src/config.py` | Thresholds, trust order, HTTP params, API URLs |
+| `src/http_utils.py` | HTTP session, retry, exponential backoff |
+| `src/io_utils.py` | CSV I/O, key loading, thread-safe file helpers |
+| `src/log_utils.py` | Thread-local logging, per-author log files |
+
+</details>
+
+---
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Run quality gates: `ruff check src/ tests/ main.py`, `mypy src/ main.py`, `pytest tests/ -v --tb=short`
+3. Run quality gates: `ruff check src/ tests/ main.py`, `mypy src/ main.py`, `pytest`
 4. Submit a pull request
 
 ## Citation
 
-If you use CiteForge in your research, please cite it:
-
 ```bibtex
 @software{spadon_citeforge,
-  author    = {Spadon, Gabriel},
-  title     = {CiteForge},
-  url       = {https://github.com/gabrielspadon/CiteForge},
-  license   = {MIT}
+  author  = {Spadon, Gabriel},
+  title   = {CiteForge},
+  url     = {https://github.com/gabrielspadon/CiteForge},
+  license = {MIT}
 }
 ```
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+[MIT](LICENSE)
