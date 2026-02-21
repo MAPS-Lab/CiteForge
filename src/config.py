@@ -22,7 +22,6 @@ DEFAULT_GEMINI_KEY_FILE = "keys/Gemini.key"
 DEFAULT_DICTIONARY_FILE = "data/cache.json"
 
 DEFAULT_OUT_DIR = "output"
-PAPERS_DIR = "papers"
 CONTRIBUTION_WINDOW_YEARS = 5
 
 # Publications per year to fetch from Scholar
@@ -30,7 +29,7 @@ CONTRIBUTION_WINDOW_YEARS = 5
 PUBLICATIONS_PER_YEAR = 50
 
 # Maximum publications to fetch from Scholar in initial bulk request
-# Calculated dynamically: 50 publications/year × contribution window
+# Calculated dynamically: 50 publications/year x contribution window
 # For CONTRIBUTION_WINDOW_YEARS=1, this fetches 50 publications
 # For CONTRIBUTION_WINDOW_YEARS=3, this fetches 150 publications
 # For CONTRIBUTION_WINDOW_YEARS=5 (default), this fetches 250 publications
@@ -40,15 +39,6 @@ MAX_PUBLICATIONS_PER_AUTHOR = PUBLICATIONS_PER_YEAR * CONTRIBUTION_WINDOW_YEARS
 # This dramatically reduces SerpAPI usage (from 1+N to just 1 request per author)
 # Set to False to always fetch fresh metadata from Scholar citation page
 SKIP_SERPAPI_FOR_EXISTING_FILES = True
-
-# Enable selective Scholar re-fetch for incomplete data
-# Set to False to completely disable Scholar refetch (fastest, but may miss data)
-ENABLE_SCHOLAR_REFETCH_FOR_INCOMPLETE = True
-
-# Truncation score threshold for considering data "incomplete"
-# 0.5 = 50% or more fields have truncation markers (e.g., "...", "et al.")
-# Higher = more tolerant (fewer refetches), Lower = stricter (more refetches)
-INCOMPLETE_DATA_THRESHOLD = 0.5
 
 # wait between processing articles to avoid hitting rate limits
 # This now applies mainly to non-Scholar enrichment sources
@@ -123,9 +113,10 @@ ARXIV_DOI_CHECK_PATTERN = r'10\.48550/arxiv'
 ARXIV_DOI_EXTRACT_PATTERN = r'(?i)10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5})'
 
 # HTTP request configuration
-# Default timeout for HTTP requests (in seconds)
-HTTP_TIMEOUT_DEFAULT = 5.0
-HTTP_TIMEOUT_SHORT = 10.0
+# Timeout for fast/lightweight API requests (in seconds)
+HTTP_TIMEOUT_FAST = 5.0
+# Default timeout for standard API requests (in seconds)
+HTTP_TIMEOUT_DEFAULT = 10.0
 
 # Exponential backoff configuration for retries
 HTTP_BACKOFF_INITIAL = 0.25  # Initial backoff delay in seconds
@@ -145,3 +136,95 @@ BIBTEX_FILENAME_MAX_LENGTH = 60
 # Valid year range for publications
 VALID_YEAR_MIN = 1900
 VALID_YEAR_MAX = 2099
+
+# Response cache configuration
+CACHE_DIR = "data/api_cache"
+CACHE_TTL_SEARCH_DAYS = 30       # Stored in cache files (expiry is monthly boundary)
+CACHE_TTL_DOI_DAYS = 90          # Stored in cache files (expiry is monthly boundary)
+CACHE_TTL_GEMINI_DAYS = 365      # Stored in cache files (expiry is monthly boundary)
+CACHE_ENABLED = True             # Master switch for response caching
+
+# File-level deduplication threshold (used in save_entry_to_file)
+# Must be >= SIM_MERGE_DUPLICATE_THRESHOLD to avoid entries passing merge but failing file save
+SIM_FILE_DUPLICATE_THRESHOLD = 0.95
+
+# Preprint detection: servers and DOI prefixes shared across modules
+PREPRINT_SERVERS = frozenset({
+    'arxiv', 'biorxiv', 'medrxiv', 'chemrxiv', 'research square',
+    'ssrn', 'preprints', 'psyarxiv', 'socarxiv', 'edarxiv',
+    'arxiv e-prints', 'e-prints', 'preprint', 'authorea',
+})
+PREPRINT_DOI_PREFIXES = (
+    '10.48550/arxiv',     # arXiv
+    '10.21203/rs.',       # Research Square
+    '10.31234/osf.io',    # PsyArXiv / SocArXiv / EdArXiv (OSF Preprints)
+    '10.1101/20',         # bioRxiv / medRxiv (date-prefixed manuscript IDs)
+    '10.26434/chemrxiv',  # ChemRxiv
+    '10.20944/preprints', # Preprints.org
+    '10.2139/ssrn',       # SSRN
+)
+
+# Data repository DOI prefixes (deprioritize in DOI selection — supplementary, not the paper)
+DATA_DOI_PREFIXES = (
+    '10.6084/m9.figshare',  # Figshare (data/supplementary)
+    '10.5281/zenodo',        # Zenodo (data/software)
+)
+
+# Relaxed title similarity for preprint/published pairs (titles may differ)
+SIM_PREPRINT_TITLE_THRESHOLD = 0.5
+
+# Known conference venue names that lack standard conference keywords
+# ("proceedings", "conference", "symposium", "workshop") in their names.
+# Used by determine_entry_type as a fallback when keyword detection fails.
+KNOWN_CONFERENCE_VENUES = frozenset({
+    "neural information processing systems",
+    "advances in neural information processing systems",
+    "graphics interface",
+})
+
+# Reject digit-only pages strings longer than this (SAGE/Wiley article IDs)
+PAGES_MAX_DIGITS = 8
+
+# Minimum word count for a valid publication title (reject Scholar artifacts)
+MIN_TITLE_WORDS = 2
+
+# Known generic series names that should be replaced with actual conference name
+GENERIC_SERIES_NAMES = frozenset({
+    "lecture notes in computer science",
+    "lecture notes in artificial intelligence",
+    "lecture notes in business information processing",
+    "lecture notes in networks and systems",
+    "communications in computer and information science",
+    "advances in intelligent systems and computing",
+})
+
+# Author name suffixes to strip when extracting last names (e.g., "Jr", "III")
+AUTHOR_NAME_SUFFIXES = frozenset({'jr', 'sr', 'ii', 'iii', 'iv', 'v'})
+
+# Multi-signal dedup: composite score threshold
+# When title sim < 0.95 but multiple weaker signals align, treat as same paper
+SIM_DEDUP_COMPOSITE_THRESHOLD = 0.60
+
+# Minimum title similarity for multi-signal dedup to even consider
+# Below this, no combination of other signals should trigger a match
+SIM_DEDUP_MULTI_SIGNAL_MIN = 0.35
+
+# Internal BibTeX fields used for dedup, stripped before final output
+DEDUP_INTERNAL_FIELDS = frozenset({
+    "x_scholar_cluster_id",
+    "x_scholar_citation_id",
+    "x_s2_paper_id",
+    "x_openalex_id",
+})
+
+# Threshold tolerance for floating-point precision in scoring (api_generics.py)
+SIM_THRESHOLD_TOLERANCE = 0.01
+
+# Title length ratio below which we keep the longer title (merge_utils.py)
+TITLE_LENGTH_KEEP_RATIO = 0.7
+
+# Minimum trust rank difference to override longer title (merge_utils.py)
+TRUST_DIFF_OVERRIDE_THRESHOLD = 3
+
+# Maximum parallel workers for author processing (main.py)
+MAX_WORKERS = 12

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import csv
-import re
 import json
 import os
+import re
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .config import DEFAULT_KEY_FILE, DEFAULT_S2_KEY_FILE, DEFAULT_INPUT, DEFAULT_OR_KEY_FILE, DEFAULT_GEMINI_KEY_FILE
-from .exceptions import CSV_ERRORS, FILE_IO_ERRORS, JSON_ERRORS, FILE_READ_ERRORS
+from .config import DEFAULT_GEMINI_KEY_FILE, DEFAULT_INPUT, DEFAULT_KEY_FILE, DEFAULT_OR_KEY_FILE, DEFAULT_S2_KEY_FILE
+from .exceptions import CSV_ERRORS, FILE_READ_ERRORS
 from .models import Record
-
 
 # CSV fieldnames for summary export
 _SUMMARY_CSV_FIELDNAMES = [
@@ -40,45 +39,38 @@ def _project_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 
 
-def _candidate_paths(primary: str, legacy: Optional[str] = None) -> List[str]:
+def _candidate_paths(primary: str, legacy: str | None = None) -> list[str]:
     """
     Build an ordered list of file paths to try for a given name, including the
     original path, a project-root-relative variant, and an optional legacy
     filename, while removing duplicates.
     """
-    candidates: List[str] = [primary]
+    candidates: list[str] = [primary]
     if not os.path.isabs(primary):
         candidates.append(os.path.join(_project_root(), primary))
     if legacy:
         candidates.append(legacy)
         if not os.path.isabs(legacy):
             candidates.append(os.path.join(_project_root(), legacy))
-    # remove duplicates, keep order
-    seen = set()
-    uniq: List[str] = []
-    for p in candidates:
-        if p not in seen:
-            uniq.append(p)
-            seen.add(p)
-    return uniq
+    return list(dict.fromkeys(candidates))
 
 
 def _read_key_file(
     path: str,
-    legacy: Optional[str] = None,
+    legacy: str | None = None,
     required: bool = True,
     expected_lines: int = 1
-) -> Optional[List[str]]:
+) -> list[str] | None:
     """
     Generic key file reader that handles common patterns for loading API keys and
     credentials from configuration files with optional fallback to legacy filenames.
     """
     candidates = _candidate_paths(path, legacy)
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
 
     for p in candidates:
         try:
-            with open(p, "r", encoding="utf-8") as f:
+            with open(p, encoding="utf-8") as f:
                 lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
                 if not lines:
                     last_err = ValueError(f"{os.path.basename(p)} is empty")
@@ -111,7 +103,7 @@ def read_api_key(path: str = DEFAULT_KEY_FILE) -> str:
     return lines[0] if lines else ""
 
 
-def read_semantic_api_key(path: str = DEFAULT_S2_KEY_FILE) -> Optional[str]:
+def read_semantic_api_key(path: str = DEFAULT_S2_KEY_FILE) -> str | None:
     """
     Look for a Semantic Scholar API key in the usual locations and return it if
     present, or None when no key file is found.
@@ -120,7 +112,7 @@ def read_semantic_api_key(path: str = DEFAULT_S2_KEY_FILE) -> Optional[str]:
     return lines[0] if lines else None
 
 
-def read_openreview_credentials(path: str = DEFAULT_OR_KEY_FILE) -> Optional[tuple]:
+def read_openreview_credentials(path: str = DEFAULT_OR_KEY_FILE) -> tuple | None:
     """
     Read OpenReview credentials from a small text file where the first non-empty
     line is the username and the second is the password, returning them as a
@@ -130,7 +122,7 @@ def read_openreview_credentials(path: str = DEFAULT_OR_KEY_FILE) -> Optional[tup
     return (lines[0], lines[1]) if lines and len(lines) >= 2 else None
 
 
-def read_gemini_api_key(path: str = DEFAULT_GEMINI_KEY_FILE) -> Optional[str]:
+def read_gemini_api_key(path: str = DEFAULT_GEMINI_KEY_FILE) -> str | None:
     """
     Look for a Gemini API key in the usual locations and return it if
     present, or None when no key file is found.
@@ -139,12 +131,12 @@ def read_gemini_api_key(path: str = DEFAULT_GEMINI_KEY_FILE) -> Optional[str]:
     return lines[0] if lines else None
 
 
-def read_records(path: str = DEFAULT_INPUT) -> List[Record]:
+def read_records(path: str = DEFAULT_INPUT) -> list[Record]:
     """
     Load author records from a CSV file, skip empty rows, and keep only entries
     with at least one valid identifier (Scholar or DBLP).
     """
-    records: List[Record] = []
+    records: list[Record] = []
     candidates = _candidate_paths(path)
     for p in candidates:
         try:
@@ -197,12 +189,12 @@ def read_records(path: str = DEFAULT_INPUT) -> List[Record]:
     return records
 
 
-def safe_read_file(path: str, encoding: str = "utf-8") -> Optional[str]:
+def safe_read_file(path: str, encoding: str = "utf-8") -> str | None:
     """
     Safely read a file and return its contents, returning None on error.
     """
     try:
-        with open(path, "r", encoding=encoding) as f:
+        with open(path, encoding=encoding) as f:
             return f.read()
     except FILE_READ_ERRORS:
         return None
@@ -213,7 +205,7 @@ def safe_read_json(path: str, default: Any = None) -> Any:
     Safely read a JSON file and return its parsed contents, returning a default value on error.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except FILE_READ_ERRORS:
         return default
@@ -239,7 +231,7 @@ def safe_write_file(path: str, content: str, encoding: str = "utf-8", makedirs: 
         return False
 
 
-def safe_write_json(path: str, data: Any, makedirs: bool = True, indent: Optional[int] = 2) -> bool:
+def safe_write_json(path: str, data: Any, makedirs: bool = True, indent: int | None = 2) -> bool:
     """
     Safely write data to a JSON file, optionally creating parent directories.
     """
@@ -259,84 +251,97 @@ def safe_write_json(path: str, data: Any, makedirs: bool = True, indent: Optiona
         return False
 
 
+# In-memory tracking for append-only CSV writes
+_SUMMARY_KNOWN_PATHS: set[str] = set()
+_SUMMARY_UPDATES: dict[str, dict[str, Any]] = {}
+_SUMMARY_INITIALIZED = False
+
+
 def init_summary_csv(csv_path: str, preserve_existing: bool = False) -> None:
     """
     Initialize the summary CSV file with proper headers, creating the parent directory if needed.
-
-    If preserve_existing is True and the file already exists, it will be left intact.
-    Otherwise, the file will be created or overwritten with just the header.
+    Loads existing entries into memory for O(1) dedup on appends.
     """
-    # Create parent directory if csv_path contains a directory component
+    global _SUMMARY_INITIALIZED
+
     parent_dir = os.path.dirname(csv_path)
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
 
-    # If preserving and file exists, leave it alone
-    if preserve_existing and os.path.exists(csv_path):
-        return
+    with _CSV_LOCK:
+        _SUMMARY_KNOWN_PATHS.clear()
+        _SUMMARY_UPDATES.clear()
 
-    with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
-        writer.writeheader()
+        if preserve_existing and os.path.exists(csv_path):
+            # Load existing file_paths into the in-memory set
+            try:
+                with open(csv_path, newline="", encoding="utf-8") as csvfile:
+                    reader = csv.DictReader(csvfile)
+                    for row in reader:
+                        fp = row.get("file_path")
+                        if fp:
+                            _SUMMARY_KNOWN_PATHS.add(fp)
+            except CSV_ERRORS:
+                pass
+        else:
+            with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+                writer.writeheader()
+
+        _SUMMARY_INITIALIZED = True
 
 
-def _read_existing_summary(csv_path: str) -> Dict[str, Dict[str, Any]]:
+def append_summary_to_csv(csv_path: str, file_path: str, trust_hits: int, flags: dict[str, bool]) -> None:
     """
-    Read existing summary CSV and return a dict mapping file_path to row data.
+    Append a summary row to the CSV file. New entries are appended in O(1).
+    Updated entries (same file_path) are tracked in memory and flushed at end of run.
+    Thread-safe via _CSV_LOCK.
     """
-    if not os.path.exists(csv_path):
-        return {}
+    flag_fields = [f for f in _SUMMARY_CSV_FIELDNAMES if f not in ("file_path", "trust_hits")]
+    new_row: dict[str, Any] = {"file_path": file_path, "trust_hits": trust_hits}
+    new_row.update({f: int(bool(flags.get(f))) for f in flag_fields})
 
-    existing = {}
-    try:
-        with open(csv_path, "r", newline="", encoding="utf-8") as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                file_path = row.get("file_path")
-                if file_path:
-                    existing[file_path] = row
-    except CSV_ERRORS:
-        return {}
+    with _CSV_LOCK:
+        if file_path in _SUMMARY_KNOWN_PATHS:
+            # Track update for flush
+            _SUMMARY_UPDATES[file_path] = new_row
+        else:
+            # True append — O(1)
+            _SUMMARY_KNOWN_PATHS.add(file_path)
+            try:
+                with open(csv_path, "a", newline="", encoding="utf-8") as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+                    writer.writerow(new_row)
+            except OSError:
+                pass
 
-    return existing
 
-
-def append_summary_to_csv(csv_path: str, file_path: str, trust_hits: int, flags: Dict[str, bool]) -> None:
+def flush_summary_csv(csv_path: str) -> None:
     """
-    Append a summary row to the CSV file with enrichment statistics for a single BibTeX entry.
-
-    If an entry with the same file_path already exists in the CSV, it will be updated
-    instead of creating a duplicate row.
-    
-    This function is thread-safe and uses a lock to prevent concurrent write issues.
+    Rewrite the summary CSV only if updates to existing entries occurred during the run.
+    Called once at the end of main().
     """
     with _CSV_LOCK:
-        # Read existing entries
-        existing_entries = _read_existing_summary(csv_path)
+        if not _SUMMARY_UPDATES:
+            return
 
-        # Build new row
-        new_row = {
-            "file_path": file_path,
-            "trust_hits": trust_hits,
-            "scholar_bib": 1 if flags.get("scholar_bib", False) else 0,
-            "scholar_page": 1 if flags.get("scholar_page", False) else 0,
-            "s2": 1 if flags.get("s2", False) else 0,
-            "crossref": 1 if flags.get("crossref", False) else 0,
-            "openreview": 1 if flags.get("openreview", False) else 0,
-            "arxiv": 1 if flags.get("arxiv", False) else 0,
-            "openalex": 1 if flags.get("openalex", False) else 0,
-            "pubmed": 1 if flags.get("pubmed", False) else 0,
-            "europepmc": 1 if flags.get("europepmc", False) else 0,
-            "doi_csl": 1 if flags.get("doi_csl", False) else 0,
-            "doi_bibtex": 1 if flags.get("doi_bibtex", False) else 0,
-        }
+        # Read current file, apply updates, rewrite
+        existing: dict[str, dict[str, Any]] = {}
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    fp = row.get("file_path")
+                    if fp:
+                        existing[fp] = dict(row)
+        except CSV_ERRORS:
+            return
 
-        # Update or add the entry
-        existing_entries[file_path] = new_row
+        existing.update(_SUMMARY_UPDATES)
+        _SUMMARY_UPDATES.clear()
 
-        # Rewrite entire CSV with updated data (ensures no duplicates)
         with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
             writer.writeheader()
-            for row in existing_entries.values():
+            for row in existing.values():
                 writer.writerow(row)

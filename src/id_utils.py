@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Any, Optional
+from typing import Any
 
-from .config import _DOI_REGEX, ARXIV_DOI_EXTRACT_PATTERN
+from .config import (
+    _DOI_REGEX,
+    ARXIV_DOI_CHECK_PATTERN,
+    ARXIV_DOI_EXTRACT_PATTERN,
+    DATA_DOI_PREFIXES,
+    DEDUP_INTERNAL_FIELDS,
+    PREPRINT_DOI_PREFIXES,
+)
+
+_ARXIV_PUBLISHER_NAMES = ("arxiv", "arxiv.org", "arxiv e-prints")
 
 
-def _norm_doi(doi: Optional[str]) -> Optional[str]:
+def _norm_doi(doi: str | None) -> str | None:
     """
     Clean up a DOI string by removing common URL and prefix wrappers and
     normalizing to lowercase for case-insensitive comparison, as DOIs are
@@ -26,7 +35,7 @@ def _norm_doi(doi: Optional[str]) -> Optional[str]:
     return d.lower()
 
 
-def normalize_doi(doi: Optional[str]) -> Optional[str]:
+def normalize_doi(doi: str | None) -> str | None:
     """
     Provide a public helper that normalizes DOIs into a consistent canonical
     form suitable for comparison and lookups.
@@ -34,7 +43,16 @@ def normalize_doi(doi: Optional[str]) -> Optional[str]:
     return _norm_doi(doi)
 
 
-def _norm_arxiv_id(s: Optional[str]) -> Optional[str]:
+def is_secondary_doi(doi: str) -> bool:
+    """Check if DOI belongs to preprint or data repository (deprioritize in selection)."""
+    lower = doi.lower()
+    return (
+        any(lower.startswith(p) for p in PREPRINT_DOI_PREFIXES)
+        or any(lower.startswith(p) for p in DATA_DOI_PREFIXES)
+    )
+
+
+def _norm_arxiv_id(s: str | None) -> str | None:
     """
     Clean an arXiv identifier by stripping the arXiv prefix and any version
     suffix so that different versions map to the same base ID.
@@ -55,7 +73,7 @@ _DOI_META_PATTERNS = [
 ]
 
 
-def find_doi_in_html(html: str) -> Optional[str]:
+def find_doi_in_html(html: str) -> str | None:
     """
     Look for a DOI inside an HTML page by checking common meta tags first and
     then searching the full document as a fallback.
@@ -72,7 +90,7 @@ def find_doi_in_html(html: str) -> Optional[str]:
     return _norm_doi(m.group(1)) if m else None
 
 
-def find_doi_in_text(text: str) -> Optional[str]:
+def find_doi_in_text(text: str) -> str | None:
     """
     Scan arbitrary text for something that looks like a DOI and return a
     normalized version when one is found.
@@ -83,25 +101,29 @@ def find_doi_in_text(text: str) -> Optional[str]:
     return _norm_doi(m.group(1)) if m else None
 
 
-def find_arxiv_in_text(text: str) -> Optional[str]:
+def find_arxiv_in_text(text: str) -> str | None:
     """
-    Scan text and URLs for an arXiv identifier, handling both plain IDs and
-    arxiv.org links before returning a normalized form.
+    Scan text and URLs for an arXiv identifier, handling plain IDs,
+    arxiv.org links, and arXiv DOIs before returning a normalized form.
     """
     if not text:
         return None
     # look for ID with or without "arXiv:" prefix
-    m = re.search(r'(?i)arxiv[:/\s]*([0-9]{4}\.[0-9]{4,5})(?:v\d+)?', text)
+    m = re.search(r'(?i)arxiv[:/\s]*(\d{4}\.\d{4,5})(?:v\d+)?', text)
     if m:
         return _norm_arxiv_id(m.group(1))
     # look for arxiv.org URLs
-    m = re.search(r'(?i)arxiv\.org/(abs|pdf)/([0-9]{4}\.[0-9]{4,5})', text)
+    m = re.search(r'(?i)arxiv\.org/(abs|pdf)/(\d{4}\.\d{4,5})', text)
     if m:
         return _norm_arxiv_id(m.group(2))
+    # look for arXiv DOIs (10.48550/arXiv.XXXX)
+    m = re.search(ARXIV_DOI_EXTRACT_PATTERN, text)
+    if m:
+        return _norm_arxiv_id(m.group(1))
     return None
 
 
-def allowlisted_url(url: Optional[str]) -> Optional[str]:
+def allowlisted_url(url: str | None) -> str | None:
     """
     Accept only URLs that point to trusted resolvers such as doi.org or
     arxiv.org and discard links to generic publisher pages.
@@ -130,7 +152,7 @@ def allowlisted_url(url: Optional[str]) -> Optional[str]:
     return None
 
 
-def extract_arxiv_eprint(entry: Dict[str, Any]) -> Optional[str]:
+def extract_arxiv_eprint(entry: dict[str, Any]) -> str | None:
     """
     Try to recover an arXiv identifier from a BibTeX entry by checking the
     archive prefix, eprint field, and common text fields that may mention arXiv.
@@ -142,13 +164,23 @@ def extract_arxiv_eprint(entry: Dict[str, Any]) -> Optional[str]:
         return _norm_arxiv_id(fields.get("eprint"))
     # sometimes arXiv ID is in journal or howpublished field
     j = fields.get("journal") or fields.get("howpublished") or ""
-    m = re.search(r'(?i)arxiv:\s*([0-9]{4}\.[0-9]{4,5})(v\d+)?', j)
+    m = re.search(r'(?i)arxiv:\s*(\d{4}\.\d{4,5})(v\d+)?', j)
     if m:
         return _norm_arxiv_id(m.group(1))
     return None
 
 
-def normalize_arxiv_metadata(fields: Dict[str, Any]) -> Dict[str, Any]:
+def external_ids_match(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> bool:
+    """Check if any internal dedup IDs match between two BibTeX entries."""
+    for field in DEDUP_INTERNAL_FIELDS:
+        a_val = (fields_a.get(field) or "").strip()
+        b_val = (fields_b.get(field) or "").strip()
+        if a_val and b_val and a_val == b_val:
+            return True
+    return False
+
+
+def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
     """
     Normalize arXiv metadata to standard BibTeX fields following best practices.
 
@@ -181,7 +213,7 @@ def normalize_arxiv_metadata(fields: Dict[str, Any]) -> Dict[str, Any]:
     # Always check and remove pages if it contains arXiv ID (not valid page numbers)
     pages = fields.get("pages", "")
     if pages:
-        m = re.search(r'(?i)arxiv:\s*([0-9]{4}\.[0-9]{4,5})', pages)
+        m = re.search(r'(?i)arxiv:\s*(\d{4}\.\d{4,5})', pages)
         if m:
             if not arxiv_id:
                 arxiv_id = _norm_arxiv_id(m.group(1))
@@ -192,7 +224,7 @@ def normalize_arxiv_metadata(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not arxiv_id:
         journal = fields.get("journal", "")
         if journal:
-            m = re.search(r'(?i)arxiv:\s*([0-9]{4}\.[0-9]{4,5})', journal)
+            m = re.search(r'(?i)arxiv:\s*(\d{4}\.\d{4,5})', journal)
             if m:
                 arxiv_id = _norm_arxiv_id(m.group(1))
 
@@ -200,7 +232,7 @@ def normalize_arxiv_metadata(fields: Dict[str, Any]) -> Dict[str, Any]:
     if not arxiv_id:
         url = fields.get("url", "")
         if url:
-            m = re.search(r'(?i)arxiv\.org/(abs|pdf)/([0-9]{4}\.[0-9]{4,5})', url)
+            m = re.search(r'(?i)arxiv\.org/(abs|pdf)/(\d{4}\.\d{4,5})', url)
             if m:
                 arxiv_id = _norm_arxiv_id(m.group(2))
 
@@ -215,7 +247,7 @@ def normalize_arxiv_metadata(fields: Dict[str, Any]) -> Dict[str, Any]:
             fields["primaryclass"] = primary_class
 
         # remove publisher='arXiv' (repository, not a publisher)
-        if (fields.get("publisher") or "").strip().lower() in ("arxiv", "arxiv.org", "arxiv e-prints"):
+        if (fields.get("publisher") or "").strip().lower() in _ARXIV_PUBLISHER_NAMES:
             fields.pop("publisher", None)
 
         # normalize journal field for pure arXiv preprints
@@ -223,17 +255,23 @@ def normalize_arxiv_metadata(fields: Dict[str, Any]) -> Dict[str, Any]:
         journal_lower = journal.lower()
         # check for various arXiv journal patterns
         is_arxiv_journal = (
-            journal_lower in ("arxiv", "arxiv.org", "arxiv e-prints") or
+            journal_lower in _ARXIV_PUBLISHER_NAMES or
             "arxiv preprint" in journal_lower or
-            re.search(r'arxiv:\s*[0-9]{4}\.[0-9]{4,5}', journal_lower)
+            re.search(r'arxiv:\s*\d{4}\.\d{4,5}', journal_lower)
         )
         if is_arxiv_journal:
             # standardize to "arXiv e-prints" for consistency
             fields["journal"] = "arXiv e-prints"
+        elif not journal:
+            # Pure arXiv preprint with no journal: set standard journal name
+            # This ensures consistent @article classification for all arXiv papers
+            doi_val = fields.get("doi", "")
+            is_arxiv_doi = bool(re.search(ARXIV_DOI_CHECK_PATTERN, doi_val, re.IGNORECASE)) if doi_val else True
+            if not doi_val or is_arxiv_doi:
+                fields["journal"] = "arXiv e-prints"
 
         # ensure URL points to arXiv if no DOI URL exists
         url = fields.get("url", "")
-        doi = fields.get("doi", "")
         has_doi_url = url and "doi.org" in url.lower()
 
         if not has_doi_url:
@@ -243,7 +281,7 @@ def normalize_arxiv_metadata(fields: Dict[str, Any]) -> Dict[str, Any]:
         # fallback: normalize journal even if we couldn't extract an arXiv ID
         journal = (fields.get("journal") or "").strip()
         journal_lower = journal.lower()
-        if journal_lower in ("arxiv", "arxiv.org"):
+        if journal_lower in _ARXIV_PUBLISHER_NAMES:
             fields["journal"] = "arXiv e-prints"
 
     return fields

@@ -1,9 +1,8 @@
 import csv
-import os
-from pathlib import Path
 from textwrap import dedent
-import pytest
+
 from src import io_utils
+
 
 def test_read_records_from_csv(tmp_path):
     """
@@ -52,7 +51,7 @@ def test_csv_initialization(tmp_path):
     assert csv_path.exists(), "CSV file was not created"
 
     # verify header matches the 13-column format required by main.py
-    with open(csv_path, 'r', encoding='utf-8') as f:
+    with open(csv_path, encoding='utf-8') as f:
         reader = csv.reader(f)
         header = next(reader)
 
@@ -96,7 +95,7 @@ def test_csv_append_single_entry(tmp_path):
     io_utils.append_summary_to_csv(csv_path_str, file_path, trust_hits, flags)
 
     # verify CSV contains header + 1 data row
-    with open(csv_path, 'r', encoding='utf-8') as f:
+    with open(csv_path, encoding='utf-8') as f:
         lines = f.readlines()
 
     assert len(lines) == 2, f"Expected 2 lines, got {len(lines)}"
@@ -142,7 +141,7 @@ def test_csv_append_multiple_entries(tmp_path):
         io_utils.append_summary_to_csv(csv_path_str, file_path, trust_hits, flags)
 
     # verify all entries recorded correctly
-    with open(csv_path, 'r', encoding='utf-8') as f:
+    with open(csv_path, encoding='utf-8') as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
@@ -181,7 +180,7 @@ def test_csv_edge_cases(tmp_path):
     io_utils.append_summary_to_csv(csv_path_str, special_path, 2, flags_complete)
 
     # verify both paths preserved exactly
-    with open(csv_path, 'r', encoding='utf-8') as f:
+    with open(csv_path, encoding='utf-8') as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 

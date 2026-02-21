@@ -87,7 +87,10 @@ KNOWN_PAPERS = [
     # --- COMPLEX / EDGE CASE PAPERS ---
     {
         "name": "higgs_boson",
-        "title": "Observation of a new particle in the search for the Standard Model Higgs boson with the ATLAS detector at the LHC",
+        "title": (
+            "Observation of a new particle in the search for the"
+            " Standard Model Higgs boson with the ATLAS detector at the LHC"
+        ),
         "authors": ["Georges Aad", "Brad Abbott", "J. Abdallah", "et al."],  # 2932 authors in reality
         "first_author": "Aad",
         "year": 2012,
@@ -162,7 +165,14 @@ KNOWN_PAPERS = [
     },
     {
         "name": "long_title",
-        "title": "A very long title that goes on and on to test the buffer limits and similarity matching algorithms of the system to ensure that it does not crash or produce incorrect results when faced with an unusually verbose publication title that might occur in certain fields like medicine or humanities where titles can be descriptive paragraphs",
+        "title": (
+            "A very long title that goes on and on to test the buffer limits"
+            " and similarity matching algorithms of the system to ensure that"
+            " it does not crash or produce incorrect results when faced with"
+            " an unusually verbose publication title that might occur in"
+            " certain fields like medicine or humanities where titles can be"
+            " descriptive paragraphs"
+        ),
         "authors": ["Verbose Author"],
         "first_author": "Author",
         "year": 2023,

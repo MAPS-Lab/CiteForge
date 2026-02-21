@@ -1,7 +1,7 @@
-from typing import Any, Dict
+import os
 
-from .config import S2_BASE, CROSSREF_BASE, OPENALEX_BASE, PUBMED_BASE, EUROPEPMC_BASE
-from .api_generics import APISearchConfig, APIFieldMapping
+from .api_generics import APIFieldMapping, APISearchConfig
+from .config import CROSSREF_BASE, EUROPEPMC_BASE, OPENALEX_BASE, PUBMED_BASE, S2_BASE
 from .text_utils import extract_year_from_any
 
 S2_SEARCH_CONFIG = APISearchConfig(
@@ -40,7 +40,7 @@ CROSSREF_SEARCH_CONFIG = APISearchConfig(
     year_getter=lambda c: (
         ((c.get("issued") or {}).get("date-parts") or [[None]])[0][0]
         if ((c.get("issued") or {}).get("date-parts") and
-            (c.get("issued") or {}).get("date-parts")[0] and
+            ((c.get("issued") or {}).get("date-parts") or [[None]])[0] and
             isinstance(((c.get("issued") or {}).get("date-parts") or [[None]])[0][0], int))
         else None
     )
@@ -55,7 +55,7 @@ OPENALEX_SEARCH_CONFIG = APISearchConfig(
     author_field="authorships",
     additional_params={
         "per-page": 20,
-        "mailto": "citeforge@example.com"
+        "mailto": os.getenv("CROSSREF_MAILTO", "")
     },
     # Custom getters for OpenAlex's nested structure
     authors_getter=lambda w: [
@@ -151,19 +151,6 @@ CROSSREF_FIELD_MAPPING = APIFieldMapping(
     )
 )
 
-
-# Helper for Crossref title extraction
-def _extract_crossref_title(item: Dict[str, Any]) -> str:
-    """
-    Extract title from Crossref's list format.
-    """
-    tlist = item.get("title") or []
-    return (tlist[0] if tlist else "").strip()
-
-
-# Update Crossref mapping to use custom title extractor
-CROSSREF_FIELD_MAPPING.title_fields = ["title"]
-# We'll handle the list extraction in a custom way
 
 OPENALEX_FIELD_MAPPING = APIFieldMapping(
     api_name="openalex",

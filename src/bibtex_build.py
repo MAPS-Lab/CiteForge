@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
-from .config import SIM_TITLE_SIM_MIN
+from .config import KNOWN_CONFERENCE_VENUES, SIM_TITLE_SIM_MIN
 from .text_utils import extract_year_from_any
 
 
@@ -13,14 +14,14 @@ def get_container_field(entry_type: str) -> str:
     such as journal for articles, booktitle for conference papers and book
     chapters, or howpublished for miscellaneous entries.
     """
-    return (
-        "journal" if entry_type == "article"
-        else "booktitle" if entry_type in ("inproceedings", "incollection")
-        else "howpublished"
-    )
+    if entry_type == "article":
+        return "journal"
+    if entry_type in ("inproceedings", "incollection"):
+        return "booktitle"
+    return "howpublished"
 
 
-def format_author_field(authors: List[str]) -> Optional[str]:
+def format_author_field(authors: list[str]) -> str | None:
     """
     Combine a list of author names into the BibTeX author format using " and "
     between names, or return None when the list is empty.
@@ -39,14 +40,14 @@ def normalize_year(year: Any) -> int:
 def build_bibtex_entry(
         entry_type: str,
         title: str,
-        authors: List[str],
+        authors: list[str],
         year: int,
         keyhint: str,
-        venue: Optional[str] = None,
-        doi: Optional[str] = None,
-        url: Optional[str] = None,
-        arxiv_id: Optional[str] = None,
-        extra_fields: Optional[Dict[str, str]] = None
+        venue: str | None = None,
+        doi: str | None = None,
+        url: str | None = None,
+        arxiv_id: str | None = None,
+        extra_fields: dict[str, str] | None = None
 ) -> str:
     """
     Build a complete BibTeX entry from the main publication details and optional
@@ -59,7 +60,7 @@ def build_bibtex_entry(
     key = make_bibkey(title, authors, year, fallback=re.sub(r"\W+", "", keyhint) or "entry")
     container_field = get_container_field(entry_type)
 
-    fields: Dict[str, Optional[str]] = {
+    fields: dict[str, str | None] = {
         "title": title or None,
         "author": format_author_field(authors),
         "year": str(year) if year else None,
@@ -88,20 +89,20 @@ def build_bibtex_entry(
 
 def create_scoring_function(
         title: str,
-        author_name: Optional[str],
-        year_hint: Optional[int],
+        author_name: str | None,
+        year_hint: int | None,
         title_getter: Callable[[Any], str],
         authors_getter: Callable[[Any], Any],
-        year_getter: Optional[Callable[[Any], Optional[int]]] = None,
-        author_match_fn: Optional[Callable] = None
+        year_getter: Callable[[Any], int | None] | None = None,
+        author_match_fn: Callable | None = None
 ) -> Callable[[Any], float]:
     """
     Create a scoring function that ranks search results against a target title,
     author, and year using the supplied accessors and matching logic.
     """
     # avoid circular imports
-    from .api_clients import _score_candidate_generic
-    from .text_utils import title_similarity, author_name_matches
+    from .clients.helpers import _score_candidate_generic
+    from .text_utils import author_name_matches, title_similarity
 
     if author_match_fn is None:
         author_match_fn = author_name_matches
@@ -143,8 +144,8 @@ def create_scoring_function(
 def determine_entry_type(
         obj: Any,
         type_field: str = "type",
-        publication_types_field: Optional[str] = None,
-        venue_hints: Optional[Dict[str, str]] = None
+        publication_types_field: str | None = None,
+        venue_hints: dict[str, str] | None = None
 ) -> str:
     """
     Guess whether a publication should be treated as a journal article,
@@ -230,6 +231,10 @@ def determine_entry_type(
                     "lecture notes in computer science",  # LNCS is a conference proceedings series
                 ]
                 if any(keyword in venue_lower for keyword in conference_keywords):
+                    return "inproceedings"
+                # Check against known conference venue names whose names
+                # don't contain obvious keywords like "conference"
+                if any(known in venue_lower for known in KNOWN_CONFERENCE_VENUES):
                     return "inproceedings"
 
         # check venue hints (e.g. if there's a journal field, probably an article)

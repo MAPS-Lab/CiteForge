@@ -1,40 +1,57 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import re
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any
 
 from slugify import slugify
 
-from .config import DEFAULT_DICTIONARY_FILE, BIBTEX_KEY_MAX_WORDS, BIBTEX_FILENAME_MAX_LENGTH
-from .id_utils import _norm_doi, extract_arxiv_eprint
-from .io_utils import safe_read_json, safe_write_json
-from .text_utils import strip_accents, has_placeholder, normalize_title, authors_overlap, extract_year_from_any
+from .cache import response_cache
+from .config import (
+    AUTHOR_NAME_SUFFIXES,
+    BIBTEX_FILENAME_MAX_LENGTH,
+    BIBTEX_KEY_MAX_WORDS,
+    CACHE_TTL_GEMINI_DAYS,
+    DEFAULT_DICTIONARY_FILE,
+    PREPRINT_DOI_PREFIXES,
+    PREPRINT_SERVERS,
+    SIM_DEDUP_COMPOSITE_THRESHOLD,
+    SIM_DEDUP_MULTI_SIGNAL_MIN,
+    SIM_FILE_DUPLICATE_THRESHOLD,
+)
+from .id_utils import _norm_doi, external_ids_match, extract_arxiv_eprint
+from .io_utils import safe_read_json
+from .text_utils import (
+    author_overlap_ratio,
+    authors_overlap,
+    compute_dedup_score,
+    extract_year_from_any,
+    has_placeholder,
+    normalize_title,
+    strip_accents,
+    title_is_truncated_match,
+    title_similarity,
+)
 
 
-def make_bibkey(title: str, authors: List[str], year: int, fallback: str = "entry") -> str:
+def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entry") -> str:
     """
     Build a compact BibTeX citation key using the first author's surname, the
     publication year, and the first word of the title, falling back to a generic
     label when needed.
     """
-    base = fallback
-    if authors:
-        last = re.sub(r"[^A-Za-z0-9]", "", authors[0].split()[-1]) if authors[0] else ""
-    else:
-        last = ""
+    last = re.sub(r"[^A-Za-z0-9]", "", authors[0].split()[-1]) if authors and authors[0] else ""
     word = re.sub(r"[^A-Za-z0-9]", "", (title.split()[:1] or [""])[0])
     y = str(year) if year else ""
     parts = [p for p in [last, y, word] if p]
-    if parts:
-        base = "".join(parts)
-    if not base:
-        base = fallback
-    base = re.sub(r"[^A-Za-z0-9_]+", "", base)
+    base = "".join(parts) if parts else fallback
+    base = re.sub(r"\W+", "", base)
     return base or fallback
 
 
-def build_minimal_bibtex(title: str, authors: List[str], year: int, keyhint: str) -> str:
+def build_minimal_bibtex(title: str, authors: list[str], year: int, keyhint: str) -> str:
     """
     Create a simple BibTeX @misc entry from a title, optional authors, and optional
     year so that even sparse metadata can be stored consistently.
@@ -51,18 +68,18 @@ def build_minimal_bibtex(title: str, authors: List[str], year: int, keyhint: str
     return "\n".join(lines) + "\n"
 
 
-def _parse_bibtex_head(bibtex: str) -> Optional[Dict[str, str]]:
+def _parse_bibtex_head(bibtex: str) -> dict[str, str] | None:
     """
     Read the opening line of a BibTeX entry and pull out the entry type and
     citation key if they follow the expected @type{key, pattern.
     """
-    m = re.search(r"(?is)@\s*([a-zA-Z]+)\s*\{\s*([^,\s]+)\s*,", bibtex)
+    m = re.search(r"@\s*([a-zA-Z]+)\s*\{\s*([^,\s]+)\s*,", bibtex)
     if not m:
         return None
     return {"type": m.group(1).strip(), "key": m.group(2).strip()}
 
 
-def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
+def _extract_balanced_braces(text: str, start: int) -> str | None:
     """
     Extract the text inside a balanced pair of braces starting at the given
     position, keeping track of nested braces so inner blocks are preserved
@@ -90,7 +107,7 @@ def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
     return None  # unbalanced
 
 
-def _assign_field_value(fields: Dict[str, str], field_name: str, full_value: str) -> None:
+def _assign_field_value(fields: dict[str, str], field_name: str, full_value: str) -> None:
     """
     Helper to assign a parsed value to fields based on whether the value is
     brace-wrapped, quoted, or plain text. Keeps logic in one place to avoid
@@ -98,7 +115,7 @@ def _assign_field_value(fields: Dict[str, str], field_name: str, full_value: str
     """
     if full_value.startswith('{'):
         val = _extract_balanced_braces(full_value, 0)
-        fields[field_name] = val.strip() if val else full_value.strip()
+        fields[field_name] = val.strip() if val is not None else full_value.strip().strip('{}')
     elif full_value.startswith('"'):
         m2 = re.match(r'^"([^"]*)"', full_value)
         fields[field_name] = m2.group(1).strip() if m2 else full_value.strip()
@@ -106,7 +123,7 @@ def _assign_field_value(fields: Dict[str, str], field_name: str, full_value: str
         fields[field_name] = full_value.strip()
 
 
-def parse_bibtex_to_dict(bibtex: str) -> Optional[Dict[str, Any]]:
+def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
     """
     Turn a BibTeX string into a dictionary that separates the entry type, key,
     and field values while handling nested braces and multi-line fields.
@@ -115,7 +132,7 @@ def parse_bibtex_to_dict(bibtex: str) -> Optional[Dict[str, Any]]:
     head = _parse_bibtex_head(bibtex)
     if not head:
         return None
-    fields: Dict[str, str] = {}
+    fields: dict[str, str] = {}
 
     # Check if this is a single-line entry by looking for the pattern
     # where fields are comma-separated all on one line after the entry key
@@ -131,7 +148,6 @@ def parse_bibtex_to_dict(bibtex: str) -> Optional[Dict[str, Any]]:
         fields_text = single_line_pattern.group(1).strip()
 
         # Split by commas while respecting brace nesting and quotes
-        current_pos = 0
         brace_depth = 0
         in_quote = False
         field_start = 0
@@ -196,7 +212,7 @@ def parse_bibtex_to_dict(bibtex: str) -> Optional[Dict[str, Any]]:
                     fields[current_field] = val.strip()
                     current_field = None
                     accumulator = []
-            elif rest.startswith('"') and rest.count('"') >= 2:
+            elif rest.startswith('"'):
                 # complete quoted value on one line
                 m2 = re.match(r'^"([^"]*)"', rest)
                 if m2:
@@ -227,7 +243,7 @@ def parse_bibtex_to_dict(bibtex: str) -> Optional[Dict[str, Any]]:
     return {"type": head["type"].lower(), "key": head["key"], "fields": fields}
 
 
-def bibtex_from_dict(entry: Dict[str, Any]) -> str:
+def bibtex_from_dict(entry: dict[str, Any]) -> str:
     """
     Format a dictionary-based BibTeX entry back into text, listing common
     citation fields first and writing remaining fields in a stable order.
@@ -332,7 +348,7 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
         # Handle tilde (non-breaking space in LaTeX) → regular space
         # But be careful not to replace tildes that are part of URLs
         # Only replace standalone ~ not preceded by http/ftp/etc
-        val = re.sub(r'(?<!:/)~', ' ', val)
+        val = re.sub(r'(?<![:/])~', ' ', val)
 
         # Handle dashes: --- → --, -- → - (for plain text, not BibTeX)
         # Actually, keep -- as - and --- as -- for readability
@@ -381,7 +397,7 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
 
         return val
 
-    def _sanitize_title(title_val: Optional[str]) -> Optional[str]:
+    def _sanitize_title(title_val: str | None) -> str | None:
         if title_val is None:
             return None
         t = str(title_val).strip()
@@ -393,7 +409,7 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
                 # Check if last two parts are the same (after stripping whitespace)
                 last_part = parts[-1].strip()
                 second_last_part = parts[-2].strip()
-                if last_part and last_part == second_last_part:
+                if last_part and last_part == second_last_part and len(last_part) > 15:
                     # Remove the duplicated last part
                     t = ':'.join(parts[:-1]).strip()
 
@@ -406,7 +422,7 @@ def bibtex_from_dict(entry: Dict[str, Any]) -> str:
 
     etype = (entry.get("type") or "misc").lower()
     key = entry.get("key") or "entry"
-    fields: Dict[str, str] = entry.get("fields") or {}
+    fields: dict[str, str] = entry.get("fields") or {}
     preferred = [
         "title", "author", "year",
         "journal", "booktitle", "howpublished", "publisher",
@@ -449,7 +465,7 @@ def sanitize_bibtex_remove_placeholders(bibtex: str) -> str:
     if not entry:
         return bibtex
     fields = entry["fields"]
-    clean: Dict[str, str] = {}
+    clean: dict[str, str] = {}
     for k, v in fields.items():
         if not has_placeholder(v):
             clean[k] = v
@@ -466,53 +482,54 @@ def _slugify(text: str) -> str:
     return slugify(text, lowercase=True)
 
 
-def _load_title_dictionary(dict_path: str = DEFAULT_DICTIONARY_FILE) -> Dict[str, str]:
-    """
-    Load the title dictionary from disk, returning a mapping of normalized
-    full titles to their short titles. Returns an empty dict if the dictionary
-    file does not exist or cannot be read.
-    """
-    # try relative to project root
+def _migrate_legacy_cache() -> None:
+    """One-time migration: import data/cache.json entries into ResponseCache, then delete the file."""
+    dict_path = DEFAULT_DICTIONARY_FILE
     if not os.path.isabs(dict_path):
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
         dict_path = os.path.join(project_root, dict_path)
+    if not os.path.exists(dict_path):
+        return
+    legacy = safe_read_json(dict_path, default={})
+    if not isinstance(legacy, dict) or not legacy:
+        return
+    for title_key, short_title in legacy.items():
+        if title_key and short_title:
+            response_cache.put("gemini", title_key, {"short_title": str(short_title)}, ttl_days=CACHE_TTL_GEMINI_DAYS)
+    with contextlib.suppress(OSError):
+        os.remove(dict_path)
 
-    result = safe_read_json(dict_path, default={})
-    return result if isinstance(result, dict) else {}
 
-
-def _save_title_dictionary(dictionary: Dict[str, str], dict_path: str = DEFAULT_DICTIONARY_FILE) -> None:
-    """
-    Save the title dictionary to disk, creating the parent directory if needed.
-    """
-    # try relative to project root
-    if not os.path.isabs(dict_path):
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-        dict_path = os.path.join(project_root, dict_path)
-
-    # safe_write_json will create parent directories and handle errors
-    safe_write_json(dict_path, dictionary, makedirs=True, indent=2)
+_LEGACY_MIGRATED = False
+_LEGACY_MIGRATION_LOCK = threading.Lock()
 
 
 def _short_title_for_key(
     title: str,
     max_words: int = BIBTEX_KEY_MAX_WORDS,
-    gemini_api_key: Optional[str] = None
+    gemini_api_key: str | None = None
 ) -> str:
     """
     Pick a few informative words from a title, skipping common stop words, and
     join them into a compact phrase that works well in keys or filenames.
 
     If a Gemini API key is provided, this function will:
-    1. Check the dictionary file for a previously generated short title (only for default max_words)
+    1. Check the ResponseCache for a previously generated short title (only for default max_words)
     2. If not found, use the Gemini API to generate a short title
     3. Fall back to the original algorithm if Gemini fails or no API key is provided
-    4. Save successful Gemini responses to the dictionary for future use
+    4. Save successful Gemini responses to the cache for future use
 
     IMPORTANT: Cache is only used when max_words equals the default value (BIBTEX_KEY_MAX_WORDS).
     When max_words is greater than default, we're disambiguating filename collisions,
     so we bypass the cache and use the algorithmic approach to get more title words.
     """
+    global _LEGACY_MIGRATED
+    if not _LEGACY_MIGRATED:
+        with _LEGACY_MIGRATION_LOCK:
+            if not _LEGACY_MIGRATED:
+                _migrate_legacy_cache()
+                _LEGACY_MIGRATED = True
+
     # normalize the title for cache lookup (consistent format)
     normalized_title = normalize_title(title)
 
@@ -522,25 +539,27 @@ def _short_title_for_key(
 
     # try to use Gemini if API key is available and we're using default max_words
     if gemini_api_key and use_cache:
-        # check dictionary first
-        dictionary = _load_title_dictionary()
-        if normalized_title in dictionary:
-            saved_short = dictionary[normalized_title]
-            if saved_short:  # ensure it's not empty
+        # check cache first
+        cached = response_cache.get("gemini", normalized_title)
+        if cached is not None:
+            saved_short = cached.get("short_title", "")
+            if saved_short:
                 # sanitize cached value (remove newlines, tabs, etc from old cache entries)
                 saved_short = saved_short.replace("\n", "").replace("\r", "").replace("\t", "")
-                if saved_short:  # ensure still not empty after sanitization
-                    return saved_short
+                if saved_short:
+                    return str(saved_short)
 
-        # not in dictionary, try Gemini API
+        # not in cache, try Gemini API
         # import here to avoid circular dependency
-        from .api_clients import gemini_generate_short_title
+        from .clients.utility_apis import gemini_generate_short_title
         gemini_result = gemini_generate_short_title(title, gemini_api_key, max_words)
 
         if gemini_result:
-            # save the result to dictionary (only for default max_words)
-            dictionary[normalized_title] = gemini_result
-            _save_title_dictionary(dictionary)
+            response_cache.put(
+                "gemini", normalized_title,
+                {"short_title": gemini_result},
+                ttl_days=CACHE_TTL_GEMINI_DAYS,
+            )
             return gemini_result
 
     # fallback to original algorithm if:
@@ -551,7 +570,7 @@ def _short_title_for_key(
     stop = {"a", "an", "the", "on", "for", "of", "and", "to", "in", "with", "using", "via", "from", "by", "at", "into",
             "through"}
     words = [w for w in re.split(r"[^A-Za-z0-9]+", title) if w]
-    picks: List[str] = []
+    picks: list[str] = []
     for w in words:
         if w.lower() in stop:
             continue
@@ -563,10 +582,13 @@ def _short_title_for_key(
     return "".join(w[:1].upper() + w[1:] for w in picks)
 
 
-def _first_author_lastname(authors_field: Optional[str]) -> Optional[str]:
+def _first_author_lastname(authors_field: str | None) -> str | None:
     """
     Derive the first author's last name from a BibTeX-style author field,
     handling both "First Last" and "Last, First" name formats.
+
+    Strips academic suffixes (Jr, Sr, II, III, etc.) so that names like
+    "Jose F. Rodrigues Jr" produce "rodrigues" instead of "jr".
     """
     if not authors_field:
         return None
@@ -579,12 +601,15 @@ def _first_author_lastname(authors_field: Optional[str]) -> Optional[str]:
         last = first.split(",")[0].strip()
     else:
         toks = first.split()
+        # Strip trailing suffixes (Jr, Sr, II, III, IV, V)
+        while len(toks) > 1 and toks[-1].rstrip('.').lower() in AUTHOR_NAME_SUFFIXES:
+            toks.pop()
         last = toks[-1] if toks else first
     last = re.sub(r"[^a-zA-Z0-9]", "", strip_accents(last)).lower()
     return last or None
 
 
-def build_standard_citekey(entry: Dict[str, Any], gemini_api_key: Optional[str] = None) -> Optional[str]:
+def build_standard_citekey(entry: dict[str, Any], gemini_api_key: str | None = None) -> str | None:
     """
     Build a human-readable citation key such as "Smith2024:MachineLearning" by
     combining the first author's name, the year, and key title words.
@@ -609,8 +634,8 @@ def build_standard_citekey(entry: Dict[str, Any], gemini_api_key: Optional[str] 
     return f"{last_cap}{y}:{short}"
 
 
-def short_filename_for_entry(entry: Dict[str, Any], gemini_api_key: Optional[str] = None,
-                             existing_files: Optional[set] = None, max_words: int = 2) -> str:
+def short_filename_for_entry(entry: dict[str, Any], gemini_api_key: str | None = None,
+                             existing_files: set | None = None, max_words: int = 2) -> str:
     """
     Construct a concise .bib filename from the first author's name, the year,
     and a shortened title so that exported files are easy to identify.
@@ -652,52 +677,99 @@ def short_filename_for_entry(entry: Dict[str, Any], gemini_api_key: Optional[str
     return f"{base}.bib"
 
 
-def _extract_year_int(year_str: Optional[str]) -> Optional[int]:
-    """
-    Search a string for a four-digit year and return it as an integer, or return None when no plausible year is present.
-    """
-    return extract_year_from_any(year_str, fallback=None)
+def _is_preprint_entry(fields: dict[str, Any]) -> bool:
+    """Check if a BibTeX entry looks like a preprint based on DOI prefix or journal name."""
+    doi = str(fields.get("doi") or "").lower()
+    if any(doi.startswith(p) for p in PREPRINT_DOI_PREFIXES):
+        return True
+    journal = str(fields.get("journal") or "").lower()
+    return any(ps in journal for ps in PREPRINT_SERVERS)
 
 
-def bibtex_entries_match_strict(entry_a: Dict[str, Any], entry_b: Dict[str, Any]) -> bool:
+def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]) -> bool:
     """
     Decide whether two BibTeX records refer to the same publication by comparing
     DOI or arXiv identifiers first and then falling back to title, year, and
     authors with fuzzy matching to handle formatting variations from different sources.
+
+    Uses a multi-signal composite score when title similarity alone is insufficient
+    (e.g., preprint/published pairs with rewritten titles).
     """
     if not entry_a or not entry_b:
         return False
     af = entry_a.get("fields") or {}
     bf = entry_b.get("fields") or {}
+
+    # Fast path 1: DOI match (exact)
+    # When DOIs differ but one is a preprint, fall through to multi-signal scoring
     a_doi = _norm_doi(af.get("doi"))
     b_doi = _norm_doi(bf.get("doi"))
     if a_doi and b_doi:
-        return a_doi == b_doi
+        if a_doi == b_doi:
+            return True
+        a_preprint_doi = any(a_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
+        b_preprint_doi = any(b_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
+        if not (a_preprint_doi or b_preprint_doi):
+            return False
+        # One DOI is a preprint — fall through to multi-signal scoring
+
+    # Fast path 2: arXiv eprint match (exact)
     a_ax = extract_arxiv_eprint(entry_a) or ""
     b_ax = extract_arxiv_eprint(entry_b) or ""
     if a_ax and b_ax:
         return a_ax == b_ax
 
-    # Fuzzy title matching to handle formatting variations between sources
+    # Fast path 3: External ID match (cluster_id, S2, OpenAlex)
     a_title = normalize_title(af.get("title"))
     b_title = normalize_title(bf.get("title"))
     if not a_title or not b_title:
         return False
-
-    # Use fuzzy title matching instead of exact equality
-    # High threshold (0.95) ensures very similar titles while allowing minor variations
-    from .text_utils import title_similarity
     title_sim = title_similarity(a_title, b_title)
-    if title_sim < 0.95:
+
+    if external_ids_match(af, bf) and title_sim >= SIM_DEDUP_MULTI_SIGNAL_MIN:
+        return True
+
+    # Fast path 4: High title similarity (backward-compatible original path)
+    if title_sim >= SIM_FILE_DUPLICATE_THRESHOLD:
+        a_year_int = extract_year_from_any(af.get("year"), fallback=None)
+        b_year_int = extract_year_from_any(bf.get("year"), fallback=None)
+        if a_year_int and b_year_int and abs(a_year_int - b_year_int) > 1:
+            return False
+        return authors_overlap(af.get("author"), bf.get("author"))
+
+    # Truncated title path: one title is a strict prefix of the other
+    # (Scholar truncation).  Requires author overlap + year within ±1
+    # to avoid matching unrelated papers with common title prefixes.
+    if title_is_truncated_match(af.get("title"), bf.get("title")):
+        a_year_int = extract_year_from_any(af.get("year"), fallback=None)
+        b_year_int = extract_year_from_any(bf.get("year"), fallback=None)
+        if a_year_int and b_year_int and abs(a_year_int - b_year_int) > 1:
+            return False
+        if authors_overlap(af.get("author"), bf.get("author")):
+            return True
+
+    # Multi-signal fallback for moderate title similarity
+    if title_sim < SIM_DEDUP_MULTI_SIGNAL_MIN:
         return False
 
-    # Extract and compare year integers for robust matching
-    a_year_int = _extract_year_int(af.get("year"))
-    b_year_int = _extract_year_int(bf.get("year"))
+    a_preprint = _is_preprint_entry(af)
+    b_preprint = _is_preprint_entry(bf)
 
-    # Allow 1 year difference to handle publication vs. online date discrepancies
-    if a_year_int and b_year_int and abs(a_year_int - b_year_int) > 1:
+    # Allow composite scoring for: preprint/published pairs, external ID matches,
+    # or very strong multi-author overlap with moderate title similarity.
+    # Require 2+ authors on each side to avoid single-author false positives.
+    from .text_utils import parse_authors_any
+    a_authors = parse_authors_any(af.get("author", ""))
+    b_authors = parse_authors_any(bf.get("author", ""))
+    author_overlap = author_overlap_ratio(af.get("author", ""), bf.get("author", ""))
+    high_author_match = (
+        author_overlap >= 0.9
+        and title_sim >= 0.6
+        and len(a_authors) >= 2
+        and len(b_authors) >= 2
+    )
+
+    if not (a_preprint ^ b_preprint) and not external_ids_match(af, bf) and not high_author_match:
         return False
 
-    # if years missing or close enough, check authors
-    return authors_overlap(af.get("author"), bf.get("author"))
+    return compute_dedup_score(af, bf) >= SIM_DEDUP_COMPOSITE_THRESHOLD

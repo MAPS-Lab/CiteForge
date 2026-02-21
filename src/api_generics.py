@@ -1,23 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
+from .cache import response_cache
+from .config import CACHE_TTL_SEARCH_DAYS, GENERIC_SERIES_NAMES, SIM_EXACT_PICK_THRESHOLD, SIM_THRESHOLD_TOLERANCE
 from .exceptions import ALL_API_ERRORS, FIELD_ACCESS_ERRORS
 from .http_utils import http_get_json, s2_http_get_json
+from .id_utils import find_arxiv_in_text, find_doi_in_text
 from .text_utils import (
-    build_url,
-    normalize_title,
     author_in_text,
     author_name_matches,
-    safe_get_field,
-    safe_get_nested,
+    build_url,
     extract_author_names,
     extract_year_from_any,
     has_placeholder,
+    normalize_title,
+    safe_get_field,
+    safe_get_nested,
 )
-from .id_utils import find_doi_in_text, find_arxiv_in_text
-from .config import SIM_EXACT_PICK_THRESHOLD
 
 
 @dataclass
@@ -31,11 +33,11 @@ class APISearchConfig:
 
     # Query parameters
     query_param_name: str = "query"
-    author_param_name: Optional[str] = None
-    additional_params: Dict[str, Any] = field(default_factory=dict)
+    author_param_name: str | None = None
+    additional_params: dict[str, Any] = field(default_factory=dict)
 
     # Response structure
-    result_path: List[str] = field(default_factory=lambda: ["results"])
+    result_path: list[str] = field(default_factory=lambda: ["results"])
     title_field: str = "title"
     author_field: str = "authors"
 
@@ -44,9 +46,9 @@ class APISearchConfig:
     requires_api_key: bool = False
 
     # Optional custom extractors
-    title_getter: Optional[Callable[[Dict[str, Any]], str]] = None
-    year_getter: Optional[Callable[[Dict[str, Any]], Optional[int]]] = None
-    authors_getter: Optional[Callable[[Dict[str, Any]], Any]] = None
+    title_getter: Callable[[dict[str, Any]], str] | None = None
+    year_getter: Callable[[dict[str, Any]], int | None] | None = None
+    authors_getter: Callable[[dict[str, Any]], Any] | None = None
 
 
 @dataclass
@@ -58,41 +60,85 @@ class APIFieldMapping:
     api_name: str
 
     # Core field mappings (list of possible field names, first match wins)
-    title_fields: List[str]
-    author_fields: List[str]
-    year_fields: List[str]
-    venue_fields: List[str]
+    title_fields: list[str]
+    author_fields: list[str]
+    year_fields: list[str]
+    venue_fields: list[str]
 
     # Identifier mappings
-    doi_fields: List[str] = field(default_factory=lambda: ["doi"])
-    url_fields: List[str] = field(default_factory=lambda: ["url"])
-    arxiv_fields: List[str] = field(default_factory=list)
-    pmid_fields: List[str] = field(default_factory=list)
+    doi_fields: list[str] = field(default_factory=lambda: ["doi"])
+    url_fields: list[str] = field(default_factory=lambda: ["url"])
+    arxiv_fields: list[str] = field(default_factory=list)
+    pmid_fields: list[str] = field(default_factory=list)
 
     # Extra field mappings (source_field -> bibtex_field)
-    extra_field_mappings: Dict[str, str] = field(default_factory=dict)
+    extra_field_mappings: dict[str, str] = field(default_factory=dict)
 
     # Author extraction config
-    author_name_key: Optional[str] = "name"
-    author_given_key: Optional[str] = None
-    author_family_key: Optional[str] = None
+    author_name_key: str | None = "name"
+    author_given_key: str | None = None
+    author_family_key: str | None = None
 
     # Entry type config
     entry_type_field: str = "type"
-    entry_type_list_field: Optional[str] = None
-    venue_hints: Dict[str, str] = field(default_factory=dict)
+    entry_type_list_field: str | None = None
+    venue_hints: dict[str, str] = field(default_factory=dict)
 
     # Custom extractors for complex cases
-    custom_author_extractor: Optional[Callable[[Dict[str, Any]], List[str]]] = None
-    custom_year_extractor: Optional[Callable[[Dict[str, Any]], int]] = None
+    custom_author_extractor: Callable[[dict[str, Any]], list[str]] | None = None
+    custom_year_extractor: Callable[[dict[str, Any]], int] | None = None
+
+
+def _build_scoring_function(
+    title: str,
+    author_name: str | None,
+    config: APISearchConfig,
+) -> Callable[[Any], float]:
+    """Build getter functions from an APISearchConfig and return a scoring function.
+
+    Resolves custom getters (title_getter, authors_getter, year_getter) from the
+    config, falling back to default field-based accessors, and composes them into
+    a single scoring function via ``create_scoring_function``.
+    """
+    from .bibtex_build import create_scoring_function
+
+    title_getter: Callable[[dict[str, Any]], str]
+    if config.title_getter:
+        title_getter = config.title_getter
+    else:
+        def title_getter(c: dict[str, Any]) -> str:
+            return safe_get_field(c, config.title_field) or ""
+
+    authors_getter: Callable[[dict[str, Any]], Any]
+    if config.authors_getter:
+        authors_getter = config.authors_getter
+    else:
+        def authors_getter(c: dict[str, Any]) -> Any:
+            return c.get(config.author_field) or []
+
+    year_getter: Callable[[dict[str, Any]], int | None]
+    if config.year_getter:
+        year_getter = config.year_getter
+    else:
+        def year_getter(c: dict[str, Any]) -> int | None:
+            return c.get("year")
+
+    return create_scoring_function(
+        title=title,
+        author_name=author_name,
+        year_hint=None,
+        title_getter=title_getter,
+        authors_getter=authors_getter,
+        year_getter=year_getter,
+    )
 
 
 def search_api_generic(
     title: str,
-    author_name: Optional[str],
+    author_name: str | None,
     config: APISearchConfig,
-    api_key: Optional[str] = None
-) -> Optional[Dict[str, Any]]:
+    api_key: str | None = None
+) -> dict[str, Any] | None:
     """
     Search for academic publications across different API providers using a unified
     interface with a two-pass matching strategy that attempts exact title matches first
@@ -100,6 +146,12 @@ def search_api_generic(
     """
     if not title:
         return None
+
+    # Check response cache
+    cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
+    cached = response_cache.get(config.api_name, cache_key)
+    if cached is not None:
+        return cached if cached else None
 
     # Build query parameters
     params = {config.query_param_name: title, **config.additional_params}
@@ -134,59 +186,35 @@ def search_api_generic(
         if normalize_title(item_title) == target_norm:
             # Check author if provided
             if not author_name:
-                return item
+                result = dict(item)
+                response_cache.put(config.api_name, cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
+                return result
 
             # Use custom getter if provided
-            if config.authors_getter:
-                item_authors = config.authors_getter(item)
-            else:
-                item_authors = item.get(config.author_field)
+            item_authors = config.authors_getter(item) if config.authors_getter else item.get(config.author_field)
 
             if author_name_matches(author_name, item_authors) or author_in_text(author_name, item_authors):
-                return item
+                result = dict(item)
+                response_cache.put(config.api_name, cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
+                return result
 
     # Fuzzy match using scoring function
-    from .bibtex_build import create_scoring_function
-    from .api_clients import _best_item_by_score
+    from .clients.helpers import _best_item_by_score
 
-    # Build getters for scoring
-    if config.title_getter:
-        title_getter = config.title_getter
-    else:
-        def title_getter(c):
-            return safe_get_field(c, config.title_field) or ""
-
-    if config.authors_getter:
-        authors_getter = config.authors_getter
-    else:
-        def authors_getter(c):
-            return c.get(config.author_field) or []
-
-    if config.year_getter:
-        year_getter = config.year_getter
-    else:
-        def year_getter(c):
-            return c.get("year")
-
-    score_fn = create_scoring_function(
-        title=title,
-        author_name=author_name,
-        year_hint=None,
-        title_getter=title_getter,
-        authors_getter=authors_getter,
-        year_getter=year_getter
-    )
-
-    return _best_item_by_score(results, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
+    score_fn = _build_scoring_function(title, author_name, config)
+    best = _best_item_by_score(results, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
+    if best is not None:
+        response_cache.put(config.api_name, cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
+    return best
 
 
 def search_api_generic_multiple(
     title: str,
-    author_name: Optional[str],
+    author_name: str | None,
     config: APISearchConfig,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     max_results: int = 5
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Search for academic publications and return multiple candidates sorted by relevance.
 
@@ -195,6 +223,13 @@ def search_api_generic_multiple(
     """
     if not title:
         return []
+
+    # Check response cache
+    cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
+    cached = response_cache.get(config.api_name, cache_key)
+    if cached is not None:
+        cached_list: list[dict[str, Any]] = cached.get("results", [])
+        return cached_list
 
     # Build query parameters
     params = {config.query_param_name: title, **config.additional_params}
@@ -217,41 +252,13 @@ def search_api_generic_multiple(
     if not results:
         return []
 
-    # Build getters for scoring
-    if config.title_getter:
-        title_getter = config.title_getter
-    else:
-        def title_getter(c):
-            return safe_get_field(c, config.title_field) or ""
-
-    if config.authors_getter:
-        authors_getter = config.authors_getter
-    else:
-        def authors_getter(c):
-            return c.get(config.author_field) or []
-
-    if config.year_getter:
-        year_getter = config.year_getter
-    else:
-        def year_getter(c):
-            return c.get("year")
-
     # Score all results
-    from .bibtex_build import create_scoring_function
-
-    score_fn = create_scoring_function(
-        title=title,
-        author_name=author_name,
-        year_hint=None,
-        title_getter=title_getter,
-        authors_getter=authors_getter,
-        year_getter=year_getter
-    )
+    score_fn = _build_scoring_function(title, author_name, config)
 
     scored_results = []
     # Use a slightly lower threshold to account for floating point precision
     # If score is within 0.01 of threshold, we accept it
-    effective_threshold = SIM_EXACT_PICK_THRESHOLD - 0.01
+    effective_threshold = SIM_EXACT_PICK_THRESHOLD - SIM_THRESHOLD_TOLERANCE
 
     for item in results:
         try:
@@ -264,14 +271,18 @@ def search_api_generic_multiple(
 
     # Sort by score (descending) and return top N
     scored_results.sort(key=lambda x: x[0], reverse=True)
-    return [item for score, item in scored_results[:max_results]]
+    top_results = [item for score, item in scored_results[:max_results]]
+    if top_results:
+        cached_results = {"results": [dict(r) for r in top_results]}
+        response_cache.put(config.api_name, cache_key, cached_results, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    return top_results
 
 
 def build_bibtex_from_response(
-    response: Dict[str, Any],
+    response: dict[str, Any],
     keyhint: str,
     mapping: APIFieldMapping
-) -> Optional[str]:
+) -> str | None:
     """
     Build a BibTeX entry from an API response using configured field mappings to handle
     diverse field naming conventions and data structures across different academic APIs.
@@ -299,7 +310,7 @@ def build_bibtex_from_response(
 
         authors = extract_author_names(
             author_data,
-            name_key=mapping.author_name_key,
+            name_key=mapping.author_name_key or "name",
             given_key=mapping.author_given_key,
             family_key=mapping.author_family_key
         )
@@ -327,6 +338,14 @@ def build_bibtex_from_response(
         venue = safe_get_field(response, field_name)
         if venue:
             break
+
+    # For Crossref: prefer event name over generic series names (LNCS etc.)
+    if mapping.api_name == "crossref" and venue and venue.lower().strip() in GENERIC_SERIES_NAMES:
+        event = response.get("event")
+        if isinstance(event, dict):
+            event_name = (event.get("name") or "").strip()
+            if event_name:
+                venue = event_name
 
     # Extract identifiers
     doi = None

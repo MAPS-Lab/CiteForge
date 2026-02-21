@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
 import threading
-from typing import Optional
-
+from collections.abc import MutableMapping
+from typing import Any, ClassVar
 
 # Define custom log levels for enhanced workflow visibility
 STEP_LEVEL = 25  # Between INFO (20) and WARNING (30)
@@ -75,7 +76,7 @@ class ColoredFormatter(logging.Formatter):
     RESET = "\033[0m"
 
     # Level colors
-    LEVEL_COLORS = {
+    LEVEL_COLORS: ClassVar[dict[str, str]] = {
         "DEBUG": CYAN,
         "INFO": WHITE,
         "STEP": BOLD_CYAN,
@@ -86,7 +87,7 @@ class ColoredFormatter(logging.Formatter):
     }
 
     # Source colors (background or distinct foreground)
-    SOURCE_COLORS = {
+    SOURCE_COLORS: ClassVar[dict[str, str]] = {
         LogSource.SCHOLAR: BLUE,
         LogSource.DBLP: CYAN,
         LogSource.S2: MAGENTA,
@@ -101,7 +102,7 @@ class ColoredFormatter(logging.Formatter):
     }
 
     # Category colors
-    CATEGORY_COLORS = {
+    CATEGORY_COLORS: ClassVar[dict[str, str]] = {
         LogCategory.AUTHOR: BOLD_MAGENTA,
         LogCategory.ARTICLE: BOLD_BLUE,
         LogCategory.FETCH: CYAN,
@@ -127,18 +128,18 @@ class ColoredFormatter(logging.Formatter):
         """
         # Save original message to restore later
         original_msg = record.msg
-        
+
         # Extract source and category if present
         source = getattr(record, "source", None)
         category = getattr(record, "category", None)
-        
+
         if self.use_color:
             # Colorize level name
             if record.levelname in self.LEVEL_COLORS:
                 record.levelname = f"{self.LEVEL_COLORS[record.levelname]}{record.levelname}{self.RESET}"
-            
+
             parts = []
-            
+
             # Add colored source tag
             if source:
                 if source in self.SOURCE_COLORS:
@@ -146,7 +147,7 @@ class ColoredFormatter(logging.Formatter):
                     parts.append(f"{source_color}[{source}]{self.RESET}")
                 else:
                     parts.append(f"[{source}]")
-            
+
             # Add colored category tag
             if category:
                 if category in self.CATEGORY_COLORS:
@@ -154,16 +155,16 @@ class ColoredFormatter(logging.Formatter):
                     parts.append(f"{cat_color}[{category}]{self.RESET}")
                 else:
                     parts.append(f"[{category}]")
-            
+
             # Combine parts with message
             if parts:
                 record.msg = f"{' '.join(parts)} {record.msg}"
 
         formatted = super().format(record)
-        
+
         # Restore original message
         record.msg = original_msg
-        
+
         return formatted
 
 
@@ -172,20 +173,20 @@ class CategoryAdapter(logging.LoggerAdapter):
     Adapter that adds category support to log messages.
     """
 
-    def process(self, msg: str, kwargs: dict) -> tuple[str, dict]:
+    def process(self, msg: str, kwargs: MutableMapping[str, Any]) -> tuple[str, MutableMapping[str, Any]]:
         """
         Pass source and category to extra dict.
         """
         extra = kwargs.get("extra", {})
-        
+
         source = kwargs.pop("source", None)
         if source:
             extra["source"] = source
-            
+
         category = kwargs.pop("category", None)
         if category:
             extra["category"] = category
-            
+
         kwargs["extra"] = extra
         return msg, kwargs
 
@@ -206,7 +207,7 @@ class ThreadLocalFileHandler(logging.Handler):
         super().__init__()
         self._tls = thread_local_storage
 
-    def emit(self, record: logging.LogRecord):
+    def emit(self, record: logging.LogRecord) -> None:
         handler = getattr(self._tls, "handler", None)
         if handler:
             handler.emit(record)
@@ -221,7 +222,7 @@ class Logger:
 
     LOG_FORMAT = "%(asctime)s [%(levelname)-8s] %(message)s"
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initialize the logger with console and optional file handlers.
         """
@@ -246,7 +247,7 @@ class Logger:
 
         # Thread-local storage for file handlers
         self._thread_local = threading.local()
-        
+
         # Thread-local delegating handler
         self._tl_handler = ThreadLocalFileHandler(self._thread_local)
         self._logger.addHandler(self._tl_handler)
@@ -255,29 +256,27 @@ class Logger:
 
         self._add_custom_methods()
 
-    def _add_custom_methods(self):
+    def _add_custom_methods(self) -> None:
         """
         Add custom logging methods for STEP and SUCCESS levels.
         """
-        def step_method(msg: str, *args, **kwargs):
+        def step_method(msg: str, *args: Any, **kwargs: Any) -> None:
             if self._logger.isEnabledFor(STEP_LEVEL):
                 self._logger._log(STEP_LEVEL, msg, args, **kwargs)
 
-        def success_method(msg: str, *args, **kwargs):
+        def success_method(msg: str, *args: Any, **kwargs: Any) -> None:
             if self._logger.isEnabledFor(SUCCESS_LEVEL):
                 self._logger._log(SUCCESS_LEVEL, msg, args, **kwargs)
 
-        self._logger.step = step_method
-        self._logger.success = success_method
+        self._logger.step = step_method  # type: ignore[attr-defined]
+        self._logger.success = success_method  # type: ignore[attr-defined]
 
-    def set_log_file(self, path: str):
+    def set_log_file(self, path: str) -> None:
         """
         Start mirroring all log messages to the specified file for the current thread.
         """
-        try:
+        with contextlib.suppress(OSError):
             os.makedirs(os.path.dirname(path), exist_ok=True)
-        except OSError:
-            pass
 
         try:
             # Close existing handler for this thread if any
@@ -298,7 +297,7 @@ class Logger:
             self._thread_local.log_file_path = None
             self._logger.error(f"Failed to open log file {path}: {e}")
 
-    def close(self):
+    def close(self) -> None:
         """
         Stop logging to file for the current thread.
         """
@@ -307,44 +306,44 @@ class Logger:
             self._thread_local.handler = None
             self._thread_local.log_file_path = None
 
-    def step(self, msg: str, source: Optional[str] = None, category: Optional[str] = None):
+    def step(self, msg: str, source: str | None = None, category: str | None = None) -> None:
         """
         Log a top-level workflow step.
         """
         self._adapter.log(STEP_LEVEL, msg, source=source, category=category)
 
-    def substep(self, msg: str, source: Optional[str] = None, category: Optional[str] = None):
+    def substep(self, msg: str, source: str | None = None, category: str | None = None) -> None:
         """
         Log a nested step (deprecated, maps to step with category).
         """
         self._adapter.log(STEP_LEVEL, msg, source=source, category=category)
 
-    def info(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
+    def info(self, msg: str, *, source: str | None = None, category: str | None = None) -> None:
         """
         Log informational messages.
         """
         self._adapter.info(msg, source=source, category=category)
 
-    def warn(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
+    def warn(self, msg: str, *, source: str | None = None, category: str | None = None) -> None:
         """
         Log warnings.
         """
         self._adapter.warning(msg, source=source, category=category)
 
-    def error(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
+    def error(self, msg: str, *, source: str | None = None, category: str | None = None) -> None:
         """
         Log errors.
         """
         self._adapter.error(msg, source=source, category=category)
 
-    def success(self, msg: str, *, source: Optional[str] = None, category: Optional[str] = None):
+    def success(self, msg: str, *, source: str | None = None, category: str | None = None) -> None:
         """
         Log successful operations.
         """
         self._adapter.log(SUCCESS_LEVEL, msg, source=source, category=category)
 
     @property
-    def log_file_path(self) -> Optional[str]:
+    def log_file_path(self) -> str | None:
         """
         Get the log file path for the current thread.
         """

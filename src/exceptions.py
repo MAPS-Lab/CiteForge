@@ -5,26 +5,27 @@ import json
 import socket
 import urllib.error
 import xml.etree.ElementTree as ElementTree
+
 import requests
 
 __all__ = [
-    "HTTP_ERRORS",
-    "TIMEOUT_ERRORS",
-    "NETWORK_ERRORS",
-    "DECODE_ERRORS",
-    "PARSE_ERRORS",
-    "ALL_FETCH_ERRORS",
     "ALL_API_ERRORS",
-    "FILE_IO_ERRORS",
-    "NUMERIC_ERRORS",
-    "JSON_ERRORS",
-    "FILE_READ_ERRORS",
+    "ALL_FETCH_ERRORS",
     "API_WITH_OS_ERRORS",
-    "FULL_OPERATION_ERRORS",
-    "XML_PARSE_ERRORS",
     "CSV_ERRORS",
+    "DECODE_ERRORS",
     "FIELD_ACCESS_ERRORS",
+    "FILE_IO_ERRORS",
+    "FILE_READ_ERRORS",
     "FILE_WRITE_ERRORS",
+    "FULL_OPERATION_ERRORS",
+    "HTTP_ERRORS",
+    "JSON_ERRORS",
+    "NETWORK_ERRORS",
+    "NUMERIC_ERRORS",
+    "PARSE_ERRORS",
+    "TIMEOUT_ERRORS",
+    "XML_PARSE_ERRORS",
 ]
 
 # errors raised by urllib when an HTTP request fails or a URL cannot be reached
@@ -64,7 +65,7 @@ JSON_ERRORS = (json.JSONDecodeError, ValueError, TypeError)
 FILE_READ_ERRORS = FILE_IO_ERRORS + DECODE_ERRORS + PARSE_ERRORS
 
 # API errors plus OS-level failures like permission issues or disk full
-API_WITH_OS_ERRORS = ALL_API_ERRORS + (OSError,)
+API_WITH_OS_ERRORS = (*ALL_API_ERRORS, OSError)
 
 # comprehensive error set for end-to-end operations: fetch from API, parse response, and handle OS errors
 FULL_OPERATION_ERRORS = ALL_API_ERRORS + PARSE_ERRORS + (OSError, ValueError)

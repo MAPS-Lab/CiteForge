@@ -1,49 +1,42 @@
-# CiteForge
+<h1 align="center">CiteForge</h1>
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml/badge.svg)](https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml)
+<p align="center">
+  <a href="https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml"><img src="https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python 3.10+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
+</p>
 
-CiteForge collects publication metadata from multiple academic APIs, merges them based on source reliability, and outputs BibTeX files.
+---
 
-## Features
+## Why?
 
-- Fetches data from 12+ academic APIs (Google Scholar, Crossref, arXiv, PubMed, Semantic Scholar, etc.)
-- Merges metadata using a trust hierarchy (DOI resolvers > curated databases > web scrapes)
-- Detects duplicates via DOI matching, title similarity, and author overlap
-- Processes multiple authors in parallel
-- Cleans LaTeX formatting (`\textit{}`, `\textbf{}`) and normalizes Unicode to ASCII
-- Caches results to reduce API calls on subsequent runs
-- Optional Gemini integration for generating citation key titles
+Researchers routinely maintain BibTeX files for their publications and collaborators, but keeping citation metadata accurate and complete is tedious. Google Scholar entries are often truncated, missing DOIs, or formatted inconsistently. Manually cross-referencing Crossref, Semantic Scholar, arXiv, PubMed, and other databases to fill in gaps is time-consuming and error-prone, especially for authors with large publication records spanning multiple venues and disciplines.
 
-## Installation
+## What?
+
+CiteForge automates this process by querying 13 academic APIs, deduplicating results through fuzzy title and author matching, and merging metadata according to a trust hierarchy that prioritizes authoritative sources (DOI resolvers, PubMed) over less reliable ones (web-scraped Scholar pages). The output is a set of clean, enriched BibTeX files organized by author, ready for use in LaTeX workflows.
+
+## How?
+
+Given a CSV of authors with their Google Scholar and DBLP identifiers, CiteForge fetches each author's publications and processes every article through a four-phase enrichment pipeline: DOI validation, parallel API enrichment, late DOI discovery, and trust-based metadata merging. Authors are processed concurrently using a thread pool, while API responses are cached locally to minimize redundant requests. The result is a per-author directory of BibTeX files alongside a CSV summary reporting enrichment coverage.
+
+## Quick Start
+
+You'll need Python 3.10+ and a [SerpAPI](https://serpapi.com/) key for Google Scholar access.
 
 ```bash
-git clone https://github.com/gabrielspadon/CiteForge.git
-cd CiteForge
+git clone https://github.com/gabrielspadon/CiteForge.git && cd CiteForge
 pip install -e .
 ```
 
-For development:
-
-```bash
-pip install -e .[dev]
-```
-
-## Usage
-
-### API Keys
-
-Create a `keys/` directory with your API keys:
+Set up API keys:
 
 ```bash
 mkdir -p keys
 echo "your_serpapi_key" > keys/SerpAPI.key          # Required
-echo "your_semantic_key" > keys/Semantic.key        # Optional
+echo "your_semantic_key" > keys/Semantic.key        # Recommended
 echo "your_gemini_key" > keys/Gemini.key            # Optional
 ```
-
-### Input
 
 Create `data/input.csv` with authors to process:
 
@@ -52,101 +45,78 @@ Name,Scholar Link,DBLP Link
 John Smith,https://scholar.google.com/citations?user=ABC123,https://dblp.org/pid/smith/john
 ```
 
-### Run
+Run:
 
 ```bash
 python3 main.py
 ```
 
-### Output
+Output is organized by author:
 
 ```
 output/
-├── run.log                       # Execution log
-├── summary.csv                   # Enrichment report
+├── run.log
+├── summary.csv
 └── John_Smith (ABC123)/
     ├── author.log
     ├── Smith2024-DeepLearning.bib
     └── ...
 ```
 
-## Configuration
-
-Edit `src/config.py` to adjust settings:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `CONTRIBUTION_WINDOW_YEARS` | 5 | Years of publications to fetch |
-| `PUBLICATIONS_PER_YEAR` | 50 | Target publications per year |
-| `SIM_MERGE_DUPLICATE_THRESHOLD` | 0.9 | Title similarity threshold for duplicates |
-| `REQUEST_DELAY_BETWEEN_ARTICLES` | 0.5s | Delay between API requests |
-| `SKIP_SERPAPI_FOR_EXISTING_FILES` | True | Reuse existing files as seeds |
-
 ## Data Sources
-
-### APIs Used
 
 | Source | API Key |
 |--------|---------|
-| Google Scholar (via SerpAPI) | Required |
+| Google Scholar (SerpAPI) | Required |
 | Semantic Scholar | Recommended |
+| Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DataCite, ORCID, DBLP, DOI resolver | None |
 | OpenReview | Optional |
-| Google Gemini | Optional |
+| Google Gemini (citation key generation) | Optional |
 
-### Trust Hierarchy
+When merging, fields are prioritized by source reliability: DOI resolvers (CSL-JSON, BibTeX) > curated databases (DataCite, PubMed, Europe PMC) > broad registries (Crossref, OpenAlex, Semantic Scholar) > author-verified (ORCID) > community platforms (OpenReview, arXiv) > web-scraped (Scholar).
 
-When merging, sources are prioritized in this order:
+## Configuration
 
-1. CSL-JSON via DOI
-2. BibTeX via DOI
-3. DataCite
-4. PubMed
-5. Europe PMC
-6. Crossref
-7. OpenAlex
-8. Semantic Scholar
-9. ORCID
-10. OpenReview
-11. arXiv
-12. Scholar Page Metadata
-13. Scholar Baseline
+All parameters live in `src/config.py`:
 
-## Architecture
-
-### Pipeline
-
-Each article goes through four phases:
-
-1. **Early DOI Validation** - Validate DOI from baseline metadata
-2. **API Enrichment** - Query academic APIs and validate matches
-3. **Late DOI Discovery** - Find DOIs from matched sources
-4. **Merge & Save** - Apply trust hierarchy and write BibTeX
-
-### Parallel Processing
-
-Authors are processed concurrently using a thread pool (default: 12 workers). Each author has isolated logging.
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `CONTRIBUTION_WINDOW_YEARS` | `5` | Years of publications to fetch |
+| `PUBLICATIONS_PER_YEAR` | `50` | Target publications per year |
+| `SIM_MERGE_DUPLICATE_THRESHOLD` | `0.9` | Title similarity for deduplication |
+| `REQUEST_DELAY_BETWEEN_ARTICLES` | `0.5` | Delay between API requests (seconds) |
+| `SKIP_SERPAPI_FOR_EXISTING_FILES` | `True` | Reuse existing BibTeX files as seeds |
+| `CACHE_ENABLED` | `True` | Enable local API response caching |
 
 ## Testing
 
 ```bash
-# Run all tests
+pip install -e .[dev]
 pytest
-
-# Run specific modules
-pytest tests/test_core.py
-pytest tests/test_apis.py
-pytest tests/test_pipeline.py
 ```
 
-The test suite includes 60+ tests covering BibTeX parsing, LaTeX stripping, Unicode normalization, duplicate detection, and merge policies.
+Integration tests that require API keys are automatically skipped when keys are unavailable.
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Run tests (`pytest`)
+3. Run quality gates: `ruff check .`, `mypy .`, `pytest`
 4. Submit a pull request
+
+## Citation
+
+If you use CiteForge in your research, please cite it:
+
+```bibtex
+@software{spadon_citeforge,
+  author    = {Spadon, Gabriel},
+  title     = {CiteForge},
+  url       = {https://github.com/gabrielspadon/CiteForge},
+  license   = {MIT}
+}
+```
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details.
