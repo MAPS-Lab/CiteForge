@@ -130,6 +130,7 @@ All parameters live in [`src/config.py`](src/config.py):
 | `SCHOLAR_BROWSER_HEADLESS` | True | Run headless browser without GUI |
 | `SCHOLAR_BROWSER_MIN_DELAY` | 2.0s | Minimum delay between Scholar page loads |
 | `SCHOLAR_BROWSER_MAX_DELAY` | 5.0s | Maximum delay between Scholar page loads |
+| `SCHOLAR_BROWSER_CIRCUIT_THRESHOLD` | 10 | Consecutive blocks before switching to SerpAPI-only |
 
 ---
 
@@ -140,7 +141,7 @@ pip install -e .[dev]
 pytest tests/ -v --tb=short
 ```
 
-158 tests across 10 modules. Integration tests that require API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
+171 tests across 10 modules. Integration tests that require API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
 ---
 

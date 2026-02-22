@@ -22,7 +22,7 @@ from ..config import (
 )
 from ..exceptions import ScholarBrowserBlockedError
 
-_log = logging.getLogger("citeforge.browser")
+_log = logging.getLogger("CiteForge.browser")
 
 _SCHOLAR_AUTHOR_URL = "https://scholar.google.com/citations"
 _SCHOLAR_SEARCH_URL = "https://scholar.google.com/scholar"

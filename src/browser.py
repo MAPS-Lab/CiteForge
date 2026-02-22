@@ -7,7 +7,7 @@ from typing import Any
 
 from .config import SCHOLAR_BROWSER_HEADLESS
 
-_log = logging.getLogger("citeforge.browser")
+_log = logging.getLogger("CiteForge.browser")
 
 # Graceful import: nodriver may not be installed
 try:

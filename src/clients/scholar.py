@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 import urllib.parse
 from typing import Any
 
@@ -10,6 +12,9 @@ from ..browser import NODRIVER_AVAILABLE, ScholarBrowserLoop
 from ..cache import response_cache
 from ..config import (
     CACHE_TTL_SEARCH_DAYS,
+    SCHOLAR_BROWSER_BACKOFF_BASE,
+    SCHOLAR_BROWSER_BACKOFF_CAP,
+    SCHOLAR_BROWSER_CIRCUIT_THRESHOLD,
     SERPAPI_BASE,
     SIM_AUTHOR_BONUS,
     SIM_MERGE_DUPLICATE_THRESHOLD,
@@ -44,9 +49,14 @@ from .scholar_browser import (
     browser_search_scholar,
 )
 
-_log = logging.getLogger("citeforge.scholar")
+_log = logging.getLogger("CiteForge.scholar")
 
 _ESSENTIAL_RESULT_KEYS = ("organic_results", "results")
+
+# Circuit breaker state: stop trying the browser after repeated blocks
+_circuit_lock = threading.Lock()
+_browser_consecutive_errors = 0
+_browser_circuit_open = False
 
 
 def _first_author_sortkey(authors: Any) -> str:
@@ -250,13 +260,32 @@ def _serpapi_fetch_bibtex_from_cite(api_key: str, cite_url: str) -> str:
 
 
 def _run_browser_coro(coro_factory: Any, context: str) -> Any | None:
-    """Run a browser coroutine, returning None on failure and logging a warning.
+    """Run a browser coroutine with circuit breaker and back-off.
 
     ``coro_factory`` receives the browser instance and returns a coroutine.
     ``context`` is used in log messages to identify the operation.
+
+    After ``SCHOLAR_BROWSER_CIRCUIT_THRESHOLD`` consecutive errors the circuit
+    opens and all subsequent calls return ``None`` immediately (SerpAPI-only
+    mode for the rest of the session).  Each retry before that uses a linear
+    back-off capped at ``SCHOLAR_BROWSER_BACKOFF_CAP`` seconds.
     """
+    global _browser_consecutive_errors, _browser_circuit_open
+
     if not NODRIVER_AVAILABLE:
         return None
+
+    with _circuit_lock:
+        if _browser_circuit_open:
+            return None
+        errors = _browser_consecutive_errors
+
+    # Back-off: wait before retrying after prior errors
+    if errors > 0:
+        delay = min(SCHOLAR_BROWSER_BACKOFF_BASE * errors, SCHOLAR_BROWSER_BACKOFF_CAP)
+        _log.info("Browser back-off: %.1fs (attempt after %d error(s))", delay, errors)
+        time.sleep(delay)
+
     try:
         loop = ScholarBrowserLoop()
 
@@ -264,11 +293,48 @@ def _run_browser_coro(coro_factory: Any, context: str) -> Any | None:
             browser = await loop.get_browser()
             return await coro_factory(browser)
 
-        return loop.run(_wrapped())
+        result = loop.run(_wrapped())
+
+        # Success: reset error counter
+        with _circuit_lock:
+            if _browser_consecutive_errors > 0:
+                _log.info("Browser recovered after %d error(s)", _browser_consecutive_errors)
+            _browser_consecutive_errors = 0
+
+        return result
+
     except ScholarBrowserBlockedError as e:
-        _log.warning("Browser blocked (%s): %s -- falling back to SerpAPI", context, e)
+        with _circuit_lock:
+            _browser_consecutive_errors += 1
+            count = _browser_consecutive_errors
+            if count >= SCHOLAR_BROWSER_CIRCUIT_THRESHOLD:
+                _browser_circuit_open = True
+                _log.warning(
+                    "Circuit breaker OPEN after %d consecutive blocks -- switching to SerpAPI-only",
+                    count,
+                )
+            else:
+                _log.warning(
+                    "Browser blocked (%s): %s [%d/%d before circuit opens]",
+                    context, e, count, SCHOLAR_BROWSER_CIRCUIT_THRESHOLD,
+                )
+
     except Exception as e:
-        _log.warning("Browser error (%s): %s -- falling back to SerpAPI", context, e)
+        with _circuit_lock:
+            _browser_consecutive_errors += 1
+            count = _browser_consecutive_errors
+            if count >= SCHOLAR_BROWSER_CIRCUIT_THRESHOLD:
+                _browser_circuit_open = True
+                _log.warning(
+                    "Circuit breaker OPEN after %d consecutive errors -- switching to SerpAPI-only",
+                    count,
+                )
+            else:
+                _log.warning(
+                    "Browser error (%s): %s [%d/%d before circuit opens]",
+                    context, e, count, SCHOLAR_BROWSER_CIRCUIT_THRESHOLD,
+                )
+
     return None
 
 

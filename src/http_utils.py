@@ -114,7 +114,7 @@ def handle_api_errors(default_return: Any = None) -> Callable[[Callable[..., T]]
             try:
                 return func(*args, **kwargs)
             except ALL_API_ERRORS as e:
-                logging.getLogger("citeforge").debug(
+                logging.getLogger("CiteForge.http").debug(
                     "API error in %s: %s", func.__qualname__, e
                 )
                 return default_return

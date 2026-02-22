@@ -246,3 +246,6 @@ SCHOLAR_BROWSER_HEADLESS = True
 SCHOLAR_BROWSER_MIN_DELAY = 2.0          # minimum delay between page loads (seconds)
 SCHOLAR_BROWSER_MAX_DELAY = 5.0          # maximum delay between page loads (seconds)
 SCHOLAR_BROWSER_PAGE_TIMEOUT = 30_000    # element wait timeout (milliseconds)
+SCHOLAR_BROWSER_CIRCUIT_THRESHOLD = 10   # open circuit after N consecutive browser blocks
+SCHOLAR_BROWSER_BACKOFF_BASE = 3.0       # back-off = base * error_count seconds
+SCHOLAR_BROWSER_BACKOFF_CAP = 30.0       # maximum back-off delay (seconds)

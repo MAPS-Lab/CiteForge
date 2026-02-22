@@ -916,3 +916,122 @@ class TestJournalUrlNormalization:
         }
         merged = merge_utils.merge_with_policy(entry, [])
         assert "journal" not in merged["fields"]
+
+
+# ---------------------------------------------------------------------------
+# Browser circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class TestBrowserCircuitBreaker:
+    """Tests for the browser circuit breaker in scholar.py."""
+
+    def _reset_circuit(self) -> None:
+        """Reset circuit breaker state between tests."""
+        import src.clients.scholar as scholar_mod
+        with scholar_mod._circuit_lock:
+            scholar_mod._browser_consecutive_errors = 0
+            scholar_mod._browser_circuit_open = False
+
+    def test_circuit_opens_after_threshold(self) -> None:
+        """After SCHOLAR_BROWSER_CIRCUIT_THRESHOLD consecutive errors, circuit opens."""
+        import src.clients.scholar as scholar_mod
+        from src.clients.scholar import _run_browser_coro
+        from src.config import SCHOLAR_BROWSER_CIRCUIT_THRESHOLD
+        from src.exceptions import ScholarBrowserBlockedError
+
+        self._reset_circuit()
+
+        with (
+            patch.object(scholar_mod, "NODRIVER_AVAILABLE", True),
+            patch("src.clients.scholar.ScholarBrowserLoop") as mock_loop_cls,
+            patch("src.clients.scholar.time"),
+        ):
+            mock_loop = MagicMock()
+            mock_loop_cls.return_value = mock_loop
+            mock_loop.run.side_effect = ScholarBrowserBlockedError("CAPTCHA")
+
+            # Trigger threshold errors
+            for i in range(SCHOLAR_BROWSER_CIRCUIT_THRESHOLD):
+                result = _run_browser_coro(lambda b: None, f"test-{i}")
+                assert result is None
+
+            # Next call should skip browser entirely (circuit open)
+            mock_loop.run.reset_mock()
+            result = _run_browser_coro(lambda b: None, "after-circuit-open")
+            assert result is None
+            mock_loop.run.assert_not_called()
+
+        self._reset_circuit()
+
+    def test_circuit_resets_on_success(self) -> None:
+        """A successful browser call resets the consecutive error counter."""
+        import src.clients.scholar as scholar_mod
+        from src.clients.scholar import _run_browser_coro
+        from src.exceptions import ScholarBrowserBlockedError
+
+        self._reset_circuit()
+
+        with (
+            patch.object(scholar_mod, "NODRIVER_AVAILABLE", True),
+            patch("src.clients.scholar.ScholarBrowserLoop") as mock_loop_cls,
+            patch("src.clients.scholar.time"),
+        ):
+            mock_loop = MagicMock()
+            mock_loop_cls.return_value = mock_loop
+
+            # 5 errors
+            mock_loop.run.side_effect = ScholarBrowserBlockedError("CAPTCHA")
+            for _ in range(5):
+                _run_browser_coro(lambda b: None, "pre-success")
+
+            with scholar_mod._circuit_lock:
+                assert scholar_mod._browser_consecutive_errors == 5
+
+            # 1 success
+            mock_loop.run.side_effect = None
+            mock_loop.run.return_value = {"data": "ok"}
+            result = _run_browser_coro(lambda b: None, "success")
+            assert result == {"data": "ok"}
+
+            with scholar_mod._circuit_lock:
+                assert scholar_mod._browser_consecutive_errors == 0
+                assert not scholar_mod._browser_circuit_open
+
+        self._reset_circuit()
+
+    def test_backoff_increases_with_errors(self) -> None:
+        """Back-off delay increases linearly with each consecutive error."""
+        import src.clients.scholar as scholar_mod
+        from src.clients.scholar import _run_browser_coro
+        from src.config import SCHOLAR_BROWSER_BACKOFF_BASE, SCHOLAR_BROWSER_BACKOFF_CAP
+        from src.exceptions import ScholarBrowserBlockedError
+
+        self._reset_circuit()
+        sleep_calls: list[float] = []
+
+        with (
+            patch.object(scholar_mod, "NODRIVER_AVAILABLE", True),
+            patch("src.clients.scholar.ScholarBrowserLoop") as mock_loop_cls,
+            patch("src.clients.scholar.time") as mock_time,
+        ):
+            mock_loop = MagicMock()
+            mock_loop_cls.return_value = mock_loop
+            mock_loop.run.side_effect = ScholarBrowserBlockedError("CAPTCHA")
+            mock_time.sleep.side_effect = lambda d: sleep_calls.append(d)
+
+            # First call: no back-off (0 prior errors)
+            _run_browser_coro(lambda b: None, "err-1")
+            # Second call: back-off = base * 1
+            _run_browser_coro(lambda b: None, "err-2")
+            # Third call: back-off = base * 2
+            _run_browser_coro(lambda b: None, "err-3")
+
+        assert len(sleep_calls) == 2  # first call had 0 errors, no sleep
+        assert sleep_calls[0] == SCHOLAR_BROWSER_BACKOFF_BASE * 1
+        assert sleep_calls[1] == SCHOLAR_BROWSER_BACKOFF_BASE * 2
+
+        # Verify cap would apply at higher counts
+        assert min(SCHOLAR_BROWSER_BACKOFF_BASE * 100, SCHOLAR_BROWSER_BACKOFF_CAP) == SCHOLAR_BROWSER_BACKOFF_CAP
+
+        self._reset_circuit()
