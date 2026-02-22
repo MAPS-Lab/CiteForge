@@ -26,6 +26,7 @@ __all__ = [
     "PARSE_ERRORS",
     "TIMEOUT_ERRORS",
     "XML_PARSE_ERRORS",
+    "ScholarBrowserBlockedError",
 ]
 
 # errors raised by urllib when an HTTP request fails or a URL cannot be reached
@@ -82,3 +83,7 @@ FIELD_ACCESS_ERRORS = (TypeError, ValueError, KeyError, AttributeError)
 
 # file write operation errors including permissions, disk full, and encoding issues
 FILE_WRITE_ERRORS = (OSError, TypeError, UnicodeEncodeError)
+
+
+class ScholarBrowserBlockedError(RuntimeError):
+    """Raised when the headless browser is blocked by CAPTCHA or rate limiting."""

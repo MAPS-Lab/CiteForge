@@ -335,11 +335,24 @@ def build_bibtex_from_response(
     # Extract venue
     venue = None
     for field_name in mapping.venue_fields:
-        venue = safe_get_field(response, field_name)
+        raw_venue = response.get(field_name)
+        # Crossref returns container-title as array: [series_name, conference_name]
+        # Prefer the non-generic element (e.g., "Artificial Intelligence in Medicine"
+        # over "Lecture Notes in Computer Science")
+        if isinstance(raw_venue, list) and len(raw_venue) > 1:
+            for candidate in raw_venue:
+                candidate_str = str(candidate).strip()
+                if candidate_str and candidate_str.lower() not in GENERIC_SERIES_NAMES:
+                    venue = candidate_str
+                    break
+            if not venue:
+                venue = safe_get_field(response, field_name)
+        else:
+            venue = safe_get_field(response, field_name)
         if venue:
             break
 
-    # For Crossref: prefer event name over generic series names (LNCS etc.)
+    # For Crossref: fall back to event name if venue is still generic
     if mapping.api_name == "crossref" and venue and venue.lower().strip() in GENERIC_SERIES_NAMES:
         event = response.get("event")
         if isinstance(event, dict):

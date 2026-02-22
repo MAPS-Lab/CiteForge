@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import html
 import os
 import re
 import threading
@@ -370,7 +371,10 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
         - Accented characters: æ → ae, ø → o, é → e, etc.
         - LaTeX formatting commands: \textit{}, \textbf{}, etc.
         """
-        # First, strip LaTeX formatting commands (preserving content)
+        # First, decode HTML entities (from CSL/Crossref metadata)
+        val = html.unescape(val)
+
+        # Strip LaTeX formatting commands (preserving content)
         val = _strip_latex_formatting(val)
 
         # Use strip_accents (unidecode) for comprehensive Unicode to ASCII conversion

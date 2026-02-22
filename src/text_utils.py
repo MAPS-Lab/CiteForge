@@ -18,7 +18,7 @@ from .exceptions import DECODE_ERRORS, NUMERIC_ERRORS, PARSE_ERRORS
 from .id_utils import external_ids_match
 
 _ET_AL = "et al."
-_ABBREVIATED_AUTHOR_PATTERN = re.compile(r'^[A-Z]\.?\s*[A-Z]?\.?\s*[A-Z]?\.?\s+[A-Z][a-z]+', re.IGNORECASE)
+_ABBREVIATED_AUTHOR_PATTERN = re.compile(r'^[A-Z]\.?[ \t]*[A-Z]?\.?[ \t]*[A-Z]?\.?[ \t]+[A-Z][a-z]+', re.IGNORECASE)
 
 __all__ = [
     "author_in_text",
@@ -324,20 +324,21 @@ def title_similarity(a: str | None, b: str | None) -> float:
 
 def title_is_truncated_match(a: str | None, b: str | None, min_length: int = 15) -> bool:
     """
-    Check if one title is a truncated version of the other (a strict prefix
-    after normalization).  Scholar sometimes truncates long titles, producing
-    entries like "Passive Co-presence" when the full title is "Passive
-    Co-presence: Exploring How Peripheral Devices Connect People Over Distance".
+    Check if one title is a truncated version of the other (a strict prefix or
+    suffix after normalization).  Scholar sometimes truncates long titles from
+    either end, producing entries like "Passive Co-presence" (prefix truncation)
+    or "Support Using Semantic GLEAN Workflows" when the full title starts with
+    "Decentralized Web-Based Clinical Decision" (suffix truncation).
 
     Requires the shorter title to be at least *min_length* characters to avoid
-    trivially matching short common prefixes.
+    trivially matching short common substrings.
     """
     norm_a = normalize_title(a or "")
     norm_b = normalize_title(b or "")
     if not norm_a or not norm_b or norm_a == norm_b:
         return False
     shorter, longer = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
-    return len(shorter) >= min_length and longer.startswith(shorter)
+    return len(shorter) >= min_length and (longer.startswith(shorter) or longer.endswith(shorter))
 
 
 def authors_overlap(authors_a: str | None, authors_b: str | None) -> bool:

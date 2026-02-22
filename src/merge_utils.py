@@ -10,6 +10,7 @@ from .bibtex_utils import bibtex_from_dict, short_filename_for_entry
 from .config import (
     DEDUP_INTERNAL_FIELDS,
     GENERIC_SERIES_NAMES,
+    JOURNAL_ONLY_PREFIXES,
     PAGES_MAX_DIGITS,
     PREPRINT_DOI_PREFIXES,
     PREPRINT_SERVERS,
@@ -49,6 +50,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     fields = dict(primary.get("fields") or {})
     etype = (primary.get("type") or "misc").lower()
     type_rank = {src: i for i, src in enumerate(TRUST_ORDER)}
+
     best_type_src = "scholar_min"
 
     def value_ok(val: str | None) -> bool:
@@ -59,7 +61,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             continue
         ktype = (e.get("type") or "").lower()
         if (
-            ktype in ("article", "inproceedings", "incollection")
+            ktype in ("article", "inproceedings", "incollection", "book")
             and type_rank.get(src, 99) < type_rank.get(best_type_src, 99)
         ):
             etype = ktype
@@ -109,7 +111,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 # Reject article IDs masquerading as pages (SAGE/Wiley use long numeric IDs)
                 # Check each page component individually so ranges like "13905-13917" pass
                 parts = re.split(r'[-\u2013\u2014,\s]+', new_str)
-                if any(len(re.sub(r'[^0-9]', '', p)) > PAGES_MAX_DIGITS for p in parts if p.strip()):
+                if any(len(re.sub(r'\D', '', p)) > PAGES_MAX_DIGITS for p in parts if p.strip()):
                     continue
 
             # special handling for journal field: never downgrade from published journal to preprint server
@@ -127,8 +129,11 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
 
             # special handling for title field: prefer longer, more descriptive titles
             if k == "title":
-                cur_len = len(str(cur)) if cur else 0
-                new_len = len(str(v))
+                # Compare content length without whitespace so OCR artifacts
+                # (e.g., "Un met" vs "Unmet") don't give the broken title a
+                # false length advantage.
+                cur_len = len(re.sub(r'\s+', '', str(cur))) if cur else 0
+                new_len = len(re.sub(r'\s+', '', str(v)))
 
                 # If new title is significantly shorter (< 70% of current length),
                 # only replace if it comes from a MUCH more trusted source
@@ -219,8 +224,13 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         else:
             # Check each page component individually (ranges like "13905-13917" are valid)
             parts = re.split(r'[-\u2013\u2014,\s]+', pages_str)
-            if any(len(re.sub(r'[^0-9]', '', p)) > PAGES_MAX_DIGITS for p in parts if p.strip()):
+            if any(len(re.sub(r'\D', '', p)) > PAGES_MAX_DIGITS for p in parts if p.strip()):
                 merged.pop("pages", None)
+            else:
+                # Strip leading zeros from page components (e.g., "01-08" → "1-8")
+                cleaned_pages = re.sub(r'\b0+(\d)', r'\1', pages_str)
+                if cleaned_pages != pages_str:
+                    merged["pages"] = cleaned_pages
 
     # remove volume if it equals year (common error in conference proceedings)
     # Conference volumes are typically series numbers, not years
@@ -237,6 +247,19 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         journal_cleaned = re.sub(r'\s*:\s*the preprint server for [\w\s]+$', '', journal_val, flags=re.IGNORECASE)
         if journal_cleaned != journal_val:
             merged["journal"] = journal_cleaned.strip()
+
+    # Fix journal field containing a URL instead of a name (Scholar/API scraping artifact)
+    journal_val = merged.get("journal", "")
+    if journal_val and journal_val.startswith("http"):
+        jurl = journal_val.lower()
+        if "arxiv.org" in jurl:
+            merged["journal"] = "arXiv e-prints"
+        elif "techrxiv.org" in jurl:
+            merged["journal"] = "TechRxiv"
+        elif "ssrn.com" in jurl:
+            merged["journal"] = "SSRN Electronic Journal"
+        else:
+            merged.pop("journal", None)
 
     # Fix publisher for bioRxiv/medRxiv papers (APIs sometimes return garbage
     # publisher names like "openRxiv" instead of "Cold Spring Harbor Laboratory")
@@ -288,6 +311,18 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         merged.pop("archiveprefix", None)
         merged.pop("primaryclass", None)
 
+    # Fix journal names misplaced in booktitle field.
+    # Some publishers (e.g., Frontiers Media SA) only publish journals, never
+    # conference proceedings. If booktitle matches a known journal-only prefix
+    # and no journal is set, move it to the journal field.
+    bt_val = (merged.get("booktitle") or "").strip()
+    if bt_val and not merged.get("journal"):
+        bt_lower = bt_val.lower()
+        if any(bt_lower.startswith(prefix) for prefix in JOURNAL_ONLY_PREFIXES):
+            merged["journal"] = bt_val
+            merged.pop("booktitle", None)
+            etype = "article"
+
     # re-validate entry type based on venue content
     # enrichers can provide incorrect types, so always check venue keywords
     from .bibtex_build import determine_entry_type, get_container_field
@@ -305,10 +340,11 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     )
 
     # if venue clearly indicates conference, override enricher type
-    if venue_type == "inproceedings":
+    # (but never downgrade a "book" type — CSL/Crossref book detection is authoritative)
+    if venue_type == "inproceedings" and etype != "book":
         etype = "inproceedings"
     # if venue clearly indicates book chapter, override enricher type
-    elif venue_type == "incollection":
+    elif venue_type == "incollection" and etype != "book":
         etype = "incollection"
     elif etype == "misc":
         # for misc entries, use full logic with venue hints
@@ -334,6 +370,16 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 etype = "article"
             elif booktitle:
                 etype = "inproceedings"
+
+    # Conference papers in proceedings series (LNCS, SHTI, etc.) are classified as
+    # book-chapter by Crossref/DOI resolvers, but they are actually @inproceedings.
+    # Note: S2/OpenAlex may set a journal field even for conference papers, so we
+    # only check booktitle content, not journal presence.
+    if etype == "incollection" and merged.get("booktitle"):
+        _bt_val = (merged.get("booktitle") or "").lower().strip()
+        book_indicators = ("handbook", "encyclopedia", "textbook", "guide to")
+        if not any(ind in _bt_val for ind in book_indicators):
+            etype = "inproceedings"
 
     # for book chapters, convert howpublished to booktitle if booktitle is missing
     if etype == "incollection" and not merged.get("booktitle") and merged.get("howpublished"):
@@ -574,35 +620,35 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                 existing_is_preprint = _is_preprint_doi(existing_doi) if existing_doi else False
                 new_is_preprint = _is_preprint_doi(new_doi) if new_doi else False
 
+                def _keep_existing() -> tuple[bool, str]:
+                    return True, os.path.basename(duplicate_path)
+
+                def _replace_existing() -> None:
+                    with contextlib.suppress(OSError):
+                        os.remove(duplicate_path)
+
                 if existing_doi and new_doi and existing_doi != new_doi:
                     # Different DOIs: one is preprint, one is published (dedup already confirmed match)
                     if not existing_is_preprint and (new_is_preprint or not new_doi):
                         # Existing is published, new is preprint → keep published
-                        skip_write = True
-                        filename = os.path.basename(duplicate_path)
+                        skip_write, filename = _keep_existing()
                     elif existing_is_preprint and not new_is_preprint:
                         # Existing is preprint, new is published → replace preprint
-                        with contextlib.suppress(OSError):
-                            os.remove(duplicate_path)
-                        # Use new entry's generated filename (with correct metadata)
+                        _replace_existing()
                     else:
                         # Both preprint or both published — keep the one with more fields
-                        if len({k: v for k, v in existing_fields.items() if v}) >= len(
-                            {k: v for k, v in new_fields.items() if v}
-                        ):
-                            skip_write = True
-                            filename = os.path.basename(duplicate_path)
+                        existing_field_count = sum(1 for v in existing_fields.values() if v)
+                        new_field_count = sum(1 for v in new_fields.values() if v)
+                        if existing_field_count >= new_field_count:
+                            skip_write, filename = _keep_existing()
                         else:
-                            with contextlib.suppress(OSError):
-                                os.remove(duplicate_path)
+                            _replace_existing()
                 elif existing_doi and not new_doi:
                     # Existing has DOI, new doesn't → keep existing (more complete)
-                    skip_write = True
-                    filename = os.path.basename(duplicate_path)
+                    skip_write, filename = _keep_existing()
                 elif new_doi and not existing_doi:
                     # New has DOI, existing doesn't → replace existing
-                    with contextlib.suppress(OSError):
-                        os.remove(duplicate_path)
+                    _replace_existing()
                 elif existing_year and new_year and existing_year != new_year:
                     # Year changed, same or no DOIs — keep generated filename for year correction
                     pass
@@ -667,8 +713,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                         if duplicate_found:
                             # Dedup scan confirmed these are the same paper — allow overwrite
                             break
-                        # Otherwise this is a genuine collision bug
-                        pass  # Fall through to raise error
+                        # Otherwise this is a genuine collision bug — fall through to raise error
 
                     # Only check citation key and title if DOIs don't contradict
                     else:

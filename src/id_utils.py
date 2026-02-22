@@ -13,6 +13,7 @@ from .config import (
 )
 
 _ARXIV_PUBLISHER_NAMES = ("arxiv", "arxiv.org", "arxiv e-prints")
+_ARXIV_JOURNAL_NAME = "arXiv e-prints"
 
 
 def _norm_doi(doi: str | None) -> str | None:
@@ -261,14 +262,14 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
         )
         if is_arxiv_journal:
             # standardize to "arXiv e-prints" for consistency
-            fields["journal"] = "arXiv e-prints"
+            fields["journal"] = _ARXIV_JOURNAL_NAME
         elif not journal:
             # Pure arXiv preprint with no journal: set standard journal name
             # This ensures consistent @article classification for all arXiv papers
             doi_val = fields.get("doi", "")
             is_arxiv_doi = bool(re.search(ARXIV_DOI_CHECK_PATTERN, doi_val, re.IGNORECASE)) if doi_val else True
             if not doi_val or is_arxiv_doi:
-                fields["journal"] = "arXiv e-prints"
+                fields["journal"] = _ARXIV_JOURNAL_NAME
 
         # ensure URL points to arXiv if no DOI URL exists
         url = fields.get("url", "")
@@ -282,6 +283,6 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
         journal = (fields.get("journal") or "").strip()
         journal_lower = journal.lower()
         if journal_lower in _ARXIV_PUBLISHER_NAMES:
-            fields["journal"] = "arXiv e-prints"
+            fields["journal"] = _ARXIV_JOURNAL_NAME
 
     return fields

@@ -72,7 +72,13 @@ from src.io_utils import (
 )
 from src.log_utils import LogCategory, LogSource, logger
 from src.models import Record
-from src.text_utils import format_author_dirname, has_placeholder, title_similarity, trim_title_default
+from src.text_utils import (
+    author_name_matches,
+    format_author_dirname,
+    has_placeholder,
+    title_similarity,
+    trim_title_default,
+)
 
 FORCE_ENRICH = "--force" in sys.argv[1:]
 
@@ -713,6 +719,28 @@ def process_article(rec: Record, art: dict[str, Any], api_key: str, out_dir: str
         if merged.get("type") == "article" and not (merged.get("fields") or {}).get("journal"):
             merged["type"] = "misc"
 
+        # Skip entries with type "book" (proceedings volumes, edited books — not individual papers)
+        if merged.get("type") == "book":
+            logger.warn(
+                "Entry is a book/proceedings volume, not an individual paper; skipping",
+                category=LogCategory.SKIP, source=LogSource.SYSTEM,
+            )
+            if path and os.path.isfile(path):
+                os.remove(path)
+            return 0
+
+        # Verify target author appears in the paper's author list to catch
+        # Scholar profile contamination (e.g., different person with same surname)
+        merged_authors = (merged.get("fields") or {}).get("author", "")
+        if merged_authors and not author_name_matches(rec.name, merged_authors):
+            logger.warn(
+                f"Target author '{rec.name}' not found in paper authors; skipping",
+                category=LogCategory.SKIP, source=LogSource.SYSTEM,
+            )
+            if path and os.path.isfile(path):
+                os.remove(path)
+            return 0
+
         merged["key"] = bt.build_standard_citekey(merged, gemini_api_key=gemini_api_key) or merged.get("key") or "Entry"
         path2 = mu.save_entry_to_file(out_dir, effective_id, merged, prefer_path=path,
                                       gemini_api_key=gemini_api_key, author_name=rec.name)
@@ -991,13 +1019,27 @@ def main() -> int:
     reset_api_call_counts()
     logger.step("CiteForge run started", category=LogCategory.PLAN)
 
+    from src.browser import NODRIVER_AVAILABLE, ScholarBrowserLoop
+
+    if NODRIVER_AVAILABLE:
+        logger.success("Browser mode available (nodriver)", category=LogCategory.PLAN)
+    else:
+        logger.info("Browser mode unavailable (nodriver not installed); SerpAPI only", category=LogCategory.PLAN)
+
+    api_key = ""
     try:
         api_key = read_api_key(DEFAULT_KEY_FILE)
         logger.success("SerpAPI key loaded", category=LogCategory.PLAN)
     except FILE_IO_ERRORS as e:
-        logger.error(f"Error reading SerpAPI key: {e}", category=LogCategory.ERROR)
-        logger.close()
-        return 2
+        if NODRIVER_AVAILABLE:
+            logger.warn(
+                f"SerpAPI key not found ({e}); using browser-only mode for Scholar",
+                category=LogCategory.PLAN,
+            )
+        else:
+            logger.error(f"Error reading SerpAPI key: {e}", category=LogCategory.ERROR)
+            logger.close()
+            return 2
 
     s2_api_key = read_semantic_api_key(DEFAULT_S2_KEY_FILE)
     if not s2_api_key:
@@ -1096,21 +1138,24 @@ def main() -> int:
                     category=LogCategory.ERROR,
                 )
 
-    # Log API call budget
-    counts = get_api_call_counts()
-    logger.step("Run complete", category=LogCategory.PLAN)
-    logger.info(f"Records processed: {processed}", category=LogCategory.PLAN)
-    logger.info(f"BibTeX files saved: {total_saved}", category=LogCategory.PLAN)
-    if counts:
-        logger.info(f"API calls: {counts}", category=LogCategory.PLAN)
-        logger.info(f"Total API calls: {sum(counts.values())}", category=LogCategory.PLAN)
-    logger.info(f"Log file: {logger.log_file_path or 'n/a'}", category=LogCategory.PLAN)
+    try:
+        counts = get_api_call_counts()
+        logger.step("Run complete", category=LogCategory.PLAN)
+        logger.info(f"Records processed: {processed}", category=LogCategory.PLAN)
+        logger.info(f"BibTeX files saved: {total_saved}", category=LogCategory.PLAN)
+        if counts:
+            logger.info(f"API calls: {counts}", category=LogCategory.PLAN)
+            logger.info(f"Total API calls: {sum(counts.values())}", category=LogCategory.PLAN)
+        logger.info(f"Log file: {logger.log_file_path or 'n/a'}", category=LogCategory.PLAN)
 
-    if summary_csv_path and os.path.exists(summary_csv_path):
-        flush_summary_csv(summary_csv_path)
-        logger.info(f"Summary CSV: {summary_csv_path}", category=LogCategory.PLAN)
+        if summary_csv_path and os.path.exists(summary_csv_path):
+            flush_summary_csv(summary_csv_path)
+            logger.info(f"Summary CSV: {summary_csv_path}", category=LogCategory.PLAN)
+    finally:
+        if NODRIVER_AVAILABLE:
+            ScholarBrowserLoop().close()
+        logger.close()
 
-    logger.close()
     return 0
 
 

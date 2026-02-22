@@ -164,6 +164,8 @@ def determine_entry_type(
             return "inproceedings"
         if "chapter" in typ or typ in ("book-chapter", "book_chapter", "incollection"):
             return "incollection"
+        if typ in ("book", "edited-book", "monograph", "reference-book"):
+            return "book"
         return "misc"
 
     # dict - try multiple strategies
@@ -189,6 +191,8 @@ def determine_entry_type(
                 return "inproceedings"
             if "chapter" in typ or typ in ("book-chapter", "book_chapter", "incollection"):
                 return "incollection"
+            if typ in ("book", "edited-book", "monograph", "reference-book"):
+                return "book"
 
         # check for book chapter indicators
         # The combination of howpublished + publisher + pages (without journal/booktitle)
@@ -229,6 +233,8 @@ def determine_entry_type(
                     "chapter of the association",  # NAACL, EACL, AACL, etc.
                     "findings of",  # ACL/EMNLP workshop findings
                     "lecture notes in computer science",  # LNCS is a conference proceedings series
+                    "medinfo",  # Medical informatics (IOS Press SHTI series)
+                    "studies in health technology and informatics",  # IOS Press (SHTI)
                 ]
                 if any(keyword in venue_lower for keyword in conference_keywords):
                     return "inproceedings"

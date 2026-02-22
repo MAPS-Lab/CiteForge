@@ -61,6 +61,7 @@ _URL_NAMESPACE_MAP = {
     "pub.orcid.org": "orcid",
     "generativelanguage.googleapis.com": "gemini",
     "dblp.org": "dblp",
+    "scholar.google.com": "scholar_browser",
 }
 
 

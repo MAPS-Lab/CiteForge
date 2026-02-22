@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.parse
-import urllib.request
 from typing import Any
 
+from ..browser import NODRIVER_AVAILABLE, ScholarBrowserLoop
 from ..cache import response_cache
 from ..config import (
     CACHE_TTL_SEARCH_DAYS,
@@ -18,7 +19,7 @@ from ..config import (
     SIM_YEAR_BONUS,
     SIM_YEAR_MATCH_WINDOW,
 )
-from ..exceptions import ALL_API_ERRORS, DECODE_ERRORS, FIELD_ACCESS_ERRORS, PARSE_ERRORS
+from ..exceptions import ALL_API_ERRORS, DECODE_ERRORS, FIELD_ACCESS_ERRORS, PARSE_ERRORS, ScholarBrowserBlockedError
 from ..http_utils import DEFAULT_JSON_HEADERS, handle_api_errors, http_fetch_bytes, http_get_json
 from ..id_utils import find_doi_in_text
 from ..text_utils import (
@@ -36,12 +37,46 @@ from .helpers import (
     get_article_year,
     get_current_year,
 )
+from .scholar_browser import (
+    browser_fetch_author_publications,
+    browser_fetch_bibtex,
+    browser_fetch_citation_detail,
+    browser_search_scholar,
+)
+
+_log = logging.getLogger("citeforge.scholar")
+
+_ESSENTIAL_RESULT_KEYS = ("organic_results", "results")
 
 
-def fetch_author_publications(
+def _first_author_sortkey(authors: Any) -> str:
+    """Extract a lowercase first-author string for sorting, handling list-of-dicts, list-of-str, and str."""
+    if isinstance(authors, list) and authors:
+        first = authors[0]
+        return ((first.get("name") or "") if isinstance(first, dict) else str(first)).lower()
+    if isinstance(authors, str):
+        return authors.split(",")[0].split(" and ")[0].strip().lower()
+    return ""
+
+
+def _extract_serpapi_cite_link(result: dict[str, Any]) -> str | None:
+    """Extract the SerpAPI cite link from a Scholar search result, checking nested and top-level locations."""
+    link = (result.get("inline_links") or {}).get("serpapi_cite_link") or result.get("serpapi_cite_link")
+    return str(link) if link else None
+
+
+# ======================================================================
+# SerpAPI implementations (private, used as fallback)
+# ======================================================================
+
+
+def _serpapi_fetch_author_publications(
     api_key: str, author_id: str, num: int = 100, start: int = 0,
 ) -> dict[str, Any]:
     """Fetch publications for an author from Google Scholar via SerpAPI."""
+    if not api_key:
+        return {}
+
     @handle_api_errors(default_return={})
     def _fetch() -> dict[str, Any]:
         params = {
@@ -51,21 +86,296 @@ def fetch_author_publications(
             "num": num,
             "start": start,
         }
-        url = build_url(SERPAPI_BASE, params)
-        return http_get_json(url)
+        return http_get_json(build_url(SERPAPI_BASE, params))
 
-    result: dict[str, Any] = _fetch()
+    return _fetch()
+
+
+def _serpapi_fetch_citation(
+    api_key: str, author_id: str, citation_id: str
+) -> dict[str, str] | None:
+    """Fetch individual article citation details from Google Scholar using SerpAPI."""
+    if not api_key or not author_id or not citation_id:
+        return None
+
+    params = {
+        "engine": "google_scholar_author",
+        "author_id": author_id,
+        "view_op": "view_citation",
+        "citation_id": citation_id,
+        "api_key": api_key,
+    }
+    url = build_url(SERPAPI_BASE, params)
+
+    try:
+        data = http_get_json(url, timeout=20.0)
+        citation = data.get("citation", {})
+        if not citation:
+            return None
+
+        fields: dict[str, str] = {}
+        if citation.get("title"):
+            fields["title"] = citation["title"]
+        authors = citation.get("authors")
+        if authors:
+            fields["authors"] = ", ".join(authors) if isinstance(authors, list) else str(authors)
+        if citation.get("publication_date"):
+            fields["publication date"] = citation["publication_date"]
+        for key in ("journal", "conference", "book", "volume", "issue", "pages", "publisher", "description"):
+            if citation.get(key):
+                fields[key] = citation[key]
+        return fields if fields else None
+
+    except ALL_API_ERRORS as e:
+        _log.debug("SerpAPI citation fetch failed for %s:%s: %s", author_id, citation_id, e)
+        return None
+
+
+@handle_api_errors(default_return=None)
+def _serpapi_search_scholar_for_cite_link(api_key: str, title: str, author_name: str | None = None) -> str | None:
+    """Query Google Scholar for a paper by title and return the best matching cite dialog link via SerpAPI."""
+    q = f'"{title}"' if title else title
+    params = {"engine": "google_scholar", "q": q, "api_key": api_key, "num": 10}
+    if author_name:
+        params["as_sauthors"] = author_name
+    data = http_get_json(build_url(SERPAPI_BASE, params))
+    results = next((data.get(key) or [] for key in _ESSENTIAL_RESULT_KEYS if key in data), [])
+    if not results:
+        return None
+    target_norm = normalize_title(title)
+
+    def candidate_authors(item: dict[str, Any]) -> Any:
+        item_authors = item.get("authors")
+        if isinstance(item_authors, (list, str)):
+            return item_authors
+        pubinfo = item.get("publication_info") or {}
+        if isinstance(pubinfo, dict):
+            return pubinfo.get("authors") or pubinfo.get("summary") or item.get("snippet")
+        return item.get("snippet")
+
+    def _author_ok(result: dict[str, Any]) -> bool:
+        """Return True if author_name is absent or matches the result's authors."""
+        if not author_name:
+            return True
+        cand = candidate_authors(result)
+        return author_name_matches(author_name, cand) or author_in_text(author_name, cand)
+
+    # Pass 1: exact normalized-title match
+    for r in results:
+        r_title = r.get("title") or r.get("name")
+        if normalize_title(r_title) != target_norm:
+            continue
+        if not _author_ok(r):
+            continue
+        link = _extract_serpapi_cite_link(r)
+        if link:
+            return link
+
+    # Pass 2: fuzzy best-match fallback
+    best: dict[str, Any] | None = None
+    best_tsim = 0.0
+    for r in results:
+        r_title = r.get("title") or r.get("name") or ""
+        tsim = title_similarity(title, r_title)
+        if tsim > best_tsim:
+            best, best_tsim = r, tsim
+    if best and best_tsim >= SIM_SCHOLAR_FUZZY_ACCEPT and _author_ok(best):
+        return _extract_serpapi_cite_link(best)
+    return None
+
+
+def _inject_api_key(url: str, api_key: str) -> str:
+    """Ensure ``api_key`` is present in the query string of *url*."""
+    parsed = urllib.parse.urlparse(url)
+    qs = urllib.parse.parse_qs(parsed.query)
+    if "api_key" not in qs:
+        qs["api_key"] = [api_key]
+    flat = {k: v[0] if isinstance(v, list) else v for k, v in qs.items()}
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(flat)))
+
+
+def _serpapi_fetch_bibtex_from_cite(api_key: str, cite_url: str) -> str:
+    """Retrieve the BibTeX text for a publication using Scholar's cite dialog through SerpAPI."""
+    cite_with_key = _inject_api_key(cite_url, api_key)
+    raw = http_fetch_bytes(cite_with_key, DEFAULT_JSON_HEADERS.copy(), timeout=30.0)
+    try:
+        cite_json = json.loads(raw.decode("utf-8"))
+    except DECODE_ERRORS:
+        cite_json = json.loads(raw.decode("utf-8", errors="replace"))
+
+    def find_bibtex_link(obj: dict[str, Any]) -> str | None:
+        for key in ("citations", "links", "resources"):
+            container = obj.get(key)
+            if not isinstance(container, list):
+                continue
+            for c in container:
+                if not isinstance(c, dict):
+                    continue
+                label = (c.get("title") or c.get("name") or "").strip().lower()
+                file_format = (c.get("file_format") or "").strip().lower()
+                if label == "bibtex" or file_format == "bibtex":
+                    link = c.get("serpapi_link") or c.get("serpapi_url") or c.get("link") or c.get("url")
+                    if link:
+                        return str(link)
+        return None
+
+    bib_link = find_bibtex_link(cite_json)
+    if not bib_link:
+        available = ",".join(cite_json)
+        raise ValueError(f"BibTeX link not found in citation formats. Available keys: {available}")
+    try:
+        parsed = urllib.parse.urlparse(bib_link)
+        if parsed.netloc.endswith("serpapi.com"):
+            bib_link = _inject_api_key(bib_link, api_key)
+    except FIELD_ACCESS_ERRORS:
+        pass
+    text_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    raw_bib = http_fetch_bytes(bib_link, text_headers, timeout=30.0)
+    try:
+        return raw_bib.decode("utf-8")
+    except DECODE_ERRORS:
+        return raw_bib.decode("latin-1", errors="replace")
+
+
+# ======================================================================
+# Public facade functions: browser-first, SerpAPI fallback
+# ======================================================================
+
+
+def _run_browser_coro(coro_factory: Any, context: str) -> Any | None:
+    """Run a browser coroutine, returning None on failure and logging a warning.
+
+    ``coro_factory`` receives the browser instance and returns a coroutine.
+    ``context`` is used in log messages to identify the operation.
+    """
+    if not NODRIVER_AVAILABLE:
+        return None
+    try:
+        loop = ScholarBrowserLoop()
+
+        async def _wrapped() -> Any:
+            browser = await loop.get_browser()
+            return await coro_factory(browser)
+
+        return loop.run(_wrapped())
+    except ScholarBrowserBlockedError as e:
+        _log.warning("Browser blocked (%s): %s -- falling back to SerpAPI", context, e)
+    except Exception as e:
+        _log.warning("Browser error (%s): %s -- falling back to SerpAPI", context, e)
+    return None
+
+
+def fetch_author_publications(
+    api_key: str, author_id: str, num: int = 100, start: int = 0,
+) -> dict[str, Any]:
+    """Fetch publications for an author -- tries headless browser first, falls back to SerpAPI."""
+    cache_key = f"{author_id}|page_{start}"
+    cached = response_cache.get("scholar_publications", cache_key)
+    if cached is not None:
+        return cached if cached else {}
+
+    result: dict[str, Any] | None = _run_browser_coro(
+        lambda b: browser_fetch_author_publications(b, author_id, num=num, start=start),
+        f"author {author_id}",
+    )
+    if result and result.get("articles"):
+        response_cache.put("scholar_publications", cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        _log.info("Fetched %d articles via browser for %s", len(result["articles"]), author_id)
+        return result
+
+    return _serpapi_fetch_author_publications(api_key, author_id, num, start)
+
+
+def fetch_scholar_citation_via_serpapi(
+    api_key: str, author_id: str, citation_id: str
+) -> dict[str, str] | None:
+    """Fetch citation details -- tries headless browser first, falls back to SerpAPI."""
+    if not author_id or not citation_id:
+        return None
+
+    cache_key = f"{author_id}|{citation_id}"
+    for namespace in ("scholar_citation", "serpapi_citation"):
+        cached = response_cache.get(namespace, cache_key)
+        if cached is not None:
+            return cached if cached else None
+
+    if NODRIVER_AVAILABLE:
+        fields: dict[str, str] | None = _run_browser_coro(
+            lambda b: browser_fetch_citation_detail(b, author_id, citation_id),
+            f"citation {author_id}:{citation_id}",
+        )
+        if fields:
+            response_cache.put("scholar_citation", cache_key, fields, ttl_days=CACHE_TTL_SEARCH_DAYS)
+            _log.info("Fetched citation via browser for %s:%s", author_id, citation_id)
+            return fields
+
+    return _serpapi_fetch_citation(api_key, author_id, citation_id)
+
+
+def search_scholar_for_cite_link(api_key: str, title: str, author_name: str | None = None) -> str | None:
+    """Search Scholar by title -- tries headless browser first, falls back to SerpAPI."""
+    cache_key = f"{normalize_title(title)}|{(author_name or '').lower()}"
+    cached = response_cache.get("scholar_search_cite", cache_key)
+    if cached is not None:
+        return cached.get("link") or None
+
+    link: str | None = _run_browser_coro(
+        lambda b: browser_search_scholar(b, title, author_name),
+        f"search '{title[:60]}'",
+    )
+    if link:
+        _log.info("Found cite link via browser for '%s'", title[:60])
+        response_cache.put("scholar_search_cite", cache_key, {"link": link}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        return link
+
+    link = _serpapi_search_scholar_for_cite_link(api_key, title, author_name)
+    if link:
+        response_cache.put("scholar_search_cite", cache_key, {"link": link}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    return link
+
+
+def fetch_bibtex_from_cite(api_key: str, cite_url: str) -> str:
+    """Retrieve BibTeX -- tries headless browser first for non-SerpAPI URLs, falls back to SerpAPI."""
+    cached = response_cache.get("scholar_bibtex", cite_url)
+    if cached is not None:
+        bib: str = cached.get("bibtex", "")
+        if bib:
+            return bib
+
+    if "serpapi.com" not in cite_url:
+        bibtex: str | None = _run_browser_coro(
+            lambda b: browser_fetch_bibtex(b, cite_url),
+            "BibTeX fetch",
+        )
+        if bibtex:
+            _log.info("Fetched BibTeX via browser")
+            response_cache.put("scholar_bibtex", cite_url, {"bibtex": bibtex}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+            return bibtex
+
+    result = _serpapi_fetch_bibtex_from_cite(api_key, cite_url)
+    if result:
+        response_cache.put("scholar_bibtex", cite_url, {"bibtex": result}, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return result
+
+
+# ======================================================================
+# Utility functions
+# ======================================================================
 
 
 def extract_cite_link(article: dict[str, Any]) -> str | None:
     """Find the URL for Scholar's cite dialog by checking multiple nested locations."""
-    from .helpers import strip_html_tags as _strip  # noqa: F401 (unused but keeps import consistency)
-
-    inline = article.get("inline_links") or {}
-    cite_link = inline.get("serpapi_cite_link") or article.get("serpapi_cite_link")
+    cite_link = _extract_serpapi_cite_link(article)
     if cite_link:
-        return str(cite_link)
+        return cite_link
+    inline = article.get("inline_links") or {}
     for key in ("citations", "links", "resources"):
         cont = inline.get(key)
         if isinstance(cont, list):
@@ -96,52 +406,6 @@ def scholar_view_citation_url(author_id: str, result_id: str) -> str:
         "citation_for_view": citation_for_view,
     }
     return build_url(base, params)
-
-
-def fetch_scholar_citation_via_serpapi(
-    api_key: str, author_id: str, citation_id: str
-) -> dict[str, str] | None:
-    """Fetch individual article citation details from Google Scholar using SerpAPI."""
-    if not api_key or not author_id or not citation_id:
-        return None
-
-    cache_key = f"{author_id}|{citation_id}"
-    cached = response_cache.get("serpapi_citation", cache_key)
-    if cached is not None:
-        return cached if cached else None
-
-    params = {
-        "engine": "google_scholar_author",
-        "author_id": author_id,
-        "view_op": "view_citation",
-        "citation_id": citation_id,
-        "api_key": api_key,
-    }
-    url = build_url("https://serpapi.com/search", params)
-
-    try:
-        data = http_get_json(url, timeout=20.0)
-        citation = data.get("citation", {})
-        if not citation:
-            return None
-
-        fields: dict[str, str] = {}
-        if citation.get("title"):
-            fields["title"] = citation["title"]
-        authors = citation.get("authors")
-        if authors:
-            fields["authors"] = ", ".join(authors) if isinstance(authors, list) else str(authors)
-        if citation.get("publication_date"):
-            fields["publication date"] = citation["publication_date"]
-        for key in ("journal", "conference", "book", "volume", "issue", "pages", "publisher", "description"):
-            if citation.get(key):
-                fields[key] = citation[key]
-        if fields:
-            response_cache.put("serpapi_citation", cache_key, fields, ttl_days=CACHE_TTL_SEARCH_DAYS)
-        return fields if fields else None
-
-    except ALL_API_ERRORS:
-        return None
 
 
 def build_bibtex_from_scholar_fields(fields: dict[str, str], keyhint: str) -> str | None:
@@ -176,124 +440,6 @@ def build_bibtex_from_scholar_fields(fields: dict[str, str], keyhint: str) -> st
     )
 
 
-essential_result_keys = ("organic_results", "results")
-
-
-def fetch_bibtex_from_cite(api_key: str, cite_url: str) -> str:
-    """Retrieve the BibTeX text for a publication using Google Scholar's cite dialog through SerpAPI."""
-    parsed = urllib.parse.urlparse(cite_url)
-    q = urllib.parse.parse_qs(parsed.query)
-    q["api_key"] = [api_key]
-    new_query = urllib.parse.urlencode({k: v[0] if isinstance(v, list) else v for k, v in q.items()})
-    cite_with_key = urllib.parse.urlunparse(parsed._replace(query=new_query))
-    json_headers = DEFAULT_JSON_HEADERS.copy()
-    raw = http_fetch_bytes(cite_with_key, json_headers, timeout=30.0)
-    try:
-        cite_json = json.loads(raw.decode("utf-8"))
-    except DECODE_ERRORS:
-        cite_json = json.loads(raw.decode("utf-8", errors="replace"))
-
-    def find_bibtex_link(obj: dict[str, Any]) -> str | None:
-        for key in ("citations", "links", "resources"):
-            container = obj.get(key)
-            if not isinstance(container, list):
-                continue
-            for c in container:
-                if not isinstance(c, dict):
-                    continue
-                title = (c.get("title") or c.get("name") or "").strip().lower()
-                file_format = (c.get("file_format") or "").strip().lower()
-                if title == "bibtex" or file_format == "bibtex":
-                    link = c.get("serpapi_link") or c.get("serpapi_url") or c.get("link") or c.get("url")
-                    if link:
-                        return str(link)
-        return None
-
-    bib_link = find_bibtex_link(cite_json)
-    if not bib_link:
-        available = ",".join(cite_json)
-        raise ValueError(f"BibTeX link not found in citation formats. Available keys: {available}")
-    try:
-        p = urllib.parse.urlparse(bib_link)
-        if p.netloc.endswith("serpapi.com"):
-            q2 = urllib.parse.parse_qs(p.query)
-            if "api_key" not in q2:
-                q2["api_key"] = [api_key]
-                bib_link = urllib.parse.urlunparse(p._replace(
-                    query=urllib.parse.urlencode({k: v[0] if isinstance(v, list) else v for k, v in q2.items()})))
-    except FIELD_ACCESS_ERRORS:
-        pass
-    text_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    raw_bib = http_fetch_bytes(bib_link, text_headers, timeout=30.0)
-    try:
-        return raw_bib.decode("utf-8")
-    except DECODE_ERRORS:
-        return raw_bib.decode("latin-1", errors="replace")
-
-
-@handle_api_errors(default_return=None)
-def search_scholar_for_cite_link(api_key: str, title: str, author_name: str | None = None) -> str | None:
-    """Query Google Scholar for a paper by title and return the best matching cite dialog link."""
-    q = f'"{title}"' if title else title
-    params = {"engine": "google_scholar", "q": q, "api_key": api_key, "num": 10}
-    if author_name:
-        params["as_sauthors"] = author_name
-    url = build_url(SERPAPI_BASE, params)
-    data = http_get_json(url)
-    results = next((data.get(key) or [] for key in essential_result_keys if key in data), [])
-    if not results:
-        return None
-    target_norm = normalize_title(title)
-
-    def candidate_authors(item: dict[str, Any]) -> Any:
-        authors = item.get("authors")
-        if isinstance(authors, (list, str)):
-            return authors
-        pubinfo = item.get("publication_info") or {}
-        if isinstance(pubinfo, dict):
-            return pubinfo.get("authors") or pubinfo.get("summary") or item.get("snippet")
-        return item.get("snippet")
-
-    for r in results:
-        r_title = r.get("title") or r.get("name")
-        if normalize_title(r_title) != target_norm:
-            continue
-        if author_name:
-            cand = candidate_authors(r)
-            if not author_name_matches(author_name, cand) and not author_in_text(author_name, cand):
-                continue
-        link = (r.get("inline_links") or {}).get("serpapi_cite_link") or r.get("serpapi_cite_link")
-        if link:
-            return str(link)
-    best = None
-    best_tsim = 0.0
-    for r in results:
-        r_title = r.get("title") or r.get("name") or ""
-        tsim = title_similarity(title, r_title)
-        if tsim > best_tsim:
-            best = r
-            best_tsim = tsim
-    if best and best_tsim >= SIM_SCHOLAR_FUZZY_ACCEPT:
-        if author_name:
-            cand = candidate_authors(best)
-            if author_name_matches(author_name, cand) or author_in_text(author_name, cand):
-                link = (best.get("inline_links") or {}).get("serpapi_cite_link") or best.get("serpapi_cite_link")
-                if link:
-                    return str(link)
-        else:
-            link = (best.get("inline_links") or {}).get("serpapi_cite_link") or best.get("serpapi_cite_link")
-            if link:
-                return str(link)
-    return None
-
-
 def sort_articles_by_year_current_first(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort articles with current year first, then descending by year."""
     cur = get_current_year()
@@ -301,15 +447,7 @@ def sort_articles_by_year_current_first(articles: list[dict[str, Any]]) -> list[
     def key_func(a: dict[str, Any]) -> tuple[int, int, str, str]:
         y = get_article_year(a)
         group = 0 if y == cur else 1
-        title = normalize_title(a.get("title") or "")
-        authors = a.get("authors") or []
-        if isinstance(authors, list) and authors:
-            first_author = ((authors[0].get("name") or "") if isinstance(authors[0], dict) else str(authors[0])).lower()
-        elif isinstance(authors, str):
-            first_author = authors.split(",")[0].split(" and ")[0].strip().lower()
-        else:
-            first_author = ""
-        return (group, -y, title, first_author)
+        return (group, -y, normalize_title(a.get("title") or ""), _first_author_sortkey(a.get("authors") or []))
 
     return sorted(articles, key=key_func)
 
@@ -323,15 +461,7 @@ def _deduplicate_publication_list(
 
     def sort_key(pub: dict[str, Any]) -> tuple[int, str, str]:
         year = extract_year_from_any(pub.get("year"), fallback=0) or 0
-        title = normalize_title(pub.get("title") or "")
-        authors = pub.get("authors") or []
-        if isinstance(authors, list) and authors:
-            first_author = ((authors[0].get("name") or "") if isinstance(authors[0], dict) else str(authors[0])).lower()
-        elif isinstance(authors, str):
-            first_author = authors.split(",")[0].split(" and ")[0].strip().lower()
-        else:
-            first_author = ""
-        return (-year, title, first_author)
+        return (-year, normalize_title(pub.get("title") or ""), _first_author_sortkey(pub.get("authors") or []))
 
     sorted_pubs = sorted(pubs, key=sort_key)
     deduplicated: list[dict[str, Any]] = []

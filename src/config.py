@@ -196,7 +196,19 @@ GENERIC_SERIES_NAMES = frozenset({
     "lecture notes in networks and systems",
     "communications in computer and information science",
     "advances in intelligent systems and computing",
+    "studies in health technology and informatics",
+    "leibniz international proceedings in informatics",
+    "lipics: leibniz international proceedings in informatics",
+    "dagstuhl seminar proceedings",
+    "oasics: open access series in informatics",
 })
+
+# Known journal-only publisher prefixes: if a booktitle starts with one of these,
+# it's actually a journal name misplaced in the booktitle field.
+# Frontiers Media SA publishes only journals (no conference proceedings).
+JOURNAL_ONLY_PREFIXES = (
+    "frontiers in ",
+)
 
 # Author name suffixes to strip when extracting last names (e.g., "Jr", "III")
 AUTHOR_NAME_SUFFIXES = frozenset({'jr', 'sr', 'ii', 'iii', 'iv', 'v'})
@@ -228,3 +240,9 @@ TRUST_DIFF_OVERRIDE_THRESHOLD = 3
 
 # Maximum parallel workers for author processing (main.py)
 MAX_WORKERS = 12
+
+# Browser-based Scholar scraping configuration
+SCHOLAR_BROWSER_HEADLESS = True
+SCHOLAR_BROWSER_MIN_DELAY = 2.0          # minimum delay between page loads (seconds)
+SCHOLAR_BROWSER_MAX_DELAY = 5.0          # maximum delay between page loads (seconds)
+SCHOLAR_BROWSER_PAGE_TIMEOUT = 30_000    # element wait timeout (milliseconds)

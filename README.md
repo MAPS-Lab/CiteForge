@@ -23,24 +23,24 @@ Google Scholar entries are often truncated, missing DOIs, or formatted inconsist
 
 ## The Solution
 
-CiteForge queries 13 academic APIs, deduplicates results through fuzzy title and author matching, and merges metadata using a trust hierarchy that prefers authoritative sources (DOI resolvers, PubMed) over less reliable ones (web-scraped Scholar pages).
+CiteForge uses a headless browser to scrape Google Scholar directly (falling back to SerpAPI when blocked), queries 13 academic APIs, deduplicates results through fuzzy title and author matching, and merges metadata using a trust hierarchy that prefers authoritative sources (DOI resolvers, PubMed) over less reliable ones (web-scraped Scholar pages).
 
 ---
 
 ## Getting Started
 
-**Requirements:** Python 3.10+ and a [SerpAPI](https://serpapi.com/) key.
+**Requirements:** Python 3.10+. No paid API keys are needed for basic usage — CiteForge uses a headless browser (via [nodriver](https://github.com/nicegui-org/nodriver)) to scrape Google Scholar directly.
 
 ```bash
 git clone https://github.com/gabrielspadon/CiteForge.git && cd CiteForge
 pip install -e .
 ```
 
-Set up API keys:
+Optionally set up API keys for higher throughput:
 
 ```bash
 mkdir -p keys
-echo "your_serpapi_key" > keys/SerpAPI.key          # Required
+echo "your_serpapi_key" > keys/SerpAPI.key          # Optional (browser fallback)
 echo "your_semantic_key" > keys/Semantic.key        # Recommended
 echo "your_gemini_key" > keys/Gemini.key            # Optional
 ```
@@ -81,7 +81,7 @@ Each article goes through a **four-phase enrichment pipeline**:
 3. **Late DOI Discovery** — Collect DOIs from matched sources, preferring published over preprint
 4. **Trust-Based Merge** — Combine fields using a 14-level source hierarchy, then deduplicate
 
-Authors are processed in parallel (12 workers) and API responses are cached locally.
+Authors are processed in parallel (12 workers). Scholar requests are serialized through a single background event loop for anti-detection, while all other API calls run in parallel. Responses are cached locally.
 
 ### Trust Hierarchy
 
@@ -107,7 +107,8 @@ The merge engine enforces additional rules:
 
 | Source | Key Required |
 |--------|:---:|
-| Google Scholar (via SerpAPI) | Yes |
+| Google Scholar (headless browser) | No |
+| Google Scholar (SerpAPI fallback) | Optional |
 | Semantic Scholar | Recommended |
 | Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DataCite, ORCID, DBLP | No |
 | OpenReview | Optional |
@@ -126,6 +127,9 @@ All parameters live in [`src/config.py`](src/config.py):
 | `SIM_MERGE_DUPLICATE_THRESHOLD` | 0.9 | Title similarity for deduplication |
 | `REQUEST_DELAY_BETWEEN_ARTICLES` | 0.5s | Courtesy delay between API requests |
 | `CACHE_ENABLED` | True | Enable local API response caching |
+| `SCHOLAR_BROWSER_HEADLESS` | True | Run headless browser without GUI |
+| `SCHOLAR_BROWSER_MIN_DELAY` | 2.0s | Minimum delay between Scholar page loads |
+| `SCHOLAR_BROWSER_MAX_DELAY` | 5.0s | Maximum delay between Scholar page loads |
 
 ---
 
@@ -136,7 +140,7 @@ pip install -e .[dev]
 pytest tests/ -v --tb=short
 ```
 
-116 tests across 9 modules. Integration tests that require API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
+158 tests across 10 modules. Integration tests that require API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
 ---
 
@@ -146,7 +150,9 @@ pytest tests/ -v --tb=short
 | Module | Purpose |
 |--------|---------|
 | `main.py` | Orchestrator: thread pool, 4-phase pipeline, CLI entry |
-| `src/clients/scholar.py` | Google Scholar (SerpAPI) and DBLP clients |
+| `src/browser.py` | Async event loop singleton for headless browser |
+| `src/clients/scholar.py` | Google Scholar facade (browser-first, SerpAPI fallback) and DBLP clients |
+| `src/clients/scholar_browser.py` | Browser-based Scholar scraping (author profiles, citations, BibTeX) |
 | `src/clients/search_apis.py` | Search API clients (S2, Crossref, arXiv, OpenReview, OpenAlex, PubMed, Europe PMC) |
 | `src/clients/utility_apis.py` | Utility API clients (DataCite, ORCID, DOI resolvers) |
 | `src/clients/helpers.py` | Shared client helpers (scoring, deduplication) |

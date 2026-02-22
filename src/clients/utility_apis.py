@@ -121,7 +121,7 @@ def gemini_generate_short_title(
         except FIELD_ACCESS_ERRORS:
             logger.warn(f"API HTTP {e.code}: {e.reason}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         return None
-    except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
         logger.warn(f"API call failed: {type(e).__name__}: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         return None
 

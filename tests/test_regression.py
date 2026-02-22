@@ -660,3 +660,259 @@ class TestGenericSeriesNameMerge:
         ]
         merged = merge_utils.merge_with_policy(entry, enrichers)
         assert merged["fields"]["booktitle"] == "Actual Conference 2024"
+
+    def test_shti_also_generic(self) -> None:
+        """Studies in Health Technology and Informatics (IOS Press) is a generic series."""
+        entry = {
+            "type": "incollection",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+                "booktitle": "Studies in Health Technology and Informatics",
+            },
+        }
+        enrichers = [
+            ("crossref", {"fields": {"booktitle": "MEDINFO 2023 - The Future Is Accessible"}}),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["fields"]["booktitle"] == "MEDINFO 2023 - The Future Is Accessible"
+
+    def test_incollection_with_conference_booktitle_becomes_inproceedings(self) -> None:
+        """Crossref book-chapter typed entries with conference booktitle should be @inproceedings."""
+        entry = {
+            "type": "misc",
+            "key": "Test2022",
+            "fields": {
+                "title": "Test Paper on Machine Learning",
+                "author": "Author One and Author Two",
+                "year": "2022",
+            },
+        }
+        enrichers = [
+            ("crossref", {
+                "type": "incollection",
+                "fields": {
+                    "booktitle": "Challenges of Trustable AI and Added-Value on Health",
+                    "publisher": "IOS Press",
+                    "doi": "10.3233/shti220385",
+                },
+            }),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "inproceedings"
+
+    def test_incollection_with_handbook_stays_incollection(self) -> None:
+        """Actual book chapters (handbooks) should remain @incollection."""
+        entry = {
+            "type": "incollection",
+            "key": "Test2023",
+            "fields": {
+                "title": "A Chapter on Methods",
+                "author": "Author One",
+                "year": "2023",
+                "booktitle": "Handbook of Machine Learning",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["type"] == "incollection"
+
+    def test_book_type_from_enricher_survives_venue_override(self) -> None:
+        """Proceedings volumes typed as 'book' by CSL/Crossref should NOT be overridden to @inproceedings."""
+        entry = {
+            "type": "misc",
+            "key": "Proceedings2022",
+            "fields": {
+                "title": "Conference X, 2022, Proceedings",
+                "author": "Editor One and Editor Two",
+                "year": "2022",
+            },
+        }
+        enrichers = [
+            ("csl", {
+                "type": "book",
+                "fields": {
+                    "booktitle": "Lecture Notes in Computer Science",
+                    "publisher": "Springer",
+                    "doi": "10.1007/978-3-031-09342-5",
+                },
+            }),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "book"
+
+
+class TestAuthorNameMatches:
+    """Tests for author_name_matches used to filter wrong-author entries."""
+
+    def test_full_name_match(self) -> None:
+        """Full name match: 'Raza Abidi' matches 'Syed Sibte Raza Abidi'."""
+        from src.text_utils import author_name_matches
+        assert author_name_matches("Raza Abidi", "Author One and Syed Sibte Raza Abidi")
+
+    def test_different_first_name_no_match(self) -> None:
+        """Different first name: 'Raza Abidi' should NOT match 'Saeed Abidi'."""
+        from src.text_utils import author_name_matches
+        assert not author_name_matches("Raza Abidi", "Author One and Saeed Abidi")
+
+    def test_partial_name_no_match(self) -> None:
+        """Partial name: 'Raza Abidi' should NOT match 'Syed Abidi' (missing Raza)."""
+        from src.text_utils import author_name_matches
+        assert not author_name_matches("Raza Abidi", "Author One and Syed Abidi")
+
+    def test_exact_name_match(self) -> None:
+        """Exact name match works."""
+        from src.text_utils import author_name_matches
+        assert author_name_matches("Gabriel Spadon", "Gabriel Spadon and Author Two")
+
+
+class TestTitleLengthWhitespaceNormalization:
+    """Title comparison normalizes whitespace so OCR artifacts don't get false length advantage."""
+
+    def test_broken_title_replaced_by_correct(self) -> None:
+        """'Un met' (Scholar artifact) should be replaced by 'Unmet' from a higher-trust source."""
+        entry = {
+            "type": "misc",
+            "key": "Test2024",
+            "fields": {
+                "title": "A Topological Data Analysis of Un met Health Care Needs Among Injured Patients",
+                "author": "Author One",
+                "year": "2024",
+            },
+        }
+        enrichers = [
+            ("crossref", {
+                "fields": {
+                    "title": "A Topological Data Analysis of Unmet Health Care Needs Among Injured Patients",
+                },
+            }),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert "Un met" not in merged["fields"]["title"]
+        assert "Unmet" in merged["fields"]["title"]
+
+
+class TestLeadingZerosInPages:
+    """Pages with leading zeros should have them stripped (e.g., 01-08 → 1-8)."""
+
+    def test_leading_zeros_stripped(self) -> None:
+        entry = {
+            "type": "inproceedings",
+            "fields": {"title": "Some Paper", "pages": "01-08", "booktitle": "Some Conf"},
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"]["pages"] == "1-8"
+
+    def test_no_leading_zeros_unchanged(self) -> None:
+        entry = {
+            "type": "article",
+            "fields": {"title": "Some Paper", "pages": "123-456", "journal": "J"},
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"]["pages"] == "123-456"
+
+    def test_single_page_leading_zero(self) -> None:
+        entry = {
+            "type": "article",
+            "fields": {"title": "Some Paper", "pages": "07", "journal": "J"},
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"]["pages"] == "7"
+
+
+class TestFrontiersJournalDetection:
+    """Frontiers in * booktitles should be moved to journal field."""
+
+    def test_frontiers_booktitle_becomes_journal(self) -> None:
+        entry = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Frontiers in Bioinformatics",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"].get("journal") == "Frontiers in Bioinformatics"
+        assert "booktitle" not in merged["fields"]
+        assert merged["type"] == "article"
+
+    def test_frontiers_not_moved_when_journal_exists(self) -> None:
+        entry = {
+            "type": "article",
+            "fields": {
+                "title": "Some Paper",
+                "journal": "Nature",
+                "booktitle": "Frontiers in Immunology",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        # journal stays as Nature; booktitle removed because type is article
+        assert merged["fields"].get("journal") == "Nature"
+
+    def test_non_frontiers_booktitle_unchanged(self) -> None:
+        entry = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "International Conference on AI",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"].get("booktitle") == "International Conference on AI"
+        assert "journal" not in merged["fields"]
+
+
+class TestHtmlEntityInSerializer:
+    """HTML entities like &amp; should be decoded in bibtex_from_dict output."""
+
+    def test_amp_decoded_in_booktitle(self) -> None:
+        from src.bibtex_utils import bibtex_from_dict
+        entry = {
+            "type": "inproceedings",
+            "key": "Test2024:SomeConf",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "IEEE Tech &amp; Engineering Conf",
+            },
+        }
+        bib_str = bibtex_from_dict(entry)
+        assert "&amp;" not in bib_str
+        assert "& Engineering" in bib_str
+
+
+class TestJournalUrlNormalization:
+    """Journal fields containing URLs should be normalized to server names."""
+
+    def test_arxiv_url_becomes_journal_name(self) -> None:
+        entry = {
+            "type": "article",
+            "fields": {
+                "title": "Some Paper",
+                "journal": "https://arxiv.org/pdf/2302.08018",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"]["journal"] == "arXiv e-prints"
+
+    def test_techrxiv_url_becomes_journal_name(self) -> None:
+        entry = {
+            "type": "article",
+            "fields": {
+                "title": "Some Paper",
+                "journal": "https://www.techrxiv.org/users/770734/articles/846181-test",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"]["journal"] == "TechRxiv"
+
+    def test_unknown_url_dropped(self) -> None:
+        entry = {
+            "type": "article",
+            "fields": {
+                "title": "Some Paper",
+                "journal": "https://example.com/papers/123",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert "journal" not in merged["fields"]
