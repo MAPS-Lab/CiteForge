@@ -1,0 +1,31 @@
+2026-02-22 06:13:48 [STEP    ] CiteForge run started
+2026-02-22 06:13:48 [SUCCESS ] Browser mode available (nodriver)
+2026-02-22 06:13:48 [SUCCESS ] SerpAPI key loaded
+2026-02-22 06:13:48 [SUCCESS ] Semantic Scholar key loaded
+2026-02-22 06:13:48 [SUCCESS ] OpenReview credentials loaded
+2026-02-22 06:13:48 [SUCCESS ] Gemini API key loaded
+2026-02-22 06:13:48 [SUCCESS ] Input loaded: 19 record(s)
+2026-02-22 06:13:48 [INFO    ] Sorting authors by existing paper count (authors with more papers will be processed first)
+2026-02-22 06:13:48 [INFO    ] Author range: 101 papers (max) to 0 papers (min)
+2026-02-22 06:13:48 [SUCCESS ] Summary CSV initialized: /home/spadon/Codebases/CiteForge/output/summary.csv
+2026-02-22 06:13:48 [STEP    ] Starting parallel execution with 12 workers
+2026-02-22 06:13:48 [INFO    ] [1/19] Queued: Richard Evans (ID: NqlOPkMAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [2/19] Queued: Travis Gagie (ID: aFCoq2YAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [3/19] Queued: Oladapo Oyebode (ID: -6DsTnMAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [4/19] Queued: Raza Abidi (ID: fzr2PUYAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [5/19] Queued: Israat Haque (ID: PMTOOSQAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [6/19] Queued: Robert Beiko (ID: OmUy3vUAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [7/19] Queued: Gabriel Spadon (ID: bfdGsGUAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [8/19] Queued: Nils Wilde (ID: lkAmFEEAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [9/19] Queued: Marta Kryven (ID: 5ogGlooAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [10/19] Queued: Alexander Brandt (ID: OMA_KjcAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [11/19] Queued: Lizbeth Escobedo (ID: lPSfdqAAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [12/19] Queued: Peter Bodorik (ID: wBYq09wAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [13/19] Queued: Dirk Arnold (ID: NsIbm80AAAAJ)
+2026-02-22 06:13:48 [INFO    ] [14/19] Queued: James Blustein (ID: 7g6iU9QAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [15/19] Queued: Stephen Brooks (ID: 42/3005)
+2026-02-22 06:13:48 [INFO    ] [16/19] Queued: Hanieh Shakeri (ID: iriAIgsAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [17/19] Queued: FE Bordeleau (ID: 8Bug6mIAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [18/19] Queued: Andrew Rau-Chaplin (ID: -PvfVhgAAAAJ)
+2026-02-22 06:13:48 [INFO    ] [19/19] Queued: Meng He (ID: 4yj_9skAAAAJ)
+2026-02-22 06:13:48 [STEP    ] All 19 authors queued for processing
