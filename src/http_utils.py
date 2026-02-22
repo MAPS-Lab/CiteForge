@@ -99,7 +99,7 @@ _RETRY_STRATEGY = Retry(
     status_forcelist=tuple(c for c in HTTP_RETRY_STATUS_CODES if c not in (429, 503)),
     allowed_methods=["GET", "POST"]
 )
-_ADAPTER = HTTPAdapter(max_retries=_RETRY_STRATEGY)
+_ADAPTER = HTTPAdapter(max_retries=_RETRY_STRATEGY, pool_maxsize=20, pool_block=True)
 _SESSION.mount("https://", _ADAPTER)
 _SESSION.mount("http://", _ADAPTER)
 

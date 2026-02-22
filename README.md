@@ -70,6 +70,17 @@ output/
     └── ...
 ```
 
+### Included Sample Data
+
+This repository ships with pre-fetched data for 18 authors from Dalhousie University's Faculty of Computer Science:
+
+- **`data/api_cache/`** — Cached API responses across 14 services, so you can inspect the pipeline without re-querying rate-limited APIs
+- **`output/`** — 422 enriched BibTeX files and an enrichment summary CSV
+- **`data/input_backup.csv`** — Full faculty list (67 authors)
+- **`data/input_full.csv`** — Working subset (22 authors)
+
+To run the pipeline on your own data, create `data/input.csv` with your authors and run `python3 main.py`. The cache will be reused for any overlapping queries.
+
 ---
 
 ## How It Works
@@ -81,7 +92,7 @@ Each article goes through a **four-phase enrichment pipeline**:
 3. **Late DOI Discovery** — Collect DOIs from matched sources, preferring published over preprint
 4. **Trust-Based Merge** — Combine fields using a 14-level source hierarchy, then deduplicate
 
-Authors are processed in parallel (12 workers). Scholar requests are serialized through a single background event loop for anti-detection, while all other API calls run in parallel. Responses are cached locally.
+Authors are processed in parallel (12 workers). Scholar requests are serialized through a single background event loop for anti-detection, while all other API calls run in parallel. Responses are cached locally under `data/api_cache/` with monthly expiry.
 
 ### Trust Hierarchy
 
