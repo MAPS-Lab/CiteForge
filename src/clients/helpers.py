@@ -11,6 +11,7 @@ from ..config import (
     SIM_YEAR_BONUS,
     SIM_YEAR_MATCH_WINDOW,
 )
+from ..log_utils import LogCategory, logger
 from ..text_utils import extract_year_from_any
 
 
@@ -24,15 +25,30 @@ def _score_candidate_generic(
         title_sim: Callable[[str, str], float],
         author_match: Callable[[str, Any], bool],
 ) -> float:
-    s = 0.0
-    s += SIM_TITLE_WEIGHT * title_sim(target_title, cand_title)
-    if target_author and author_match(target_author, cand_authors):
-        s += SIM_AUTHOR_BONUS
+    tsim = title_sim(target_title, cand_title)
+    s = SIM_TITLE_WEIGHT * tsim
+    author_matched = bool(target_author and author_match(target_author, cand_authors))
+    author_bonus = SIM_AUTHOR_BONUS if author_matched else 0.0
+    s += author_bonus
 
     ty = extract_year_from_any(target_year) if target_year else None
     cy = extract_year_from_any(cand_year) if cand_year else None
+    year_diff: int | None = None
+    year_in_window = False
+    year_bonus = 0.0
     if ty is not None and cy is not None:
-        s += SIM_YEAR_BONUS * (1.0 if abs(ty - cy) <= SIM_YEAR_MATCH_WINDOW else 0.0)
+        year_diff = abs(ty - cy)
+        year_in_window = year_diff <= SIM_YEAR_MATCH_WINDOW
+        year_bonus = SIM_YEAR_BONUS if year_in_window else 0.0
+        s += year_bonus
+
+    logger.debug(
+        f"CANDIDATE | title_sim={tsim:.3f} | author_match={author_matched}"
+        f" | author_bonus={author_bonus:.2f} | year_diff={year_diff}"
+        f" | year_in_window={year_in_window} | year_bonus={year_bonus:.2f}"
+        f" | total={s:.3f}",
+        category=LogCategory.SCORE,
+    )
     return s
 
 
@@ -48,7 +64,12 @@ def _best_item_by_score(
         s = score_fn(it)
         if s > best_s:
             best, best_s = it, s
-    return best if best_s >= threshold else None
+    selected = best is not None and best_s >= threshold
+    logger.debug(
+        f"BEST_ITEM | candidates={len(items)} | best_score={best_s:.3f} | threshold={threshold} | selected={selected}",
+        category=LogCategory.SCORE,
+    )
+    return best if selected else None
 
 
 def extract_authors_from_article(art: dict[str, Any]) -> list[str] | None:
@@ -78,16 +99,13 @@ def extract_authors_from_article(art: dict[str, Any]) -> list[str] | None:
 def get_article_year(art: dict[str, Any]) -> int:
     """Extract the publication year from an article by checking multiple fields, returning 0 if not found."""
     y = art.get("year") or art.get("publication_year")
-    year = extract_year_from_any(y, fallback=None)
-    if year is not None:
-        return year
+    primary = extract_year_from_any(y, fallback=None)
+    if primary is not None:
+        return primary
 
     pub = art.get("publication") or art.get("snippet") or art.get("publication_info")
-    year = extract_year_from_any(pub, fallback=None)
-    if year is not None:
-        return year
-
-    return 0
+    fallback = extract_year_from_any(pub, fallback=None)
+    return fallback if fallback is not None else 0
 
 
 def strip_html_tags(s: str) -> str:
@@ -95,10 +113,10 @@ def strip_html_tags(s: str) -> str:
     Remove HTML tags, convert <br> to newlines, and collapse multiple
     whitespace characters into single spaces.
     """
-    s2 = re.sub(r"<\s*br\s*/?\s*>", "\n", s, flags=re.IGNORECASE)
-    s2 = re.sub(r"<[^>]+>", " ", s2)
-    s2 = re.sub(r"\s+", " ", s2)
-    return s2.strip()
+    cleaned = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
 
 
 def _sanitize_dblp_author(name: str) -> str:

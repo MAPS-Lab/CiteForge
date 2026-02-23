@@ -5,8 +5,7 @@ import json
 import os
 import re
 import threading
-import urllib.parse
-import urllib.request
+import time
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
 from typing import Any
@@ -18,8 +17,10 @@ from ..config import (
     CACHE_TTL_SEARCH_DAYS,
     DBLP_BASE,
     DBLP_PERSON_BASE,
+    GENERIC_SERIES_NAMES,
     HTTP_TIMEOUT_DEFAULT,
     OPENREVIEW_BASE,
+    OPENREVIEW_SESSION_TTL_SECS,
     PUBMED_BASE,
     SIM_EXACT_PICK_THRESHOLD,
     SIM_MERGE_DUPLICATE_THRESHOLD,
@@ -35,6 +36,7 @@ from ..exceptions import (
 )
 from ..http_utils import (
     DEFAULT_JSON_HEADERS,
+    _get_session,
     handle_api_errors,
     http_fetch_bytes,
     http_get_json,
@@ -42,6 +44,7 @@ from ..http_utils import (
     s2_http_get_json,
 )
 from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text
+from ..log_utils import LogCategory, logger
 from ..text_utils import (
     author_in_text,
     author_name_matches,
@@ -84,6 +87,13 @@ def s2_search_papers_multiple(
     """Search Semantic Scholar for multiple paper candidates."""
     if not api_key or not title:
         return []
+    cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
+    cached = response_cache.get("semantic_scholar", cache_key)
+    if cached is not None:
+        if cached.get("_negative"):
+            return []
+        logger.debug(f"s2_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
+        return list(cached.get("results", []))
     query_parts = [f'"{title}"']
     if author_name:
         query_parts.append(author_name)
@@ -97,7 +107,12 @@ def s2_search_papers_multiple(
     except ALL_API_ERRORS:
         return []
     results = safe_get_nested(data, *config.result_path, default=[])
-    return list(results[:max_results]) if results else []
+    top = list(results[:max_results]) if results else []
+    if top:
+        response_cache.put("semantic_scholar", cache_key, {"results": top}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put("semantic_scholar", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    return top
 
 
 # ============ Crossref ============
@@ -159,13 +174,16 @@ def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
         return None
     cached = response_cache.get("doi_csl", doi_norm)
     if cached is not None:
+        logger.debug(f"doi_csl | HIT | doi={doi_norm}", category=LogCategory.CACHE)
         return cached
+    logger.debug(f"doi_csl | MISS | doi={doi_norm}", category=LogCategory.CACHE)
     url = f"https://doi.org/{doi_norm}"
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["Accept"] = "application/vnd.citationstyles.csl+json"
     raw = http_fetch_bytes(url, headers, timeout)
     result: dict[str, Any] = json.loads(raw.decode("utf-8"))
     response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
+    logger.debug(f"doi_csl | PUT | doi={doi_norm}", category=LogCategory.CACHE)
     return result
 
 
@@ -176,7 +194,9 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
         return None
     cached = response_cache.get("doi_bibtex", doi_norm)
     if cached is not None:
+        logger.debug(f"doi_bibtex | HIT | doi={doi_norm}", category=LogCategory.CACHE)
         return cached.get("bibtex")
+    logger.debug(f"doi_bibtex | MISS | doi={doi_norm}", category=LogCategory.CACHE)
     url = f"https://doi.org/{doi_norm}"
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["Accept"] = "application/x-bibtex"
@@ -184,6 +204,7 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
         raw = http_fetch_bytes(url, headers, timeout)
         result = raw.decode("utf-8", errors="replace")
         response_cache.put("doi_bibtex", doi_norm, {"bibtex": result}, ttl_days=CACHE_TTL_DOI_DAYS)
+        logger.debug(f"doi_bibtex | PUT | doi={doi_norm}", category=LogCategory.CACHE)
         return result
     except NETWORK_ERRORS:
         return None
@@ -195,12 +216,32 @@ def bibtex_from_csl(csl: dict[str, Any], keyhint: str) -> str:
     from ..text_utils import extract_authors_from_any, extract_year_from_any, safe_get_field
     title = safe_get_field(csl, "title") or ""
     subtitle_raw = csl.get("subtitle")
-    subtitle = (subtitle_raw[0] if subtitle_raw else "") if isinstance(subtitle_raw, list) else (subtitle_raw or "")
+    subtitle = (
+        (subtitle_raw[0] if subtitle_raw else "")
+        if isinstance(subtitle_raw, list)
+        else (subtitle_raw or "")
+    )
     if subtitle:
         title = f"{title}: {subtitle}" if title else subtitle
     authors = extract_authors_from_any(csl, field_names=["author"])
     year = extract_year_from_any(csl, fallback=0) or 0
-    container = safe_get_field(csl, "container-title")
+    container_raw = csl.get("container-title")
+    if isinstance(container_raw, list) and len(container_raw) > 1:
+        container = None
+        for candidate in container_raw:
+            candidate_str = str(candidate).strip()
+            if candidate_str and candidate_str.lower() not in GENERIC_SERIES_NAMES:
+                container = candidate_str
+                break
+        if not container:
+            container = safe_get_field(csl, "container-title")
+    else:
+        container = safe_get_field(csl, "container-title")
+    if container and container.lower().strip() in GENERIC_SERIES_NAMES:
+        event = csl.get("event") or {}
+        event_name = event.get("name", "").strip() if isinstance(event, dict) else ""
+        if event_name:
+            container = event_name
     entry_type = determine_entry_type(csl)
     doi = safe_get_field(csl, "DOI")
     url = safe_get_field(csl, "URL")
@@ -208,8 +249,16 @@ def bibtex_from_csl(csl: dict[str, Any], keyhint: str) -> str:
     number = safe_get_field(csl, "issue")
     pages = safe_get_field(csl, "page")
     publisher = safe_get_field(csl, "publisher")
-    if publisher and publisher.strip().lower() == "arxiv":
+    publisher_cleanup = bool(publisher and publisher.strip().lower() == "arxiv")
+    if publisher_cleanup:
         publisher = None
+    is_container_array = isinstance(container_raw, list) and len(container_raw) > 1
+    logger.debug(
+        f"csl | CONVERT | title={title[:50]} | subtitle={bool(subtitle)}"
+        f" | container_title_array={is_container_array}"
+        f" | publisher_cleanup={publisher_cleanup} | entry_type={entry_type}",
+        category=LogCategory.SCORE,
+    )
     return build_bibtex_entry(
         entry_type=entry_type, title=title, authors=authors, year=year, keyhint=keyhint,
         venue=container or None, doi=doi or None, url=url or None,
@@ -232,6 +281,9 @@ def arxiv_search(
     cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
     cached = response_cache.get("arxiv", cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            return []
+        logger.debug(f"arxiv | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         entries_cached: list[dict[str, Any]] = cached.get("entries", [])
         return entries_cached
     q_parts = [f'ti:"{title}"']
@@ -303,6 +355,7 @@ def arxiv_search(
             "abs_url": link_abs, "doi": doi_val, "primary_class": pc, "arxiv_id": arxiv_id,
         })
     if not entries:
+        response_cache.put("arxiv", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return []
     from ..bibtex_build import create_scoring_function
     score_fn = create_scoring_function(
@@ -310,10 +363,14 @@ def arxiv_search(
         title_getter=lambda ent: ent.get("title", ""),
         authors_getter=lambda ent: ent.get("authors", []),
         year_getter=lambda ent: ent.get("year"),
-        author_match_fn=lambda anv, al: authors_overlap(anv, al)
+        author_match_fn=authors_overlap
     )
     entries.sort(key=score_fn, reverse=True)
     response_cache.put("arxiv", cache_key, {"entries": entries}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    logger.debug(
+        f"arxiv | PUT | key={cache_key[:60]} | entries={len(entries)}",
+        category=LogCategory.CACHE,
+    )
     return entries
 
 
@@ -327,36 +384,101 @@ def build_bibtex_from_arxiv(entry: dict[str, Any], keyhint: str) -> str | None:
 # ============ OpenReview ============
 
 _OPENREVIEW_SESSION: dict[str, str] | None = None
+_OPENREVIEW_SESSION_CREATED_AT: float = 0.0
 _OPENREVIEW_SESSION_LOCK = threading.Lock()
+
+
+def _or_note_title(note: dict[str, Any]) -> str:
+    """Extract the title from an OpenReview note."""
+    content = note.get("content") or {}
+    return (content.get("title") or note.get("title") or "").strip()
+
+
+def _or_note_authors(note: dict[str, Any]) -> Any:
+    """Extract the authors from an OpenReview note."""
+    content = note.get("content") or {}
+    return content.get("authors") or content.get("authorids") or note.get("authors")
+
+
+def _or_note_year(note: dict[str, Any]) -> int | None:
+    """Extract the publication year from an OpenReview note timestamp."""
+    try:
+        ms = note.get("cdate") or note.get("tcdate")
+        if isinstance(ms, (int, float)):
+            return datetime.fromtimestamp(float(ms) / 1000.0, timezone.utc).year
+    except (*NUMERIC_ERRORS, OSError):
+        return None
+    return None
+
+
+def _or_authors_are_ids(authors: Any) -> bool:
+    """Check if authors list contains OpenReview IDs (~User or email) instead of names."""
+    if isinstance(authors, list):
+        return any("~" in str(a) or "@" in str(a) for a in authors)
+    return False
+
+
+def _openreview_session_expired() -> bool:
+    """Return True if the cached OpenReview session has exceeded its TTL."""
+    if _OPENREVIEW_SESSION_CREATED_AT <= 0:
+        return True
+    return (time.monotonic() - _OPENREVIEW_SESSION_CREATED_AT) >= OPENREVIEW_SESSION_TTL_SECS
 
 
 def openreview_login(creds: tuple[str, ...] | None) -> dict[str, str] | None:
     """Log into OpenReview and return headers with a session cookie."""
-    global _OPENREVIEW_SESSION
+    global _OPENREVIEW_SESSION, _OPENREVIEW_SESSION_CREATED_AT
     if not creds:
         return None
-    # Fast path: return cached session without acquiring the lock
-    if _OPENREVIEW_SESSION is not None:
+    def _reuse_session() -> bool:
+        return _OPENREVIEW_SESSION is not None and not _openreview_session_expired()
+
+    # Fast path: return cached session if not expired
+    if _reuse_session():
+        logger.debug("openreview | SESSION | reused=True", category=LogCategory.CACHE)
         return _OPENREVIEW_SESSION
     with _OPENREVIEW_SESSION_LOCK:
-        # Double-check after acquiring lock
-        if _OPENREVIEW_SESSION is not None:
+        # Double-check after acquiring lock (may have been refreshed by another thread)
+        if _reuse_session():
+            logger.debug("openreview | SESSION | reused=True", category=LogCategory.CACHE)
             return _OPENREVIEW_SESSION
+        # Clear stale session before re-login
+        expired = _OPENREVIEW_SESSION is not None
+        _OPENREVIEW_SESSION = None
+        _OPENREVIEW_SESSION_CREATED_AT = 0.0
         login, password = creds[0], creds[1]
+        url = f"{OPENREVIEW_BASE}/login"
+        payload = {"id": login, "password": password}
+        headers = DEFAULT_JSON_HEADERS.copy()
+        headers["Content-Type"] = "application/json"
         try:
-            url = f"{OPENREVIEW_BASE}/login"
-            payload = json.dumps({"id": login, "password": password}).encode("utf-8")
-            headers = DEFAULT_JSON_HEADERS.copy()
-            headers["Content-Type"] = "application/json"
-            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                set_cookie = resp.headers.get("Set-Cookie") if hasattr(resp, "headers") else None
-                if set_cookie:
-                    headers_with_cookie = DEFAULT_JSON_HEADERS.copy()
-                    headers_with_cookie["Cookie"] = set_cookie
-                    _OPENREVIEW_SESSION = headers_with_cookie
-                    return _OPENREVIEW_SESSION
-        except (*NETWORK_ERRORS, *PARSE_ERRORS):
+            resp = _get_session().post(url, json=payload, headers=headers, timeout=20)
+            resp.raise_for_status()
+            set_cookie = resp.headers.get("Set-Cookie")
+            if set_cookie:
+                headers_with_cookie = DEFAULT_JSON_HEADERS.copy()
+                headers_with_cookie["Cookie"] = set_cookie
+                _OPENREVIEW_SESSION = headers_with_cookie
+                _OPENREVIEW_SESSION_CREATED_AT = time.monotonic()
+                logger.debug(
+                    f"openreview | SESSION | reused=False | expired={expired} | login_success=True",
+                    category=LogCategory.CACHE,
+                )
+                return _OPENREVIEW_SESSION
+            logger.debug(
+                f"openreview | SESSION | reused=False | expired={expired} | login_success=False | reason=no_cookie",
+                category=LogCategory.CACHE,
+            )
+        except (*NETWORK_ERRORS, *PARSE_ERRORS) as e:
+            logger.debug(
+                f"openreview | SESSION | reused=False | expired={expired}"
+                f" | login_success=False | reason={type(e).__name__}",
+                category=LogCategory.CACHE,
+            )
+            logger.warn(
+                f"OpenReview re-login failed: {type(e).__name__}: {e}",
+                source="OpenReview",
+            )
             return None
     return None
 
@@ -370,6 +492,9 @@ def openreview_search_paper(
     cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
     cached = response_cache.get("openreview", cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            return None
+        logger.debug(f"openreview | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached if cached else None
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates: list[dict[str, Any]] = []
@@ -384,50 +509,44 @@ def openreview_search_paper(
     try:
         url = build_url(f"{OPENREVIEW_BASE}/notes", {"term": title, "details": "metadata"})
         _extend_with_notes(url)
-    except ALL_API_ERRORS:
+    except (*ALL_API_ERRORS, ValueError):
         pass
     if not candidates:
         try:
             url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"q": title, "limit": 20})
             _extend_with_notes(url)
-        except ALL_API_ERRORS:
+        except (*ALL_API_ERRORS, ValueError):
             pass
     if not candidates:
+        response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return None
-
-    def note_title(note: dict[str, Any]) -> str:
-        c = note.get("content") or {}
-        return (c.get("title") or note.get("title") or "").strip()
-
-    def note_authors(note: dict[str, Any]) -> Any:
-        c = note.get("content") or {}
-        return c.get("authors") or c.get("authorids") or note.get("authors")
 
     target_norm = normalize_title(title)
     for cand in candidates:
-        if normalize_title(note_title(cand)) == target_norm and (
-            not author_name or author_name_matches(author_name, note_authors(cand))
+        cand_authors = _or_note_authors(cand)
+        if normalize_title(_or_note_title(cand)) == target_norm and (
+            not author_name
+            or _or_authors_are_ids(cand_authors)
+            or author_name_matches(author_name, cand_authors)
         ):
             response_cache.put("openreview", cache_key, dict(cand), ttl_days=CACHE_TTL_SEARCH_DAYS)
+            logger.debug(f"openreview | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return cand
 
-    def note_year(note_obj: dict[str, Any]) -> int | None:
-        try:
-            ms = note_obj.get("cdate") or note_obj.get("tcdate")
-            if isinstance(ms, (int, float)):
-                return datetime.fromtimestamp(float(ms) / 1000.0, timezone.utc).year
-        except (*NUMERIC_ERRORS, OSError):
-            return None
-        return None
-
     from ..bibtex_build import create_scoring_function
+
     score_fn = create_scoring_function(
         title=title, author_name=author_name, year_hint=None,
-        title_getter=note_title, authors_getter=note_authors, year_getter=note_year,
+        title_getter=_or_note_title, authors_getter=_or_note_authors,
+        year_getter=_or_note_year,
     )
     best = _best_item_by_score(candidates, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
     if best is not None:
         response_cache.put("openreview", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"openreview | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
+    else:
+        response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"openreview | PUT_NEGATIVE | key={cache_key[:60]}", category=LogCategory.CACHE)
     return best
 
 
@@ -447,6 +566,9 @@ def openreview_search_papers_multiple(
     cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
     cached = response_cache.get("openreview", cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            return []
+        logger.debug(f"openreview_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("results", []))
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates: list[dict[str, Any]] = []
@@ -461,47 +583,37 @@ def openreview_search_papers_multiple(
     try:
         url = build_url(f"{OPENREVIEW_BASE}/notes", {"term": title, "details": "metadata"})
         _extend_with_notes(url)
-    except ALL_API_ERRORS:
+    except (*ALL_API_ERRORS, ValueError):
         pass
     if not candidates:
         try:
             url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"q": title, "limit": 20})
             _extend_with_notes(url)
-        except ALL_API_ERRORS:
+        except (*ALL_API_ERRORS, ValueError):
             pass
     if not candidates:
+        response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return []
-
-    def note_title(note: dict[str, Any]) -> str:
-        c = note.get("content") or {}
-        return (c.get("title") or note.get("title") or "").strip()
-
-    def note_authors(note: dict[str, Any]) -> Any:
-        c = note.get("content") or {}
-        return c.get("authors") or c.get("authorids") or note.get("authors")
-
-    def note_year(note_obj: dict[str, Any]) -> int | None:
-        try:
-            ms = note_obj.get("cdate") or note_obj.get("tcdate")
-            if isinstance(ms, (int, float)):
-                return datetime.fromtimestamp(float(ms) / 1000.0, timezone.utc).year
-        except (*NUMERIC_ERRORS, OSError):
-            return None
-        return None
 
     target_norm = normalize_title(title)
     exact: list[dict[str, Any]] = []
     for cand in candidates:
-        if normalize_title(note_title(cand)) == target_norm and (
-            not author_name or author_name_matches(author_name, note_authors(cand))
+        cand_authors = _or_note_authors(cand)
+        if normalize_title(_or_note_title(cand)) == target_norm and (
+            not author_name
+            or _or_authors_are_ids(cand_authors)
+            or author_name_matches(author_name, cand_authors)
         ):
             exact.append(cand)
     if exact:
         candidates = exact
+
     from ..bibtex_build import create_scoring_function
+
     score_fn = create_scoring_function(
         title=title, author_name=author_name, year_hint=None,
-        title_getter=note_title, authors_getter=note_authors, year_getter=note_year,
+        title_getter=_or_note_title, authors_getter=_or_note_authors,
+        year_getter=_or_note_year,
     )
     scored = []
     for cand in candidates:
@@ -512,9 +624,13 @@ def openreview_search_papers_multiple(
         except FIELD_ACCESS_ERRORS:
             continue
     scored.sort(key=lambda x: x[0], reverse=True)
-    top_results = [cand for _score, cand in scored[:max_results]]
+    top_results = [item for _, item in scored[:max_results]]
     if top_results:
         response_cache.put("openreview", cache_key, {"results": top_results}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"openreview_multi | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
+    else:
+        response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"openreview_multi | PUT_NEGATIVE | key={cache_key[:60]}", category=LogCategory.CACHE)
     return top_results
 
 
@@ -565,8 +681,6 @@ def _xml_text(el: ElementTree.Element | None) -> str:
     return (el.text or "").strip() if el is not None else ""
 
 
-
-
 def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     """Download a DBLP author XML record and convert entries into publication dicts."""
     if not pid:
@@ -574,7 +688,9 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     cache_key = f"dblp_pubs|{pid}"
     cached = response_cache.get("dblp", cache_key)
     if cached is not None:
+        logger.debug(f"dblp | HIT | pid={pid}", category=LogCategory.CACHE)
         return list(cached.get("articles", []))
+    logger.debug(f"dblp | MISS | pid={pid}", category=LogCategory.CACHE)
     url = f"{DBLP_PERSON_BASE}/{pid}.xml"
     try:
         xml = http_get_text(url, timeout=HTTP_TIMEOUT_DEFAULT)
@@ -585,6 +701,7 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     except XML_PARSE_ERRORS:
         return []
     articles: list[dict[str, Any]] = []
+    dblp_allowed_tags = {"article", "inproceedings", "incollection", "phdthesis", "mastersthesis"}
     for r in root.findall("r"):
         child = None
         for ch in r:
@@ -593,9 +710,17 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
                 break
         if child is None:
             continue
+        tag_name = child.tag if isinstance(child.tag, str) else str(child.tag)
+        allowed = tag_name in dblp_allowed_tags
         title_el = child.find("title")
         title_val = "".join(title_el.itertext()) if title_el is not None else ""
-        title = trim_title_default(title_val or "")
+        title = trim_title_default(title_val or "") if allowed else ""
+        logger.debug(
+            f"dblp | ENTRY_FILTER | tag={tag_name} | allowed={allowed} | title={title_val[:50]}",
+            category=LogCategory.SCORE,
+        )
+        if not allowed:
+            continue
         if not title:
             continue
         year = 0
@@ -638,6 +763,10 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
         articles.append(art)
     if articles:
         response_cache.put("dblp", cache_key, {"articles": articles}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(
+            f"dblp | PUT | pid={pid} | articles={len(articles)}",
+            category=LogCategory.CACHE,
+        )
     return articles
 
 
@@ -668,16 +797,18 @@ def enhance_scholar_article_with_dblp(
             target_title=scholar_title, target_author=target_author, target_year=scholar_art.get("year"),
             cand_title=dblp_title, cand_authors=dblp_item.get("authors", []), cand_year=dblp_item.get("year"),
             title_sim=title_similarity,
-            author_match=lambda anv, al: authors_overlap(anv, al),
+            author_match=authors_overlap,
         )
         if score > best_score:
             best_score = score
             best_match = dblp_item
+    enhanced = False
+    fields_updated: list[str] = []
     if best_score >= SIM_MERGE_DUPLICATE_THRESHOLD and best_match:
-        enhanced = False
         if is_truncated(scholar_title) and best_match.get("title") and not is_truncated(best_match["title"]):
             scholar_art["title"] = best_match["title"]
             enhanced = True
+            fields_updated.append("title")
         scholar_authors = scholar_art.get("author_info", [])
         if is_truncated(str(scholar_authors)) and best_match.get("authors"):
             dblp_authors = best_match["authors"]
@@ -687,16 +818,26 @@ def enhance_scholar_article_with_dblp(
                 else:
                     scholar_art["author_info"] = dblp_authors
                 enhanced = True
+                fields_updated.append("author_info")
         scholar_pub = scholar_art.get("publication_info", "")
         if best_match.get("publication") and (not scholar_pub or is_truncated(scholar_pub)):
             scholar_art["publication_info"] = best_match["publication"]
             enhanced = True
+            fields_updated.append("publication_info")
         if not scholar_art.get("year") and best_match.get("year"):
             scholar_art["year"] = best_match["year"]
             enhanced = True
-        if enhanced:
-            scholar_art["_dblp_enhanced"] = True
-            return True
+            fields_updated.append("year")
+
+    logger.debug(
+        f"dblp | ENHANCE | scholar_title={scholar_title[:50]}"
+        f" | best_match_score={best_score:.3f} | enhanced={enhanced}"
+        f" | fields_updated={fields_updated}",
+        category=LogCategory.SCORE,
+    )
+    if enhanced:
+        scholar_art["_dblp_enhanced"] = True
+        return True
     return False
 
 
@@ -746,6 +887,9 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
     cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
     cached = response_cache.get("pubmed", cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            return None
+        logger.debug(f"pubmed | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached if cached else None
     search_query = f"{title}[Title]"
     if author_name:
@@ -757,6 +901,7 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
     search_data = http_get_json(search_url, timeout=15.0)
     pmids = (search_data.get("esearchresult") or {}).get("idlist") or []
     if not pmids:
+        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return None
     fetch_url = build_url(
         f"{PUBMED_BASE}/esummary.fcgi",
@@ -766,6 +911,7 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
     result = fetch_data.get("result") or {}
     articles = [result[pmid] for pmid in pmids if pmid in result and isinstance(result[pmid], dict)]
     if not articles:
+        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return None
     target_norm = normalize_title(title)
     for article in articles:
@@ -775,6 +921,10 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
         ):
             result = dict(article)
             response_cache.put("pubmed", cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
+            logger.debug(
+                f"pubmed | PUT | key={cache_key[:60]} | pmids={len(pmids)}",
+                category=LogCategory.CACHE,
+            )
             return result
     from ..bibtex_build import create_scoring_function
     score_fn = create_scoring_function(
@@ -787,6 +937,13 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
     best = _best_item_by_score(articles, score_fn)
     if best is not None:
         response_cache.put("pubmed", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(
+            f"pubmed | PUT | key={cache_key[:60]} | pmids={len(pmids)}",
+            category=LogCategory.CACHE,
+        )
+    else:
+        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"pubmed | PUT_NEGATIVE | key={cache_key[:60]}", category=LogCategory.CACHE)
     return best
 
 
@@ -830,6 +987,9 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
     cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
     cached = response_cache.get("pubmed", cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            return []
+        logger.debug(f"pubmed_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("results", []))
     search_query = f"{title}[Title]"
     if author_name:
@@ -844,6 +1004,7 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
         return []
     id_list = safe_get_nested(search_data, "esearchresult", "idlist", default=[])
     if not id_list:
+        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return []
     summary_url = build_url(
         f"{PUBMED_BASE}/esummary.fcgi",
@@ -854,9 +1015,12 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
     except NETWORK_ERRORS:
         return []
     result = safe_get_nested(summary_data, "result", default={})
-    results_list = [result[uid] for uid in id_list[:max_results] if uid in result and isinstance(result.get(uid), dict)]
+    results_list = [result[uid] for uid in id_list[:max_results] if uid in result and isinstance(result[uid], dict)]
     if results_list:
         response_cache.put("pubmed", cache_key, {"results": results_list}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"pubmed_multi | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
+    else:
+        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return results_list
 
 
@@ -868,7 +1032,8 @@ def europepmc_search_paper(title: str, author_name: str | None) -> dict[str, Any
         return None
     from ..api_configs import EUROPEPMC_SEARCH_CONFIG
     from ..api_generics import search_api_generic
-    query = f'TITLE:"{title}"'
+    safe_title = title.replace('"', '')
+    query = f'TITLE:"{safe_title}"'
     if author_name:
         query += f' AND AUTH:"{author_name}"'
     config = copy.copy(EUROPEPMC_SEARCH_CONFIG)
@@ -900,7 +1065,9 @@ def build_bibtex_from_europepmc(article: dict[str, Any], keyhint: str) -> str | 
     pmid = article.get("pmid") or ""
     pmcid = article.get("pmcid") or ""
     if pmcid:
-        url = f"https://europepmc.org/article/MED/{pmcid}"
+        # PMCIDs use the PMC source, not MED
+        numeric_id = pmcid.upper().removeprefix("PMC")
+        url = f"https://europepmc.org/article/PMC/{numeric_id}"
     elif pmid:
         url = f"https://europepmc.org/article/MED/{pmid}"
     else:
@@ -927,8 +1094,16 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
     """Search Europe PMC for multiple paper candidates."""
     if not title:
         return []
+    cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
+    cached = response_cache.get("europepmc", cache_key)
+    if cached is not None:
+        if cached.get("_negative"):
+            return []
+        logger.debug(f"europepmc_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
+        return list(cached.get("results", []))
     from ..api_configs import EUROPEPMC_SEARCH_CONFIG
-    query = f'TITLE:"{title}"'
+    safe_title = title.replace('"', '')
+    query = f'TITLE:"{safe_title}"'
     if author_name:
         query += f' AND AUTH:"{author_name}"'
     config = copy.copy(EUROPEPMC_SEARCH_CONFIG)
@@ -939,4 +1114,9 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
     except ALL_API_ERRORS:
         return []
     results = safe_get_nested(data, *config.result_path, default=[])
-    return list(results[:max_results])
+    top = list(results[:max_results])
+    if top:
+        response_cache.put("europepmc", cache_key, {"results": top}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put("europepmc", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    return top

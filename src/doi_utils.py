@@ -6,7 +6,7 @@ from . import bibtex_utils as bt
 from .clients import search_apis
 from .exceptions import ALL_API_ERRORS
 from .log_utils import LogCategory, LogSource, logger
-from .text_utils import title_similarity
+from .text_utils import normalize_title, title_similarity
 
 
 def _validate_csl(
@@ -17,19 +17,49 @@ def _validate_csl(
     """
     Helper to validate DOI using CSL-JSON format.
     """
+    logger.debug(f"CSL_START | doi={doi}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
     try:
         csl = search_apis.fetch_csl_via_doi(doi)
+        logger.debug(
+            f"CSL_FETCH | result={csl is not None}",
+            category=LogCategory.DOI_VAL, source=LogSource.DOI,
+        )
         if csl:
             csl_bib = search_apis.bibtex_from_csl(csl, keyhint=result_id)
+            logger.debug(
+                f"CSL_CONVERT | bibtex_ok={csl_bib is not None}",
+                category=LogCategory.DOI_VAL, source=LogSource.DOI,
+            )
             if csl_bib:
                 csl_entry = bt.parse_bibtex_to_dict(csl_bib)
-                if csl_entry and bt.bibtex_entries_match_strict(baseline_entry, csl_entry):
-                    logger.success(
-                        f"{doi}: CSL format validated and added",
-                        category=LogCategory.MATCH, source=LogSource.DOI,
+                logger.debug(
+                    f"CSL_PARSE | entry_ok={csl_entry is not None}",
+                    category=LogCategory.DOI_VAL, source=LogSource.DOI,
+                )
+                if csl_entry is not None:
+                    strict_match = bt.bibtex_entries_match_strict(
+                        baseline_entry, csl_entry
                     )
-                    return True, csl_entry, csl
+                    logger.debug(
+                        f"CSL_MATCH | strict_match={strict_match}",
+                        category=LogCategory.DOI_VAL, source=LogSource.DOI,
+                    )
+                    if strict_match:
+                        logger.success(
+                            f"{doi}: CSL format validated and added",
+                            category=LogCategory.MATCH, source=LogSource.DOI,
+                        )
+                        return True, csl_entry, csl
+                else:
+                    logger.debug(
+                        "CSL_PARSE | entry_ok=False | skipping_match",
+                        category=LogCategory.DOI_VAL, source=LogSource.DOI,
+                    )
     except ALL_API_ERRORS as e:
+        logger.debug(
+            f"CSL_ERROR | doi={doi} | error={type(e).__name__}: {e}",
+            category=LogCategory.DOI_VAL, source=LogSource.DOI,
+        )
         logger.warn(f"{doi}: CSL fetch failed: {e}", category=LogCategory.ERROR, source=LogSource.DOI)
 
     return False, None, None
@@ -42,17 +72,43 @@ def _validate_bibtex(
     """
     Helper to validate DOI using BibTeX format.
     """
+    logger.debug(f"BIBTEX_START | doi={doi}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
     try:
         doi_bib = search_apis.fetch_bibtex_via_doi(doi)
+        logger.debug(
+            f"BIBTEX_FETCH | result={doi_bib is not None}",
+            category=LogCategory.DOI_VAL, source=LogSource.DOI,
+        )
         if doi_bib:
             bibtex_entry = bt.parse_bibtex_to_dict(doi_bib)
-            if bibtex_entry and bt.bibtex_entries_match_strict(baseline_entry, bibtex_entry):
-                logger.success(
-                    f"{doi}: BibTeX format validated and added",
-                    category=LogCategory.MATCH, source=LogSource.DOI,
+            logger.debug(
+                f"BIBTEX_PARSE | entry_ok={bibtex_entry is not None}",
+                category=LogCategory.DOI_VAL, source=LogSource.DOI,
+            )
+            if bibtex_entry is not None:
+                strict_match = bt.bibtex_entries_match_strict(
+                    baseline_entry, bibtex_entry
                 )
-                return True, bibtex_entry, doi_bib
+                logger.debug(
+                    f"BIBTEX_MATCH | strict_match={strict_match}",
+                    category=LogCategory.DOI_VAL, source=LogSource.DOI,
+                )
+                if strict_match:
+                    logger.success(
+                        f"{doi}: BibTeX format validated and added",
+                        category=LogCategory.MATCH, source=LogSource.DOI,
+                    )
+                    return True, bibtex_entry, doi_bib
+            else:
+                logger.debug(
+                    "BIBTEX_PARSE | entry_ok=False | skipping_match",
+                    category=LogCategory.DOI_VAL, source=LogSource.DOI,
+                )
     except ALL_API_ERRORS as e:
+        logger.debug(
+            f"BIBTEX_ERROR | doi={doi} | error={type(e).__name__}: {e}",
+            category=LogCategory.DOI_VAL, source=LogSource.DOI,
+        )
         logger.warn(f"{doi}: BibTeX fetch failed: {e}", category=LogCategory.ERROR, source=LogSource.DOI)
 
     return False, None, None
@@ -72,7 +128,9 @@ def _log_rejection_details(
         f"{doi} rejected: neither CSL nor BibTeX metadata matches baseline",
         category=LogCategory.SKIP, source=LogSource.DOI,
     )
-    baseline_title = bt.normalize_title(baseline_entry.get("fields", {}).get("title"))
+    baseline_title = normalize_title(baseline_entry.get("fields", {}).get("title"))
+    csl_title_sim = -1.0
+    bibtex_title_sim = -1.0
 
     # Check CSL title if available
     if csl:
@@ -80,9 +138,9 @@ def _log_rejection_details(
             csl_bib_check = search_apis.bibtex_from_csl(csl, keyhint=result_id)
             if csl_bib_check:
                 csl_dict = bt.parse_bibtex_to_dict(csl_bib_check)
-                csl_title = bt.normalize_title((csl_dict or {}).get("fields", {}).get("title"))
-                sim = title_similarity(baseline_title, csl_title)
-                logger.info(f"    CSL title similarity: {sim:.2f}", category=LogCategory.DEBUG, source=LogSource.DOI)
+                if csl_dict:
+                    csl_title = normalize_title(csl_dict.get("fields", {}).get("title"))
+                    csl_title_sim = title_similarity(baseline_title, csl_title)
         except Exception:  # noqa: S110
             pass
 
@@ -90,11 +148,19 @@ def _log_rejection_details(
     if doi_bib:
         try:
             bib_dict = bt.parse_bibtex_to_dict(doi_bib)
-            bib_title = bt.normalize_title((bib_dict or {}).get("fields", {}).get("title"))
-            sim = title_similarity(baseline_title, bib_title)
-            logger.info(f"    BibTeX title similarity: {sim:.2f}", category=LogCategory.DEBUG, source=LogSource.DOI)
+            if bib_dict:
+                bib_title = normalize_title(bib_dict.get("fields", {}).get("title"))
+                bibtex_title_sim = title_similarity(baseline_title, bib_title)
         except Exception:  # noqa: S110
             pass
+
+    logger.debug(
+        f"REJECTION_DETAIL | doi={doi}"
+        f" | csl_title_sim={csl_title_sim:.2f}"
+        f" | bibtex_title_sim={bibtex_title_sim:.2f}"
+        f" | baseline_title={baseline_title[:50] if baseline_title else 'none'}",
+        category=LogCategory.DOI_VAL, source=LogSource.DOI,
+    )
 
 
 def validate_doi_candidate(
@@ -115,8 +181,14 @@ def validate_doi_candidate(
     else:
         bibtex_matched, bibtex_entry, doi_bib = False, None, None
 
-    # Determine overall validation result
     doi_matched = csl_matched or bibtex_matched
+
+    logger.debug(
+        f"VALIDATE | doi={doi} | csl_tried=True | csl_matched={csl_matched}"
+        f" | bibtex_tried={not csl_matched} | bibtex_matched={bibtex_matched}"
+        f" | overall={doi_matched}",
+        category=LogCategory.DOI_VAL, source=LogSource.DOI,
+    )
 
     if not doi_matched:
         _log_rejection_details(doi, baseline_entry, result_id, csl, doi_bib)
@@ -150,13 +222,7 @@ def process_validated_doi(
     doi_matched = csl_matched or bibtex_matched
 
     if doi_matched:
-        # Build clear success message
-        formats = []
-        if csl_matched:
-            formats.append("CSL")
-        if bibtex_matched:
-            formats.append("BibTeX")
-
+        formats = [name for name, ok in [("CSL", csl_matched), ("BibTeX", bibtex_matched)] if ok]
         logger.success(
             f"{doi} validated successfully ({', '.join(formats)})",
             category=LogCategory.MATCH, source=LogSource.DOI,

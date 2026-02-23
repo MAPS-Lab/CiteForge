@@ -27,7 +27,7 @@ def test_prevent_duplicate_save_high_similarity(tmp_path):
     }
 
     # Save it
-    path_a = merge_utils.save_entry_to_file(out_dir, author_id, entry_a, author_name=author_name)
+    path_a, _ = merge_utils.save_entry_to_file(out_dir, author_id, entry_a, author_name=author_name)
     assert os.path.exists(path_a)
 
     # 2. Create a second entry with >95% similarity
@@ -48,7 +48,7 @@ def test_prevent_duplicate_save_high_similarity(tmp_path):
     assert sim >= 0.95, f"Similarity {sim} is not high enough for this test"
 
     # 3. Attempt to save the second entry
-    path_b = merge_utils.save_entry_to_file(out_dir, author_id, entry_b, author_name=author_name)
+    path_b, _ = merge_utils.save_entry_to_file(out_dir, author_id, entry_b, author_name=author_name)
 
     # 4. Assertions
     # Should reuse the same file path (deduplication)
@@ -79,7 +79,7 @@ def test_allow_duplicate_save_medium_similarity(tmp_path):
             "year": "2023"
         }
     }
-    path_a = merge_utils.save_entry_to_file(out_dir, author_id, entry_a, author_name=author_name)
+    path_a, _ = merge_utils.save_entry_to_file(out_dir, author_id, entry_a, author_name=author_name)
 
     # 2. Create a second entry with ~92% similarity
     # "Machine Learning for Healthcare Applications" (original)
@@ -105,7 +105,7 @@ def test_allow_duplicate_save_medium_similarity(tmp_path):
          pytest.skip(f"Generated similarity {sim} was too low (<= 0.90)")
 
     # 3. Save entry B
-    path_b = merge_utils.save_entry_to_file(out_dir, author_id, entry_b, author_name=author_name)
+    path_b, _ = merge_utils.save_entry_to_file(out_dir, author_id, entry_b, author_name=author_name)
 
     # 4. Assertions
     # Should create a NEW file because it's below the 95% threshold

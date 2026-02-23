@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from typing import Any
 
 from .config import (
@@ -11,6 +12,7 @@ from .config import (
     DEDUP_INTERNAL_FIELDS,
     PREPRINT_DOI_PREFIXES,
 )
+from .log_utils import LogCategory, LogSource, logger
 
 _ARXIV_PUBLISHER_NAMES = ("arxiv", "arxiv.org", "arxiv e-prints")
 _ARXIV_JOURNAL_NAME = "arXiv e-prints"
@@ -25,15 +27,12 @@ def _norm_doi(doi: str | None) -> str | None:
     if not doi:
         return None
     d = str(doi).strip()
-    # strip URL prefixes
     d = re.sub(r"^https?://(dx\.)?doi\.org/", "", d, flags=re.IGNORECASE)
-    # remove "doi:" prefix
-    d = re.sub(r"^doi:\s*", "", d, flags=re.IGNORECASE)
-    d = d.strip()
+    d = re.sub(r"^doi:\s*", "", d, flags=re.IGNORECASE).strip()
     if not d:
         return None
-    # lowercase entire DOI for case-insensitive comparison
-    return d.lower()
+    # URL-decode percent-encoded characters (e.g., %2F → /)
+    return urllib.parse.unquote(d).lower()
 
 
 def normalize_doi(doi: str | None) -> str | None:
@@ -47,10 +46,9 @@ def normalize_doi(doi: str | None) -> str | None:
 def is_secondary_doi(doi: str) -> bool:
     """Check if DOI belongs to preprint or data repository (deprioritize in selection)."""
     lower = doi.lower()
-    return (
-        any(lower.startswith(p) for p in PREPRINT_DOI_PREFIXES)
-        or any(lower.startswith(p) for p in DATA_DOI_PREFIXES)
-    )
+    preprint = any(lower.startswith(p) for p in PREPRINT_DOI_PREFIXES)
+    data = any(lower.startswith(p) for p in DATA_DOI_PREFIXES)
+    return preprint or data
 
 
 def _norm_arxiv_id(s: str | None) -> str | None:
@@ -61,8 +59,8 @@ def _norm_arxiv_id(s: str | None) -> str | None:
     if not s:
         return None
     t = str(s).strip()
-    t = re.sub(r'(?i)^arxiv:\s*', '', t)  # strip "arXiv:"
-    t = re.sub(r'v\d+$', '', t)  # strip version
+    t = re.sub(r'(?i)^arxiv:\s*', '', t)
+    t = re.sub(r'v\d+$', '', t)
     return t.strip() or None
 
 
@@ -86,9 +84,19 @@ def find_doi_in_html(html: str) -> str | None:
         if m:
             d = _norm_doi(m.group(1))
             if d and re.search(_DOI_REGEX, d, flags=re.IGNORECASE):
+                logger.debug(
+                    f"DOI_HTML_SEARCH | meta_match=True | doi={d}",
+                    category=LogCategory.AUDIT, source=LogSource.DOI,
+                )
                 return d
     m = re.search(_DOI_REGEX, html, flags=re.IGNORECASE)
-    return _norm_doi(m.group(1)) if m else None
+    fulltext_result = _norm_doi(m.group(1)) if m else None
+    if fulltext_result:
+        logger.debug(
+            f"DOI_HTML_SEARCH | fulltext_match=True | doi={fulltext_result}",
+            category=LogCategory.AUDIT, source=LogSource.DOI,
+        )
+    return fulltext_result
 
 
 def find_doi_in_text(text: str) -> str | None:
@@ -109,18 +117,23 @@ def find_arxiv_in_text(text: str) -> str | None:
     """
     if not text:
         return None
-    # look for ID with or without "arXiv:" prefix
-    m = re.search(r'(?i)arxiv[:/\s]*(\d{4}\.\d{4,5})(?:v\d+)?', text)
-    if m:
-        return _norm_arxiv_id(m.group(1))
-    # look for arxiv.org URLs
-    m = re.search(r'(?i)arxiv\.org/(abs|pdf)/(\d{4}\.\d{4,5})', text)
-    if m:
-        return _norm_arxiv_id(m.group(2))
-    # look for arXiv DOIs (10.48550/arXiv.XXXX)
-    m = re.search(ARXIV_DOI_EXTRACT_PATTERN, text)
-    if m:
-        return _norm_arxiv_id(m.group(1))
+
+    # Ordered patterns: prefix, URL, DOI
+    _patterns: list[tuple[str, str, int]] = [
+        (r'(?i)arxiv[:/\s]*(\d{4}\.\d{4,5})(?:v\d+)?', "prefix", 1),
+        (r'(?i)arxiv\.org/(abs|pdf)/(\d{4}\.\d{4,5})', "url", 2),
+        (ARXIV_DOI_EXTRACT_PATTERN, "doi", 1),
+    ]
+    for pattern, label, group in _patterns:
+        m = re.search(pattern, text)
+        if m:
+            result = _norm_arxiv_id(m.group(group))
+            logger.debug(
+                f"TEXT_SEARCH | matched={label} | found={result or 'none'}",
+                category=LogCategory.ARXIV, source=LogSource.ARXIV,
+            )
+            return result
+
     return None
 
 
@@ -140,7 +153,12 @@ def allowlisted_url(url: str | None) -> str | None:
     if doi_match:
         # Normalize to https://doi.org/...
         doi_suffix = doi_match.group(2)
-        return f"https://doi.org/{doi_suffix}"
+        result = f"https://doi.org/{doi_suffix}"
+        logger.debug(
+            f"URL_ALLOWLIST | url={url[:60]} | type=doi | normalized={result}",
+            category=LogCategory.AUDIT, source=LogSource.DOI,
+        )
+        return result
 
     # Check for arXiv URLs and normalize to HTTPS
     arxiv_match = re.search(r'^https?://arxiv\.org/(abs|pdf)/(\S+)$', u, flags=re.IGNORECASE)
@@ -148,22 +166,35 @@ def allowlisted_url(url: str | None) -> str | None:
         # Normalize to https://arxiv.org/...
         arxiv_type = arxiv_match.group(1)
         arxiv_id = arxiv_match.group(2)
-        return f"https://arxiv.org/{arxiv_type}/{arxiv_id}"
+        result = f"https://arxiv.org/{arxiv_type}/{arxiv_id}"
+        logger.debug(
+            f"URL_ALLOWLIST | url={url[:60]} | type=arxiv | normalized={result}",
+            category=LogCategory.AUDIT, source=LogSource.ARXIV,
+        )
+        return result
 
+    logger.debug(
+        f"URL_ALLOWLIST | url={url[:60]} | type=rejected | normalized=none",
+        category=LogCategory.AUDIT, source=LogSource.DOI,
+    )
     return None
 
 
 def extract_arxiv_eprint(entry: dict[str, Any]) -> str | None:
     """
     Try to recover an arXiv identifier from a BibTeX entry by checking the
-    archive prefix, eprint field, and common text fields that may mention arXiv.
+    archive prefix, eprint field, DOI (10.48550/arxiv.*), and common text
+    fields that may mention arXiv.
     """
     fields = entry.get("fields") or {}
-    # check proper eprint field first
     ap = (fields.get("archiveprefix") or "").lower()
     if ap == "arxiv":
         return _norm_arxiv_id(fields.get("eprint"))
-    # sometimes arXiv ID is in journal or howpublished field
+    # Extract from arXiv DOI (10.48550/arxiv.XXXX.YYYYY)
+    doi = (fields.get("doi") or "").strip().lower()
+    doi_m = re.search(r'10\.48550/arxiv\.(\d{4}\.\d{4,5})', doi)
+    if doi_m:
+        return _norm_arxiv_id(doi_m.group(1))
     j = fields.get("journal") or fields.get("howpublished") or ""
     m = re.search(r'(?i)arxiv:\s*(\d{4}\.\d{4,5})(v\d+)?', j)
     if m:
@@ -176,8 +207,15 @@ def external_ids_match(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> bo
     for field in DEDUP_INTERNAL_FIELDS:
         a_val = (fields_a.get(field) or "").strip()
         b_val = (fields_b.get(field) or "").strip()
-        if a_val and b_val and a_val == b_val:
-            return True
+        if a_val and b_val:
+            match = a_val == b_val
+            logger.debug(
+                f"EXTERNAL_ID_CHECK | field={field}"
+                f" | a={a_val[:30]} | b={b_val[:30]} | match={match}",
+                category=LogCategory.DEDUP, source=LogSource.DOI,
+            )
+            if match:
+                return True
     return False
 
 
@@ -192,9 +230,7 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
 
     Returns updated fields dictionary with normalized arXiv metadata.
     """
-    fields = dict(fields)  # work on a copy
-
-    # extract arXiv ID from various sources
+    fields = dict(fields)
     arxiv_id = None
     primary_class = fields.get("primaryclass")
 
@@ -219,6 +255,10 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
             if not arxiv_id:
                 arxiv_id = _norm_arxiv_id(m.group(1))
             # remove arXiv ID from pages - it doesn't belong there
+            logger.debug(
+                f"PAGES_REMOVE | val={pages} | reason=contains_arxiv_id",
+                category=LogCategory.ARXIV, source=LogSource.ARXIV,
+            )
             fields.pop("pages", None)
 
     # 4. check journal field for arXiv patterns
@@ -237,47 +277,72 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
             if m:
                 arxiv_id = _norm_arxiv_id(m.group(2))
 
-    # if we found an arXiv ID, normalize the fields
+    logger.debug(
+        f"ID_SOURCE | eprint={bool(fields.get('eprint'))}"
+        f" | doi={bool(fields.get('doi'))}"
+        f" | pages={bool(fields.get('pages'))}"
+        f" | journal={bool(fields.get('journal'))}"
+        f" | url={bool(fields.get('url'))}"
+        f" | id={arxiv_id or 'none'}",
+        category=LogCategory.ARXIV, source=LogSource.ARXIV,
+    )
+
     if arxiv_id:
-        # set standard arXiv fields
+        logger.debug(
+            f"SET_EPRINT | id={arxiv_id} | archiveprefix=arXiv"
+            f" | primaryclass={primary_class or 'none'}",
+            category=LogCategory.ARXIV, source=LogSource.ARXIV,
+        )
         fields["eprint"] = arxiv_id
         fields["archiveprefix"] = "arXiv"
 
-        # preserve primaryClass if we have it
         if primary_class:
             fields["primaryclass"] = primary_class
 
-        # remove publisher='arXiv' (repository, not a publisher)
-        if (fields.get("publisher") or "").strip().lower() in _ARXIV_PUBLISHER_NAMES:
+        publisher_val = (fields.get("publisher") or "").strip()
+        if publisher_val.lower() in _ARXIV_PUBLISHER_NAMES:
+            logger.debug(
+                f"PUBLISHER_REMOVE | val={publisher_val}",
+                category=LogCategory.ARXIV, source=LogSource.ARXIV,
+            )
             fields.pop("publisher", None)
 
-        # normalize journal field for pure arXiv preprints
         journal = (fields.get("journal") or "").strip()
         journal_lower = journal.lower()
-        # check for various arXiv journal patterns
         is_arxiv_journal = (
-            journal_lower in _ARXIV_PUBLISHER_NAMES or
-            "arxiv preprint" in journal_lower or
-            re.search(r'arxiv:\s*\d{4}\.\d{4,5}', journal_lower)
+            journal_lower in _ARXIV_PUBLISHER_NAMES
+            or "arxiv preprint" in journal_lower
+            or bool(re.search(r'arxiv:\s*\d{4}\.\d{4,5}', journal_lower))
         )
         if is_arxiv_journal:
-            # standardize to "arXiv e-prints" for consistency
+            logger.debug(
+                f"JOURNAL_NORMALIZE | old={journal} | new={_ARXIV_JOURNAL_NAME}"
+                f" | is_arxiv={is_arxiv_journal}",
+                category=LogCategory.ARXIV, source=LogSource.ARXIV,
+            )
             fields["journal"] = _ARXIV_JOURNAL_NAME
         elif not journal:
             # Pure arXiv preprint with no journal: set standard journal name
-            # This ensures consistent @article classification for all arXiv papers
             doi_val = fields.get("doi", "")
-            is_arxiv_doi = bool(re.search(ARXIV_DOI_CHECK_PATTERN, doi_val, re.IGNORECASE)) if doi_val else True
-            if not doi_val or is_arxiv_doi:
+            has_non_arxiv_doi = doi_val and not re.search(
+                ARXIV_DOI_CHECK_PATTERN, doi_val, re.IGNORECASE
+            )
+            if not has_non_arxiv_doi:
+                logger.debug(
+                    f"JOURNAL_SET_PURE | no_journal_no_published_doi"
+                    f" | journal={_ARXIV_JOURNAL_NAME}",
+                    category=LogCategory.ARXIV, source=LogSource.ARXIV,
+                )
                 fields["journal"] = _ARXIV_JOURNAL_NAME
 
-        # ensure URL points to arXiv if no DOI URL exists
         url = fields.get("url", "")
-        has_doi_url = url and "doi.org" in url.lower()
-
-        if not has_doi_url:
-            # prefer abs URL for human readability
-            fields["url"] = f"https://arxiv.org/abs/{arxiv_id}"
+        if not (url and "doi.org" in url.lower()):
+            arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
+            logger.debug(
+                f"URL_SET | url={arxiv_url}",
+                category=LogCategory.ARXIV, source=LogSource.ARXIV,
+            )
+            fields["url"] = arxiv_url
     else:
         # fallback: normalize journal even if we couldn't extract an arXiv ID
         journal = (fields.get("journal") or "").strip()

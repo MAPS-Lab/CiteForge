@@ -9,6 +9,7 @@ from .config import CACHE_TTL_SEARCH_DAYS, GENERIC_SERIES_NAMES, SIM_EXACT_PICK_
 from .exceptions import ALL_API_ERRORS, FIELD_ACCESS_ERRORS
 from .http_utils import http_get_json, s2_http_get_json
 from .id_utils import find_arxiv_in_text, find_doi_in_text
+from .log_utils import LogCategory, logger
 from .text_utils import (
     author_in_text,
     author_name_matches,
@@ -20,6 +21,47 @@ from .text_utils import (
     safe_get_field,
     safe_get_nested,
 )
+
+
+def _resolve_dotted(obj: dict[str, Any], field: str) -> Any:
+    """Resolve a dot-notation field path (e.g. ``externalIds.DOI``) against *obj*.
+
+    Falls back to a literal key lookup when there is no dot or when the
+    dot-traversal fails, so existing non-dotted field names keep working.
+    """
+    if "." not in field:
+        return obj.get(field)
+    parts = field.split(".")
+    cur: Any = obj
+    for part in parts:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+        if cur is None:
+            return None
+    return cur
+
+
+def _resolve_dotted_str(obj: dict[str, Any], field: str, *, check_placeholder: bool = False) -> str | None:
+    """Like :func:`_resolve_dotted` but coerces the result to ``str``.
+
+    Returns ``None`` when the value is missing, empty, or (optionally) a
+    placeholder string.
+    """
+    value = _resolve_dotted(obj, field)
+    if value is None:
+        return None
+    # Handle list values (common in API responses)
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if check_placeholder and has_placeholder(s):
+        return None
+    return s
 
 
 @dataclass
@@ -102,26 +144,18 @@ def _build_scoring_function(
     """
     from .bibtex_build import create_scoring_function
 
-    title_getter: Callable[[dict[str, Any]], str]
-    if config.title_getter:
-        title_getter = config.title_getter
-    else:
-        def title_getter(c: dict[str, Any]) -> str:
-            return safe_get_field(c, config.title_field) or ""
-
-    authors_getter: Callable[[dict[str, Any]], Any]
-    if config.authors_getter:
-        authors_getter = config.authors_getter
-    else:
-        def authors_getter(c: dict[str, Any]) -> Any:
-            return c.get(config.author_field) or []
-
-    year_getter: Callable[[dict[str, Any]], int | None]
-    if config.year_getter:
-        year_getter = config.year_getter
-    else:
-        def year_getter(c: dict[str, Any]) -> int | None:
-            return c.get("year")
+    title_getter: Callable[[dict[str, Any]], str] = (
+        config.title_getter
+        or (lambda c: safe_get_field(c, config.title_field) or "")
+    )
+    authors_getter: Callable[[dict[str, Any]], Any] = (
+        config.authors_getter
+        or (lambda c: c.get(config.author_field) or [])
+    )
+    year_getter: Callable[[dict[str, Any]], int | None] = (
+        config.year_getter
+        or (lambda c: c.get("year"))
+    )
 
     return create_scoring_function(
         title=title,
@@ -147,20 +181,21 @@ def search_api_generic(
     if not title:
         return None
 
-    # Check response cache
     cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
     cached = response_cache.get(config.api_name, cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            return None
+        logger.debug(f"{config.api_name} | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached if cached else None
 
-    # Build query parameters
     params = {config.query_param_name: title, **config.additional_params}
     if author_name and config.author_param_name:
         params[config.author_param_name] = author_name
 
     url = build_url(config.base_url, params)
+    logger.debug(f"{config.api_name} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
 
-    # Make HTTP request
     try:
         if api_key and config.api_name == "semantic_scholar":
             data = s2_http_get_json(url, api_key, timeout=config.timeout)
@@ -169,42 +204,63 @@ def search_api_generic(
     except ALL_API_ERRORS:
         return None
 
-    # Extract results using configured path
     results = safe_get_nested(data, *config.result_path, default=[])
     if not results:
+        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return None
+
+    logger.debug(
+        f"{config.api_name} | RESULTS | count={len(results)} | path={config.result_path}",
+        category=LogCategory.SCORE,
+    )
 
     # Try exact title match first
     target_norm = normalize_title(title)
+    get_title = config.title_getter or (lambda it: safe_get_field(it, config.title_field) or "")
+    get_authors = config.authors_getter or (lambda it: it.get(config.author_field))
+
     for item in results:
-        # Use custom getter if provided, otherwise use field name
-        if config.title_getter:
-            item_title = config.title_getter(item)
-        else:
-            item_title = safe_get_field(item, config.title_field) or ""
-
-        if normalize_title(item_title) == target_norm:
-            # Check author if provided
-            if not author_name:
-                result = dict(item)
-                response_cache.put(config.api_name, cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
-                return result
-
-            # Use custom getter if provided
-            item_authors = config.authors_getter(item) if config.authors_getter else item.get(config.author_field)
-
-            if author_name_matches(author_name, item_authors) or author_in_text(author_name, item_authors):
-                result = dict(item)
-                response_cache.put(config.api_name, cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
-                return result
+        item_title = get_title(item)
+        norm_match = normalize_title(item_title) == target_norm
+        author_ok = True
+        if norm_match and author_name:
+            item_authors = get_authors(item)
+            author_ok = author_name_matches(author_name, item_authors) or author_in_text(
+                author_name, item_authors
+            )
+        logger.debug(
+            f"{config.api_name} | EXACT_CHECK | item_title={item_title[:50]}"
+            f" | normalized_match={norm_match} | author_check={bool(author_name)}"
+            f" | author_match={author_ok}",
+            category=LogCategory.SCORE,
+        )
+        if not norm_match or not author_ok:
+            continue
+        logger.debug(
+            f"{config.api_name} | EXACT_MATCH | title={title[:50]}",
+            category=LogCategory.SCORE,
+        )
+        result = dict(item)
+        response_cache.put(config.api_name, cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        return result
 
     # Fuzzy match using scoring function
     from .clients.helpers import _best_item_by_score
 
     score_fn = _build_scoring_function(title, author_name, config)
     best = _best_item_by_score(results, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
+
+    # _best_item_by_score logs BEST_ITEM internally; here we add API-specific context.
+    best_score = max((score_fn(it) for it in results), default=0.0) if results else 0.0
+    logger.debug(
+        f"{config.api_name} | FUZZY_RESULT | best_score={best_score:.3f}"
+        f" | threshold={SIM_EXACT_PICK_THRESHOLD} | accepted={best is not None}",
+        category=LogCategory.SCORE,
+    )
     if best is not None:
         response_cache.put(config.api_name, cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return best
 
 
@@ -224,21 +280,22 @@ def search_api_generic_multiple(
     if not title:
         return []
 
-    # Check response cache
     cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
     cached = response_cache.get(config.api_name, cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            return []
         cached_list: list[dict[str, Any]] = cached.get("results", [])
+        logger.debug(f"{config.api_name}_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached_list
 
-    # Build query parameters
     params = {config.query_param_name: title, **config.additional_params}
     if author_name and config.author_param_name:
         params[config.author_param_name] = author_name
 
     url = build_url(config.base_url, params)
+    logger.debug(f"{config.api_name} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
 
-    # Make HTTP request
     try:
         if api_key and config.api_name == "semantic_scholar":
             data = s2_http_get_json(url, api_key, timeout=config.timeout)
@@ -247,34 +304,42 @@ def search_api_generic_multiple(
     except ALL_API_ERRORS:
         return []
 
-    # Extract results using configured path
     results = safe_get_nested(data, *config.result_path, default=[])
     if not results:
+        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return []
 
-    # Score all results
     score_fn = _build_scoring_function(title, author_name, config)
 
     scored_results = []
-    # Use a slightly lower threshold to account for floating point precision
-    # If score is within 0.01 of threshold, we accept it
     effective_threshold = SIM_EXACT_PICK_THRESHOLD - SIM_THRESHOLD_TOLERANCE
 
     for item in results:
         try:
             score = score_fn(item)
-            if score is not None and score >= effective_threshold:
+            accepted = score is not None and score >= effective_threshold
+            logger.debug(
+                f"{config.api_name} | ITEM_SCORE | score={score:.3f}"
+                f" | threshold={effective_threshold:.3f} | accepted={accepted}",
+                category=LogCategory.SCORE,
+            )
+            if accepted:
                 scored_results.append((score, item))
         except FIELD_ACCESS_ERRORS:
             # Skip items that cause scoring errors (missing fields, wrong types, etc.)
             continue
 
-    # Sort by score (descending) and return top N
     scored_results.sort(key=lambda x: x[0], reverse=True)
-    top_results = [item for score, item in scored_results[:max_results]]
+    top_results = [item for _, item in scored_results[:max_results]]
+    logger.debug(
+        f"{config.api_name}_multi | RESULT | scored={len(scored_results)}/{len(results)} | top={len(top_results)}",
+        category=LogCategory.SCORE,
+    )
     if top_results:
         cached_results = {"results": [dict(r) for r in top_results]}
         response_cache.put(config.api_name, cache_key, cached_results, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return top_results
 
 
@@ -292,7 +357,7 @@ def build_bibtex_from_response(
     # Extract title (try all configured fields)
     title = None
     for field_name in mapping.title_fields:
-        title = safe_get_field(response, field_name, check_placeholder=True)
+        title = _resolve_dotted_str(response, field_name, check_placeholder=True)
         if title:
             break
     if not title:
@@ -304,7 +369,7 @@ def build_bibtex_from_response(
     else:
         author_data = None
         for field_name in mapping.author_fields:
-            author_data = response.get(field_name)
+            author_data = _resolve_dotted(response, field_name)
             if author_data:
                 break
 
@@ -335,20 +400,27 @@ def build_bibtex_from_response(
     # Extract venue
     venue = None
     for field_name in mapping.venue_fields:
-        raw_venue = response.get(field_name)
+        raw_venue = _resolve_dotted(response, field_name)
         # Crossref returns container-title as array: [series_name, conference_name]
         # Prefer the non-generic element (e.g., "Artificial Intelligence in Medicine"
         # over "Lecture Notes in Computer Science")
         if isinstance(raw_venue, list) and len(raw_venue) > 1:
+            generic_filtered = False
             for candidate in raw_venue:
                 candidate_str = str(candidate).strip()
                 if candidate_str and candidate_str.lower() not in GENERIC_SERIES_NAMES:
                     venue = candidate_str
+                    generic_filtered = True
                     break
             if not venue:
-                venue = safe_get_field(response, field_name)
+                venue = _resolve_dotted_str(response, field_name)
+            logger.debug(
+                f"{mapping.api_name} | VENUE_ARRAY | elements={len(raw_venue)}"
+                f" | generic_filtered={generic_filtered} | selected={(venue or '')[:50]}",
+                category=LogCategory.SCORE,
+            )
         else:
-            venue = safe_get_field(response, field_name)
+            venue = _resolve_dotted_str(response, field_name)
         if venue:
             break
 
@@ -358,12 +430,16 @@ def build_bibtex_from_response(
         if isinstance(event, dict):
             event_name = (event.get("name") or "").strip()
             if event_name:
+                logger.debug(
+                    f"{mapping.api_name} | EVENT_NAME | generic_series={venue[:40]}"
+                    f" | event={event_name[:40]}",
+                    category=LogCategory.SCORE,
+                )
                 venue = event_name
 
-    # Extract identifiers
     doi = None
     for field_name in mapping.doi_fields:
-        doi_candidate = safe_get_field(response, field_name)
+        doi_candidate = _resolve_dotted_str(response, field_name)
         if doi_candidate:
             doi = find_doi_in_text(doi_candidate)
             if doi:
@@ -371,26 +447,31 @@ def build_bibtex_from_response(
 
     url = None
     for field_name in mapping.url_fields:
-        url = safe_get_field(response, field_name)
+        url = _resolve_dotted_str(response, field_name)
         if url:
             break
 
     arxiv_id = None
     for field_name in mapping.arxiv_fields:
-        arxiv_candidate = safe_get_field(response, field_name)
+        arxiv_candidate = _resolve_dotted_str(response, field_name)
         if arxiv_candidate:
             arxiv_id = find_arxiv_in_text(arxiv_candidate)
             if arxiv_id:
                 break
 
-    # Build extra fields
     extra_fields = {}
     for source_field, bibtex_field in mapping.extra_field_mappings.items():
-        value = safe_get_field(response, source_field)
+        value = _resolve_dotted_str(response, source_field)
         if value:
             extra_fields[bibtex_field] = value
 
-    # Build entry
+    logger.debug(
+        f"{mapping.api_name} | BUILD | title={title[:50]} | authors={len(authors)}"
+        f" | year={year} | type={entry_type} | venue={(venue or '')[:40]}"
+        f" | doi={doi or 'none'} | arxiv={arxiv_id or 'none'}",
+        category=LogCategory.SCORE,
+    )
+
     return build_bibtex_entry(
         entry_type=entry_type,
         title=title,

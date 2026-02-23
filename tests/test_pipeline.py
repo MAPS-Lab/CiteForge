@@ -1,4 +1,5 @@
 import urllib.error
+from email.message import Message
 from textwrap import dedent
 from unittest.mock import patch
 
@@ -60,7 +61,8 @@ def test_validate_doi_candidate_both_formats_match():
 
 def test_validate_doi_candidate_csl_only_matches():
     """
-    Check partial validation where CSL-JSON succeeds but BibTeX fails.
+    Check that when CSL-JSON matches the baseline, BibTeX is skipped
+    (Phase 3a optimization) even if BibTeX would resolve to a wrong paper.
     """
     baseline_entry = {
         'type': 'inproceedings',
@@ -169,7 +171,7 @@ def test_validate_doi_candidate_network_errors():
     with (
         patch.object(search_apis, 'fetch_csl_via_doi', side_effect=urllib.error.URLError("Network error")),
         patch.object(search_apis, 'fetch_bibtex_via_doi', side_effect=urllib.error.HTTPError(
-            url='test', code=500, msg='Server Error', hdrs={}, fp=None
+            url='test', code=500, msg='Server Error', hdrs=Message(), fp=None
         )),
     ):
         csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
@@ -181,10 +183,10 @@ def test_validate_doi_candidate_network_errors():
     assert not csl_matched and not bibtex_matched, "Should handle network errors gracefully"
     assert not csl_entry and not bibtex_entry, "Should not return entries on error"
 
-def test_validate_doi_candidate_early_vs_late():
+def test_validate_doi_candidate_bibtex_fallback_when_csl_fails():
     """
-    Confirm that validation logic remains consistent between early validation
-    and late validation.
+    Confirm that BibTeX fallback triggers when CSL validation fails,
+    exercising the Phase 3a short-circuit logic in reverse.
     """
     baseline_entry = {
         'type': 'inproceedings',
@@ -196,40 +198,46 @@ def test_validate_doi_candidate_early_vs_late():
         }
     }
 
-    mock_csl = {
-        'title': 'Attention Is All You Need',
-        'author': [{'given': 'Ashish', 'family': 'Vaswani'}],
-        'issued': {'date-parts': [[2017]]}
+    # CSL returns wrong paper (won't match baseline)
+    mock_csl_wrong = {
+        'title': 'A Completely Different Paper Title',
+        'author': [{'given': 'John', 'family': 'Doe'}],
+        'issued': {'date-parts': [[2020]]}
     }
 
-    mock_bibtex = dedent("""
+    # BibTeX returns correct paper (matches baseline)
+    mock_bibtex_correct = dedent("""
         @inproceedings{Vaswani2017,
           title = {Attention Is All You Need},
           author = {Ashish Vaswani and Noam Shazeer},
           year = {2017}
         }
     """).strip()
+
+    mock_bibtex_from_csl_wrong = dedent("""
+        @article{Doe2020,
+          title = {A Completely Different Paper Title},
+          author = {John Doe},
+          year = {2020}
+        }
+    """).strip()
+
     with (
-        patch.object(search_apis, 'fetch_csl_via_doi', return_value=mock_csl),
-        patch.object(search_apis, 'fetch_bibtex_via_doi', return_value=mock_bibtex),
-        patch.object(search_apis, 'bibtex_from_csl', return_value=mock_bibtex),
+        patch.object(search_apis, 'fetch_csl_via_doi', return_value=mock_csl_wrong),
+        patch.object(search_apis, 'fetch_bibtex_via_doi', return_value=mock_bibtex_correct),
+        patch.object(search_apis, 'bibtex_from_csl', return_value=mock_bibtex_from_csl_wrong),
     ):
-        csl_matched_early, _, _, _ = validate_doi_candidate(
+        csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
             doi="10.48550/arXiv.1706.03762", baseline_entry=baseline_entry,
             result_id="test"
         )
 
-    with (
-        patch.object(search_apis, 'fetch_csl_via_doi', return_value=mock_csl),
-        patch.object(search_apis, 'fetch_bibtex_via_doi', return_value=mock_bibtex),
-        patch.object(search_apis, 'bibtex_from_csl', return_value=mock_bibtex),
-    ):
-        csl_matched_late, _, _, _ = validate_doi_candidate(
-            doi="10.48550/arXiv.1706.03762", baseline_entry=baseline_entry,
-            result_id="test"
-        )
-
-    assert csl_matched_early and csl_matched_late, "Both early and late should succeed"
+    # CSL should have failed (wrong paper metadata)
+    assert not csl_matched, "CSL should not match (wrong paper)"
+    assert csl_entry is None, "CSL entry should be None"
+    # BibTeX fallback should have succeeded
+    assert bibtex_matched, "BibTeX fallback should match when CSL fails"
+    assert bibtex_entry is not None, "BibTeX entry should be returned"
 
 def test_process_validated_doi_success():
     """

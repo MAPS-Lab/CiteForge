@@ -7,10 +7,11 @@ import os
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .config import CACHE_DIR, CACHE_ENABLED
+from .log_utils import LogCategory, logger
 
 
 def _month_boundary() -> float:
@@ -20,19 +21,16 @@ def _month_boundary() -> float:
     forcing a fresh API request at the start of each month.
     Atlantic Standard Time (UTC-4) is used as the reference timezone.
     """
-    from datetime import timedelta
-
     ast = timezone(timedelta(hours=-4))
     now = datetime.now(tz=ast)
-    first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    return first_of_month.timestamp()
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
 class ResponseCache:
     """Thread-safe, file-based response cache with monthly expiry.
 
-    All entries expire on the 1st of each calendar month (UTC), ensuring
-    a full refresh of every API source at least once per month.
+    All entries expire on the 1st of each calendar month (AST/UTC-4),
+    ensuring a full refresh of every API source at least once per month.
     """
 
     def __init__(self, cache_dir: str = CACHE_DIR) -> None:
@@ -61,6 +59,8 @@ class ResponseCache:
         lock = self._lock_for(namespace)
         with lock:
             path = self._entry_path(namespace, key)
+            if not os.path.isfile(path):
+                return None
             try:
                 with open(path, encoding="utf-8") as f:
                     entry = json.load(f)
@@ -77,13 +77,17 @@ class ResponseCache:
     def put(self, namespace: str, key: str, value: dict[str, Any], ttl_days: int = 30) -> None:
         if not CACHE_ENABLED:
             return
+        khash = self._key_hash(key)[:12]
+        logger.debug(
+            f"PUT | namespace={namespace} | key_hash={khash} | ttl_days={ttl_days}",
+            category=LogCategory.CACHE,
+        )
         lock = self._lock_for(namespace)
         with lock:
             ns_dir = os.path.join(self._cache_dir, namespace)
             os.makedirs(ns_dir, exist_ok=True)
             entry = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
             path = self._entry_path(namespace, key)
-            # Atomic write: write to temp file then rename
             try:
                 fd, tmp_path = tempfile.mkstemp(dir=ns_dir, suffix=".tmp")
                 try:
@@ -101,6 +105,11 @@ class ResponseCache:
         return self.get(namespace, key) is not None
 
     def invalidate(self, namespace: str, key: str) -> None:
+        khash = self._key_hash(key)[:12]
+        logger.debug(
+            f"INVALIDATE | namespace={namespace} | key_hash={khash}",
+            category=LogCategory.CACHE,
+        )
         lock = self._lock_for(namespace)
         with lock:
             path = self._entry_path(namespace, key)

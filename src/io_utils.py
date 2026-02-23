@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import re
 import threading
 from typing import Any
 
-from .config import DEFAULT_GEMINI_KEY_FILE, DEFAULT_INPUT, DEFAULT_KEY_FILE, DEFAULT_OR_KEY_FILE, DEFAULT_S2_KEY_FILE
+from .config import (
+    DEFAULT_GEMINI_KEY_FILE,
+    DEFAULT_INPUT,
+    DEFAULT_OR_KEY_FILE,
+    DEFAULT_S2_KEY_FILE,
+    DEFAULT_SERPAPI_KEY_FILE,
+    DEFAULT_SERPLY_KEY_FILE,
+)
 from .exceptions import CSV_ERRORS, FILE_READ_ERRORS
 from .models import Record
 
-# CSV fieldnames for summary export
 _SUMMARY_CSV_FIELDNAMES = [
     "file_path",
     "trust_hits",
@@ -28,7 +35,6 @@ _SUMMARY_CSV_FIELDNAMES = [
     "doi_bibtex",
 ]
 
-# Lock for synchronizing CSV writes
 _CSV_LOCK = threading.Lock()
 
 
@@ -85,7 +91,6 @@ def _read_key_file(
             last_err = e
             continue
 
-    # File not found in any location
     if required:
         if last_err:
             raise last_err
@@ -94,25 +99,16 @@ def _read_key_file(
     return None
 
 
-def read_api_key(path: str = DEFAULT_KEY_FILE) -> str:
-    """
-    Load the SerpAPI key from a configuration file, trying the preferred path
-    and an older legacy filename in a few common locations.
-    """
-    lines = _read_key_file(path, legacy="src.key", required=True, expected_lines=1)
-    return lines[0] if lines else ""
-
-
 def read_semantic_api_key(path: str = DEFAULT_S2_KEY_FILE) -> str | None:
     """
     Look for a Semantic Scholar API key in the usual locations and return it if
     present, or None when no key file is found.
     """
-    lines = _read_key_file(path, legacy="Semantic.key", required=False, expected_lines=1)
+    lines = _read_key_file(path, required=False, expected_lines=1)
     return lines[0] if lines else None
 
 
-def read_openreview_credentials(path: str = DEFAULT_OR_KEY_FILE) -> tuple | None:
+def read_openreview_credentials(path: str = DEFAULT_OR_KEY_FILE) -> tuple[str, str] | None:
     """
     Read OpenReview credentials from a small text file where the first non-empty
     line is the username and the second is the password, returning them as a
@@ -122,12 +118,30 @@ def read_openreview_credentials(path: str = DEFAULT_OR_KEY_FILE) -> tuple | None
     return (lines[0], lines[1]) if lines and len(lines) >= 2 else None
 
 
+def read_serpapi_api_key(path: str = DEFAULT_SERPAPI_KEY_FILE) -> str | None:
+    """
+    Look for a SerpAPI key in the usual locations and return it if
+    present, or None when no key file is found.
+    """
+    lines = _read_key_file(path, required=False, expected_lines=1)
+    return lines[0] if lines else None
+
+
+def read_serply_api_key(path: str = DEFAULT_SERPLY_KEY_FILE) -> str | None:
+    """
+    Look for a Serply API key in the usual locations and return it if
+    present, or None when no key file is found.
+    """
+    lines = _read_key_file(path, required=False, expected_lines=1)
+    return lines[0] if lines else None
+
+
 def read_gemini_api_key(path: str = DEFAULT_GEMINI_KEY_FILE) -> str | None:
     """
     Look for a Gemini API key in the usual locations and return it if
     present, or None when no key file is found.
     """
-    lines = _read_key_file(path, legacy="Gemini.key", required=False, expected_lines=1)
+    lines = _read_key_file(path, required=False, expected_lines=1)
     return lines[0] if lines else None
 
 
@@ -143,7 +157,6 @@ def read_records(path: str = DEFAULT_INPUT) -> list[Record]:
             with open(p, newline="", encoding="utf-8") as csvfile:
                 reader = csv.DictReader(csvfile)
                 for row in reader:
-                    # skip empty rows
                     if not any(row.values()):
                         continue
 
@@ -151,23 +164,27 @@ def read_records(path: str = DEFAULT_INPUT) -> list[Record]:
                     scholar_link = (row.get("Scholar Link") or "").strip()
                     dblp_link = (row.get("DBLP Link") or "").strip()
 
-                    # Extract Scholar ID
                     scholar_id = ""
                     if scholar_link:
                         m = re.search(r"user=([^&]+)", scholar_link)
                         if m:
                             scholar_id = m.group(1)
 
-                    # Extract DBLP ID
                     dblp_id = ""
                     if dblp_link:
-                        # Handle full URL or just ID if user provided that
                         if "/pid/" in dblp_link:
                             m = re.search(r"/pid/(.+?)(?:\.[a-z0-9]+)?$", dblp_link)
                             if m:
                                 dblp_id = m.group(1)
                         else:
                             dblp_id = dblp_link
+
+                    if not name and (scholar_id or dblp_id):
+                        logging.getLogger("CiteForge.io").warning(
+                            "Skipping record with empty Name but ID(s): %s/%s",
+                            scholar_id, dblp_id,
+                        )
+                        continue
 
                     records.append(
                         Record(
@@ -182,7 +199,6 @@ def read_records(path: str = DEFAULT_INPUT) -> list[Record]:
     else:
         raise FileNotFoundError(f"Input file not found (tried: {', '.join(candidates)})")
 
-    # need at least one ID to do anything useful
     records = [r for r in records if r.scholar_id or r.dblp]
     if not records:
         raise ValueError("No valid records with Scholar ID or DBLP ID found in input file.")
@@ -251,7 +267,6 @@ def safe_write_json(path: str, data: Any, makedirs: bool = True, indent: int | N
         return False
 
 
-# In-memory tracking for append-only CSV writes
 _SUMMARY_KNOWN_PATHS: set[str] = set()
 _SUMMARY_UPDATES: dict[str, dict[str, Any]] = {}
 _SUMMARY_INITIALIZED = False
@@ -273,7 +288,6 @@ def init_summary_csv(csv_path: str, preserve_existing: bool = False) -> None:
         _SUMMARY_UPDATES.clear()
 
         if preserve_existing and os.path.exists(csv_path):
-            # Load existing file_paths into the in-memory set
             try:
                 with open(csv_path, newline="", encoding="utf-8") as csvfile:
                     reader = csv.DictReader(csvfile)
@@ -303,10 +317,8 @@ def append_summary_to_csv(csv_path: str, file_path: str, trust_hits: int, flags:
 
     with _CSV_LOCK:
         if file_path in _SUMMARY_KNOWN_PATHS:
-            # Track update for flush
             _SUMMARY_UPDATES[file_path] = new_row
         else:
-            # True append — O(1)
             _SUMMARY_KNOWN_PATHS.add(file_path)
             try:
                 with open(csv_path, "a", newline="", encoding="utf-8") as csvfile:
@@ -325,7 +337,6 @@ def flush_summary_csv(csv_path: str) -> None:
         if not _SUMMARY_UPDATES:
             return
 
-        # Read current file, apply updates, rewrite
         existing: dict[str, dict[str, Any]] = {}
         try:
             with open(csv_path, newline="", encoding="utf-8") as csvfile:
