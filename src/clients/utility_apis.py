@@ -1,24 +1,21 @@
 from __future__ import annotations
 
-import json
+import random
 import re
-import urllib.error
+import time
 import urllib.parse
-import urllib.request
 from typing import Any
 
 from ..cache import response_cache
 from ..config import CACHE_TTL_DOI_DAYS, CACHE_TTL_SEARCH_DAYS, DATACITE_BASE, GEMINI_BASE, ORCID_BASE
-from ..exceptions import FIELD_ACCESS_ERRORS, NUMERIC_ERRORS
-from ..http_utils import DEFAULT_JSON_HEADERS, handle_api_errors, http_get_json
+from ..exceptions import ALL_API_ERRORS, NUMERIC_ERRORS
+from ..http_utils import handle_api_errors, http_get_json, http_post_json
 from ..id_utils import _norm_doi
 from ..log_utils import LogCategory, LogSource, logger
 from ..text_utils import normalize_title
 from .helpers import _best_item_by_score
 
-# ============================================================================================
-# Gemini API Integration
-# ============================================================================================
+# ============ Gemini ============
 
 def gemini_generate_short_title(
     full_title: str, api_key: str, max_words: int | None = None
@@ -37,12 +34,12 @@ def gemini_generate_short_title(
     prompt = (
         f"Create a smart, concise CamelCase title (1 to {max_words} words) "
         f"for this publication: \"{full_title}\". "
-        f"Extract the most important keywords. "
-        f"Skip stop words (a, an, the, for, of, and, to, in, with, from, by, at). "
+        "Extract the most important keywords. "
+        "Skip stop words (a, an, the, for, of, and, to, in, with, from, by, at). "
         f"Use exactly {max_words} words or fewer if shorter captures the essence better. "
-        f"IMPORTANT: Write as ONE word in CamelCase format with NO spaces between words "
-        f"(e.g., 'AttentionMechanism' not 'Attention Mechanism'). "
-        f"Return ONLY the CamelCase title with no quotes, explanation, spaces, or punctuation."
+        "IMPORTANT: Write as ONE word in CamelCase format with NO spaces between words "
+        "(e.g., 'AttentionMechanism' not 'Attention Mechanism'). "
+        "Return ONLY the CamelCase title with no quotes, explanation, spaces, or punctuation."
     )
 
     url = f"{GEMINI_BASE}?key={api_key}"
@@ -60,75 +57,79 @@ def gemini_generate_short_title(
         }
     }
 
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-            }
+    import requests as _requests
+
+    data: dict[str, Any] | None = None
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        logger.debug(
+            f"GEMINI_ATTEMPT | attempt={attempt} | title={full_title[:50]}",
+            category=LogCategory.CITEKEY,
         )
+        try:
+            data = http_post_json(url, payload, timeout=15.0)
+            break  # success
+        except _requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429 and attempt < max_retries:
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                logger.debug(
+                    f"GEMINI_429 | attempt={attempt} | backoff={wait:.1f}s",
+                    category=LogCategory.CITEKEY,
+                )
+                logger.info(
+                    f"Gemini 429 (attempt {attempt}/{max_retries}), retrying in {wait:.1f}s",
+                    category=LogCategory.DEBUG, source=LogSource.SYSTEM,
+                )
+                time.sleep(wait)
+                continue
+            logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
+            logger.warn(f"API call failed: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
+            return None
+        except (*ALL_API_ERRORS, ValueError) as e:
+            logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
+            logger.warn(f"API call failed: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
+            return None
 
-        with urllib.request.urlopen(req, timeout=15.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+    if data is None:
+        logger.debug("GEMINI_FAIL | reason=no_response", category=LogCategory.CITEKEY)
+        return None
 
-        if data.get("candidates"):
-            candidate = data["candidates"][0]
-            if "content" in candidate and "parts" in candidate["content"]:
-                parts = candidate["content"]["parts"]
-                if parts and "text" in parts[0]:
-                    short_title = parts[0]["text"].strip()
-                    short_title = short_title.strip('"\'').strip()
-                    short_title = re.sub(r"\s+", "", short_title)
+    candidates = data.get("candidates") or []
+    if candidates:
+        parts = candidates[0].get("content", {}).get("parts") or []
+        raw_text = parts[0].get("text", "").strip() if parts else ""
+    else:
+        raw_text = ""
+    short_title = re.sub(r"\s+", "", raw_text.strip("\"'"))
 
-                    if short_title:
-                        word_count = sum(1 for c in short_title if c.isupper())
-                        if word_count > max_words:
-                            logger.warn(
-                                f"Gemini returned {word_count} words (expected max {max_words}): '{short_title}'. "
-                                f"Falling back to default algorithm.",
-                                category=LogCategory.DEBUG,
-                                source=LogSource.SYSTEM
-                            )
-                            return None
-
-                    if short_title and len(short_title) <= 100:
-                        logger.info(
-                            f"Generated title: {short_title}",
-                            category=LogCategory.DEBUG, source=LogSource.SYSTEM,
-                        )
-                        return str(short_title)
-
+    if not short_title or len(short_title) > 100:
+        logger.debug("GEMINI_FAIL | reason=invalid_length", category=LogCategory.CITEKEY)
         logger.warn("Returned no valid candidates in response", category=LogCategory.ERROR, source=LogSource.SYSTEM)
         return None
 
-    except urllib.error.HTTPError as e:
-        try:
-            error_body = json.loads(e.read().decode("utf-8"))
-            error_msg = error_body.get("error", {}).get("message", str(e.reason))
-            if e.code == 503:
-                logger.warn(
-                    "API overloaded (503), falling back to default algorithm",
-                    category=LogCategory.ERROR, source=LogSource.SYSTEM,
-                )
-            elif e.code == 429:
-                logger.warn(
-                    "API quota exceeded (429), falling back to default algorithm",
-                    category=LogCategory.ERROR, source=LogSource.SYSTEM,
-                )
-            else:
-                logger.warn(f"API error {e.code}: {error_msg}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
-        except FIELD_ACCESS_ERRORS:
-            logger.warn(f"API HTTP {e.code}: {e.reason}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
-        return None
-    except (urllib.error.URLError, TimeoutError, ValueError) as e:
-        logger.warn(f"API call failed: {type(e).__name__}: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
+    word_count = sum(1 for c in short_title if c.isupper())
+    if word_count > max_words:
+        logger.debug("GEMINI_FAIL | reason=too_many_words", category=LogCategory.CITEKEY)
+        logger.warn(
+            f"Gemini returned {word_count} words (expected max {max_words}): '{short_title}'. "
+            f"Falling back to default algorithm.",
+            category=LogCategory.DEBUG,
+            source=LogSource.SYSTEM,
+        )
         return None
 
+    logger.debug(
+        f"GEMINI_SUCCESS | short={short_title} | word_count={word_count} | max_words={max_words} | valid=True",
+        category=LogCategory.CITEKEY,
+    )
+    logger.info(
+        f"Generated title: {short_title}",
+        category=LogCategory.DEBUG, source=LogSource.SYSTEM,
+    )
+    return short_title
 
-# ============================================================================================
-# DataCite API Integration
-# ============================================================================================
+
+# ============ DataCite ============
 
 @handle_api_errors(default_return=None)
 def datacite_search_doi(doi: str) -> dict[str, Any] | None:
@@ -142,7 +143,9 @@ def datacite_search_doi(doi: str) -> dict[str, Any] | None:
 
     cached = response_cache.get("datacite", doi_norm)
     if cached is not None:
-        return cached if cached else None
+        logger.debug(f"datacite | HIT | doi={doi_norm}", category=LogCategory.CACHE)
+        return cached
+    logger.debug(f"datacite | MISS | doi={doi_norm}", category=LogCategory.CACHE)
 
     encoded_doi = urllib.parse.quote(doi_norm, safe="")
     url = f"{DATACITE_BASE}/{encoded_doi}"
@@ -152,6 +155,10 @@ def datacite_search_doi(doi: str) -> dict[str, Any] | None:
     result = data.get("data") or None
     if result is not None:
         response_cache.put("datacite", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
+    logger.debug(
+        f"datacite | RESULT | doi={doi_norm} | found={result is not None}",
+        category=LogCategory.SCORE,
+    )
     return result
 
 
@@ -193,15 +200,14 @@ def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | No
     doi = safe_get_field(attributes, "doi")
     url = safe_get_field(attributes, "url")
 
-    extra_fields = {}
+    extra_fields: dict[str, str] = {}
+    note_parts = []
     if resource_type_general:
-        extra_fields["note"] = f"Type: {resource_type_general}"
+        note_parts.append(f"Type: {resource_type_general}")
     if attributes.get("version"):
-        version_note = f"Version: {attributes['version']}"
-        if "note" in extra_fields:
-            extra_fields["note"] += f", {version_note}"
-        else:
-            extra_fields["note"] = version_note
+        note_parts.append(f"Version: {attributes['version']}")
+    if note_parts:
+        extra_fields["note"] = ", ".join(note_parts)
 
     if venue:
         extra_fields["howpublished"] = venue
@@ -220,9 +226,7 @@ def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | No
     )
 
 
-# ============================================================================================
-# ORCID API Integration
-# ============================================================================================
+# ============ ORCID ============
 
 @handle_api_errors(default_return=[])
 def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
@@ -235,40 +239,42 @@ def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
     cache_key = f"orcid_works|{orcid_id}"
     cached = response_cache.get("orcid", cache_key)
     if cached is not None:
+        logger.debug(f"orcid | HIT | id={orcid_id}", category=LogCategory.CACHE)
         return list(cached.get("works", []))
+    logger.debug(f"orcid | MISS | id={orcid_id}", category=LogCategory.CACHE)
 
     url = f"{ORCID_BASE}/{orcid_id}/works"
 
-    headers = DEFAULT_JSON_HEADERS.copy()
-    headers["User-Agent"] = "CiteForge/1.0"
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=15.0) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    data = http_get_json(url, timeout=15.0)
 
     works = []
     for work_group in (data.get("group") or []):
         work_summary = work_group.get("work-summary") or []
-        if work_summary:
-            work = work_summary[0]
+        if not work_summary:
+            continue
 
-            title_obj = work.get("title") or {}
-            title = (title_obj.get("title") or {}).get("value") or ""
+        work = work_summary[0]
+        title_obj = work.get("title") or {}
+        title = (title_obj.get("title") or {}).get("value") or ""
+        if not title:
+            continue
 
-            pub_date = work.get("publication-date") or {}
-            year = pub_date.get("year") or {}
-            year_val = year.get("value") if isinstance(year, dict) else None
+        pub_date = work.get("publication-date") or {}
+        year = pub_date.get("year") or {}
+        year_val = year.get("value") if isinstance(year, dict) else None
 
-            work_record = {
-                "title": title,
-                "year": year_val,
-                "type": work.get("type"),
-                "external-ids": work.get("external-ids") or {},
-                "url": work.get("url") or {},
-            }
+        works.append({
+            "title": title,
+            "year": year_val,
+            "type": work.get("type"),
+            "external-ids": work.get("external-ids") or {},
+            "url": work.get("url") or {},
+        })
 
-            if title:
-                works.append(work_record)
-
+    logger.debug(
+        f"orcid | WORKS | id={orcid_id} | count={len(works)}",
+        category=LogCategory.SCORE,
+    )
     if works:
         response_cache.put("orcid", cache_key, {"works": works}, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return works
@@ -285,6 +291,10 @@ def orcid_search_work_by_title(orcid_id: str, title: str, _author_name: str | No
     for work in works:
         work_title = work.get("title") or ""
         if normalize_title(work_title) == target_norm:
+            logger.debug(
+                f"orcid | TITLE_MATCH | title={title[:50]} | exact=True | best_score=1.000 | result=found",
+                category=LogCategory.SCORE,
+            )
             return dict(work)
 
     def get_orcid_title(w: dict[str, Any]) -> str:
@@ -299,18 +309,23 @@ def orcid_search_work_by_title(orcid_id: str, title: str, _author_name: str | No
                 return None
         return None
 
-    def match_fn(_name: str, _work_item: dict[str, Any]) -> bool:
-        return True
-
     from ..bibtex_build import create_scoring_function
+    # NOTE: ORCID work-summary responses do not include contributor lists,
+    # so we skip author matching (author_name=None) to avoid rejecting all
+    # candidates when cand_authors is always empty.
     score_fn = create_scoring_function(
         title=title,
         author_name=None,
         year_hint=None,
         title_getter=get_orcid_title,
-        authors_getter=lambda w: [],
+        authors_getter=lambda w: w.get("contributors") or [],
         year_getter=get_orcid_year,
-        author_match_fn=match_fn
     )
 
-    return _best_item_by_score(works, score_fn)
+    result = _best_item_by_score(works, score_fn)
+    logger.debug(
+        f"orcid | TITLE_MATCH | title={title[:50]} | exact=False"
+        f" | result={'found' if result else 'none'}",
+        category=LogCategory.SCORE,
+    )
+    return result

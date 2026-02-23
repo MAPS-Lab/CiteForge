@@ -23,24 +23,25 @@ Google Scholar entries are often truncated, missing DOIs, or formatted inconsist
 
 ## The Solution
 
-CiteForge uses a headless browser to scrape Google Scholar directly (falling back to SerpAPI when blocked), queries 13 academic APIs, deduplicates results through fuzzy title and author matching, and merges metadata using a trust hierarchy that prefers authoritative sources (DOI resolvers, PubMed) over less reliable ones (web-scraped Scholar pages).
+CiteForge uses [SerpAPI](https://serpapi.com/) for author publication retrieval and [Serply](https://serply.io/) for citation detail, queries 13 academic APIs, deduplicates results through fuzzy title and author matching, and merges metadata using a trust hierarchy that prefers authoritative sources (DOI resolvers, PubMed) over less reliable ones (web-scraped Scholar pages).
 
 ---
 
 ## Getting Started
 
-**Requirements:** Python 3.10+. No paid API keys are needed for basic usage — CiteForge uses a headless browser (via [nodriver](https://github.com/nicegui-org/nodriver)) to scrape Google Scholar directly.
+**Requirements:** Python 3.10+. A [SerpAPI](https://serpapi.com/) key is required for Google Scholar author profiles.
 
 ```bash
 git clone https://github.com/gabrielspadon/CiteForge.git && cd CiteForge
 pip install -e .
 ```
 
-Optionally set up API keys for higher throughput:
+Set up API keys:
 
 ```bash
 mkdir -p keys
-echo "your_serpapi_key" > keys/SerpAPI.key          # Optional (browser fallback)
+echo "your_serpapi_key" > keys/SerpAPI.key           # Required (Scholar profiles)
+echo "your_serply_key" > keys/Serply.key             # Optional (citation detail)
 echo "your_semantic_key" > keys/Semantic.key        # Recommended
 echo "your_gemini_key" > keys/Gemini.key            # Optional
 ```
@@ -70,16 +71,11 @@ output/
     └── ...
 ```
 
-### Included Sample Data
+### Generating Sample Data
 
-This repository ships with pre-fetched data for 18 authors from Dalhousie University's Faculty of Computer Science:
+The pipeline produces per-author BibTeX files and an enrichment summary CSV under `output/`. API responses are cached locally under `data/api_cache/` with monthly expiry. Both directories are gitignored — run `python3 main.py` to populate them.
 
-- **`data/api_cache/`** — Cached API responses across 14 services, so you can inspect the pipeline without re-querying rate-limited APIs
-- **`output/`** — 422 enriched BibTeX files and an enrichment summary CSV
-- **`data/input_backup.csv`** — Full faculty list (67 authors)
-- **`data/input_full.csv`** — Working subset (22 authors)
-
-To run the pipeline on your own data, create `data/input.csv` with your authors and run `python3 main.py`. The cache will be reused for any overlapping queries.
+A sample input file (`data/input.csv`) is provided.
 
 ---
 
@@ -92,7 +88,7 @@ Each article goes through a **four-phase enrichment pipeline**:
 3. **Late DOI Discovery** — Collect DOIs from matched sources, preferring published over preprint
 4. **Trust-Based Merge** — Combine fields using a 14-level source hierarchy, then deduplicate
 
-Authors are processed in parallel (12 workers). Scholar requests are serialized through a single background event loop for anti-detection, while all other API calls run in parallel. Responses are cached locally under `data/api_cache/` with monthly expiry.
+Authors are processed in parallel (12 workers). All API calls run in parallel with per-API rate limiting. Responses are cached locally under `data/api_cache/` with monthly expiry.
 
 ### Trust Hierarchy
 
@@ -118,8 +114,7 @@ The merge engine enforces additional rules:
 
 | Source | Key Required |
 |--------|:---:|
-| Google Scholar (headless browser) | No |
-| Google Scholar (SerpAPI fallback) | Optional |
+| Google Scholar (SerpAPI + Serply) | Required / Optional |
 | Semantic Scholar | Recommended |
 | Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DataCite, ORCID, DBLP | No |
 | OpenReview | Optional |
@@ -135,13 +130,9 @@ All parameters live in [`src/config.py`](src/config.py):
 |-----------|:-------:|-------------|
 | `CONTRIBUTION_WINDOW_YEARS` | 5 | Years of publications to fetch |
 | `PUBLICATIONS_PER_YEAR` | 50 | Target publications per year |
-| `SIM_MERGE_DUPLICATE_THRESHOLD` | 0.9 | Title similarity for deduplication |
+| `SIM_MERGE_DUPLICATE_THRESHOLD` | 0.95 | Title similarity for deduplication |
 | `REQUEST_DELAY_BETWEEN_ARTICLES` | 0.5s | Courtesy delay between API requests |
 | `CACHE_ENABLED` | True | Enable local API response caching |
-| `SCHOLAR_BROWSER_HEADLESS` | True | Run headless browser without GUI |
-| `SCHOLAR_BROWSER_MIN_DELAY` | 2.0s | Minimum delay between Scholar page loads |
-| `SCHOLAR_BROWSER_MAX_DELAY` | 5.0s | Maximum delay between Scholar page loads |
-| `SCHOLAR_BROWSER_CIRCUIT_THRESHOLD` | 10 | Consecutive blocks before switching to SerpAPI-only |
 
 ---
 
@@ -152,7 +143,7 @@ pip install -e .[dev]
 pytest tests/ -v --tb=short
 ```
 
-171 tests across 10 modules. Integration tests that require API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
+264 tests across 11 modules. Integration tests that require API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
 ---
 
@@ -162,9 +153,9 @@ pytest tests/ -v --tb=short
 | Module | Purpose |
 |--------|---------|
 | `main.py` | Orchestrator: thread pool, 4-phase pipeline, CLI entry |
-| `src/browser.py` | Async event loop singleton for headless browser |
-| `src/clients/scholar.py` | Google Scholar facade (browser-first, SerpAPI fallback) and DBLP clients |
-| `src/clients/scholar_browser.py` | Browser-based Scholar scraping (author profiles, citations, BibTeX) |
+| `src/clients/scholar.py` | Google Scholar facade (SerpAPI + Serply) |
+| `src/clients/serpapi_scholar.py` | SerpAPI client for author publication retrieval |
+| `src/clients/serply_scholar.py` | Serply REST API client for citation detail |
 | `src/clients/search_apis.py` | Search API clients (S2, Crossref, arXiv, OpenReview, OpenAlex, PubMed, Europe PMC) |
 | `src/clients/utility_apis.py` | Utility API clients (DataCite, ORCID, DOI resolvers) |
 | `src/clients/helpers.py` | Shared client helpers (scoring, deduplication) |
@@ -181,6 +172,8 @@ pytest tests/ -v --tb=short
 | `src/http_utils.py` | HTTP session, retry, exponential backoff |
 | `src/io_utils.py` | CSV I/O, key loading, thread-safe file helpers |
 | `src/log_utils.py` | Thread-local logging, per-author log files |
+| `src/models.py` | Record dataclass, EnrichmentSource enum |
+| `src/exceptions.py` | Error hierarchy tuples |
 
 </details>
 

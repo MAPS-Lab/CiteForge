@@ -24,9 +24,10 @@ def test_read_records_from_csv(tmp_path):
     # Read records
     records = io_utils.read_records(csv_path_str)
 
-    # Should have 3 valid records (Scholar123, Scholar456, Scholar789)
+    # Should have 2 valid records (Scholar123, Scholar456)
+    # Scholar789 has empty Name so it's skipped (L12)
     # InvalidRow has no IDs, so it should be filtered
-    assert len(records) == 3, f"Expected 3 records, got {len(records)}"
+    assert len(records) == 2, f"Expected 2 records, got {len(records)}"
 
     # Verify first record
     assert records[0].name == "Ashish Vaswani"
@@ -157,8 +158,7 @@ def test_csv_append_multiple_entries(tmp_path):
 
 def test_csv_edge_cases(tmp_path):
     """
-    Validate robustness against edge cases including very long file paths
-    and special characters.
+    Edge cases: very long file paths and special characters.
     """
     csv_path = tmp_path / 'summary.csv'
     csv_path_str = str(csv_path)

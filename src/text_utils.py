@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import html as html_module
 import re
 import urllib.parse
 from typing import Any
@@ -39,7 +40,7 @@ __all__ = [
     "is_truncated",
     "is_valid_value",
     "name_signature",
-    "needs_refetch",
+
     "normalize_person_name",
     "normalize_title",
     "parse_authors_any",
@@ -117,7 +118,7 @@ def strip_accents(s: str) -> str:
     Remove accents and diacritics from a string so visually similar text from
     different locales can be compared more reliably.
 
-    Uses unidecode library for comprehensive Unicode to ASCII transliteration.
+    Uses unidecode for Unicode-to-ASCII transliteration.
     """
     try:
         return unidecode(s)
@@ -136,22 +137,21 @@ def normalize_title(t: str | None) -> str:
 
     t_str = str(t)
 
-    # Remove LaTeX math delimiters and keep content: $φ$ -> φ
+    t_str = html_module.unescape(t_str)
     t_str = re.sub(r'\$([^$]*)\$', r'\1', t_str)
-
-    # Handle multi-arg LaTeX commands: \frac{1}{2} -> 1/2
     t_str = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', t_str)
-
-    # Remove LaTeX commands and keep content: \textbf{text} -> text
     t_str = re.sub(r'\\[a-zA-Z]+\{([^}]*)}', r'\1', t_str)
-
-    # Remove remaining backslashes (for commands without braces)
     t_str = re.sub(r'\\[a-zA-Z]+', '', t_str)
-
-    # Standard normalization
     t2 = strip_accents(t_str).lower()
     t2 = re.sub(r"[,.;:!?\n\t\r'\"\-\(\)\[\]\{\}~]", " ", t2)
-    return " ".join(t2.split())
+    result = " ".join(t2.split())
+    # If unidecode stripped everything (e.g., CJK-only title), fall back to
+    # the original lowercased+collapsed string so similarity can still work.
+    if not result and t_str.strip():
+        fallback = t_str.lower()
+        fallback = re.sub(r"[,.;:!?\n\t\r'\"\-\(\)\[\]\{\}~]", " ", fallback)
+        result = " ".join(fallback.split())
+    return result
 
 
 _ARTIFACT_PREFIXES = ("Check for updates ", "Check for Updates ")
@@ -166,17 +166,13 @@ def trim_title_default(t: str | None) -> str:
     s = str(t).strip()
     if not s:
         return ""
-    # Strip known PDF/publisher artifacts from Scholar-scraped titles
     for prefix in _ARTIFACT_PREFIXES:
         if s.startswith(prefix):
             s = s[len(prefix):]
             break
-    # keep ellipses as-is
     if s.endswith("…") or s.endswith("..."):
         return s
-    # remove trailing asterisks (e.g., from Scholar metadata)
     s = s.rstrip('*').rstrip()
-    # remove trailing periods (one or two, but not three which would be an ellipsis)
     i = len(s) - 1
     dots = 0
     while i >= 0 and s[i] == '.':
@@ -198,7 +194,7 @@ def has_placeholder(s: str | None) -> bool:
     if not s2:
         return True
     low = s2.lower()
-    if "..." in s2 or "…" in s2:
+    if ("..." in s2 or "…" in s2) and len(s2) < 50:
         return True
     if "et al" in low:
         return True
@@ -218,10 +214,19 @@ def normalize_person_name(n: Any | None) -> str:
     return " ".join(n2.split())
 
 
+_NOBLE_PARTICLES = frozenset({
+    "van", "von", "de", "del", "der", "den", "di", "la", "le", "al",
+    "el", "bin", "ibn", "da", "dos", "das", "du", "lo",
+})
+
+
 def name_signature(n: Any | None) -> dict[str, Any] | None:
     """
     Derive a compact signature for a person name that keeps the normalized last
     name and initials, working with both "Last, First" and "First Last" formats.
+
+    Noble particles (van, von, de, etc.) are included in the last name so that
+    "Johan van der Waals" and "van der Waals, Johan" produce the same signature.
     """
     if not n:
         return None
@@ -239,8 +244,16 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
     tokens = n_clean.split()
     if not tokens:
         return None
-    last_norm = tokens[-1]
-    initials = "".join(t[0] for t in tokens[:-1] if t)
+    last_start = len(tokens) - 1
+    for i in range(len(tokens) - 2, -1, -1):
+        if tokens[i] in _NOBLE_PARTICLES:
+            last_start = i
+        else:
+            break
+    last_tokens = tokens[last_start:]
+    first_tokens = tokens[:last_start]
+    last_norm = re.sub(r"[^a-z0-9]", "", "".join(last_tokens))
+    initials = "".join(t[0] for t in first_tokens if t)
     return {"last": last_norm, "initials": initials}
 
 
@@ -257,19 +270,16 @@ def extract_last_name(full_name: str | None) -> str:
     if not name_str:
         return "Unknown"
 
-    # Handle "Last, First" format
     if "," in name_str:
         parts = [p.strip() for p in name_str.split(",")]
         last_name = parts[0].strip()
         if last_name:
             return last_name
 
-    # Handle "First Middle Last" format - take the last token
     tokens = name_str.split()
     if tokens:
         return tokens[-1]
 
-    # Fallback to original name
     return name_str
 
 
@@ -281,8 +291,6 @@ def format_author_dirname(author_name: str | None, author_id: str) -> str:
     """
     last_name = extract_last_name(author_name)
 
-    # Sanitize author_id by replacing reserved path characters with dashes
-    # Reserved characters: / \ : * ? " < > |
     sanitized_id = re.sub(r'[/\\:*?"<>|]+', '-', author_id)
 
     if not sanitized_id:
@@ -293,7 +301,6 @@ def format_author_dirname(author_name: str | None, author_id: str) -> str:
     if last_name and last_name != "Unknown":
         return f"{last_name} ({sanitized_id})"
 
-    # Fallback to just the sanitized ID if we can't extract a name
     return sanitized_id
 
 
@@ -350,7 +357,6 @@ def authors_overlap(authors_a: str | None, authors_b: str | None) -> bool:
     names_b = parse_authors_any(authors_b or "")
     if not names_a or not names_b:
         return False
-    # Build index by last name from list A for O(N+M) lookup
     sigs_a_by_last: dict[str, list[dict[str, Any]]] = {}
     for nm in names_a:
         sig = name_signature(nm)
@@ -373,16 +379,36 @@ def authors_overlap(authors_a: str | None, authors_b: str | None) -> bool:
     return False
 
 
+def _author_sig_key(sig: dict[str, Any]) -> str:
+    """Build a set key from a name signature, including initials when available."""
+    last = sig.get("last", "")
+    initials = sig.get("initials", "")
+    return f"{last}_{initials}" if initials else last
+
+
 def author_overlap_ratio(authors_a: str | None, authors_b: str | None) -> float:
-    """Jaccard coefficient on normalized last names between two author lists."""
+    """Jaccard coefficient on normalized author signatures between two author lists.
+
+    Uses last_name + initials when both sides have initials, falling back to
+    last-name-only matching otherwise.
+    """
     names_a = parse_authors_any(authors_a or "")
     names_b = parse_authors_any(authors_b or "")
     if not names_a or not names_b:
         return 0.0
-    sigs_a = {sig["last"] for nm in names_a if (sig := name_signature(nm)) and sig.get("last")}
-    sigs_b = {sig["last"] for nm in names_b if (sig := name_signature(nm)) and sig.get("last")}
-    if not sigs_a or not sigs_b:
+    sigs_a_raw = [sig for nm in names_a if (sig := name_signature(nm)) and sig.get("last")]
+    sigs_b_raw = [sig for nm in names_b if (sig := name_signature(nm)) and sig.get("last")]
+    if not sigs_a_raw or not sigs_b_raw:
         return 0.0
+    a_has_initials = all(s.get("initials") for s in sigs_a_raw)
+    b_has_initials = all(s.get("initials") for s in sigs_b_raw)
+    if a_has_initials and b_has_initials:
+        sigs_a = {_author_sig_key(s) for s in sigs_a_raw}
+        sigs_b = {_author_sig_key(s) for s in sigs_b_raw}
+    else:
+        # Fall back to last-name-only when one side lacks initials
+        sigs_a = {s["last"] for s in sigs_a_raw}
+        sigs_b = {s["last"] for s in sigs_b_raw}
     intersection = len(sigs_a & sigs_b)
     union = len(sigs_a | sigs_b)
     return intersection / union if union > 0 else 0.0
@@ -402,8 +428,8 @@ def venue_similarity(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> floa
     b_norm = normalize_title(b_venue)
     if a_norm == b_norm:
         return 1.0
-    a_is_preprint = any(ps in a_norm for ps in PREPRINT_SERVERS)
-    b_is_preprint = any(ps in b_norm for ps in PREPRINT_SERVERS)
+    a_is_preprint = any(normalize_title(ps) in a_norm for ps in PREPRINT_SERVERS)
+    b_is_preprint = any(normalize_title(ps) in b_norm for ps in PREPRINT_SERVERS)
     if a_is_preprint ^ b_is_preprint:
         return 0.5
     return fuzz_ratio(a_norm, b_norm) / 100.0
@@ -415,7 +441,7 @@ def _is_preprint_fields(fields: dict[str, Any]) -> bool:
     if any(doi.startswith(p) for p in PREPRINT_DOI_PREFIXES):
         return True
     journal = str(fields.get("journal") or "").lower()
-    return any(ps in journal for ps in PREPRINT_SERVERS)
+    return any(ps == journal or ps in journal for ps in PREPRINT_SERVERS)
 
 
 def compute_dedup_score(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> float:
@@ -481,6 +507,16 @@ def author_name_matches(target_author: str | None, authors: Any) -> bool:
             return True
         if ti == ci or ti.startswith(ci) or ci.startswith(ti):
             return True
+        # Handle middle initials: "CH" matches "CRH" when first initials
+        # agree and the shorter is a subsequence of the longer
+        if ti[0] == ci[0]:
+            short, long = (ti, ci) if len(ti) <= len(ci) else (ci, ti)
+            j = 0
+            for ch in long:
+                if j < len(short) and ch == short[j]:
+                    j += 1
+            if j == len(short):
+                return True
         tnorm = normalize_person_name(target_author)
         cnorm = normalize_person_name(nm)
         if tnorm in cnorm or cnorm in tnorm:
@@ -514,13 +550,11 @@ def extract_year_from_any(
     including integers, free text, date dictionaries, Crossref-style date parts,
     and Unix timestamps, falling back when no plausible year is found.
     """
-    # plain integer
     if isinstance(obj, int):
         if VALID_YEAR_MIN <= obj <= VALID_YEAR_MAX:
             return obj
         return fallback
 
-    # string with a year somewhere in it
     if isinstance(obj, str):
         m = re.search(r"(19|20)\d{2}", obj)
         if m:
@@ -532,9 +566,7 @@ def extract_year_from_any(
                 pass
         return fallback
 
-    # dictionary - try several strategies
     if isinstance(obj, dict):
-        # check custom field names if provided
         if field_names:
             for fname in field_names:
                 val = obj.get(fname)
@@ -543,7 +575,6 @@ def extract_year_from_any(
                     if result:
                         return result
 
-        # check common year field names
         for fname in ["year", "publication_year", "pub_year", "date", "published"]:
             val = obj.get(fname)
             if val is not None:
@@ -551,7 +582,6 @@ def extract_year_from_any(
                 if result:
                     return result
 
-        # check Crossref/CSL date-parts format
         for fname in ["issued", "published-print", "published-online"]:
             issued = obj.get(fname)
             if isinstance(issued, dict):
@@ -565,7 +595,6 @@ def extract_year_from_any(
                     if VALID_YEAR_MIN <= year <= VALID_YEAR_MAX:
                         return year
 
-        # check unix timestamps (OpenReview uses milliseconds)
         for fname in ["cdate", "tcdate", "timestamp"]:
             ms = obj.get(fname)
             if isinstance(ms, (int, float)):
@@ -577,7 +606,6 @@ def extract_year_from_any(
                 except (*NUMERIC_ERRORS, OSError):
                     pass
 
-    # list - try first element
     if isinstance(obj, list) and obj:
         return extract_year_from_any(obj[0], field_names=field_names, fallback=fallback)
 
@@ -601,9 +629,7 @@ def extract_authors_from_any(
     if obj is None:
         return authors
 
-    # dict - look for author fields
     if isinstance(obj, dict):
-        # try custom field names if provided
         if field_names:
             for fname in field_names:
                 val = obj.get(fname)
@@ -615,7 +641,6 @@ def extract_authors_from_any(
                     if authors:
                         return authors
 
-        # try common field names
         for fname in ["authors", "author", "authorids", "creators", "contributors"]:
             val = obj.get(fname)
             if val is not None:
@@ -626,14 +651,11 @@ def extract_authors_from_any(
                 if authors:
                     return authors
 
-        # single author dict with name components
         if given_key and family_key:
-            # Use specified keys (e.g., Crossref style)
             given = (obj.get(given_key) or "").strip()
             family = (obj.get(family_key) or "").strip()
             nm = f"{given} {family}".strip() if (given or family) else ""
         else:
-            # Auto-detect common patterns
             nm = _name_from_dict(obj)
 
         if nm:
@@ -644,7 +666,6 @@ def extract_authors_from_any(
                 authors.append(nm)
         return authors
 
-    # list of authors
     if isinstance(obj, list):
         for item in obj:
             if isinstance(item, str):
@@ -656,13 +677,11 @@ def extract_authors_from_any(
                     if nm:
                         authors.append(nm)
             elif isinstance(item, dict):
-                # extract from dict using specified or auto-detected keys
                 if given_key and family_key:
                     given = (item.get(given_key) or "").strip()
                     family = (item.get(family_key) or "").strip()
                     nm = f"{given} {family}".strip() if (given or family) else ""
                 else:
-                    # Try name key first, then auto-detect given/family
                     nm = (item.get(name_key) or "").strip()
                     if not nm:
                         given = (item.get("given") or item.get("first") or "").strip()
@@ -681,19 +700,15 @@ def extract_authors_from_any(
                     authors.append(nm)
         return authors
 
-    # string - parse with separators
     if isinstance(obj, str):
         obj_str = obj.strip()
         if not obj_str:
             return authors
 
-        # try different separator formats
         if " and " in obj_str:
-            # BibTeX style
             parts = [p.strip() for p in obj_str.split(" and ")]
             authors = [p for p in parts if p]
         elif " et al." in obj_str or " et al" in obj_str:
-            # Handle "Name et al." pattern
             clean_str = obj_str.replace(" et al.", "").replace(" et al", "")
             # If there are commas, split by comma
             if "," in clean_str:
@@ -703,43 +718,29 @@ def extract_authors_from_any(
             else:
                 authors = [clean_str, _ET_AL]
         elif ";" in obj_str:
-            # semicolon-separated
             parts = [p.strip() for p in obj_str.split(";")]
             authors = [p for p in parts if p]
         elif "," in obj_str and " " in obj_str:
-            # Could be comma-separated list or single "Last, First" name
-            # If there are multiple commas, likely a list
             if obj_str.count(",") > 1:
                 parts = [p.strip() for p in obj_str.split(",")]
                 authors = [p for p in parts if p]
             else:
-                # Single comma - could be "Last, First" OR abbreviated list like "A Smith, B Jones"
-                # Check if it looks like abbreviated author names (e.g., "H Huang, DV Arnold")
                 parts = [p.strip() for p in obj_str.split(",")]
                 if len(parts) == 2:
-                    # Check if both parts look like abbreviated names with structure "INITIALS SURNAME"
-                    # Pattern: 1-3 capital letters (with optional periods) + SPACE + surname
-                    # Examples: "H Huang", "DV Arnold", "H. Huang", "D.V. Arnold", "JK Rowling"
-                    # Non-examples: "Smith" (no space), "John" (no initials)
-                    # Pattern requires: initials (1-3 caps with optional periods) + mandatory space + surname
-                    if all(_ABBREVIATED_AUTHOR_PATTERN.match(p) for p in parts):
-                        # Both parts look like abbreviated names - treat as list
-                        authors = parts
-                    elif all(" " in p.strip() for p in parts):
-                        # Both parts contain spaces (e.g. "First Last, First Last") - treat as list
+                    if (
+                        all(_ABBREVIATED_AUTHOR_PATTERN.match(p) for p in parts)
+                        or all(" " in p.strip() for p in parts)
+                    ):
                         authors = parts
                     else:
-                        # Likely "Last, First" format for a single author
                         authors = [obj_str]
                 else:
                     authors = [obj_str]
         else:
-            # single author
             authors = [obj_str]
 
         return authors
 
-    # fallback - just convert to string
     s = str(obj).strip()
     if s:
         authors.append(s)
@@ -758,13 +759,11 @@ def extract_valid_title(
     """
     title = None
 
-    # extract from dict
     if isinstance(obj, dict):
         names = field_names or ["title"]
         for fname in names:
             val = obj.get(fname)
             if val:
-                # check nested dicts
                 if isinstance(val, dict):
                     title = extract_valid_title(val, field_names=field_names, check_placeholder=check_placeholder)
                 else:
@@ -777,7 +776,6 @@ def extract_valid_title(
     if not title:
         return None
 
-    # skip placeholders if requested
     if check_placeholder and has_placeholder(title):
         return None
 
@@ -826,8 +824,6 @@ def is_truncated(text: str | None) -> bool:
         return False
 
     text_stripped = text.strip()
-
-    # Check for explicit truncation markers
     truncation_markers = [
         "...",
         "…",
@@ -838,7 +834,15 @@ def is_truncated(text: str | None) -> bool:
     ]
 
     text_lower = text_stripped.lower()
-    return any(marker in text_lower for marker in truncation_markers)
+    if any(marker in text_lower for marker in truncation_markers):
+        return True
+
+    dangling_endings = frozenset({
+        "a", "an", "the", "of", "in", "on", "at", "to", "for", "from",
+        "with", "by", "and", "or", "but", "via", "using", "based",
+    })
+    last_word = text_lower.rstrip(".,:;").rsplit(None, 1)[-1] if text_lower.strip() else ""
+    return last_word in dangling_endings
 
 
 def get_truncation_score(article_data: dict[str, Any]) -> float:
@@ -849,27 +853,23 @@ def get_truncation_score(article_data: dict[str, Any]) -> float:
     fields_to_check = []
     truncated_count = 0
 
-    # Check title
     title = article_data.get("title")
     if title:
         fields_to_check.append(title)
         if is_truncated(title):
             truncated_count += 1
 
-    # Check authors
     author_info = article_data.get("author_info")
     if isinstance(author_info, list) and author_info:
-        # Convert to string to check for truncation markers
         author_str = str(author_info)
         fields_to_check.append(author_str)
         if is_truncated(author_str):
             truncated_count += 1
-    elif author_info:  # Non-list author info
+    elif author_info:
         fields_to_check.append(str(author_info))
         if is_truncated(str(author_info)):
             truncated_count += 1
 
-    # Check publication info
     pub_info = article_data.get("publication_info") or article_data.get("snippet")
     if pub_info:
         fields_to_check.append(str(pub_info))
@@ -880,14 +880,6 @@ def get_truncation_score(article_data: dict[str, Any]) -> float:
         return 0.0
 
     return truncated_count / len(fields_to_check)
-
-
-def needs_refetch(article_data: dict[str, Any], threshold: float = 0.5) -> bool:
-    """
-    Determine if article data needs re-fetching from Scholar based on truncation score.
-    """
-    score = get_truncation_score(article_data)
-    return score >= threshold
 
 
 def safe_get_field(
@@ -908,12 +900,10 @@ def safe_get_field(
     if value is None:
         return None if required else default
 
-    # Handle list values (common in API responses like Crossref, DOI, etc.)
-    # Extract first element if list, otherwise convert to string
     if isinstance(value, list):
-        if not value:  # Empty list
+        if not value:
             return None if required else default
-        value = value[0]  # Take first element
+        value = value[0]
 
     value = str(value)
 

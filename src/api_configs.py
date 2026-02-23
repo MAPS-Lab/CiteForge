@@ -93,9 +93,7 @@ EUROPEPMC_SEARCH_CONFIG = APISearchConfig(
 )
 
 
-# ============================================================================================
 # Field Mapping Configurations
-# ============================================================================================
 
 S2_FIELD_MAPPING = APIFieldMapping(
     api_name="semantic_scholar",

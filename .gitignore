@@ -43,7 +43,6 @@ ENV/
 .pytest_cache/
 .coverage
 .tox/
-A2I2/
 htmlcov/
 .mypy_cache/
 .dmypy.json
@@ -51,7 +50,6 @@ dmypy.json
 
 # User data and API keys
 keys/
-data/cache.json
 *.key
 *.keys
 .env
@@ -67,6 +65,6 @@ coverage.xml
 temp/
 tmp/
 
-# AI artifacts
+# Local config
 .claude/
 CLAUDE.md
