@@ -2878,3 +2878,87 @@ class TestStaleFileValidation:
     def test_corrupted_title_detected(self) -> None:
         from main import _is_corrupted_title
         assert _is_corrupted_title("Li2 () Wang3 () Chen1 ()")
+
+
+class TestProceedingsVolumeDetection:
+    """Proceedings volume titles should be detected as garbage."""
+
+    def test_proceedings_volume_year_prefix(self) -> None:
+        from main import _is_garbage_title
+        title = "Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing: Tutorial Abstracts"
+        assert _is_garbage_title(title)
+
+    def test_proceedings_volume_without_the(self) -> None:
+        from main import _is_garbage_title
+        assert _is_garbage_title("Proceedings of 2024 International Joint Conference on AI")
+
+    def test_real_paper_title_with_proceedings(self) -> None:
+        from main import _is_garbage_title
+        # Regular papers mentioning "proceedings" should NOT be caught
+        assert not _is_garbage_title("Analyzing Proceedings of Major NLP Conferences")
+
+    def test_workshop_paper_not_caught(self) -> None:
+        from main import _is_garbage_title
+        # Legitimate workshop paper should NOT be caught
+        assert not _is_garbage_title("A Survey of Transformer Architectures for NLP")
+
+
+class TestHowpublishedCasingNormalization:
+    """howpublished field casing should be normalized to canonical form."""
+
+    def test_biorxiv_casing(self) -> None:
+        entry = {
+            "type": "misc",
+            "key": "Test2024:Test",
+            "fields": {"title": "Test", "author": "A", "year": "2024", "howpublished": "BioRxiv"},
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        assert result["fields"]["howpublished"] == "bioRxiv"
+
+    def test_research_square_casing(self) -> None:
+        entry = {
+            "type": "misc",
+            "key": "Test2024:Test",
+            "fields": {"title": "Test", "author": "A", "year": "2024", "howpublished": "Research square"},
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        assert result["fields"]["howpublished"] == "Research Square"
+
+    def test_arxiv_lowercase(self) -> None:
+        entry = {
+            "type": "misc",
+            "key": "Test2024:Test",
+            "fields": {"title": "Test", "author": "A", "year": "2024", "howpublished": "ARXIV"},
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        assert result["fields"]["howpublished"] == "arXiv"
+
+    def test_regular_howpublished_unchanged(self) -> None:
+        entry = {
+            "type": "misc",
+            "key": "Test2024:Test",
+            "fields": {"title": "Test", "author": "A", "year": "2024", "howpublished": "Technical Report"},
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        assert result["fields"]["howpublished"] == "Technical Report"
+
+
+class TestArxivEprintsJournalStripping:
+    """arXiv e-prints journal should be stripped and entry downgraded to @misc."""
+
+    def test_arxiv_eprints_stripped_from_article(self) -> None:
+        """@article with journal='arXiv e-prints' should become @misc after merge."""
+        entry = {
+            "type": "article",
+            "key": "Test2024:Test",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author A",
+                "year": "2024",
+                "journal": "arXiv e-prints",
+                "doi": "10.48550/arxiv.2401.12345",
+            },
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        # normalize_arxiv_metadata should strip the journal
+        assert "journal" not in result["fields"]

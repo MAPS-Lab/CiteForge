@@ -114,10 +114,16 @@ def _is_garbage_title(title: str) -> bool:
         return True
     if re.search(r'^(OASIcs|LIPIcs|LNI|LNCS|Dagstuhl)\b.*\bVolume\s+\d+\b', title, re.IGNORECASE):
         return True
-    return bool(
+    if (
         re.search(r'\bFestschrift\b', title, re.IGNORECASE)
         and re.search(r',\s+[A-Z][a-z]+,\s+[A-Z][a-z]+\b.*\d{4}', title)
-    )
+    ):
+        return True
+    # Proceedings volumes: "Proceedings of the 2023 Conference on X: Tutorial Abstracts"
+    return bool(re.match(
+        r'^Proceedings\s+of\s+(the\s+)?\d{4}\s+',
+        title, re.IGNORECASE,
+    ))
 
 
 def _is_corrupted_title(title: str) -> bool:
@@ -375,6 +381,60 @@ def process_article(
                         break
             except (OSError, ValueError, TypeError):
                 continue
+
+    # Fixup stale entries loaded from disk: strip preprint journals and
+    # downgrade @article→@misc so cached files from older pipeline runs
+    # are corrected even when FILE_SKIP_WRITE blocks the new version.
+    if existing_file_loaded and baseline_entry is not None:
+        _bl_fields = baseline_entry.get("fields") or {}
+        _bl_jnl = (_bl_fields.get("journal") or "").strip().lower()
+        _bl_type = baseline_entry.get("type", "")
+        _fixup_written = False
+
+        # Strip preprint server names from journal field
+        if _bl_jnl and any(ps == _bl_jnl for ps in PREPRINT_SERVERS):
+            logger.debug(
+                f"EXISTING_FIXUP | preprint_journal_stripped | journal={_bl_fields.get('journal')}",
+                category=LogCategory.CLEANUP,
+            )
+            if _bl_type == "article":
+                _bl_fields["howpublished"] = _bl_fields.pop("journal")
+                baseline_entry["type"] = "misc"
+                logger.debug(
+                    "EXISTING_FIXUP | article_preprint_journal->misc",
+                    category=LogCategory.CLEANUP,
+                )
+            else:
+                _bl_fields.pop("journal", None)
+            _fixup_written = True
+
+        # Strip email addresses from author field
+        _bl_author = _bl_fields.get("author", "")
+        if isinstance(_bl_author, str) and re.search(r'\S+@\S+\.\S+', _bl_author):
+            _bl_author_clean = re.sub(r'\s*\S+@\S+\.\S+', '', _bl_author).strip()
+            _bl_author_clean = re.sub(r'\s*and\s*$', '', _bl_author_clean).strip()
+            _bl_author_clean = re.sub(r'^\s*and\s*', '', _bl_author_clean).strip()
+            if _bl_author_clean:
+                logger.debug(
+                    f"EXISTING_FIXUP | email_stripped_from_author | old={_bl_author[:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["author"] = _bl_author_clean
+                _fixup_written = True
+
+        # Strip [J] bracket artifacts from title
+        _bl_title = _bl_fields.get("title", "")
+        if isinstance(_bl_title, str) and re.search(r'\s*\[J\]\s*$', _bl_title):
+            _bl_fields["title"] = re.sub(r'\s*\[J\]\s*$', '', _bl_title).strip()
+            logger.debug(
+                f"EXISTING_FIXUP | bracket_artifact_stripped | title={_bl_title[:60]}",
+                category=LogCategory.CLEANUP,
+            )
+            _fixup_written = True
+
+        if _fixup_written and existing_file_path:
+            bib_str = bt.bibtex_from_dict(baseline_entry)
+            safe_write_file(existing_file_path, bib_str)
 
     # Skip enrichment entirely if entry is already complete (unless --force)
     if not FORCE_ENRICH and existing_file_loaded and baseline_entry is not None and _entry_is_complete(baseline_entry):
@@ -950,6 +1010,15 @@ def process_article(
                 merged["type"] = "misc"
                 if venue:
                     merged_fields["howpublished"] = merged_fields.pop("journal")
+
+        # Backfill howpublished for @misc entries with arXiv eprint/DOI
+        if merged.get("type") == "misc" and not merged_fields.get("howpublished"):
+            _has_arxiv = (
+                (merged_fields.get("archiveprefix") or "").lower() == "arxiv"
+                or (merged_fields.get("doi") or "").lower().startswith("10.48550/arxiv")
+            )
+            if _has_arxiv:
+                merged_fields["howpublished"] = "arXiv"
 
         # Annotate bare stubs: no enrichers, no DOI, no venue
         is_bare_stub = (

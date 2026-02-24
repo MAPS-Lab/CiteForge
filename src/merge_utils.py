@@ -685,6 +685,22 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             category=LogCategory.CLEANUP,
         )
 
+    # Normalize howpublished casing for known preprint servers
+    howpub_canonical: dict[str, str] = {
+        "arxiv": "arXiv",
+        "biorxiv": "bioRxiv",
+        "medrxiv": "medRxiv",
+        "chemrxiv": "ChemRxiv",
+        "techrxiv": "TechRxiv",
+        "research square": "Research Square",
+        "ssrn": "SSRN",
+    }
+    _hp = (merged.get("howpublished") or "").strip()
+    if _hp:
+        _hp_key = _hp.lower().split("(")[0].strip()
+        if _hp_key in howpub_canonical:
+            merged["howpublished"] = howpub_canonical[_hp_key]
+
     unique_sources = sorted(set(field_sources.values()))
     logger.debug(
         f"COMPLETE | type={etype} | key={primary.get('key')} | fields={sorted(merged.keys())} "
