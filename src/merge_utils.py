@@ -10,6 +10,7 @@ from .bibtex_build import determine_entry_type, get_container_field
 from .bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict, short_filename_for_entry
 from .config import (
     ABBREVIATED_VENUE_MAP,
+    CONFERENCE_AS_JOURNAL,
     DEDUP_INTERNAL_FIELDS,
     GENERIC_SERIES_NAMES,
     JOURNAL_ONLY_PREFIXES,
@@ -39,6 +40,7 @@ from .text_utils import (
     compute_dedup_score,
     format_author_dirname,
     has_placeholder,
+    normalize_title,
     parse_authors_any,
     title_is_truncated_match,
     title_similarity,
@@ -351,6 +353,40 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
 
+    # Fix lowercase author names: ensure each author part has at least one
+    # uppercase letter (catches "darren steeves" or "Evangelos milios").
+    # Skip names that are intentionally lowercase or single tokens.
+    author_val2 = merged.get("author", "")
+    if author_val2:
+        parts2 = [p.strip() for p in str(author_val2).split(" and ")]
+        fixed_parts: list[str] = []
+        any_fixed = False
+        for ap in parts2:
+            tokens = ap.split()
+            if len(tokens) >= 2 and all(t[0].islower() for t in tokens if t and t[0].isalpha()):
+                # All tokens start lowercase — capitalize each
+                fixed = " ".join(t.capitalize() for t in tokens)
+                fixed_parts.append(fixed)
+                any_fixed = True
+            elif len(tokens) >= 2:
+                # Check for individual lowercase tokens (e.g. "Evangelos milios")
+                new_tokens = []
+                for t in tokens:
+                    if t and t[0].isalpha() and t[0].islower() and len(t) > 1:
+                        new_tokens.append(t.capitalize())
+                        any_fixed = True
+                    else:
+                        new_tokens.append(t)
+                fixed_parts.append(" ".join(new_tokens))
+            else:
+                fixed_parts.append(ap)
+        if any_fixed:
+            merged["author"] = " and ".join(fixed_parts)
+            logger.debug(
+                f"author_capitalize | before={author_val2[:80]} | after={merged['author'][:80]}",
+                category=LogCategory.CLEANUP,
+            )
+
     pages_val = merged.get("pages", "")
     if pages_val:
         pages_str = str(pages_val).strip()
@@ -534,6 +570,38 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             merged["journal"] = bt_val
             merged.pop("booktitle", None)
             etype = "article"
+
+    # Fix conference proceedings misclassified as @article with journal.
+    # Crossref registers some conference proceedings (AAAI, EMNLP, etc.) as
+    # journal volumes, so the pipeline sees journal=<proceedings name>.
+    # Detect and reclassify as @inproceedings with booktitle.
+    if etype == "article" and merged.get("journal") and not merged.get("booktitle"):
+        jnl_for_conf = (merged.get("journal") or "").strip()
+        jnl_lower_conf = jnl_for_conf.lower()
+        # Some "Proceedings of the X" are legitimate journals (PVLDB, PACMSE,
+        # PACMHCI, PACMPL). Only reclassify when the name looks like a one-off
+        # conference proceedings, not a recurring journal series.
+        _is_recurring_journal = any(
+            kw in jnl_lower_conf
+            for kw in ("endowment", "programming languages", "human-computer",
+                        "interactive, mobile", "software engineering", "measurement")
+        )
+        is_conf_proceedings = (
+            (
+                (jnl_lower_conf.startswith("proceedings of the")
+                 or jnl_lower_conf.startswith("proceedings of "))
+                and not _is_recurring_journal
+            )
+            or "@" in jnl_for_conf  # IberLEF@SEPLN pattern
+            or jnl_lower_conf in CONFERENCE_AS_JOURNAL
+        )
+        if is_conf_proceedings:
+            logger.debug(
+                f"conference_as_journal | journal={jnl_for_conf} | type article->inproceedings",
+                category=LogCategory.CLEANUP,
+            )
+            merged["booktitle"] = merged.pop("journal")
+            etype = "inproceedings"
 
     # Resolve Dagstuhl LIPIcs/OASIcs DOIs to correct conference name.
     # S2 often returns bogus venue expansions for LIPIcs abbreviations (e.g.,
@@ -830,7 +898,14 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                     new_key = entry.get('key', '').strip()
                     if existing_key and new_key and existing_key == new_key:
                         key_title_sim = title_similarity(existing_title, new_title)
-                        if key_title_sim >= SIM_FILE_DUPLICATE_THRESHOLD:
+                        # Also check if shorter title is a prefix of longer (truncated stub)
+                        _e_norm = normalize_title(existing_title)
+                        _n_norm = normalize_title(new_title)
+                        _is_prefix = (
+                            (_e_norm.startswith(_n_norm) and len(_n_norm) > 20)
+                            or (_n_norm.startswith(_e_norm) and len(_e_norm) > 20)
+                        )
+                        if key_title_sim >= SIM_FILE_DUPLICATE_THRESHOLD or _is_prefix:
                             logger.debug(
                                 f"FILE_MATCH | KEY_TITLE | file={existing_filename} "
                                 f"| key={existing_key} | sim={key_title_sim:.3f}",

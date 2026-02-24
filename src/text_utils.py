@@ -156,10 +156,53 @@ def normalize_title(t: str | None) -> str:
 
 _ARTIFACT_PREFIXES = ("Check for updates ", "Check for Updates ")
 
+# Words that should stay uppercase when converting ALL-CAPS titles to title case
+_ACRONYMS = frozenset({
+    "a", "an", "and", "as", "at", "but", "by", "for", "if", "in",
+    "nor", "of", "on", "or", "so", "the", "to", "up", "vs", "yet",
+})
+
+
+def _fix_allcaps_title(s: str) -> str:
+    """Convert ALL-CAPS title to title case, preserving known acronyms.
+
+    Only activates when >60% of alphabetic characters are uppercase,
+    indicating publisher metadata in ALL-CAPS rather than intentional styling.
+    """
+    alpha_chars = [c for c in s if c.isalpha()]
+    if not alpha_chars:
+        return s
+    upper_ratio = sum(1 for c in alpha_chars if c.isupper()) / len(alpha_chars)
+    if upper_ratio <= 0.6:
+        return s
+    # Split on spaces, preserving hyphens within words
+    words = s.split()
+    result: list[str] = []
+    for i, word in enumerate(words):
+        # Preserve words that look like chemical formulas, gene names, etc.
+        # (mixed case within the original ALL-CAPS context means they were
+        # already specially formatted)
+        if "-" in word:
+            # Handle hyphenated words: capitalize each part
+            parts = word.split("-")
+            parts = [p.capitalize() if len(p) > 1 else p for p in parts]
+            result.append("-".join(parts))
+        elif word.startswith("(") or word.startswith("["):
+            # Preserve bracketed content
+            result.append(word[0] + word[1:].capitalize())
+        elif i == 0:
+            result.append(word.capitalize())
+        elif word.lower() in _ACRONYMS:
+            result.append(word.lower())
+        else:
+            result.append(word.capitalize())
+    return " ".join(result)
+
 
 def trim_title_default(t: str | None) -> str:
     """
-    Clean up a raw title by trimming whitespace and removing trailing full stops while preserving genuine ellipses.
+    Clean up a raw title by trimming whitespace, removing trailing full stops,
+    preserving genuine ellipses, and normalizing ALL-CAPS titles to title case.
     """
     if t is None:
         return ""
@@ -171,7 +214,7 @@ def trim_title_default(t: str | None) -> str:
             s = s[len(prefix):]
             break
     if s.endswith("…") or s.endswith("..."):
-        return s
+        return _fix_allcaps_title(s)
     s = s.rstrip('*').rstrip()
     i = len(s) - 1
     dots = 0
@@ -180,7 +223,7 @@ def trim_title_default(t: str | None) -> str:
         i -= 1
     if dots and dots < 3:
         s = s[: len(s) - dots].rstrip()
-    return s
+    return _fix_allcaps_title(s)
 
 
 def has_placeholder(s: str | None) -> bool:

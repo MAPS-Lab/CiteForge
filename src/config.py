@@ -133,6 +133,12 @@ PREPRINT_ONLY_PUBLISHERS = frozenset({
     'techrxiv',
 })
 
+# Journal names that are actually conferences (Crossref registers them as journals).
+# Used by merge_utils to reclassify @article→@inproceedings.
+CONFERENCE_AS_JOURNAL: frozenset[str] = frozenset({
+    "software engineering",  # German SE conference (Fachtagung Softwaretechnik)
+})
+
 # Data repository DOI prefixes (deprioritized in DOI selection)
 DATA_DOI_PREFIXES = (
     '10.6084/m9.figshare',  # Figshare (data/supplementary)

@@ -2885,7 +2885,10 @@ class TestProceedingsVolumeDetection:
 
     def test_proceedings_volume_year_prefix(self) -> None:
         from main import _is_garbage_title
-        title = "Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing: Tutorial Abstracts"
+        title = (
+            "Proceedings of the 2023 Conference on Empirical Methods "
+            "in Natural Language Processing: Tutorial Abstracts"
+        )
         assert _is_garbage_title(title)
 
     def test_proceedings_volume_without_the(self) -> None:
