@@ -15,6 +15,7 @@ from .config import (
     JOURNAL_ONLY_PREFIXES,
     PAGES_MAX_DIGITS,
     PREPRINT_DOI_PREFIXES,
+    PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
     SIM_DEDUP_COMPOSITE_THRESHOLD,
     SIM_FILE_DUPLICATE_THRESHOLD,
@@ -28,6 +29,7 @@ from .id_utils import (
     allowlisted_url,
     external_ids_match,
     extract_arxiv_eprint,
+    is_secondary_doi,
     normalize_arxiv_metadata,
 )
 from .log_utils import LogCategory, logger
@@ -41,6 +43,29 @@ from .text_utils import (
     title_is_truncated_match,
     title_similarity,
 )
+
+_DAGSTUHL_DOI_RE = re.compile(
+    r"^10\.4230/(lipics|oasics)\.([a-z0-9]+)\.(\d+)(?:\.\d+)?$", re.IGNORECASE,
+)
+
+_AUTHOR_DIGIT_SUFFIX_RE = re.compile(r"\s+\d{1,4}\s*$")
+_AUTHOR_PAREN_SUFFIX_RE = re.compile(r"\s*\(\d{1,4}\)\s*$")
+_AUTHOR_GLUED_DIGIT_RE = re.compile(r"(?<=[A-Za-z]{2})\d{1,4}$")
+
+_JOURNAL_URL_MAP: dict[str, str] = {
+    "techrxiv.org": "TechRxiv",
+    "ssrn.com": "SSRN Electronic Journal",
+}
+
+
+def _sanitize_author_digits(name: str) -> str:
+    """Strip trailing digit suffixes from author names (e.g., 'Das1' -> 'Das')."""
+    if not name:
+        return name
+    s = _AUTHOR_PAREN_SUFFIX_RE.sub("", name.strip())
+    s = _AUTHOR_DIGIT_SUFFIX_RE.sub("", s)
+    s = _AUTHOR_GLUED_DIGIT_RE.sub("", s)
+    return s.strip()
 
 
 def _is_preprint_doi(doi: str) -> bool:
@@ -262,30 +287,29 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # Validate DOI consistency: contradicting DOIs indicate different papers
     primary_doi = _norm_doi(primary.get("fields", {}).get("doi"))
     has_doi_conflict = False
+    merged_doi_norm = _norm_doi(merged.get("doi"))
 
-    if primary_doi and merged.get("doi"):
-        merged_doi_norm = _norm_doi(merged.get("doi"))
-        if merged_doi_norm and merged_doi_norm != primary_doi:
-            preprint_upgrade = _is_preprint_doi(primary_doi) and not _is_preprint_doi(merged_doi_norm)
-            if preprint_upgrade:
-                logger.debug(
-                    f"doi_conflict | primary={primary_doi} merged={merged_doi_norm} "
-                    f"| preprint_upgrade=True | kept={merged_doi_norm}",
-                    category=LogCategory.CLEANUP,
-                )
-            else:
-                logger.debug(
-                    f"doi_conflict | primary={primary_doi} merged={merged_doi_norm} "
-                    f"| preprint_upgrade=False | kept={primary_doi}",
-                    category=LogCategory.CLEANUP,
-                )
-                merged["doi"] = primary_doi
-                has_doi_conflict = True
+    if primary_doi and merged_doi_norm and merged_doi_norm != primary_doi:
+        preprint_upgrade = _is_preprint_doi(primary_doi) and not _is_preprint_doi(merged_doi_norm)
+        if preprint_upgrade:
+            logger.debug(
+                f"doi_conflict | primary={primary_doi} merged={merged_doi_norm} "
+                f"| preprint_upgrade=True | kept={merged_doi_norm}",
+                category=LogCategory.CLEANUP,
+            )
+        else:
+            logger.debug(
+                f"doi_conflict | primary={primary_doi} merged={merged_doi_norm} "
+                f"| preprint_upgrade=False | kept={primary_doi}",
+                category=LogCategory.CLEANUP,
+            )
+            merged["doi"] = primary_doi
+            has_doi_conflict = True
 
     # Only trust DOIs from registration agencies and authoritative databases
     if merged.get("doi") and not has_doi_conflict:
         trusted_doi_sources = {"csl", "doi_bibtex", "datacite", "pubmed", "europepmc", "crossref"}
-        merged_doi_norm = _norm_doi(merged.get("doi"))
+        merged_doi_norm = _norm_doi(merged["doi"])
         doi_trusted_src = next(
             (
                 src
@@ -314,6 +338,19 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     _pop_fields(merged, DEDUP_INTERNAL_FIELDS, "dedup_fields_removed")
     merged = normalize_arxiv_metadata(merged)
     _pop_fields(merged, {"keywords", "copyright"}, "unwanted_removed")
+
+    # Sanitize author names: strip trailing digit suffixes (e.g., "Das1" -> "Das")
+    # that leak from Scholar/DBLP author disambiguation markers
+    author_val = merged.get("author", "")
+    if author_val:
+        author_parts = [p.strip() for p in str(author_val).split(" and ")]
+        author_cleaned = [_sanitize_author_digits(p) for p in author_parts]
+        if author_cleaned != author_parts:
+            merged["author"] = " and ".join(author_cleaned)
+            logger.debug(
+                f"author_digit_sanitize | before={author_val[:80]} | after={merged['author'][:80]}",
+                category=LogCategory.CLEANUP,
+            )
 
     pages_val = merged.get("pages", "")
     if pages_val:
@@ -355,13 +392,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
 
     journal_val = merged.get("journal", "")
     if journal_val and journal_val.startswith("http"):
-        url_to_journal = {
-            "arxiv.org": "arXiv e-prints",
-            "techrxiv.org": "TechRxiv",
-            "ssrn.com": "SSRN Electronic Journal",
-        }
         jurl = journal_val.lower()
-        resolved_name = next((name for domain, name in url_to_journal.items() if domain in jurl), None)
+        resolved_name = next((name for domain, name in _JOURNAL_URL_MAP.items() if domain in jurl), None)
         if resolved_name:
             logger.debug(f"journal_url_to_name | {journal_val}->{resolved_name}", category=LogCategory.CLEANUP)
             merged["journal"] = resolved_name
@@ -380,6 +412,21 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
         merged["publisher"] = "Cold Spring Harbor Laboratory"
+
+    # Strip preprint-only publishers from entries that have a real journal
+    pub_lower = (merged.get("publisher") or "").lower().strip()
+    journal_for_pub_check = (merged.get("journal") or "").lower()
+    if (
+        pub_lower in PREPRINT_ONLY_PUBLISHERS
+        and journal_for_pub_check
+        and not any(ps in journal_for_pub_check for ps in PREPRINT_SERVERS)
+    ):
+        logger.debug(
+            f"publisher_preprint_stripped | publisher={merged['publisher']} "
+            f"| journal={merged.get('journal')} | reason=preprint_publisher_on_published",
+            category=LogCategory.CLEANUP,
+        )
+        merged.pop("publisher", None)
 
     # Decode HTML entities then strip HTML/XML tags from text fields
     text_fields_to_clean = ["title", "journal", "booktitle", "series"]
@@ -420,8 +467,9 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         merged.pop("eprint", None)
         merged.pop("archiveprefix", None)
         merged.pop("primaryclass", None)
-        # Clear phantom "arXiv e-prints" journal — the published paper's real
-        # journal should come from a higher-trust enricher
+        # Clear any remaining arXiv journal value and backfill from enrichers.
+        # normalize_arxiv_metadata may have already stripped the arXiv journal;
+        # either way, try to recover the real journal from enrichers.
         journal_check = (merged.get("journal") or "").strip().lower()
         if journal_check in ("arxiv e-prints", "arxiv"):
             logger.debug(
@@ -429,8 +477,9 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
             merged.pop("journal", None)
-            # Backfill from enrichers: find the best-ranked source that carries
-            # a real (non-preprint) journal name matching the published DOI.
+        # Backfill from enrichers when journal is missing: find the best-ranked
+        # source that carries a real (non-preprint) journal matching the published DOI.
+        if not merged.get("journal"):
             doi_norm_check = _norm_doi(doi_val)
             best_journal: str | None = None
             best_journal_rank = 999
@@ -461,6 +510,15 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                     f"journal_backfill | journal={best_journal} | src={field_sources['journal']}",
                     category=LogCategory.CLEANUP,
                 )
+            elif etype == "article":
+                # No enricher carries a real journal for this DOI (e.g., OSTI
+                # technical reports).  Downgrade @article -> @misc so the entry
+                # doesn't violate BibTeX's requirement of a journal field.
+                etype = "misc"
+                logger.debug(
+                    f"article_downgrade_no_journal | doi={doi_val} | phantom_removed=True | type->misc",
+                    category=LogCategory.CLEANUP,
+                )
 
     # Fix journal names misplaced in booktitle field.
     # Some publishers (e.g., Frontiers Media SA) only publish journals, never
@@ -478,7 +536,45 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             merged.pop("booktitle", None)
             etype = "article"
 
-    # expand abbreviated venue names (e.g., "SPIRE" → full conference name)
+    # Resolve Dagstuhl LIPIcs/OASIcs DOIs to correct conference name.
+    # S2 often returns bogus venue expansions for LIPIcs abbreviations (e.g.,
+    # ESA -> "Embedded Systems and Applications", SEA -> "The Sea").
+    # CSL returns @misc with howpublished for all Dagstuhl entries.
+    # The DOI pattern 10.4230/{lipics|oasics}.{conf}.{year}.{paper} encodes
+    # the conference abbreviation, so we can resolve it directly.
+    doi_for_dagstuhl = (merged.get("doi") or "").strip()
+    m_dag = _DAGSTUHL_DOI_RE.match(doi_for_dagstuhl) if doi_for_dagstuhl else None
+    if m_dag:
+        dag_conf = m_dag.group(2).lower()
+        old_journal = merged.get("journal", "")
+        old_booktitle = merged.get("booktitle", "")
+        if dag_conf in ABBREVIATED_VENUE_MAP:
+            dag_full = ABBREVIATED_VENUE_MAP[dag_conf]
+            merged["booktitle"] = dag_full
+            merged.pop("journal", None)
+            merged.pop("howpublished", None)
+            etype = "inproceedings"
+            logger.debug(
+                f"dagstuhl_resolve | doi={doi_for_dagstuhl} | conf={dag_conf} "
+                f"| booktitle={dag_full} | old_journal={old_journal} "
+                f"| old_booktitle={old_booktitle} | type->inproceedings",
+                category=LogCategory.CLEANUP,
+            )
+        else:
+            # Festschrift or unknown series: conf abbrev not in map but DOI
+            # confirms it's a Dagstuhl proceedings publication (LIPIcs/OASIcs)
+            etype = "inproceedings"
+            if old_journal and not merged.get("booktitle"):
+                merged["booktitle"] = old_journal
+                merged.pop("journal", None)
+            merged.pop("howpublished", None)
+            logger.debug(
+                f"dagstuhl_resolve_fallback | doi={doi_for_dagstuhl} | conf={dag_conf} "
+                f"| booktitle={merged.get('booktitle', '')} | type->inproceedings",
+                category=LogCategory.CLEANUP,
+            )
+
+    # expand abbreviated venue names (e.g., "SPIRE" -> full conference name)
     # S2 and DBLP often return just the abbreviation without descriptive keywords
     # All entries in ABBREVIATED_VENUE_MAP are conferences, so if the abbreviation
     # appears in 'journal', move it to 'booktitle' (correct BibTeX field for conferences)
@@ -506,6 +602,10 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     pre_revalidate_type = etype
     if venue_type == "inproceedings" and etype != "book":
         if not (etype == "article" and best_type_src in ("csl", "doi_bibtex")):
+            etype = "inproceedings"
+        elif is_secondary_doi(str(merged.get("doi", ""))):
+            # CSL/doi_bibtex misclassify preprints as articles;
+            # trust venue detection when the DOI is a preprint DOI
             etype = "inproceedings"
     elif venue_type == "incollection" and etype != "book":
         etype = "incollection"
@@ -565,6 +665,14 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         if merged.get("journal") and not merged.get("booktitle"):
             migrated_container = "journal->booktitle"
             merged["booktitle"] = merged["journal"]
+        elif (
+            merged.get("journal")
+            and merged.get("booktitle")
+            and (merged["booktitle"].lower().strip() in GENERIC_SERIES_NAMES)
+            and (merged["journal"].lower().strip() not in GENERIC_SERIES_NAMES)
+        ):
+            migrated_container = "journal->booktitle(generic_upgrade)"
+            merged["booktitle"] = merged["journal"]
         if merged.get("journal"):
             removed_containers.append("journal")
         if merged.get("howpublished"):
@@ -619,9 +727,11 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
     filename = base_filename
 
     new_content = bibtex_from_dict(entry)
+    new_fields = entry.get('fields', {})
+    new_doi = _norm_doi(new_fields.get('doi')) or ''
+    new_title_str = new_fields.get("title", "")
     duplicate_found = False
     duplicate_path = None
-    new_title_str = (entry.get("fields") or {}).get("title", "")
     scan_count = len(all_files)
     logger.debug(
         f"FILE_SCAN_START | title={new_title_str[:60]} | scanning={scan_count}_existing_files "
@@ -645,10 +755,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
 
                 if existing_entry:
                     existing_fields = existing_entry.get('fields', {})
-                    new_fields = entry.get('fields', {})
-
                     existing_doi = _norm_doi(existing_fields.get('doi')) or ''
-                    new_doi = _norm_doi(new_fields.get('doi')) or ''
 
                     if existing_doi and new_doi and existing_doi == new_doi:
                         logger.debug(
@@ -665,7 +772,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                         n_preprint = _is_preprint_doi(new_doi)
                         if e_preprint != n_preprint:
                             # If both have distinct arXiv eprint IDs, they are
-                            # different papers — skip preprint pair matching.
+                            # different papers -- skip preprint pair matching.
                             e_eprint = extract_arxiv_eprint(existing_entry)
                             n_eprint = extract_arxiv_eprint(entry)
                             if e_eprint and n_eprint and e_eprint != n_eprint:
@@ -718,14 +825,12 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             duplicate_found = True
                             duplicate_path = existing_path
                             break
-                        # Keys match but titles differ significantly — check if
+                        # Keys match but titles differ significantly -- check if
                         # this is a preprint/published pair before giving up
-                        existing_doi = _norm_doi(existing_fields.get('doi')) or ''
-                        new_doi = _norm_doi(new_fields.get('doi')) or ''
                         if existing_doi and new_doi and existing_doi != new_doi:
                             e_preprint = _is_preprint_doi(existing_doi)
                             n_preprint = _is_preprint_doi(new_doi)
-                            # Distinct arXiv eprint IDs → different papers
+                            # Distinct arXiv eprint IDs -> different papers
                             ke_eprint = extract_arxiv_eprint(existing_entry)
                             kn_eprint = extract_arxiv_eprint(entry)
                             if ke_eprint and kn_eprint and ke_eprint != kn_eprint:
@@ -835,15 +940,13 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
 
             if existing_entry:
                 existing_fields = existing_entry.get('fields', {})
-                new_fields = entry.get('fields', {})
                 existing_year = existing_fields.get('year', '')
                 new_year = new_fields.get('year', '')
                 existing_doi = _norm_doi(existing_fields.get('doi')) or ''
-                new_doi = _norm_doi(new_fields.get('doi')) or ''
 
                 # Check preprint/published relationship when DOIs differ
-                existing_is_preprint = bool(existing_doi) and _is_preprint_doi(existing_doi)
-                new_is_preprint = bool(new_doi) and _is_preprint_doi(new_doi)
+                existing_is_preprint = existing_doi and _is_preprint_doi(existing_doi)
+                new_is_preprint = new_doi and _is_preprint_doi(new_doi)
 
                 def _keep_existing() -> tuple[bool, str]:
                     return True, os.path.basename(duplicate_path)
@@ -858,7 +961,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                 if existing_doi and new_doi and existing_doi != new_doi:
                     # Different DOIs: one is preprint, one is published (dedup already confirmed match)
                     if not existing_is_preprint and (new_is_preprint or not new_doi):
-                        # Existing is published, new is preprint → keep published
+                        # Existing is published, new is preprint -> keep published
                         logger.debug(
                             f"DECISION | KEEP_EXISTING | reason=existing_published_new_preprint "
                             f"| file={dup_basename}",
@@ -866,7 +969,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                         )
                         skip_write, filename = _keep_existing()
                     elif existing_is_preprint and not new_is_preprint:
-                        # Existing is preprint, new is published → replace preprint
+                        # Existing is preprint, new is published -> replace preprint
                         logger.debug(
                             f"DECISION | REPLACE | reason=new_published_beats_preprint "
                             f"| file={dup_basename}",
@@ -874,7 +977,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                         )
                         _replace_existing()
                     else:
-                        # Both preprint or both published — prefer incoming entry
+                        # Both preprint or both published -- prefer incoming entry
                         # (it went through merge_with_policy) unless existing has
                         # significantly more fields (3+ advantage).
                         existing_field_count = sum(1 for v in existing_fields.values() if v)
@@ -894,27 +997,27 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             )
                             _replace_existing()
                 elif existing_doi and not new_doi:
-                    # Existing has DOI, new doesn't → keep existing (more complete)
+                    # Existing has DOI, new doesn't -> keep existing (more complete)
                     logger.debug(
                         f"DECISION | KEEP_EXISTING | reason=existing_has_doi | file={dup_basename}",
                         category=LogCategory.DEDUP,
                     )
                     skip_write, filename = _keep_existing()
                 elif new_doi and not existing_doi:
-                    # New has DOI, existing doesn't → replace existing
+                    # New has DOI, existing doesn't -> replace existing
                     logger.debug(
                         f"DECISION | REPLACE | reason=new_has_doi | file={dup_basename}",
                         category=LogCategory.DEDUP,
                     )
                     _replace_existing()
                 elif existing_year and new_year and existing_year != new_year:
-                    # Year changed, same or no DOIs — keep generated filename for year correction
+                    # Year changed, same or no DOIs -- keep generated filename for year correction
                     logger.debug(
                         f"DECISION | USE_NEW_NAME | reason=year_change | old_year={existing_year} new_year={new_year}",
                         category=LogCategory.DEDUP,
                     )
                 else:
-                    # Same year, same DOI (or both missing) → reuse existing filename
+                    # Same year, same DOI (or both missing) -> reuse existing filename
                     existing_key = existing_entry.get('key', '')
                     if existing_key:
                         logger.debug(
@@ -953,10 +1056,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                 existing_entry = parse_bibtex_to_dict(existing_content)
                 if existing_entry:
                     existing_fields = existing_entry.get('fields', {})
-                    new_fields = entry.get('fields', {})
-
                     existing_doi = _norm_doi(existing_fields.get('doi')) or ''
-                    new_doi = _norm_doi(new_fields.get('doi')) or ''
 
                     if existing_doi and new_doi and existing_doi == new_doi:
                         logger.debug(
@@ -1012,7 +1112,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
         collision_title = entry.get('fields', {}).get('title', '')
         collision_path = os.path.join(author_dir, filename)
         logger.warn(
-            f"Filename collision for '{collision_title}' — existing file kept: {collision_path}",
+            f"Filename collision for '{collision_title}' -- existing file kept: {collision_path}",
         )
         return os.path.join(author_dir, filename), False
 
@@ -1033,27 +1133,26 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                 if existing_key:
                     entry['key'] = existing_key
 
-                existing_fields = {k: v for k, v in existing_entry.get('fields', {}).items() if v}
-                new_fields = {k: v for k, v in entry.get('fields', {}).items() if v}
+                existing_nonempty = {k: v for k, v in existing_entry.get('fields', {}).items() if v}
+                new_nonempty = {k: v for k, v in entry.get('fields', {}).items() if v}
 
                 # Keep existing if it has more fields (prevents downgrading)
-                if len(existing_fields) > len(new_fields):
+                if len(existing_nonempty) > len(new_nonempty):
                     should_write = False
 
-                existing_doi = _norm_doi(existing_fields.get('doi')) or ''
-                new_doi = _norm_doi(new_fields.get('doi')) or ''
+                existing_doi = _norm_doi(existing_nonempty.get('doi')) or ''
                 if existing_doi and new_doi and not _is_preprint_doi(existing_doi) and _is_preprint_doi(new_doi):
                     should_write = False
 
                 # Never overwrite a specific conference booktitle with a generic series name
-                existing_bt = (existing_fields.get('booktitle') or '').lower().strip()
-                new_bt = (new_fields.get('booktitle') or '').lower().strip()
+                existing_bt = (existing_nonempty.get('booktitle') or '').lower().strip()
+                new_bt = (new_nonempty.get('booktitle') or '').lower().strip()
                 if (existing_bt and existing_bt not in GENERIC_SERIES_NAMES
                         and new_bt in GENERIC_SERIES_NAMES):
                     should_write = False
                 logger.debug(
                     f"PREWRITE_CHECK | file={path} | should_write={should_write} "
-                    f"| existing_fields={len(existing_fields)} new_fields={len(new_fields)} "
+                    f"| existing_fields={len(existing_nonempty)} new_fields={len(new_nonempty)} "
                     f"| existing_published_doi={bool(existing_doi and not _is_preprint_doi(existing_doi))} "
                     f"| new_preprint_doi={bool(new_doi and _is_preprint_doi(new_doi))}",
                     category=LogCategory.DEDUP,
@@ -1064,6 +1163,22 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
     if prefer_path and os.path.abspath(prefer_path) != os.path.abspath(path):
         try:
             if os.path.exists(prefer_path):
+                # Guard: don't remove prefer_path if it's more complete than what
+                # we're about to write (prevents enriched file from being replaced
+                # by an unenriched stub when Scholar returns duplicate entries)
+                with open(prefer_path, encoding="utf-8") as pf:
+                    prefer_entry = parse_bibtex_to_dict(pf.read())
+                if prefer_entry:
+                    pf_fields = sum(1 for v in prefer_entry.get("fields", {}).values() if v)
+                    nf_fields = sum(1 for v in entry.get("fields", {}).values() if v)
+                    pf_doi = (prefer_entry.get("fields", {}).get("doi") or "").strip()
+                    if pf_fields > nf_fields or (pf_fields == nf_fields and pf_doi):
+                        logger.debug(
+                            f"FILE_CLEANUP_BLOCKED | prefer={os.path.basename(prefer_path)} "
+                            f"({pf_fields} fields, doi) > new ({nf_fields} fields) | keeping enriched",
+                            category=LogCategory.DEDUP,
+                        )
+                        return prefer_path, False
                 logger.debug(f"FILE_CLEANUP | removed={prefer_path} | new_location={path}", category=LogCategory.DEDUP)
                 os.remove(prefer_path)
         except OSError:
@@ -1082,4 +1197,4 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
     else:
         logger.debug(f"FILE_SKIP_WRITE | path={path} | reason=existing_more_complete", category=LogCategory.DEDUP)
 
-    return path, True
+    return path, should_write

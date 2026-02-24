@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import json
-import os
+from pathlib import Path
 
 from src.cache import ResponseCache
 
 
-def test_put_and_get(tmp_path):
+def test_put_and_get(tmp_path: Path) -> None:
     """Test basic cache put and get operations."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     cache.put("test_ns", "key1", {"value": "hello"}, ttl_days=30)
@@ -12,14 +14,14 @@ def test_put_and_get(tmp_path):
     assert result == {"value": "hello"}
 
 
-def test_get_missing_key(tmp_path):
+def test_get_missing_key(tmp_path: Path) -> None:
     """Test that get returns None for missing keys."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     result = cache.get("test_ns", "nonexistent")
     assert result is None
 
 
-def test_has(tmp_path):
+def test_has(tmp_path: Path) -> None:
     """Test has() checks for key existence."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     assert not cache.has("test_ns", "key1")
@@ -27,7 +29,7 @@ def test_has(tmp_path):
     assert cache.has("test_ns", "key1")
 
 
-def test_invalidate(tmp_path):
+def test_invalidate(tmp_path: Path) -> None:
     """Test that invalidate removes a cached entry."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     cache.put("test_ns", "key1", {"v": 1})
@@ -36,31 +38,28 @@ def test_invalidate(tmp_path):
     assert not cache.has("test_ns", "key1")
 
 
-def test_invalidate_missing_key(tmp_path):
+def test_invalidate_missing_key(tmp_path: Path) -> None:
     """Test that invalidating a non-existent key doesn't raise."""
     cache = ResponseCache(cache_dir=str(tmp_path))
-    cache.invalidate("test_ns", "nonexistent")  # Should not raise
+    cache.invalidate("test_ns", "nonexistent")
 
 
-def test_monthly_expiry(tmp_path):
+def test_monthly_expiry(tmp_path: Path) -> None:
     """Test that entries from before the 1st of the current month are expired."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     cache.put("test_ns", "key1", {"v": 1})
 
-    # Backdate timestamp to before the monthly boundary
-    path = cache._entry_path("test_ns", "key1")
-    with open(path, encoding="utf-8") as f:
-        entry = json.load(f)
-    entry["timestamp"] = cache._month_boundary - 1  # 1 second before boundary
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(entry, f)
+    path = Path(cache._entry_path("test_ns", "key1"))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    entry["timestamp"] = cache._month_boundary - 1
+    path.write_text(json.dumps(entry), encoding="utf-8")
 
     result = cache.get("test_ns", "key1")
     assert result is None
-    assert not os.path.exists(path), "Expired entry file should be removed"
+    assert not path.exists(), "Expired entry file should be removed"
 
 
-def test_namespace_isolation(tmp_path):
+def test_namespace_isolation(tmp_path: Path) -> None:
     """Test that different namespaces are isolated."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     cache.put("ns_a", "key1", {"v": "a"})
@@ -70,7 +69,7 @@ def test_namespace_isolation(tmp_path):
     assert cache.get("ns_b", "key1") == {"v": "b"}
 
 
-def test_overwrite(tmp_path):
+def test_overwrite(tmp_path: Path) -> None:
     """Test that putting the same key overwrites the value."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     cache.put("test_ns", "key1", {"v": 1})
@@ -78,20 +77,19 @@ def test_overwrite(tmp_path):
     assert cache.get("test_ns", "key1") == {"v": 2}
 
 
-def test_creates_namespace_directory(tmp_path):
+def test_creates_namespace_directory(tmp_path: Path) -> None:
     """Test that put creates the namespace directory if needed."""
     cache = ResponseCache(cache_dir=str(tmp_path))
-    ns_dir = os.path.join(str(tmp_path), "new_ns")
-    assert not os.path.exists(ns_dir)
+    ns_dir = tmp_path / "new_ns"
+    assert not ns_dir.exists()
     cache.put("new_ns", "key1", {"v": 1})
-    assert os.path.isdir(ns_dir)
+    assert ns_dir.is_dir()
 
 
-def test_corrupted_cache_file(tmp_path):
+def test_corrupted_cache_file(tmp_path: Path) -> None:
     """Test that corrupted cache files return None."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     cache.put("test_ns", "key1", {"v": 1})
-    path = cache._entry_path("test_ns", "key1")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("not valid json{{{")
+    path = Path(cache._entry_path("test_ns", "key1"))
+    path.write_text("not valid json{{{", encoding="utf-8")
     assert cache.get("test_ns", "key1") is None

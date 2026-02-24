@@ -108,8 +108,8 @@ def test_all_multiple_candidate_functions_exist() -> None:
     ]
 
     for func_name in required_functions:
-        assert hasattr(search_apis, func_name), f"Function {func_name} not found"
-        assert callable(getattr(search_apis, func_name)), f"Function {func_name} is not callable"
+        func = getattr(search_apis, func_name, None)
+        assert callable(func), f"Function {func_name} not found or not callable"
 
 
 def test_crossref_multiple_candidates() -> None:
@@ -180,11 +180,9 @@ def test_api_field_mappings() -> None:
 
 def test_doi_validation_functions() -> None:
     """DOI validation utilities are present and callable."""
-    assert hasattr(doi_utils, "validate_doi_candidate"), "Missing validate_doi_candidate"
-    assert callable(doi_utils.validate_doi_candidate), "validate_doi_candidate not callable"
-
-    assert hasattr(doi_utils, "process_validated_doi"), "Missing process_validated_doi"
-    assert callable(doi_utils.process_validated_doi), "process_validated_doi not callable"
+    for func_name in ("validate_doi_candidate", "process_validated_doi"):
+        func = getattr(doi_utils, func_name, None)
+        assert callable(func), f"{func_name} not found or not callable"
 
 
 def test_bibtex_building_from_openalex_canned() -> None:

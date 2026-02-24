@@ -119,7 +119,19 @@ PREPRINT_DOI_PREFIXES = (
     '10.26434/chemrxiv',  # ChemRxiv
     '10.20944/preprints', # Preprints.org
     '10.2139/ssrn',       # SSRN
+    '10.64898/',          # openRxiv
+    '10.36227/techrxiv',  # TechRxiv (IEEE preprints)
 )
+
+# Publishers exclusively associated with preprint servers.
+# Used to strip leaked preprint publishers from published journal entries.
+PREPRINT_ONLY_PUBLISHERS = frozenset({
+    'openrxiv',
+    'cold spring harbor laboratory',  # bioRxiv / medRxiv
+    'research square',
+    'authorea, inc.',
+    'techrxiv',
+})
 
 # Data repository DOI prefixes (deprioritized in DOI selection)
 DATA_DOI_PREFIXES = (
@@ -128,7 +140,7 @@ DATA_DOI_PREFIXES = (
 )
 
 # Relaxed title similarity for preprint/published pairs
-SIM_PREPRINT_TITLE_THRESHOLD = 0.5
+SIM_PREPRINT_TITLE_THRESHOLD = 0.55
 
 # Conference venues that lack standard keywords (proceedings, conference, etc.)
 KNOWN_CONFERENCE_VENUES = frozenset({

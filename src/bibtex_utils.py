@@ -39,8 +39,8 @@ def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entr
     label when needed.
     """
     last = re.sub(r"[^A-Za-z0-9]", "", authors[0].split()[-1]) if authors and authors[0] else ""
-    first_word = title.split()[0] if title.split() else ""
-    word = re.sub(r"[^A-Za-z0-9]", "", first_word)
+    title_words = title.split()
+    word = re.sub(r"[^A-Za-z0-9]", "", title_words[0]) if title_words else ""
     y = str(year) if year else ""
     parts = [p for p in [last, y, word] if p]
     base = "".join(parts) if parts else fallback
@@ -85,10 +85,8 @@ def _extract_balanced_braces(text: str, start: int) -> str | None:
     if start >= len(text) or text[start] != '{':
         return None
     depth = 0
-    result = []
-    i = start
-    while i < len(text):
-        ch = text[i]
+    result: list[str] = []
+    for ch in text[start:]:
         if ch == '{':
             depth += 1
             if depth > 1:  # Don't include the outermost braces
@@ -100,7 +98,6 @@ def _extract_balanced_braces(text: str, start: int) -> str | None:
             result.append(ch)
         else:
             result.append(ch)
-        i += 1
     return None  # unbalanced
 
 
@@ -174,13 +171,9 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
 
     # Multi-line format parsing
     current_field = None
-    accumulator = []
+    accumulator: list[str] = []
 
-    lines = bibtex.split('\n')
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
+    for line in bibtex.split('\n'):
         m = re.match(r'^\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*=\s*(.*)$', line)
 
         if m:
@@ -215,8 +208,6 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
                         fields[current_field] = val.strip()
                         current_field = None
                         accumulator = []
-
-        i += 1
 
     if current_field and accumulator:
         full_value = ' '.join(accumulator)
@@ -381,21 +372,14 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
         "doi", "url", "eprint", "archiveprefix", "primaryclass"
     ]
     lines = [f"@{etype}{{{key},"]
-    used = set()
-    for k in preferred:
+    preferred_set = set(preferred)
+    ordered_keys = list(preferred) + sorted(k for k in fields if k not in preferred_set)
+    for k in ordered_keys:
         val = fields.get(k)
         if val is not None and str(val).strip():
-            used.add(k)
             val = _normalize_to_ascii(str(val))
             if k == "title":
                 val = _sanitize_title(val)
-            lines.append(f"  {k} = {{{val}}},")
-    for k in sorted(fields.keys()):
-        if k in used:
-            continue
-        val = fields[k]
-        if val is not None and str(val).strip():
-            val = _normalize_to_ascii(str(val))
             lines.append(f"  {k} = {{{val}}},")
     if len(lines) > 1 and lines[-1].endswith(','):
         lines[-1] = lines[-1][:-1]
@@ -440,13 +424,11 @@ def _short_title_for_key(
     if gemini_api_key and use_cache:
         cached = response_cache.get("gemini", normalized_title)
         if cached is not None:
-            if not cached.get("_negative"):
-                saved_short = cached.get("short_title", "")
-                if saved_short:
-                    saved_short = re.sub(r"[\n\r\t]", "", saved_short)
-                    if saved_short:
-                        return str(saved_short)
-            # Fall through to algorithmic path for negative cache hits
+            saved_short = "" if cached.get("_negative") else cached.get("short_title", "")
+            saved_short = re.sub(r"[\n\r\t]", "", saved_short) if saved_short else ""
+            if saved_short:
+                return saved_short
+            # Fall through to algorithmic path for negative/empty cache hits
         else:
             from .clients.utility_apis import gemini_generate_short_title
 
@@ -570,6 +552,13 @@ def short_filename_for_entry(entry: dict[str, Any], gemini_api_key: str | None =
     return filename
 
 
+def _years_diverge(af: dict[str, Any], bf: dict[str, Any], max_gap: int = 3) -> bool:
+    """Return True if both entries have years and they differ by more than max_gap."""
+    a_year = extract_year_from_any(af.get("year"), fallback=None)
+    b_year = extract_year_from_any(bf.get("year"), fallback=None)
+    return bool(a_year and b_year and abs(a_year - b_year) > max_gap)
+
+
 def _is_preprint_entry(fields: dict[str, Any]) -> bool:
     """Check if a BibTeX entry looks like a preprint based on DOI prefix or journal name."""
     doi = str(fields.get("doi") or "").lower()
@@ -654,13 +643,9 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
 
     # Fast path 4: High title similarity (backward-compatible original path)
     if title_sim >= SIM_FILE_DUPLICATE_THRESHOLD:
-        a_year_int = extract_year_from_any(af.get("year"), fallback=None)
-        b_year_int = extract_year_from_any(bf.get("year"), fallback=None)
-        if a_year_int and b_year_int and abs(a_year_int - b_year_int) > 3:
+        if _years_diverge(af, bf):
             logger.debug(
-                f"ENTRY_REJECT | HIGH_SIM_YEAR_MISMATCH | sim={title_sim:.3f}"
-                f" | a_year={a_year_int} b_year={b_year_int} | diff={abs(a_year_int - b_year_int)}"
-                " | result=False",
+                f"ENTRY_REJECT | HIGH_SIM_YEAR_MISMATCH | sim={title_sim:.3f} | result=False",
                 category=LogCategory.DEDUP,
             )
             return False
@@ -672,15 +657,12 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
         return overlap
 
     # Truncated title path: one title is a strict prefix of the other
-    # (Scholar truncation).  Requires author overlap + year within ±3
+    # (Scholar truncation).  Requires author overlap + year within +/-3
     # to avoid matching unrelated papers with common title prefixes.
     if title_is_truncated_match(af.get("title"), bf.get("title")):
-        a_year_int = extract_year_from_any(af.get("year"), fallback=None)
-        b_year_int = extract_year_from_any(bf.get("year"), fallback=None)
-        if a_year_int and b_year_int and abs(a_year_int - b_year_int) > 3:
+        if _years_diverge(af, bf):
             logger.debug(
-                f"ENTRY_REJECT | TRUNCATED_YEAR_MISMATCH | a_year={a_year_int} b_year={b_year_int}"
-                " | result=False",
+                "ENTRY_REJECT | TRUNCATED_YEAR_MISMATCH | result=False",
                 category=LogCategory.DEDUP,
             )
             return False
