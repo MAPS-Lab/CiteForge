@@ -220,10 +220,23 @@ _NOBLE_PARTICLES = frozenset({
 })
 
 
+_INITIALS_EXCLUSIONS = frozenset({"jr", "sr", "ii", "iii", "iv", "md", "phd"})
+
+
+def _is_initials_token(token: str) -> bool:
+    """Check if a token is uppercase initials (1-4 chars, not a suffix/title)."""
+    clean = token.replace(".", "").strip()
+    return (1 <= len(clean) <= 4
+            and clean.isalpha()
+            and clean.isupper()
+            and clean.lower() not in _INITIALS_EXCLUSIONS)
+
+
 def name_signature(n: Any | None) -> dict[str, Any] | None:
     """
     Derive a compact signature for a person name that keeps the normalized last
-    name and initials, working with both "Last, First" and "First Last" formats.
+    name and initials, working with "Last, First", "First Last", and
+    "Lastname INITIALS" (PubMed/Europe PMC) formats.
 
     Noble particles (van, von, de, etc.) are included in the last name so that
     "Johan van der Waals" and "van der Waals, Johan" produce the same signature.
@@ -244,6 +257,14 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
     tokens = n_clean.split()
     if not tokens:
         return None
+    # Detect PubMed/Europe PMC "Lastname INITIALS" format (e.g. "Alanko JN")
+    # by checking if the last token in the original text is all uppercase
+    raw_tokens = to_text(n).strip().split()
+    if (len(tokens) == 2 and len(raw_tokens) == 2
+            and _is_initials_token(raw_tokens[-1])):
+        last_norm = re.sub(r"[^a-z0-9]", "", tokens[0])
+        initials = re.sub(r"[^a-z]", "", tokens[1])
+        return {"last": last_norm, "initials": initials}
     last_start = len(tokens) - 1
     for i in range(len(tokens) - 2, -1, -1):
         if tokens[i] in _NOBLE_PARTICLES:

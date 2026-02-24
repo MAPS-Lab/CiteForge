@@ -269,7 +269,6 @@ def safe_write_json(path: str, data: Any, makedirs: bool = True, indent: int | N
 
 _SUMMARY_KNOWN_PATHS: set[str] = set()
 _SUMMARY_UPDATES: dict[str, dict[str, Any]] = {}
-_SUMMARY_INITIALIZED = False
 
 
 def init_summary_csv(csv_path: str, preserve_existing: bool = False) -> None:
@@ -277,8 +276,6 @@ def init_summary_csv(csv_path: str, preserve_existing: bool = False) -> None:
     Initialize the summary CSV file with proper headers, creating the parent directory if needed.
     Loads existing entries into memory for O(1) dedup on appends.
     """
-    global _SUMMARY_INITIALIZED
-
     parent_dir = os.path.dirname(csv_path)
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
@@ -302,7 +299,11 @@ def init_summary_csv(csv_path: str, preserve_existing: bool = False) -> None:
                 writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
                 writer.writeheader()
 
-        _SUMMARY_INITIALIZED = True
+
+def is_known_summary_path(file_path: str) -> bool:
+    """Return True if *file_path* already has an entry in the summary CSV (from a previous run)."""
+    with _CSV_LOCK:
+        return file_path in _SUMMARY_KNOWN_PATHS
 
 
 def append_summary_to_csv(csv_path: str, file_path: str, trust_hits: int, flags: dict[str, bool]) -> None:
@@ -356,3 +357,82 @@ def flush_summary_csv(csv_path: str) -> None:
             writer.writeheader()
             for row in existing.values():
                 writer.writerow(row)
+
+
+def collect_orphan_files(csv_path: str, output_dir: str) -> list[str]:
+    """
+    Return absolute paths of .bib files on disk that have no entry in the
+    summary CSV.  These are stale leftovers from previous runs where the same
+    article received a different citation key (e.g. Gemini returned a different
+    short title).
+
+    Called after :func:`reconcile_summary_csv` so that phantom entries have
+    already been stripped -- any remaining CSV entry corresponds to a real file.
+    """
+    # NOTE: CSV stores paths relative to CWD (e.g. "output/Author/file.bib").
+    # os.path.abspath() resolves them correctly when CWD is the project root.
+    csv_paths: set[str] = set()
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                fp = row.get("file_path", "")
+                csv_paths.add(os.path.abspath(fp))
+    except CSV_ERRORS:
+        return []
+
+    orphans: list[str] = []
+    try:
+        for entry in os.listdir(output_dir):
+            d = os.path.join(output_dir, entry)
+            if not os.path.isdir(d):
+                continue
+            for fname in os.listdir(d):
+                if not fname.endswith(".bib"):
+                    continue
+                abs_path = os.path.abspath(os.path.join(d, fname))
+                if abs_path not in csv_paths:
+                    orphans.append(abs_path)
+    except OSError:
+        pass
+
+    return sorted(orphans)
+
+
+def reconcile_summary_csv(csv_path: str) -> int:
+    """
+    Remove CSV rows whose file no longer exists on disk (phantom entries).
+
+    FILE_CLEANUP in save_entry_to_file can delete/rename files that already
+    have CSV entries; the CSV is append-only so stale rows accumulate.
+    This pass rewrites the CSV keeping only rows for files that exist.
+
+    Returns the number of removed phantom entries.
+    """
+    # NOTE: CSV stores paths relative to CWD (e.g. "output/Author/file.bib").
+    # This function must be called from the project root (same CWD used when
+    # the CSV was written) so that os.path.exists() resolves correctly.
+    with _CSV_LOCK:
+        rows: list[dict[str, Any]] = []
+        removed = 0
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    fp = row.get("file_path", "")
+                    if os.path.exists(fp):
+                        rows.append(dict(row))
+                    else:
+                        removed += 1
+        except CSV_ERRORS:
+            return 0
+
+        if removed:
+            with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(row)
+            _SUMMARY_KNOWN_PATHS.clear()
+            _SUMMARY_KNOWN_PATHS.update(r["file_path"] for r in rows if r.get("file_path"))
+
+        return removed

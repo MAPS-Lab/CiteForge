@@ -6,7 +6,6 @@ from typing import Any
 
 from .config import (
     _DOI_REGEX,
-    ARXIV_DOI_CHECK_PATTERN,
     ARXIV_DOI_EXTRACT_PATTERN,
     DATA_DOI_PREFIXES,
     DEDUP_INTERNAL_FIELDS,
@@ -15,7 +14,6 @@ from .config import (
 from .log_utils import LogCategory, LogSource, logger
 
 _ARXIV_PUBLISHER_NAMES = ("arxiv", "arxiv.org", "arxiv e-prints")
-_ARXIV_JOURNAL_NAME = "arXiv e-prints"
 
 
 def _norm_doi(doi: str | None) -> str | None:
@@ -316,24 +314,10 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
         )
         if is_arxiv_journal:
             logger.debug(
-                f"JOURNAL_NORMALIZE | old={journal} | new={_ARXIV_JOURNAL_NAME}"
-                f" | is_arxiv={is_arxiv_journal}",
+                f"JOURNAL_REMOVE | old={journal} | reason=arxiv_is_preprint",
                 category=LogCategory.ARXIV, source=LogSource.ARXIV,
             )
-            fields["journal"] = _ARXIV_JOURNAL_NAME
-        elif not journal:
-            # Pure arXiv preprint with no journal: set standard journal name
-            doi_val = fields.get("doi", "")
-            has_non_arxiv_doi = doi_val and not re.search(
-                ARXIV_DOI_CHECK_PATTERN, doi_val, re.IGNORECASE
-            )
-            if not has_non_arxiv_doi:
-                logger.debug(
-                    f"JOURNAL_SET_PURE | no_journal_no_published_doi"
-                    f" | journal={_ARXIV_JOURNAL_NAME}",
-                    category=LogCategory.ARXIV, source=LogSource.ARXIV,
-                )
-                fields["journal"] = _ARXIV_JOURNAL_NAME
+            fields.pop("journal", None)
 
         url = fields.get("url", "")
         if not (url and "doi.org" in url.lower()):
@@ -348,6 +332,6 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
         journal = (fields.get("journal") or "").strip()
         journal_lower = journal.lower()
         if journal_lower in _ARXIV_PUBLISHER_NAMES:
-            fields["journal"] = _ARXIV_JOURNAL_NAME
+            fields.pop("journal", None)
 
     return fields

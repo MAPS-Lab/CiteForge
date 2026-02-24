@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
@@ -45,10 +46,11 @@ from src.config import (
     DEFAULT_S2_KEY_FILE,
     DEFAULT_SERPAPI_KEY_FILE,
     DEFAULT_SERPLY_KEY_FILE,
+    GENERIC_SERIES_NAMES,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
     MIN_TITLE_WORDS,
-    PREPRINT_DOI_PREFIXES,
+    PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
@@ -66,14 +68,18 @@ from src.exceptions import (
 from src.http_utils import get_api_call_counts, http_get_text, reset_api_call_counts
 from src.io_utils import (
     append_summary_to_csv,
+    collect_orphan_files,
     flush_summary_csv,
     init_summary_csv,
+    is_known_summary_path,
     read_gemini_api_key,
     read_openreview_credentials,
     read_records,
     read_semantic_api_key,
     read_serpapi_api_key,
     read_serply_api_key,
+    reconcile_summary_csv,
+    safe_write_file,
 )
 from src.log_utils import LogCategory, LogSource, logger
 from src.models import Record
@@ -87,6 +93,31 @@ from src.text_utils import (
 
 FORCE_ENRICH = "--force" in sys.argv[1:]
 
+
+def _is_garbage_title(title: str) -> bool:
+    """Detect non-bibliographic titles from Scholar/DBLP artifacts.
+
+    Catches institutional addresses, contact info, and other metadata
+    that occasionally appear as "paper titles" in Scholar results.
+    """
+    if not title:
+        return False
+    if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', title):
+        return True
+    if re.search(r'\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b', title):
+        return True
+    if re.search(r'^\s*(Department|Faculty|School|Institute)\s+of\b', title, re.IGNORECASE):
+        return True
+    if re.search(r'\+?\d{1,4}[\.\-]\d{2,4}[\.\-]\d{2,}', title):
+        return True
+    if re.search(r'\bComplete\s+Volume\b', title, re.IGNORECASE):
+        return True
+    if re.search(r'^(OASIcs|LIPIcs|LNI|LNCS|Dagstuhl)\b.*\bVolume\s+\d+\b', title, re.IGNORECASE):
+        return True
+    return bool(
+        re.search(r'\bFestschrift\b', title, re.IGNORECASE)
+        and re.search(r',\s+[A-Z][a-z]+,\s+[A-Z][a-z]+\b.*\d{4}', title)
+    )
 
 
 def _is_corrupted_title(title: str) -> bool:
@@ -126,13 +157,22 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
     has_doi = bool(doi) and not has_placeholder(str(doi))
 
     if has_essentials and has_venue and has_doi:
-        doi_lower = str(doi).lower()
-        doi_is_preprint = any(doi_lower.startswith(p) for p in PREPRINT_DOI_PREFIXES)
+        doi_is_preprint = idu.is_secondary_doi(str(doi))
         if not doi_is_preprint:
             journal = str(fields.get("journal") or "").lower()
             journal_is_preprint = any(ps in journal for ps in PREPRINT_SERVERS)
 
-    result = has_essentials and has_venue and has_doi and not doi_is_preprint and not journal_is_preprint
+    # Treat generic series booktitles as incomplete so they get re-enriched
+    venue_is_generic = False
+    if has_venue:
+        bt_val = (fields.get("booktitle") or "").lower().strip()
+        venue_is_generic = bt_val in GENERIC_SERIES_NAMES and not fields.get("journal")
+
+    result = (
+        has_essentials and has_venue and has_doi
+        and not doi_is_preprint and not journal_is_preprint
+        and not venue_is_generic
+    )
 
     logger.debug(
         f"COMPLETE_CHECK | title={title[:50]} | has_title={bool(title)} "
@@ -235,9 +275,11 @@ def process_article(
 
     word_count = len(title.split()) if title else 0
     corrupted = _is_corrupted_title(title) if title else False
-    title_valid = bool(title) and word_count >= MIN_TITLE_WORDS and not corrupted
+    garbage = _is_garbage_title(title) if title else False
+    title_valid = bool(title) and word_count >= MIN_TITLE_WORDS and not corrupted and not garbage
     logger.debug(
-        f"TITLE_VALIDATE | raw={title[:60]} | words={word_count} | corrupted={corrupted} | valid={title_valid}",
+        f"TITLE_VALIDATE | raw={title[:60]} | words={word_count} | corrupted={corrupted} "
+        f"| garbage={garbage} | valid={title_valid}",
         category=LogCategory.AUDIT,
     )
 
@@ -253,6 +295,12 @@ def process_article(
     if corrupted:
         logger.warn(
             f"Corrupted title (probable DBLP artifact): '{title}'; skipping",
+            category=LogCategory.SKIP,
+        )
+        return 0
+    if garbage:
+        logger.warn(
+            f"Garbage title (non-bibliographic content): '{title}'; skipping",
             category=LogCategory.SKIP,
         )
         return 0
@@ -301,6 +349,15 @@ def process_article(
                     if isinstance(existing_title, list):
                         existing_title = existing_title[0] if existing_title else ''
 
+                    # Purge stale files whose titles now fail validation
+                    if _is_garbage_title(existing_title) or _is_corrupted_title(existing_title):
+                        logger.warn(
+                            f"STALE_FILE_REMOVED | file={filename} | reason=title_now_invalid",
+                            category=LogCategory.CLEANUP,
+                        )
+                        os.remove(file_path)
+                        continue
+
                     sim = title_similarity(title, existing_title)
                     if sim >= SIM_MERGE_DUPLICATE_THRESHOLD:
                         baseline_entry = existing_entry
@@ -321,13 +378,49 @@ def process_article(
 
     # Skip enrichment entirely if entry is already complete (unless --force)
     if not FORCE_ENRICH and existing_file_loaded and baseline_entry is not None and _entry_is_complete(baseline_entry):
+        # Quick fixup: strip preprint-only publishers from complete entries
+        bl_fields = baseline_entry.get("fields") or {}
+        bl_pub = (bl_fields.get("publisher") or "").lower().strip()
+        bl_jnl = (bl_fields.get("journal") or "").lower()
+        if (
+            bl_pub in PREPRINT_ONLY_PUBLISHERS
+            and bl_jnl
+            and not any(ps in bl_jnl for ps in PREPRINT_SERVERS)
+        ):
+            logger.debug(
+                f"EXISTING_FIXUP | publisher_stripped={bl_fields['publisher']} "
+                f"| journal={bl_fields.get('journal')}",
+                category=LogCategory.CLEANUP,
+            )
+            bl_fields.pop("publisher", None)
+            if existing_file_path:
+                bib_str = bt.bibtex_from_dict(baseline_entry)
+                safe_write_file(existing_file_path, bib_str)
+
+        # Quick fixup: downgrade @article with preprint DOI -> @misc
+        bl_doi = (bl_fields.get("doi") or "").strip()
+        if baseline_entry.get("type") == "article" and bl_doi and idu.is_secondary_doi(bl_doi):
+            venue = bl_fields.get("journal", "")
+            logger.debug(
+                f"EXISTING_FIXUP | article_preprint_doi->misc | doi={bl_doi} | venue={venue}",
+                category=LogCategory.CLEANUP,
+            )
+            baseline_entry["type"] = "misc"
+            if venue:
+                bl_fields["howpublished"] = bl_fields.pop("journal")
+            if existing_file_path:
+                bib_str = bt.bibtex_from_dict(baseline_entry)
+                safe_write_file(existing_file_path, bib_str)
+
         logger.info("Entry already complete; skipping enrichment", category=LogCategory.SKIP, source=LogSource.SYSTEM)
         if summary_csv_path and existing_file_path:
             try:
                 rel = os.path.relpath(existing_file_path)
             except (OSError, ValueError):
                 rel = existing_file_path
-            append_summary_to_csv(summary_csv_path, rel, 0, flags)
+            # Only write a new CSV row if this file has no entry from a previous run
+            if not is_known_summary_path(rel):
+                append_summary_to_csv(summary_csv_path, rel, 0, flags)
         return 1
 
     # If no existing file found, build minimal BibTeX baseline
@@ -814,19 +907,63 @@ def process_article(
     try:
         merged = mu.merge_with_policy(baseline_entry, enr_list)
 
-        # Downgrade @article to @misc when journal is missing AND the entry
-        # doesn't have a published DOI (preprint DOIs from Research Square/Authorea
-        # often produce journal-less articles; entries with published DOIs should
-        # stay @article even if the journal name wasn't resolved)
+        # Downgrade @article to @misc when journal is missing (by Phase 4 all
+        # enrichment is done, so a missing journal means no source could provide one)
         merged_fields = merged.get("fields") or {}
-        merged_doi = merged_fields.get("doi", "")
-        has_published_doi = bool(merged_doi and not idu.is_secondary_doi(str(merged_doi)))
-        if merged.get("type") == "article" and not merged_fields.get("journal") and not has_published_doi:
+        if merged.get("type") == "article" and not merged_fields.get("journal"):
             logger.debug(
                 "TYPE_CORRECT | article_no_journal->misc",
                 category=LogCategory.AUDIT,
             )
             merged["type"] = "misc"
+
+        # Downgrade @inproceedings without booktitle -> @misc (same rationale:
+        # by Phase 4 enrichment is complete; @inproceedings without booktitle
+        # is invalid BibTeX)
+        if merged.get("type") == "inproceedings" and not merged_fields.get("booktitle"):
+            logger.debug(
+                "TYPE_CORRECT | inproceedings_no_booktitle->misc",
+                category=LogCategory.AUDIT,
+            )
+            merged["type"] = "misc"
+
+        # Downgrade @article with preprint server as journal -> @misc
+        if merged.get("type") == "article":
+            j_lower = (merged_fields.get("journal") or "").lower().strip()
+            if j_lower and any(ps == j_lower for ps in PREPRINT_SERVERS):
+                logger.debug(
+                    f"TYPE_CORRECT | article_preprint_journal->misc | journal={j_lower}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "misc"
+                merged_fields["howpublished"] = merged_fields.pop("journal")
+
+        # Downgrade @article with preprint-only DOI -> @misc
+        if merged.get("type") == "article":
+            _merged_doi = (merged_fields.get("doi") or "").strip()
+            if _merged_doi and idu.is_secondary_doi(_merged_doi):
+                venue = merged_fields.get("journal", "")
+                logger.debug(
+                    f"TYPE_CORRECT | article_preprint_doi->misc | doi={_merged_doi} | venue={venue}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "misc"
+                if venue:
+                    merged_fields["howpublished"] = merged_fields.pop("journal")
+
+        # Annotate bare stubs: no enrichers, no DOI, no venue
+        is_bare_stub = (
+            len(enr_list) == 0
+            and not (merged_fields.get("doi") or "").strip()
+            and not (merged_fields.get("journal") or "").strip()
+            and not (merged_fields.get("booktitle") or "").strip()
+        )
+        if is_bare_stub:
+            merged_fields["note"] = "Unenriched: no enrichment sources matched"
+            logger.warn(
+                "Bare stub: no venue, no DOI, no enrichment; annotated with note",
+                category=LogCategory.AUDIT,
+            )
 
         # Skip entries with type "book" (proceedings volumes, edited books — not individual papers)
         if merged.get("type") == "book":
@@ -995,8 +1132,8 @@ def process_record(
                 data = fetch_author_publications(
                     serpapi_key, rec.scholar_id, rec.name, num=MAX_PUBLICATIONS_PER_AUTHOR,
                 )
-                if data.get("search_metadata"):
-                    break  # Got a valid API response
+                if data.get("articles"):
+                    break  # Got articles -- valid response
                 if attempt < max_fetch_retries:
                     logger.warn(
                         f"Scholar API returned empty (attempt {attempt}/{max_fetch_retries}), retrying...",
@@ -1004,7 +1141,7 @@ def process_record(
                     )
                     time.sleep(2.0 * attempt)
 
-            if not data.get("search_metadata"):
+            if not data.get("articles"):
                 logger.warn(
                     f"Scholar API failed after {max_fetch_retries} attempts; continuing with DBLP only",
                     category=LogCategory.ERROR, source=LogSource.SCHOLAR,
@@ -1126,6 +1263,30 @@ def count_existing_papers(rec: Record, out_dir: str) -> int:
         return 0
 
 
+def _load_csv_titles(csv_path: str) -> dict[str, list[str]]:
+    """Load titles from CSV-tracked .bib files, grouped by author directory."""
+    import csv as _csv
+
+    result: dict[str, list[str]] = {}
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                fp = row.get("file_path", "")
+                abs_fp = os.path.abspath(fp)
+                author_dir_path = os.path.dirname(abs_fp)
+                try:
+                    with open(abs_fp, encoding="utf-8") as bf:
+                        entry = bt.parse_bibtex_to_dict(bf.read())
+                    t = (entry or {}).get("fields", {}).get("title", "")
+                    if t:
+                        result.setdefault(author_dir_path, []).append(t)
+                except (OSError, ValueError):
+                    pass
+    except (OSError, ValueError):
+        pass
+    return result
+
+
 def main() -> int:
     """Set up the run, load API keys and author records, and process all authors in parallel.
 
@@ -1201,7 +1362,7 @@ def main() -> int:
     csv_path = os.path.join(out_dir, "summary.csv")
     summary_csv_path: str | None = csv_path
     try:
-        init_summary_csv(csv_path)
+        init_summary_csv(csv_path, preserve_existing=True)
         logger.success(f"Summary CSV initialized: {csv_path}", category=LogCategory.PLAN)
     except FILE_IO_ERRORS as e:
         logger.warn(f"Could not initialize summary CSV: {e}", category=LogCategory.ERROR)
@@ -1305,6 +1466,63 @@ def main() -> int:
 
         if summary_csv_path and os.path.exists(summary_csv_path):
             flush_summary_csv(summary_csv_path)
+
+            # Remove phantom CSV entries
+            phantoms = reconcile_summary_csv(summary_csv_path)
+            if phantoms:
+                logger.info(f"Reconciled summary CSV: removed {phantoms} phantom entries", category=LogCategory.CLEANUP)
+
+            # Safe orphan removal (duplicates only)
+            orphans = collect_orphan_files(summary_csv_path, out_dir)
+            if orphans:
+                csv_titles = _load_csv_titles(summary_csv_path)
+                removed = 0
+                for orphan in orphans:
+                    try:
+                        with open(orphan, encoding="utf-8") as of:
+                            orphan_entry = bt.parse_bibtex_to_dict(of.read())
+                        orphan_title = (orphan_entry or {}).get("fields", {}).get("title", "")
+                    except (OSError, ValueError):
+                        orphan_title = ""
+
+                    author_dir_path = os.path.dirname(orphan)
+                    tracked_titles = csv_titles.get(author_dir_path, [])
+                    is_dup = any(
+                        title_similarity(orphan_title, t) >= SIM_MERGE_DUPLICATE_THRESHOLD
+                        for t in tracked_titles
+                    ) if orphan_title else False
+
+                    if is_dup:
+                        os.remove(orphan)
+                        removed += 1
+                        logger.info(
+                            f"Removed duplicate orphan: {os.path.basename(orphan)}",
+                            category=LogCategory.CLEANUP,
+                        )
+                    else:
+                        logger.warn(
+                            f"Orphan kept (no duplicate found): {os.path.basename(orphan)}",
+                            category=LogCategory.CLEANUP,
+                        )
+                if removed:
+                    logger.info(
+                        f"Removed {removed}/{len(orphans)} orphan .bib files (duplicates only)",
+                        category=LogCategory.CLEANUP,
+                    )
+
+            # Write per-author baseline counts
+            baseline: dict[str, int] = {}
+            for entry in sorted(os.listdir(out_dir)):
+                d = os.path.join(out_dir, entry)
+                if os.path.isdir(d):
+                    baseline[entry] = len([f for f in os.listdir(d) if f.endswith(".bib")])
+            baseline_path = os.path.join(out_dir, "baseline.json")
+            try:
+                with open(baseline_path, "w", encoding="utf-8") as bf:
+                    json.dump({"total": sum(baseline.values()), "authors": baseline}, bf, indent=2)
+            except OSError:
+                pass
+
             logger.info(f"Summary CSV: {summary_csv_path}", category=LogCategory.PLAN)
     finally:
         logger.close()

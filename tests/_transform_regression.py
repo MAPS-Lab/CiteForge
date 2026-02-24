@@ -10,7 +10,6 @@ This script:
 7. Removes `import re` (only used by the removed _extract_bibtex_field)
 """
 
-import re
 import sys
 from pathlib import Path
 

@@ -123,12 +123,15 @@ def _sanitize_dblp_author(name: str) -> str:
     """
     Clean a DBLP author name by removing trailing numeric disambiguators,
     keeping only the human-readable part of the name.
+
+    DBLP uses suffixes like "0001", "0002" (or parenthesized "(0001)") to
+    distinguish authors with identical names.
     """
     if not name:
         return name
     s = name.strip()
-    s = re.sub(r"\s*\((0\d{3})\)\s*$", "", s)
-    s = re.sub(r"\s+(0\d{3})\s*$", "", s)
+    s = re.sub(r"\s*\(\d{1,4}\)\s*$", "", s)  # "John Smith (0001)" or "(1)"
+    s = re.sub(r"\s+\d{1,4}\s*$", "", s)       # "John Smith 0001" or "Smith 1"
     return s
 
 

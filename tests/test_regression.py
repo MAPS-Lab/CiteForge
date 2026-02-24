@@ -7,7 +7,6 @@ arXiv consistency, and dedup gate relaxation.
 
 from __future__ import annotations
 
-import csv
 import os
 import time
 from typing import Any
@@ -36,8 +35,8 @@ from src.config import (
 )
 from src.doi_utils import validate_doi_candidate
 from src.http_utils import (
-    TokenBucketRateLimiter,
     _THREAD_LOCAL,
+    TokenBucketRateLimiter,
     _get_rate_limiter,
     _http_request,
     http_post_json,
@@ -487,26 +486,26 @@ class TestMinTitleWords:
 
 
 class TestArxivJournalConsistency:
-    """Fix 7: Pure arXiv papers consistently get journal='arXiv e-prints'."""
+    """Fix 7: Pure arXiv papers have journal removed (arXiv is a preprint server, not a journal)."""
 
-    def test_arxiv_eprint_no_journal_gets_standard(self) -> None:
-        """An arXiv paper with eprint but no journal should get 'arXiv e-prints'."""
+    def test_arxiv_eprint_no_journal_stays_empty(self) -> None:
+        """An arXiv paper with eprint but no journal should NOT get a journal field."""
         fields: dict[str, Any] = {
             "eprint": "2401.12345",
             "archiveprefix": "arXiv",
             "doi": "10.48550/arxiv.2401.12345",
         }
         result = id_utils.normalize_arxiv_metadata(fields)
-        assert result["journal"] == "arXiv e-prints"
+        assert "journal" not in result
 
     def test_arxiv_eprint_no_doi_no_journal(self) -> None:
-        """An arXiv paper with eprint, no DOI, no journal should get 'arXiv e-prints'."""
+        """An arXiv paper with eprint, no DOI, no journal should NOT get a journal field."""
         fields: dict[str, Any] = {
             "eprint": "2401.12345",
             "archiveprefix": "arXiv",
         }
         result = id_utils.normalize_arxiv_metadata(fields)
-        assert result["journal"] == "arXiv e-prints"
+        assert "journal" not in result
 
     def test_published_doi_with_eprint_keeps_journal(self) -> None:
         """A paper with published DOI and existing journal should NOT be overwritten."""
@@ -519,15 +518,15 @@ class TestArxivJournalConsistency:
         result = id_utils.normalize_arxiv_metadata(fields)
         assert result["journal"] == "ACM Computing Surveys"
 
-    def test_arxiv_journal_variant_standardized(self) -> None:
-        """arXiv preprint variants in journal field are standardized."""
+    def test_arxiv_journal_variant_removed(self) -> None:
+        """arXiv preprint variants in journal field are removed entirely."""
         fields: dict[str, Any] = {
             "eprint": "2401.12345",
             "archiveprefix": "arXiv",
             "journal": "arXiv preprint arXiv:2401.12345",
         }
         result = id_utils.normalize_arxiv_metadata(fields)
-        assert result["journal"] == "arXiv e-prints"
+        assert "journal" not in result
 
 
 class TestStrongAuthorDedupGate:
@@ -2685,3 +2684,197 @@ class TestArticlePreprintDoiDowngrade:
                 fields["howpublished"] = fields.pop("journal")
         assert baseline["type"] == "misc"
         assert fields.get("howpublished") == "ISMB"
+
+
+class TestReconcileSummaryCSV:
+    """reconcile_summary_csv removes phantom entries for deleted files."""
+
+    def test_phantom_entries_removed(self, tmp_path: Any) -> None:
+        """Rows pointing to non-existent files are stripped from the CSV."""
+        import csv as _csv
+
+        from src.io_utils import _SUMMARY_CSV_FIELDNAMES, reconcile_summary_csv
+
+        csv_path = str(tmp_path / "summary.csv")
+        real_file = tmp_path / "real.bib"
+        real_file.write_text("@misc{k, title={T}}")
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row_real: dict[str, Any] = {"file_path": str(real_file), "trust_hits": "3"}
+            row_real.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row_real})
+            row_phantom: dict[str, Any] = {"file_path": str(tmp_path / "ghost.bib"), "trust_hits": "1"}
+            row_phantom.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row_phantom})
+            writer.writerow(row_real)
+            writer.writerow(row_phantom)
+
+        removed = reconcile_summary_csv(csv_path)
+        assert removed == 1
+
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        assert len(rows) == 1
+        assert rows[0]["file_path"] == str(real_file)
+
+    def test_no_phantoms_no_rewrite(self, tmp_path: Any) -> None:
+        """When all files exist, CSV is untouched (no rewrite)."""
+        import csv as _csv
+
+        from src.io_utils import _SUMMARY_CSV_FIELDNAMES, reconcile_summary_csv
+
+        csv_path = str(tmp_path / "summary.csv")
+        real_file = tmp_path / "real.bib"
+        real_file.write_text("@misc{k, title={T}}")
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row: dict[str, Any] = {"file_path": str(real_file), "trust_hits": "2"}
+            row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
+            writer.writerow(row)
+
+        mtime_before = os.path.getmtime(csv_path)
+        removed = reconcile_summary_csv(csv_path)
+        assert removed == 0
+        assert os.path.getmtime(csv_path) == mtime_before
+
+
+class TestCollectOrphanFiles:
+    """collect_orphan_files finds .bib files not referenced in the CSV."""
+
+    def test_orphan_detected(self, tmp_path: Any) -> None:
+        """A .bib file with no CSV entry is reported as an orphan."""
+        import csv as _csv
+
+        from src.io_utils import _SUMMARY_CSV_FIELDNAMES, collect_orphan_files
+
+        out_dir = tmp_path / "output"
+        author_dir = out_dir / "Author (ID)"
+        author_dir.mkdir(parents=True)
+
+        tracked = author_dir / "Tracked2024-Paper.bib"
+        tracked.write_text("@article{k, title={Tracked}}")
+        orphan = author_dir / "Orphan2023-OldKey.bib"
+        orphan.write_text("@article{k2, title={Orphan}}")
+
+        csv_path = str(tmp_path / "summary.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row: dict[str, Any] = {"file_path": str(tracked), "trust_hits": "3"}
+            row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
+            writer.writerow(row)
+
+        orphans = collect_orphan_files(csv_path, str(out_dir))
+        assert len(orphans) == 1
+        assert os.path.basename(orphans[0]) == "Orphan2023-OldKey.bib"
+
+    def test_no_orphans(self, tmp_path: Any) -> None:
+        """When all files are in the CSV, no orphans are reported."""
+        import csv as _csv
+
+        from src.io_utils import _SUMMARY_CSV_FIELDNAMES, collect_orphan_files
+
+        out_dir = tmp_path / "output"
+        author_dir = out_dir / "Author (ID)"
+        author_dir.mkdir(parents=True)
+        f1 = author_dir / "Paper2024-Title.bib"
+        f1.write_text("@article{k, title={P}}")
+
+        csv_path = str(tmp_path / "summary.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row: dict[str, Any] = {"file_path": str(f1), "trust_hits": "1"}
+            row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
+            writer.writerow(row)
+
+        orphans = collect_orphan_files(csv_path, str(out_dir))
+        assert len(orphans) == 0
+
+
+class TestIsKnownSummaryPath:
+    """is_known_summary_path checks the in-memory set from init_summary_csv."""
+
+    def test_known_path_after_preserve(self, tmp_path: Any) -> None:
+        """Paths loaded from an existing CSV are recognized as known."""
+        import csv as _csv
+
+        from src.io_utils import (
+            _SUMMARY_CSV_FIELDNAMES,
+            init_summary_csv,
+            is_known_summary_path,
+        )
+
+        csv_path = str(tmp_path / "summary.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row: dict[str, Any] = {"file_path": "output/Author/Paper.bib", "trust_hits": "3"}
+            row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
+            writer.writerow(row)
+
+        init_summary_csv(csv_path, preserve_existing=True)
+        assert is_known_summary_path("output/Author/Paper.bib")
+        assert not is_known_summary_path("output/Author/Unknown.bib")
+
+    def test_unknown_path_fresh_csv(self, tmp_path: Any) -> None:
+        """After fresh init, no paths are known."""
+        from src.io_utils import init_summary_csv, is_known_summary_path
+
+        csv_path = str(tmp_path / "summary_fresh.csv")
+        init_summary_csv(csv_path, preserve_existing=False)
+        assert not is_known_summary_path("anything.bib")
+
+
+class TestGarbageTitleDetection:
+    """_is_garbage_title catches non-bibliographic titles."""
+
+    def test_email_address(self) -> None:
+        from main import _is_garbage_title
+        assert _is_garbage_title("spadon@dal.ca Department of CS")
+
+    def test_postal_code(self) -> None:
+        from main import _is_garbage_title
+        assert _is_garbage_title("Halifax, NS B3H 4R2, Canada")
+
+    def test_department_prefix(self) -> None:
+        from main import _is_garbage_title
+        assert _is_garbage_title("Department of Computer Science")
+
+    def test_complete_volume(self) -> None:
+        from main import _is_garbage_title
+        assert _is_garbage_title("OASIcs, Volume 131, Manzini's Festschrift, Complete Volume")
+
+    def test_series_volume_metadata(self) -> None:
+        from main import _is_garbage_title
+        assert _is_garbage_title("LIPIcs, Volume 308, MFCS 2024, Complete Volume")
+
+    def test_real_paper_title_not_garbage(self) -> None:
+        from main import _is_garbage_title
+        assert not _is_garbage_title("Finding Simple Solutions to Multi-Task Visual RL")
+
+    def test_year_range_not_phone(self) -> None:
+        from main import _is_garbage_title
+        assert not _is_garbage_title("An Updated Review from 2012-2023")
+
+    def test_empty_title(self) -> None:
+        from main import _is_garbage_title
+        assert not _is_garbage_title("")
+
+
+class TestStaleFileValidation:
+    """Stale files with now-invalid titles should be detected."""
+
+    def test_garbage_title_detected(self) -> None:
+        from main import _is_garbage_title
+        title = (
+            "Dalhousie University, Halifax, NS B3H 4R2, Canada "
+            "{travis. gagie, michael. stdenis}@ dal. ca"
+        )
+        assert _is_garbage_title(title)
+
+    def test_corrupted_title_detected(self) -> None:
+        from main import _is_corrupted_title
+        assert _is_corrupted_title("Li2 () Wang3 () Chen1 ()")
