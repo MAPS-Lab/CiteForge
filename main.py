@@ -432,6 +432,76 @@ def process_article(
             )
             _fixup_written = True
 
+        # Fix ALL-CAPS titles
+        _bl_title2 = _bl_fields.get("title", "")
+        if isinstance(_bl_title2, str) and _bl_title2:
+            _fixed_title = trim_title_default(_bl_title2)
+            if _fixed_title != _bl_title2:
+                logger.debug(
+                    f"EXISTING_FIXUP | title_normalized | old={_bl_title2[:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["title"] = _fixed_title
+                _fixup_written = True
+
+        # Fix conference proceedings misclassified as @article with journal
+        if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
+            _conf_jnl = (_bl_fields.get("journal") or "").strip()
+            _conf_jnl_lower = _conf_jnl.lower()
+            from src.config import CONFERENCE_AS_JOURNAL
+            _is_conf = (
+                (_conf_jnl_lower.startswith("proceedings of the")
+                 or _conf_jnl_lower.startswith("proceedings of ")
+                 or "@" in _conf_jnl)
+                and not any(kw in _conf_jnl_lower for kw in (
+                    "endowment", "programming languages", "human-computer",
+                    "interactive, mobile", "software engineering", "measurement",
+                ))
+            ) or _conf_jnl_lower in CONFERENCE_AS_JOURNAL
+            if _is_conf and not _bl_fields.get("booktitle"):
+                logger.debug(
+                    f"EXISTING_FIXUP | conference_as_journal | journal={_conf_jnl[:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["booktitle"] = _bl_fields.pop("journal")
+                baseline_entry["type"] = "inproceedings"
+                _fixup_written = True
+
+        # Fix lowercase author names
+        _bl_auth = _bl_fields.get("author", "")
+        if isinstance(_bl_auth, str) and _bl_auth:
+            _auth_parts = [p.strip() for p in _bl_auth.split(" and ")]
+            _auth_fixed = False
+            _auth_result: list[str] = []
+            for _ap in _auth_parts:
+                _toks = _ap.split()
+                if len(_toks) >= 2:
+                    _new_toks: list[str] = []
+                    for _t in _toks:
+                        if _t and _t[0].isalpha() and _t[0].islower() and len(_t) > 1:
+                            _new_toks.append(_t.capitalize())
+                            _auth_fixed = True
+                        else:
+                            _new_toks.append(_t)
+                    _auth_result.append(" ".join(_new_toks))
+                else:
+                    _auth_result.append(_ap)
+            if _auth_fixed:
+                _bl_fields["author"] = " and ".join(_auth_result)
+                logger.debug(
+                    f"EXISTING_FIXUP | author_capitalized | old={_bl_auth[:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _fixup_written = True
+
+        # Backfill howpublished for @misc with arXiv but no howpublished
+        if (baseline_entry.get("type") == "misc"
+                and not _bl_fields.get("howpublished")
+                and (((_bl_fields.get("archiveprefix") or "").lower() == "arxiv")
+                     or (_bl_fields.get("doi") or "").lower().startswith("10.48550/arxiv"))):
+            _bl_fields["howpublished"] = "arXiv"
+            _fixup_written = True
+
         if _fixup_written and existing_file_path:
             bib_str = bt.bibtex_from_dict(baseline_entry)
             safe_write_file(existing_file_path, bib_str)
