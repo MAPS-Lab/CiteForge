@@ -188,7 +188,8 @@ def test_file_output(tmp_path: Path) -> None:
         None,
     )
 
-    assert saved_path and os.path.exists(saved_path), "File was not created"
+    assert saved_path is not None, "save_entry_to_file returned no path"
+    assert os.path.exists(saved_path), f"File was not created at {saved_path}"
 
     with open(saved_path, encoding='utf-8') as f:
         content = f.read()

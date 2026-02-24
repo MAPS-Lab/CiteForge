@@ -81,8 +81,7 @@ def _serply_get(api_key: str, query: str, start: int = 0) -> dict[str, Any]:
 
     try:
         raw = http_fetch_bytes(url, headers, HTTP_TIMEOUT_DEFAULT)
-        result: dict[str, Any] = json.loads(raw.decode("utf-8"))
-        return result
+        return json.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
     except Exception as exc:
         _log.debug("Serply request failed: %s", exc)
         return {}

@@ -70,8 +70,12 @@ def _patch_doi_resolvers(
     bibtex_side_effect: Any = None,
 ) -> contextlib.ExitStack:
     """Patch DOI resolver functions with the given return values or side effects."""
-    csl_kwargs = {"side_effect": csl_side_effect} if csl_side_effect else {"return_value": csl}
-    bib_kwargs = {"side_effect": bibtex_side_effect} if bibtex_side_effect else {"return_value": bibtex}
+    csl_kwargs: dict[str, Any] = (
+        {"side_effect": csl_side_effect} if csl_side_effect else {"return_value": csl}
+    )
+    bib_kwargs: dict[str, Any] = (
+        {"side_effect": bibtex_side_effect} if bibtex_side_effect else {"return_value": bibtex}
+    )
     stack = contextlib.ExitStack()
     stack.enter_context(patch.object(search_apis, 'fetch_csl_via_doi', **csl_kwargs))
     stack.enter_context(patch.object(search_apis, 'fetch_bibtex_via_doi', **bib_kwargs))
@@ -139,8 +143,8 @@ def test_validate_doi_candidate_csl_only_matches() -> None:
 
     assert csl_matched, "CSL should match"
     assert not bibtex_matched, "BibTeX should not match"
-    assert csl_entry, "CSL entry should be returned"
-    assert not bibtex_entry, "BibTeX entry should not be returned"
+    assert csl_entry is not None, "CSL entry should be returned"
+    assert bibtex_entry is None, "BibTeX entry should not be returned"
 
 
 def test_validate_doi_candidate_neither_matches() -> None:
@@ -154,8 +158,10 @@ def test_validate_doi_candidate_neither_matches() -> None:
             doi=_BERT_DOI, baseline_entry=_BASELINE_MINIMAL, result_id="test",
         )
 
-    assert not csl_matched and not bibtex_matched, "Both formats should be rejected"
-    assert not csl_entry and not bibtex_entry, "No entries should be returned"
+    assert not csl_matched, "CSL should be rejected"
+    assert not bibtex_matched, "BibTeX should be rejected"
+    assert csl_entry is None, "CSL entry should not be returned"
+    assert bibtex_entry is None, "BibTeX entry should not be returned"
 
 
 def test_validate_doi_candidate_network_errors() -> None:
@@ -173,8 +179,10 @@ def test_validate_doi_candidate_network_errors() -> None:
             doi=_ARXIV_DOI, baseline_entry=_BASELINE_MINIMAL, result_id="test",
         )
 
-    assert not csl_matched and not bibtex_matched, "Should handle network errors gracefully"
-    assert not csl_entry and not bibtex_entry, "Should not return entries on error"
+    assert not csl_matched, "CSL should not match on network error"
+    assert not bibtex_matched, "BibTeX should not match on network error"
+    assert csl_entry is None, "CSL entry should not be returned on error"
+    assert bibtex_entry is None, "BibTeX entry should not be returned on error"
 
 
 def test_validate_doi_candidate_bibtex_fallback_when_csl_fails() -> None:
@@ -225,7 +233,7 @@ def test_process_validated_doi_success() -> None:
         )
 
     assert doi_matched, "Should return True"
-    assert len(enr_list) > 0, "Should populate enr_list"
+    assert enr_list, "Should populate enr_list"
 
     # CSL flag should be set; BibTeX skipped (Phase 3a optimization)
     assert flags.get("doi_csl"), "CSL flag should be set"
@@ -258,5 +266,6 @@ def test_process_validated_doi_failure() -> None:
         )
 
     assert not doi_matched, "Should return False"
-    assert len(enr_list) == 0, "Should leave enr_list empty"
-    assert not flags.get("doi_csl") and not flags.get("doi_bibtex"), "Flags should remain False"
+    assert not enr_list, "Should leave enr_list empty"
+    assert not flags.get("doi_csl"), "doi_csl flag should remain False"
+    assert not flags.get("doi_bibtex"), "doi_bibtex flag should remain False"

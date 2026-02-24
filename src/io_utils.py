@@ -115,7 +115,7 @@ def read_openreview_credentials(path: str = DEFAULT_OR_KEY_FILE) -> tuple[str, s
     tuple.
     """
     lines = _read_key_file(path, legacy=None, required=False, expected_lines=2)
-    return (lines[0], lines[1]) if lines and len(lines) >= 2 else None
+    return (lines[0], lines[1]) if lines else None
 
 
 def read_serpapi_api_key(path: str = DEFAULT_SERPAPI_KEY_FILE) -> str | None:
@@ -227,17 +227,23 @@ def safe_read_json(path: str, default: Any = None) -> Any:
         return default
 
 
+def _ensure_parent_dirs(path: str) -> bool:
+    """Create parent directories for *path*. Returns False on failure."""
+    parent_dir = os.path.dirname(path)
+    if parent_dir:
+        try:
+            os.makedirs(parent_dir, exist_ok=True)
+        except OSError:
+            return False
+    return True
+
+
 def safe_write_file(path: str, content: str, encoding: str = "utf-8", makedirs: bool = True) -> bool:
     """
     Safely write content to a file, optionally creating parent directories.
     """
-    if makedirs:
-        parent_dir = os.path.dirname(path)
-        if parent_dir:
-            try:
-                os.makedirs(parent_dir, exist_ok=True)
-            except OSError:
-                return False
+    if makedirs and not _ensure_parent_dirs(path):
+        return False
 
     try:
         with open(path, "w", encoding=encoding) as f:
@@ -251,13 +257,8 @@ def safe_write_json(path: str, data: Any, makedirs: bool = True, indent: int | N
     """
     Safely write data to a JSON file, optionally creating parent directories.
     """
-    if makedirs:
-        parent_dir = os.path.dirname(path)
-        if parent_dir:
-            try:
-                os.makedirs(parent_dir, exist_ok=True)
-            except OSError:
-                return False
+    if makedirs and not _ensure_parent_dirs(path):
+        return False
 
     try:
         with open(path, "w", encoding="utf-8") as f:

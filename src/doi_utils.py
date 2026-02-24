@@ -20,41 +20,32 @@ def _validate_csl(
     logger.debug(f"CSL_START | doi={doi}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
     try:
         csl = search_apis.fetch_csl_via_doi(doi)
+        logger.debug(f"CSL_FETCH | result={csl is not None}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
+        if not csl:
+            return False, None, None
+
+        csl_bib = search_apis.bibtex_from_csl(csl, keyhint=result_id)
         logger.debug(
-            f"CSL_FETCH | result={csl is not None}",
+            f"CSL_CONVERT | bibtex_ok={csl_bib is not None}",
             category=LogCategory.DOI_VAL, source=LogSource.DOI,
         )
-        if csl:
-            csl_bib = search_apis.bibtex_from_csl(csl, keyhint=result_id)
-            logger.debug(
-                f"CSL_CONVERT | bibtex_ok={csl_bib is not None}",
-                category=LogCategory.DOI_VAL, source=LogSource.DOI,
-            )
-            if csl_bib:
-                csl_entry = bt.parse_bibtex_to_dict(csl_bib)
-                logger.debug(
-                    f"CSL_PARSE | entry_ok={csl_entry is not None}",
-                    category=LogCategory.DOI_VAL, source=LogSource.DOI,
-                )
-                if csl_entry is not None:
-                    strict_match = bt.bibtex_entries_match_strict(
-                        baseline_entry, csl_entry
-                    )
-                    logger.debug(
-                        f"CSL_MATCH | strict_match={strict_match}",
-                        category=LogCategory.DOI_VAL, source=LogSource.DOI,
-                    )
-                    if strict_match:
-                        logger.success(
-                            f"{doi}: CSL format validated and added",
-                            category=LogCategory.MATCH, source=LogSource.DOI,
-                        )
-                        return True, csl_entry, csl
-                else:
-                    logger.debug(
-                        "CSL_PARSE | entry_ok=False | skipping_match",
-                        category=LogCategory.DOI_VAL, source=LogSource.DOI,
-                    )
+        if not csl_bib:
+            return False, None, None
+
+        csl_entry = bt.parse_bibtex_to_dict(csl_bib)
+        logger.debug(
+            f"CSL_PARSE | entry_ok={csl_entry is not None}",
+            category=LogCategory.DOI_VAL, source=LogSource.DOI,
+        )
+        if csl_entry is None:
+            return False, None, None
+
+        strict_match = bt.bibtex_entries_match_strict(baseline_entry, csl_entry)
+        logger.debug(f"CSL_MATCH | strict_match={strict_match}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
+        if strict_match:
+            logger.success(f"{doi}: CSL format validated and added", category=LogCategory.MATCH, source=LogSource.DOI)
+            return True, csl_entry, csl
+
     except ALL_API_ERRORS as e:
         logger.debug(
             f"CSL_ERROR | doi={doi} | error={type(e).__name__}: {e}",
@@ -75,35 +66,27 @@ def _validate_bibtex(
     logger.debug(f"BIBTEX_START | doi={doi}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
     try:
         doi_bib = search_apis.fetch_bibtex_via_doi(doi)
+        logger.debug(f"BIBTEX_FETCH | result={doi_bib is not None}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
+        if not doi_bib:
+            return False, None, None
+
+        bibtex_entry = bt.parse_bibtex_to_dict(doi_bib)
         logger.debug(
-            f"BIBTEX_FETCH | result={doi_bib is not None}",
+            f"BIBTEX_PARSE | entry_ok={bibtex_entry is not None}",
             category=LogCategory.DOI_VAL, source=LogSource.DOI,
         )
-        if doi_bib:
-            bibtex_entry = bt.parse_bibtex_to_dict(doi_bib)
-            logger.debug(
-                f"BIBTEX_PARSE | entry_ok={bibtex_entry is not None}",
-                category=LogCategory.DOI_VAL, source=LogSource.DOI,
+        if bibtex_entry is None:
+            return False, None, None
+
+        strict_match = bt.bibtex_entries_match_strict(baseline_entry, bibtex_entry)
+        logger.debug(f"BIBTEX_MATCH | strict_match={strict_match}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
+        if strict_match:
+            logger.success(
+                f"{doi}: BibTeX format validated and added",
+                category=LogCategory.MATCH, source=LogSource.DOI,
             )
-            if bibtex_entry is not None:
-                strict_match = bt.bibtex_entries_match_strict(
-                    baseline_entry, bibtex_entry
-                )
-                logger.debug(
-                    f"BIBTEX_MATCH | strict_match={strict_match}",
-                    category=LogCategory.DOI_VAL, source=LogSource.DOI,
-                )
-                if strict_match:
-                    logger.success(
-                        f"{doi}: BibTeX format validated and added",
-                        category=LogCategory.MATCH, source=LogSource.DOI,
-                    )
-                    return True, bibtex_entry, doi_bib
-            else:
-                logger.debug(
-                    "BIBTEX_PARSE | entry_ok=False | skipping_match",
-                    category=LogCategory.DOI_VAL, source=LogSource.DOI,
-                )
+            return True, bibtex_entry, doi_bib
+
     except ALL_API_ERRORS as e:
         logger.debug(
             f"BIBTEX_ERROR | doi={doi} | error={type(e).__name__}: {e}",

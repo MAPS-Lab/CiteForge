@@ -405,7 +405,7 @@ class TestSerplyFetchAuthorPublications:
         # URL must NOT contain author: prefix (Serply doesn't support it)
         assert "author%3A" not in call_url
         # URL must contain the quoted author name
-        assert "Gabriel" in call_url or "gabriel" in call_url.lower()
+        assert "gabriel" in call_url.lower()
 
 
 class TestSerplyFetchCitation:

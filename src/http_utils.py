@@ -51,26 +51,18 @@ def _generate_user_agent_pool() -> list[str]:
     firefox_versions = ["132.0", "133.0", "134.0"]
     safari_version = "17.6"
 
-    agents: list[str] = []
+    chrome_platforms = [
+        "Windows NT 10.0; Win64; x64",
+        "Macintosh; Intel Mac OS X 10_15_7",
+        "X11; Linux x86_64",
+    ]
 
-    # Chrome on Windows
-    for cv in chrome_versions:
-        agents.append(
-            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            f"(KHTML, like Gecko) Chrome/{cv} Safari/537.36"
-        )
-    # Chrome on macOS
-    for cv in chrome_versions:
-        agents.append(
-            f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            f"(KHTML, like Gecko) Chrome/{cv} Safari/537.36"
-        )
-    # Chrome on Linux
-    for cv in chrome_versions:
-        agents.append(
-            f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            f"(KHTML, like Gecko) Chrome/{cv} Safari/537.36"
-        )
+    agents: list[str] = [
+        f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{cv} Safari/537.36"
+        for platform in chrome_platforms
+        for cv in chrome_versions
+    ]
     # Firefox on Windows
     for fv in firefox_versions:
         agents.append(

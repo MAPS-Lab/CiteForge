@@ -225,8 +225,9 @@ def search_api_generic(
         author_ok = True
         if norm_match and author_name:
             item_authors = get_authors(item)
-            author_ok = author_name_matches(author_name, item_authors) or author_in_text(
-                author_name, item_authors
+            author_ok = (
+                author_name_matches(author_name, item_authors)
+                or author_in_text(author_name, item_authors)
             )
         logger.debug(
             f"{config.api_name} | EXACT_CHECK | item_title={item_title[:50]}"
@@ -234,7 +235,7 @@ def search_api_generic(
             f" | author_match={author_ok}",
             category=LogCategory.SCORE,
         )
-        if not norm_match or not author_ok:
+        if not (norm_match and author_ok):
             continue
         logger.debug(
             f"{config.api_name} | EXACT_MATCH | title={title[:50]}",
@@ -257,10 +258,8 @@ def search_api_generic(
         f" | threshold={SIM_EXACT_PICK_THRESHOLD} | accepted={best is not None}",
         category=LogCategory.SCORE,
     )
-    if best is not None:
-        response_cache.put(config.api_name, cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    cache_value = dict(best) if best is not None else {"_negative": True}
+    response_cache.put(config.api_name, cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return best
 
 
@@ -335,11 +334,10 @@ def search_api_generic_multiple(
         f"{config.api_name}_multi | RESULT | scored={len(scored_results)}/{len(results)} | top={len(top_results)}",
         category=LogCategory.SCORE,
     )
-    if top_results:
-        cached_results = {"results": [dict(r) for r in top_results]}
-        response_cache.put(config.api_name, cache_key, cached_results, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    cache_value: dict[str, Any] = (
+        {"results": [dict(r) for r in top_results]} if top_results else {"_negative": True}
+    )
+    response_cache.put(config.api_name, cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return top_results
 
 

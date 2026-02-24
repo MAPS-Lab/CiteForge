@@ -44,9 +44,10 @@ def normalize_doi(doi: str | None) -> str | None:
 def is_secondary_doi(doi: str) -> bool:
     """Check if DOI belongs to preprint or data repository (deprioritize in selection)."""
     lower = doi.lower()
-    preprint = any(lower.startswith(p) for p in PREPRINT_DOI_PREFIXES)
-    data = any(lower.startswith(p) for p in DATA_DOI_PREFIXES)
-    return preprint or data
+    return (
+        any(lower.startswith(p) for p in PREPRINT_DOI_PREFIXES)
+        or any(lower.startswith(p) for p in DATA_DOI_PREFIXES)
+    )
 
 
 def _norm_arxiv_id(s: str | None) -> str | None:

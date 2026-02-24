@@ -180,14 +180,13 @@ def _classify_type_string(typ: str) -> str | None:
 def _is_conference_venue(venue: str) -> bool:
     """Check whether a venue string indicates a conference or workshop."""
     venue_lower = venue.lower()
-    if any(kw in venue_lower for kw in _CONFERENCE_KEYWORDS):
-        return True
-    if any(known in venue_lower for known in KNOWN_CONFERENCE_VENUES):
-        return True
     venue_stripped = venue_lower.strip()
-    if venue_stripped in ABBREVIATED_VENUE_MAP:
-        return True
-    return any(venue_stripped == full.lower() for full in ABBREVIATED_VENUE_MAP.values())
+    return (
+        any(kw in venue_lower for kw in _CONFERENCE_KEYWORDS)
+        or any(known in venue_lower for known in KNOWN_CONFERENCE_VENUES)
+        or venue_stripped in ABBREVIATED_VENUE_MAP
+        or any(venue_stripped == full.lower() for full in ABBREVIATED_VENUE_MAP.values())
+    )
 
 
 def determine_entry_type(

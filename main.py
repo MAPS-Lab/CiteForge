@@ -953,7 +953,7 @@ def process_article(
 
         # Annotate bare stubs: no enrichers, no DOI, no venue
         is_bare_stub = (
-            len(enr_list) == 0
+            not enr_list
             and not (merged_fields.get("doi") or "").strip()
             and not (merged_fields.get("journal") or "").strip()
             and not (merged_fields.get("booktitle") or "").strip()
@@ -967,16 +967,16 @@ def process_article(
 
         # Skip entries with type "book" (proceedings volumes, edited books — not individual papers)
         if merged.get("type") == "book":
-            file_deleted = bool(path and os.path.isfile(path))
+            has_file = bool(path and os.path.isfile(path))
             logger.debug(
-                f"BOOK_SKIP | type=book | file_deleted={file_deleted}",
+                f"BOOK_SKIP | type=book | file_deleted={has_file}",
                 category=LogCategory.AUDIT,
             )
             logger.warn(
                 "Entry is a book/proceedings volume, not an individual paper; skipping",
                 category=LogCategory.SKIP, source=LogSource.SYSTEM,
             )
-            if path and os.path.isfile(path):
+            if has_file and path:
                 os.remove(path)
             return 0
 

@@ -28,7 +28,7 @@ def test_scholar_connection(api_keys: dict) -> None:
     if not articles:
         pytest.skip("Scholar returned no results (key expired or rate-limited)")
 
-    assert len(articles) > 0, "Expected at least one article"
+    assert articles, "Expected at least one article"
     for article in articles[:3]:
         assert "title" in article, f"Article missing 'title' field: {article}"
 
@@ -155,7 +155,7 @@ def test_multiple_candidate_empty_inputs() -> None:
     candidates = search_apis.crossref_search_multiple(
         "Attention Is All You Need", "Ashish Vaswani", max_results=0,
     )
-    assert len(candidates) == 0, f"max_results=0: expected empty list, got {len(candidates)} items"
+    assert not candidates, f"max_results=0: expected empty list, got {len(candidates)} items"
 
 
 def test_api_configs() -> None:

@@ -104,8 +104,7 @@ def get_article_year(art: dict[str, Any]) -> int:
         return primary
 
     pub = art.get("publication") or art.get("snippet") or art.get("publication_info")
-    fallback = extract_year_from_any(pub, fallback=None)
-    return fallback if fallback is not None else 0
+    return extract_year_from_any(pub, fallback=None) or 0
 
 
 def strip_html_tags(s: str) -> str:

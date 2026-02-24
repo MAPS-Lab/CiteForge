@@ -302,12 +302,12 @@ def orcid_search_work_by_title(orcid_id: str, title: str, _author_name: str | No
 
     def get_orcid_year(w: dict[str, Any]) -> int | None:
         year = w.get("year")
-        if year:
-            try:
-                return int(year)
-            except NUMERIC_ERRORS:
-                return None
-        return None
+        if not year:
+            return None
+        try:
+            return int(year)
+        except NUMERIC_ERRORS:
+            return None
 
     from ..bibtex_build import create_scoring_function
     # NOTE: ORCID work-summary responses do not include contributor lists,

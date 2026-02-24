@@ -38,10 +38,10 @@ CROSSREF_SEARCH_CONFIG = APISearchConfig(
         else ""
     ),
     year_getter=lambda c: (
-        ((c.get("issued") or {}).get("date-parts") or [[None]])[0][0]
-        if ((c.get("issued") or {}).get("date-parts") and
-            ((c.get("issued") or {}).get("date-parts") or [[None]])[0] and
-            isinstance(((c.get("issued") or {}).get("date-parts") or [[None]])[0][0], int))
+        parts[0][0]
+        if (parts := (c.get("issued") or {}).get("date-parts"))
+        and parts[0]
+        and isinstance(parts[0][0], int)
         else None
     )
 )
@@ -139,12 +139,12 @@ CROSSREF_FIELD_MAPPING = APIFieldMapping(
         if f"{author.get('given', '').strip()} {author.get('family', '').strip()}".strip()
     ] if item.get("author") else [],
     custom_year_extractor=lambda item: (
-        ((item.get("issued") or item.get("published-print") or item.get("published-online") or {})
-         .get("date-parts") or [[None]])[0][0]
-        if ((item.get("issued") or item.get("published-print") or item.get("published-online") or {})
-            .get("date-parts") or [[None]])[0]
-        and isinstance(((item.get("issued") or item.get("published-print") or item.get("published-online") or {})
-                       .get("date-parts") or [[None]])[0][0], int)
+        parts[0][0]
+        if (parts := (
+            item.get("issued") or item.get("published-print") or item.get("published-online") or {}
+        ).get("date-parts"))
+        and parts[0]
+        and isinstance(parts[0][0], int)
         else 0
     )
 )
@@ -216,8 +216,7 @@ EUROPEPMC_FIELD_MAPPING = APIFieldMapping(
         if name.strip()
     ],
     custom_year_extractor=lambda article: (
-        (lambda ys: int(ys) if ys and ys.isdigit() else 0)
-        (article.get("pubYear") or "")
+        int(ys) if (ys := article.get("pubYear") or "") and ys.isdigit() else 0
     )
 )
 

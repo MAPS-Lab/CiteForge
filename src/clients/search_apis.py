@@ -108,10 +108,8 @@ def s2_search_papers_multiple(
         return []
     results = safe_get_nested(data, *config.result_path, default=[])
     top = list(results[:max_results]) if results else []
-    if top:
-        response_cache.put("semantic_scholar", cache_key, {"results": top}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put("semantic_scholar", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    cache_value: dict[str, Any] = {"results": top} if top else {"_negative": True}
+    response_cache.put("semantic_scholar", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return top
 
 
@@ -541,12 +539,10 @@ def openreview_search_paper(
         year_getter=_or_note_year,
     )
     best = _best_item_by_score(candidates, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
-    if best is not None:
-        response_cache.put("openreview", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(f"openreview | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
-    else:
-        response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(f"openreview | PUT_NEGATIVE | key={cache_key[:60]}", category=LogCategory.CACHE)
+    cache_value = dict(best) if best is not None else {"_negative": True}
+    cache_tag = "PUT" if best is not None else "PUT_NEGATIVE"
+    response_cache.put("openreview", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    logger.debug(f"openreview | {cache_tag} | key={cache_key[:60]}", category=LogCategory.CACHE)
     return best
 
 
@@ -625,12 +621,10 @@ def openreview_search_papers_multiple(
             continue
     scored.sort(key=lambda x: x[0], reverse=True)
     top_results = [item for _, item in scored[:max_results]]
-    if top_results:
-        response_cache.put("openreview", cache_key, {"results": top_results}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(f"openreview_multi | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
-    else:
-        response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(f"openreview_multi | PUT_NEGATIVE | key={cache_key[:60]}", category=LogCategory.CACHE)
+    cache_value: dict[str, Any] = {"results": top_results} if top_results else {"_negative": True}
+    cache_tag = "PUT" if top_results else "PUT_NEGATIVE"
+    response_cache.put("openreview", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    logger.debug(f"openreview_multi | {cache_tag} | key={cache_key[:60]}", category=LogCategory.CACHE)
     return top_results
 
 
@@ -710,7 +704,7 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
                 break
         if child is None:
             continue
-        tag_name = child.tag if isinstance(child.tag, str) else str(child.tag)
+        tag_name = str(child.tag)
         allowed = tag_name in dblp_allowed_tags
         title_el = child.find("title")
         title_val = "".join(title_el.itertext()) if title_el is not None else ""
@@ -837,8 +831,7 @@ def enhance_scholar_article_with_dblp(
     )
     if enhanced:
         scholar_art["_dblp_enhanced"] = True
-        return True
-    return False
+    return enhanced
 
 
 def dblp_fetch_for_author(name: str, dblp_hint: str | None, min_year: int | None) -> list[dict[str, Any]]:
@@ -935,15 +928,10 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
         author_match_fn=author_name_matches,
     )
     best = _best_item_by_score(articles, score_fn)
-    if best is not None:
-        response_cache.put("pubmed", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(
-            f"pubmed | PUT | key={cache_key[:60]} | pmids={len(pmids)}",
-            category=LogCategory.CACHE,
-        )
-    else:
-        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(f"pubmed | PUT_NEGATIVE | key={cache_key[:60]}", category=LogCategory.CACHE)
+    cache_value = dict(best) if best is not None else {"_negative": True}
+    cache_tag = "PUT" if best is not None else "PUT_NEGATIVE"
+    response_cache.put("pubmed", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    logger.debug(f"pubmed | {cache_tag} | key={cache_key[:60]} | pmids={len(pmids)}", category=LogCategory.CACHE)
     return best
 
 
@@ -1016,11 +1004,10 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
         return []
     result = safe_get_nested(summary_data, "result", default={})
     results_list = [result[uid] for uid in id_list[:max_results] if uid in result and isinstance(result[uid], dict)]
+    cache_value: dict[str, Any] = {"results": results_list} if results_list else {"_negative": True}
+    response_cache.put("pubmed", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
     if results_list:
-        response_cache.put("pubmed", cache_key, {"results": results_list}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         logger.debug(f"pubmed_multi | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
-    else:
-        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return results_list
 
 
@@ -1115,8 +1102,6 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
         return []
     results = safe_get_nested(data, *config.result_path, default=[])
     top = list(results[:max_results])
-    if top:
-        response_cache.put("europepmc", cache_key, {"results": top}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put("europepmc", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    cache_value: dict[str, Any] = {"results": top} if top else {"_negative": True}
+    response_cache.put("europepmc", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return top

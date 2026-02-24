@@ -276,12 +276,11 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     raw_doi = merged.get("doi")
     doi_norm = _norm_doi(raw_doi)
     if doi_norm:
-        if raw_doi and str(raw_doi) != doi_norm:
+        if str(raw_doi) != doi_norm:
             logger.debug(f"doi_normalize | {raw_doi}->{doi_norm}", category=LogCategory.CLEANUP)
         merged["doi"] = doi_norm
-    else:
-        if raw_doi:
-            logger.debug("doi_remove | invalid after normalization", category=LogCategory.CLEANUP)
+    elif raw_doi:
+        logger.debug("doi_remove | invalid after normalization", category=LogCategory.CLEANUP)
         merged.pop("doi", None)
 
     # Validate DOI consistency: contradicting DOIs indicate different papers
@@ -721,10 +720,9 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
         set(all_files) - {os.path.basename(prefer_path)} if prefer_path else set(all_files)
     )
 
-    base_filename = short_filename_for_entry(
+    filename = short_filename_for_entry(
         entry, gemini_api_key=gemini_api_key, existing_files=collision_files,
     )
-    filename = base_filename
 
     new_content = bibtex_from_dict(entry)
     new_fields = entry.get('fields', {})

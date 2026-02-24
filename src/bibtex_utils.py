@@ -59,7 +59,7 @@ def build_minimal_bibtex(title: str, authors: list[str], year: int, keyhint: str
         lines.append(f"  author = {{{' and '.join(authors)}}},")
     if year:
         lines.append(f"  year = {{{year}}},")
-    if lines and lines[-1].endswith(","):
+    if lines[-1].endswith(","):
         lines[-1] = lines[-1][:-1]
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -449,18 +449,17 @@ def _short_title_for_key(
                 ttl_days=CACHE_TTL_GEMINI_DAYS,
             )
 
-    stop = {
+    stop = frozenset({
         "a", "an", "the", "on", "for", "of", "and", "to", "in",
         "with", "using", "via", "from", "by", "at", "into", "through",
-    }
+    })
     words = [w for w in re.split(r"[^A-Za-z0-9]+", title) if w]
     picks: list[str] = []
     for w in words:
-        if w.lower() in stop:
-            continue
-        picks.append(w)
-        if len(picks) >= max_words:
-            break
+        if w.lower() not in stop:
+            picks.append(w)
+            if len(picks) >= max_words:
+                break
     if not picks and words:
         picks = words[:max_words]
     return "".join(w[:1].upper() + w[1:] for w in picks)
@@ -619,12 +618,11 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
     a_ax = extract_arxiv_eprint(entry_a) or ""
     b_ax = extract_arxiv_eprint(entry_b) or ""
     if a_ax and b_ax:
-        match = a_ax == b_ax
-        if match:
+        if a_ax == b_ax:
             logger.debug(f"ENTRY_MATCH | ARXIV_EXACT | id={a_ax} | result=True", category=LogCategory.DEDUP)
-        else:
-            logger.debug(f"ENTRY_REJECT | DIFF_ARXIV | a={a_ax} b={b_ax} | result=False", category=LogCategory.DEDUP)
-        return match
+            return True
+        logger.debug(f"ENTRY_REJECT | DIFF_ARXIV | a={a_ax} b={b_ax} | result=False", category=LogCategory.DEDUP)
+        return False
 
     # Fast path 3: External ID match (cluster_id, S2, OpenAlex)
     a_title = normalize_title(af.get("title"))

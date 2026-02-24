@@ -6,10 +6,7 @@ from src import merge_utils, text_utils
 
 
 def test_prevent_duplicate_save_high_similarity(tmp_path):
-    """
-    Test that save_entry_to_file prevents creating a new file when an existing entry
-    has a title with >= 95% similarity, even if the citation key or filename might differ.
-    """
+    """Test that save_entry_to_file prevents creating new file for >= 95% title similarity."""
     out_dir = str(tmp_path)
     author_id = "Scholar123"
     author_name = "Test Author"
@@ -60,11 +57,9 @@ def test_prevent_duplicate_save_high_similarity(tmp_path):
     bib_files = [f for f in files if f.endswith('.bib')]
     assert len(bib_files) == 1, f"Expected 1 bib file, found {len(bib_files)}: {bib_files}"
 
+
 def test_allow_duplicate_save_medium_similarity(tmp_path):
-    """
-    Test that save_entry_to_file allows creating a new file when similarity is
-    between 90% and 95% (below the new threshold).
-    """
+    """Test that save_entry_to_file allows new file when similarity is 90-95%."""
     out_dir = str(tmp_path)
     author_id = "Scholar456"
     author_name = "Test Author 2"

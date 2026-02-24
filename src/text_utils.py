@@ -292,16 +292,12 @@ def extract_last_name(full_name: str | None) -> str:
         return "Unknown"
 
     if "," in name_str:
-        parts = [p.strip() for p in name_str.split(",")]
-        last_name = parts[0].strip()
+        last_name = name_str.split(",", 1)[0].strip()
         if last_name:
             return last_name
 
     tokens = name_str.split()
-    if tokens:
-        return tokens[-1]
-
-    return name_str
+    return tokens[-1] if tokens else name_str
 
 
 def format_author_dirname(author_name: str | None, author_id: str) -> str:
@@ -650,6 +646,15 @@ def extract_authors_from_any(
     if obj is None:
         return authors
 
+    # Lazy import to avoid circular dependency; cached after first call
+    _sanitize: Any = None
+    if sanitize_dblp:
+        from .clients.helpers import _sanitize_dblp_author
+        _sanitize = _sanitize_dblp_author
+
+    def _maybe_sanitize(nm: str) -> str:
+        return _sanitize(nm) if _sanitize else nm
+
     if isinstance(obj, dict):
         if field_names:
             for fname in field_names:
@@ -680,9 +685,7 @@ def extract_authors_from_any(
             nm = _name_from_dict(obj)
 
         if nm:
-            if sanitize_dblp:
-                from .clients.helpers import _sanitize_dblp_author
-                nm = _sanitize_dblp_author(nm)
+            nm = _maybe_sanitize(nm)
             if nm:
                 authors.append(nm)
         return authors
@@ -692,9 +695,7 @@ def extract_authors_from_any(
             if isinstance(item, str):
                 nm = item.strip()
                 if nm:
-                    if sanitize_dblp:
-                        from .clients.helpers import _sanitize_dblp_author
-                        nm = _sanitize_dblp_author(nm)
+                    nm = _maybe_sanitize(nm)
                     if nm:
                         authors.append(nm)
             elif isinstance(item, dict):
@@ -710,9 +711,7 @@ def extract_authors_from_any(
                         nm = f"{given} {family}".strip() if (given or family) else ""
 
                 if nm:
-                    if sanitize_dblp:
-                        from .clients.helpers import _sanitize_dblp_author
-                        nm = _sanitize_dblp_author(nm)
+                    nm = _maybe_sanitize(nm)
                     if nm:
                         authors.append(nm)
             else:
@@ -818,7 +817,7 @@ def is_valid_value(val: Any, check_placeholder: bool = True) -> bool:
         return not has_placeholder(s) if check_placeholder else True
 
     if isinstance(val, (list, dict)):
-        return len(val) > 0
+        return bool(val)
 
     return True
 
@@ -871,35 +870,24 @@ def get_truncation_score(article_data: dict[str, Any]) -> float:
     Calculate a truncation score for an article by checking key fields, returning
     a value between 0.0 (complete) and 1.0 (fully truncated).
     """
-    fields_to_check = []
-    truncated_count = 0
+    fields_to_check: list[str] = []
 
     title = article_data.get("title")
     if title:
-        fields_to_check.append(title)
-        if is_truncated(title):
-            truncated_count += 1
+        fields_to_check.append(str(title))
 
     author_info = article_data.get("author_info")
-    if isinstance(author_info, list) and author_info:
-        author_str = str(author_info)
-        fields_to_check.append(author_str)
-        if is_truncated(author_str):
-            truncated_count += 1
-    elif author_info:
+    if author_info:
         fields_to_check.append(str(author_info))
-        if is_truncated(str(author_info)):
-            truncated_count += 1
 
     pub_info = article_data.get("publication_info") or article_data.get("snippet")
     if pub_info:
         fields_to_check.append(str(pub_info))
-        if is_truncated(str(pub_info)):
-            truncated_count += 1
 
     if not fields_to_check:
         return 0.0
 
+    truncated_count = sum(1 for f in fields_to_check if is_truncated(f))
     return truncated_count / len(fields_to_check)
 
 

@@ -1,5 +1,4 @@
 import os
-import re
 from pathlib import Path
 from textwrap import dedent
 
@@ -7,29 +6,11 @@ import pytest
 
 from src import bibtex_utils as bt
 from src import config, exceptions, http_utils, id_utils, io_utils, merge_utils, text_utils
+from tests.conftest import extract_bibtex_field
 
-
-def _extract_bibtex_field(bibtex_str: str, field_name: str) -> str | None:
-    """Extract a field value from BibTeX output, handling nested braces."""
-    pattern = rf'{field_name}\s*=\s*\{{'
-    match = re.search(pattern, bibtex_str)
-    if not match:
-        return None
-    start = match.end() - 1
-    depth = 0
-    for i in range(start, len(bibtex_str)):
-        if bibtex_str[i] == '{':
-            depth += 1
-        elif bibtex_str[i] == '}':
-            depth -= 1
-            if depth == 0:
-                return bibtex_str[start + 1:i]
-    return None
 
 def test_title_normalization():
-    """
-    Test title normalization with all variations.
-    """
+    """Test title normalization with all variations."""
     test_cases = [
         # Basic
         ("Attention Is All You Need", "attention is all you need"),
@@ -58,10 +39,9 @@ def test_title_normalization():
         output = text_utils.normalize_title(input_val)
         assert output == expected, f"Expected '{expected}', got '{output}'"
 
+
 def test_title_similarity():
-    """
-    Test title similarity scoring.
-    """
+    """Test title similarity scoring."""
     test_cases = [
         ("Attention Is All You Need", "Attention Is All You Need", True),
         ("Attention Is All You Need", "attention is all you need", True),
@@ -73,10 +53,9 @@ def test_title_similarity():
         is_similar = score >= 0.8
         assert is_similar == should_be_similar, f"Expected similarity {should_be_similar}, got score {score}"
 
+
 def test_author_parsing():
-    """
-    Test author parsing with all formats.
-    """
+    """Test author parsing with all formats."""
     test_cases = [
         ("Ashish Vaswani and Noam Shazeer", ["Ashish Vaswani", "Noam Shazeer"]),
         ("Kaiming He; Xiangyu Zhang", ["Kaiming He", "Xiangyu Zhang"]),
@@ -94,10 +73,9 @@ def test_author_parsing():
         output = text_utils.extract_authors_from_any(input_val)
         assert output == expected, f"Expected {expected}, got {output}"
 
+
 def test_author_matching():
-    """
-    Test author name matching with initials.
-    """
+    """Test author name matching with initials."""
     test_cases = [
         ("Ashish Vaswani", "Ashish Vaswani", True),
         ("ASHISH VASWANI", "ashish vaswani", True),
@@ -112,10 +90,9 @@ def test_author_matching():
         matches = text_utils.author_name_matches(name1, name2)
         assert matches == should_match, f"Expected match {should_match} for '{name1}' vs '{name2}'"
 
+
 def test_authors_overlap():
-    """
-    Test author list overlap detection.
-    """
+    """Test author list overlap detection."""
     test_cases = [
         ("Ashish Vaswani and Noam Shazeer", "Ashish Vaswani", True),
         ("Hinton; LeCun; Bengio", "LeCun", True),
@@ -127,10 +104,9 @@ def test_authors_overlap():
         overlap = text_utils.authors_overlap(authors1, authors2)
         assert overlap == should_overlap, f"Expected overlap {should_overlap} for '{authors1}' vs '{authors2}'"
 
+
 def test_doi_normalization():
-    """
-    Test DOI normalization (URL stripping, prefix removal, lowercasing).
-    """
+    """Test DOI normalization (URL stripping, prefix removal, lowercasing)."""
     normalize_cases = [
         ("https://doi.org/10.18653/v1/N19-1423", "10.18653/v1/n19-1423"),
         ("doi:10.1234/TEST", "10.1234/test"),
@@ -144,9 +120,7 @@ def test_doi_normalization():
 
 
 def test_doi_extraction_from_html():
-    """
-    Test DOI extraction from HTML meta tags.
-    """
+    """Test DOI extraction from HTML meta tags."""
     html_cases = [
         ('<meta name="citation_doi" content="10.18653/v1/N19-1423" />', "10.18653/v1/n19-1423"),
         ('<meta name="dc.identifier" content="doi:10.1234/TEST" />', "10.1234/test"),
@@ -159,9 +133,7 @@ def test_doi_extraction_from_html():
 
 
 def test_doi_extraction_from_text():
-    """
-    Test DOI extraction from free text.
-    """
+    """Test DOI extraction from free text."""
     text_cases = [
         ("See doi:10.1234/TEST for details", "10.1234/test"),
         ("DOI is 10.18653/v1/N19-1423 here", "10.18653/v1/n19-1423"),
@@ -172,10 +144,9 @@ def test_doi_extraction_from_text():
         output = id_utils.find_doi_in_text(input_val)
         assert output == expected, f"find_doi_in_text({input_val!r}): expected {expected!r}, got {output!r}"
 
+
 def test_arxiv_extraction():
-    """
-    Test arXiv ID extraction.
-    """
+    """Test arXiv ID extraction."""
     test_cases = [
         ("See arXiv:1706.03762 for details", "1706.03762"),
         ("https://arxiv.org/abs/1706.03762v5", "1706.03762"),
@@ -189,10 +160,9 @@ def test_arxiv_extraction():
         output = id_utils.find_arxiv_in_text(input_val)
         assert output == expected, f"find_arxiv_in_text({input_val!r}): expected {expected!r}, got {output!r}"
 
+
 def test_bibtex_parsing():
-    """
-    Test BibTeX parsing.
-    """
+    """Test BibTeX parsing."""
     valid_cases = [
         (dedent("""
             @inproceedings{Vaswani2017,
@@ -221,10 +191,9 @@ def test_bibtex_parsing():
         parsed = bt.parse_bibtex_to_dict(invalid_bib)
         assert parsed is None, "Expected None for invalid BibTeX"
 
+
 def test_bibtex_building():
-    """
-    Test BibTeX construction.
-    """
+    """Test BibTeX construction."""
     # Minimal BibTeX
     bibtex = bt.build_minimal_bibtex(
         "Attention Is All You Need",
@@ -248,9 +217,7 @@ def test_bibtex_building():
 
 
 def test_bibtex_latex_stripping():
-    """
-    Test LaTeX formatting removal in BibTeX output via bibtex_from_dict.
-    """
+    """Test LaTeX formatting removal in BibTeX output via bibtex_from_dict."""
     test_cases = [
         # Basic formatting commands
         (r"\textit{Machine Learning} for NLP", "Machine Learning for NLP"),
@@ -308,7 +275,7 @@ def test_bibtex_latex_stripping():
     for input_title, expected_title in test_cases:
         entry = {"type": "article", "key": "test", "fields": {"title": input_title}}
         result = bt.bibtex_from_dict(entry)
-        actual_title = _extract_bibtex_field(result, "title")
+        actual_title = extract_bibtex_field(result, "title")
 
         assert actual_title == expected_title, (
             f"LaTeX stripping failed:\n"
@@ -319,9 +286,7 @@ def test_bibtex_latex_stripping():
 
 
 def test_bibtex_unicode_normalization():
-    """
-    Test Unicode to ASCII normalization in BibTeX output via bibtex_from_dict.
-    """
+    """Test Unicode to ASCII normalization in BibTeX output via bibtex_from_dict."""
     test_cases = [
         # Accented characters (via unidecode)
         ("Café Society", "Cafe Society"),
@@ -363,7 +328,7 @@ def test_bibtex_unicode_normalization():
     for input_val, expected_val in test_cases:
         entry = {"type": "article", "key": "test", "fields": {"author": input_val}}
         result = bt.bibtex_from_dict(entry)
-        actual_val = _extract_bibtex_field(result, "author")
+        actual_val = extract_bibtex_field(result, "author")
 
         assert actual_val == expected_val, (
             f"Unicode normalization failed:\n"
@@ -374,9 +339,7 @@ def test_bibtex_unicode_normalization():
 
 
 def test_bibtex_latex_and_unicode_combined():
-    """
-    Test that LaTeX stripping and Unicode normalization work together.
-    """
+    """Test that LaTeX stripping and Unicode normalization work together."""
     test_cases = [
         # LaTeX + accents
         (r"\textit{Café} Culture", "Cafe Culture"),
@@ -399,7 +362,7 @@ def test_bibtex_latex_and_unicode_combined():
     for input_title, expected_title in test_cases:
         entry = {"type": "article", "key": "test", "fields": {"title": input_title}}
         result = bt.bibtex_from_dict(entry)
-        actual_title = _extract_bibtex_field(result, "title")
+        actual_title = extract_bibtex_field(result, "title")
 
         assert actual_title == expected_title, (
             f"Combined LaTeX+Unicode normalization failed:\n"
@@ -408,10 +371,9 @@ def test_bibtex_latex_and_unicode_combined():
             f"  Got:      {actual_title!r}"
         )
 
+
 def test_bibtex_matching():
-    """
-    Test strict BibTeX matching.
-    """
+    """Test strict BibTeX matching."""
     # Exact match
     bib1 = dedent("""
         @inproceedings{Vaswani2017,
@@ -492,10 +454,9 @@ def test_bibtex_matching():
         "Different titles should NOT match"
     )
 
+
 def test_bibtex_extra_fields():
-    """
-    Test that extra fields don't prevent matching.
-    """
+    """Test that extra fields don't prevent matching."""
     minimal = dedent("""
         @inproceedings{Vaswani2017,
           title = {Attention Is All You Need},
@@ -520,17 +481,15 @@ def test_bibtex_extra_fields():
         "Extra fields should not prevent matching"
     )
 
+
 def test_config():
-    """
-    Test configuration constants.
-    """
+    """Test configuration constants."""
     for const in ['CONTRIBUTION_WINDOW_YEARS', 'SIM_EXACT_PICK_THRESHOLD']:
         assert hasattr(config, const) and getattr(config, const) is not None, f"Missing constant: {const}"
 
+
 def test_safe_file_operations(tmp_path):
-    """
-    Test safe file reading and writing.
-    """
+    """Test safe file reading and writing."""
     # Test safe write and read
     test_path = tmp_path / "subdir" / "test.txt"
     content = "Hello, World!"
@@ -547,10 +506,9 @@ def test_safe_file_operations(tmp_path):
     no_dir_path = tmp_path / "nodir" / "test.txt"
     assert not io_utils.safe_write_file(str(no_dir_path), content, makedirs=False), "Should fail without makedirs"
 
+
 def test_safe_json_operations(tmp_path):
-    """
-    Test safe JSON reading and writing.
-    """
+    """Test safe JSON reading and writing."""
     test_path = tmp_path / "test.json"
     data = {"title": "Attention Is All You Need", "year": 2017, "authors": ["Vaswani", "Shazeer"]}
 
@@ -564,10 +522,9 @@ def test_safe_json_operations(tmp_path):
     read_data = io_utils.safe_read_json("/nonexistent.json", default=default)
     assert read_data == default, f"Expected default {default}, got {read_data}"
 
+
 def test_csv_summary_operations(tmp_path):
-    """
-    Test CSV summary initialization and appending.
-    """
+    """Test CSV summary initialization and appending."""
     csv_path = tmp_path / "summary.csv"
     csv_path_str = str(csv_path)
 
@@ -589,10 +546,9 @@ def test_csv_summary_operations(tmp_path):
     assert "file_path" in content and "trust_hits" in content, "CSV headers missing"
     assert "test.bib" in content and "2" in content, "CSV data not appended correctly"
 
+
 def test_merge_with_policy():
-    """
-    Test BibTeX merging with trust hierarchy.
-    """
+    """Test BibTeX merging with trust hierarchy."""
     # Primary (Scholar baseline)
     primary = {
         "type": "misc",
@@ -635,9 +591,10 @@ def test_merge_with_policy():
     assert fields.get("booktitle") == "NeurIPS"
     assert fields.get("doi"), "DOI should be present from Crossref"
 
+
 def test_merge_doi_arxiv_handling():
-    """
-    Test DOI vs arXiv handling in merge.
+    """Test DOI vs arXiv handling in merge.
+
     When a published DOI is present alongside arXiv, the arXiv fields should be removed
     since DOI is the primary identifier for published papers.
     """
@@ -674,10 +631,9 @@ def test_merge_doi_arxiv_handling():
     assert not fields.get("eprint"), "eprint should be removed when DOI present"
     assert not fields.get("archiveprefix"), "archiveprefix should be removed when DOI present"
 
+
 def test_save_entry_to_file(tmp_path):
-    """
-    Test saving BibTeX entry to file with collision handling.
-    """
+    """Test saving BibTeX entry to file with collision handling."""
     entry = {
         "type": "inproceedings",
         "key": "Vaswani2017",
@@ -716,19 +672,17 @@ def test_save_entry_to_file(tmp_path):
 
     assert os.path.exists(path3), f"Modified entry file not created: {path3}"
 
+
 def test_exception_definitions():
-    """
-    Test that exception tuples are properly defined.
-    """
+    """Test that exception tuples are properly defined."""
     required = ['HTTP_ERRORS', 'NETWORK_ERRORS', 'ALL_API_ERRORS', 'FILE_IO_ERRORS']
     for name in required:
         assert hasattr(exceptions, name), f"Missing: {name}"
         assert isinstance(getattr(exceptions, name), tuple), f"{name} not a tuple"
 
+
 def test_http_error_decorator():
-    """
-    Test handle_api_errors decorator returns default on API error.
-    """
+    """Test handle_api_errors decorator returns default on API error."""
     import urllib.error
 
     @http_utils.handle_api_errors(default_return="fallback")
@@ -739,8 +693,7 @@ def test_http_error_decorator():
 
 
 def test_no_duplicate_titles_per_author():
-    """
-    Test that no author has two publications with title similarity >= 90%.
+    """Test that no author has two publications with title similarity >= 90%.
 
     This catches preprint/published duplicates and other duplicate entries
     that should have been deduplicated during processing.
