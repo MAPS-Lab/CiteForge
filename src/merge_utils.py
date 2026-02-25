@@ -572,26 +572,14 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             etype = "article"
 
     # Fix conference proceedings misclassified as @article with journal.
-    # Crossref registers some conference proceedings (AAAI, EMNLP, etc.) as
-    # journal volumes, so the pipeline sees journal=<proceedings name>.
-    # Detect and reclassify as @inproceedings with booktitle.
+    # Crossref registers some conference proceedings (AAAI, EMNLP, PVLDB,
+    # PACMHCI, etc.) as journal volumes. Any venue named "Proceedings of..."
+    # is proceedings, not a journal — reclassify as @inproceedings.
     if etype == "article" and merged.get("journal") and not merged.get("booktitle"):
         jnl_for_conf = (merged.get("journal") or "").strip()
         jnl_lower_conf = jnl_for_conf.lower()
-        # Some "Proceedings of the X" are legitimate journals (PVLDB, PACMSE,
-        # PACMHCI, PACMPL). Only reclassify when the name looks like a one-off
-        # conference proceedings, not a recurring journal series.
-        _is_recurring_journal = any(
-            kw in jnl_lower_conf
-            for kw in ("endowment", "programming languages", "human-computer",
-                        "interactive, mobile", "software engineering", "measurement")
-        )
         is_conf_proceedings = (
-            (
-                (jnl_lower_conf.startswith("proceedings of the")
-                 or jnl_lower_conf.startswith("proceedings of "))
-                and not _is_recurring_journal
-            )
+            jnl_lower_conf.startswith("proceedings of")
             or "@" in jnl_for_conf  # IberLEF@SEPLN pattern
             or jnl_lower_conf in CONFERENCE_AS_JOURNAL
         )
@@ -1289,6 +1277,41 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                 os.remove(prefer_path)
         except OSError:
             pass
+
+    # Cross-file citation key collision check: scan other files in the
+    # directory for the same key.  If found on a DIFFERENT paper, append
+    # a distinguishing suffix to the key to avoid LaTeX collisions.
+    new_key = (entry.get("key") or "").strip()
+    if should_write and new_key:
+        for other_file in os.listdir(author_dir):
+            if not other_file.endswith(".bib"):
+                continue
+            other_path = os.path.join(author_dir, other_file)
+            if os.path.abspath(other_path) == os.path.abspath(path):
+                continue
+            try:
+                with open(other_path, encoding="utf-8") as of:
+                    other_entry = parse_bibtex_to_dict(of.read())
+                if other_entry and other_entry.get("key", "").strip() == new_key:
+                    # Same key in another file — check if genuinely different
+                    other_doi = _norm_doi((other_entry.get("fields") or {}).get("doi"))
+                    this_doi = _norm_doi(new_fields.get("doi"))
+                    if other_doi and this_doi and other_doi == this_doi:
+                        continue  # Same paper, key collision is fine
+                    # Different paper — disambiguate key
+                    _old_key = new_key
+                    # Use first significant title word not in the other key
+                    _title_words = re.findall(r'[A-Z][a-z]+', new_fields.get("title", ""))
+                    _suffix = next((w for w in _title_words if w not in new_key), "B")
+                    entry["key"] = f"{new_key}{_suffix}"
+                    logger.debug(
+                        f"KEY_COLLISION_FIX | old={_old_key} | new={entry['key']} "
+                        f"| other_file={other_file}",
+                        category=LogCategory.DEDUP,
+                    )
+                    break
+            except OSError:
+                continue
 
     if should_write:
         entry_type = entry.get("type", "misc")

@@ -1891,8 +1891,8 @@ class TestIncollectionPromotionRestricted:
 class TestCslArticleTypePreserved:
     """L16: CSL/doi_bibtex article type should not be overridden to inproceedings."""
 
-    def test_csl_article_not_overridden(self) -> None:
-        """Article type from CSL should be preserved even with conference-like venue."""
+    def test_proceedings_journal_becomes_inproceedings(self) -> None:
+        """Proceedings-named venues should become @inproceedings, not @article."""
         entry = {
             "type": "misc",
             "key": "Test2024",
@@ -1911,8 +1911,10 @@ class TestCslArticleTypePreserved:
             }),
         ]
         merged = merge_utils.merge_with_policy(entry, enrichers)
-        # Should respect CSL's article type, not override to inproceedings
-        assert merged["type"] == "article"
+        # Proceedings are not journals — must become @inproceedings
+        assert merged["type"] == "inproceedings"
+        assert merged["fields"]["booktitle"] == "Proceedings of the VLDB Endowment"
+        assert "journal" not in merged["fields"]
 
 
 class TestPreprintServersNoFalsePositives:
@@ -2265,8 +2267,8 @@ class TestCslPreprintVenueOverride:
         assert "booktitle" in merged.get("fields", {})
         assert "journal" not in merged.get("fields", {})
 
-    def test_published_doi_article_with_conference_journal_stays_article(self) -> None:
-        """Published DOI + conference-like journal -> stays @article (guard holds)."""
+    def test_published_doi_proceedings_becomes_inproceedings(self) -> None:
+        """Published DOI + proceedings journal -> @inproceedings (proceedings are not journals)."""
         entry: dict[str, Any] = {
             "type": "misc",
             "key": "Test2024",
@@ -2286,7 +2288,8 @@ class TestCslPreprintVenueOverride:
             }),
         ]
         merged = merge_utils.merge_with_policy(entry, enrichers)
-        assert merged["type"] == "article"
+        assert merged["type"] == "inproceedings"
+        assert merged["fields"]["booktitle"] == "Proceedings of the VLDB Endowment"
 
     def test_arxiv_article_with_real_journal_stays_article(self) -> None:
         """arXiv DOI + real journal name (no conference keywords) -> stays @article."""

@@ -450,14 +450,11 @@ def process_article(
             _conf_jnl_lower = _conf_jnl.lower()
             from src.config import CONFERENCE_AS_JOURNAL
             _is_conf = (
-                (_conf_jnl_lower.startswith("proceedings of")
-                 or _conf_jnl_lower.startswith("conference on")
-                 or "@" in _conf_jnl)
-                and not any(kw in _conf_jnl_lower for kw in (
-                    "endowment", "programming languages", "human-computer",
-                    "interactive, mobile", "measurement",
-                ))
-            ) or _conf_jnl_lower in CONFERENCE_AS_JOURNAL
+                _conf_jnl_lower.startswith("proceedings of")
+                or _conf_jnl_lower.startswith("conference on")
+                or "@" in _conf_jnl
+                or _conf_jnl_lower in CONFERENCE_AS_JOURNAL
+            )
             if _is_conf and not _bl_fields.get("booktitle"):
                 logger.debug(
                     f"EXISTING_FIXUP | conference_as_journal | journal={_conf_jnl[:60]}",
@@ -1102,15 +1099,9 @@ def process_article(
             _p4_jnl = (merged_fields.get("journal") or "").strip()
             _p4_jnl_lower = _p4_jnl.lower()
             from src.config import CONFERENCE_AS_JOURNAL
-            _p4_is_recurring = any(
-                kw in _p4_jnl_lower
-                for kw in ("endowment", "programming languages", "human-computer",
-                            "interactive, mobile", "measurement")
-            )
             _p4_is_conf = (
-                ((_p4_jnl_lower.startswith("proceedings of")
-                  or _p4_jnl_lower.startswith("conference on"))
-                 and not _p4_is_recurring)
+                _p4_jnl_lower.startswith("proceedings of")
+                or _p4_jnl_lower.startswith("conference on")
                 or "@" in _p4_jnl
                 or _p4_jnl_lower in CONFERENCE_AS_JOURNAL
             )
