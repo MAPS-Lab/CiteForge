@@ -579,7 +579,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         jnl_for_conf = (merged.get("journal") or "").strip()
         jnl_lower_conf = jnl_for_conf.lower()
         is_conf_proceedings = (
-            jnl_lower_conf.startswith("proceedings of")
+            jnl_lower_conf.startswith("proceedings ")
             or "@" in jnl_for_conf  # IberLEF@SEPLN pattern
             or jnl_lower_conf in CONFERENCE_AS_JOURNAL
         )

@@ -1916,6 +1916,30 @@ class TestCslArticleTypePreserved:
         assert merged["fields"]["booktitle"] == "Proceedings of the VLDB Endowment"
         assert "journal" not in merged["fields"]
 
+    def test_proceedings_on_also_becomes_inproceedings(self) -> None:
+        """'Proceedings on X' (not just 'of') should also become @inproceedings."""
+        entry = {
+            "type": "misc",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+            },
+        }
+        enrichers = [
+            ("csl", {
+                "type": "article",
+                "fields": {
+                    "journal": "Proceedings on Privacy Enhancing Technologies",
+                },
+            }),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "inproceedings"
+        assert merged["fields"]["booktitle"] == "Proceedings on Privacy Enhancing Technologies"
+        assert "journal" not in merged["fields"]
+
 
 class TestPreprintServersNoFalsePositives:
     """L19: Journals with 'preprint' substring should not be misclassified."""
