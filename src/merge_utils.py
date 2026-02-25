@@ -96,13 +96,21 @@ def _normalize_howpublished(fields: dict[str, Any]) -> None:
             fields["howpublished"] = _HOWPUB_CANONICAL[hp_key]
 
 
+_AUTHOR_SEPARATOR = " and "
+_AUTHOR_SEPARATOR_CAPITAL = " And "
+
+
 def _fix_author_casing(author_val: str) -> tuple[str, bool]:
-    """Fix author name casing: capitalize all-lowercase tokens and convert
-    ALL-CAPS tokens (>2 chars) to title case.
+    """Fix author name casing: capitalize all-lowercase tokens, convert
+    ALL-CAPS tokens (>2 chars) to title case, and fix capital 'And' separators.
 
     Returns (fixed_string, was_modified).
     """
-    parts = [p.strip() for p in author_val.split(" and ")]
+    # Fix capital "And" separator first (e.g. "and And Duncan" → "and Duncan")
+    val = re.sub(r'\band\s+And\b', 'and', author_val)
+    val = val.replace(_AUTHOR_SEPARATOR_CAPITAL, _AUTHOR_SEPARATOR)
+    any_fixed = val != author_val
+    parts = [p.strip() for p in val.split(_AUTHOR_SEPARATOR)]
     fixed_parts: list[str] = []
     any_fixed = False
     for ap in parts:
@@ -704,11 +712,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # Re-validate type from venue content, preserving authoritative book/article types
     pre_revalidate_type = etype
     if venue_type == "inproceedings" and etype != "book":
-        if not (etype == "article" and best_type_src in ("csl", "doi_bibtex")):
-            etype = "inproceedings"
-        elif is_secondary_doi(str(merged.get("doi", ""))):
-            # CSL/doi_bibtex misclassify preprints as articles;
-            # trust venue detection when the DOI is a preprint DOI
+        is_authoritative_article = etype == "article" and best_type_src in ("csl", "doi_bibtex")
+        if not is_authoritative_article or is_secondary_doi(str(merged.get("doi", ""))):
             etype = "inproceedings"
     elif venue_type == "incollection" and etype != "book":
         etype = "incollection"

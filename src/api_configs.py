@@ -1,8 +1,33 @@
 import os
+from typing import Any
 
 from .api_generics import APIFieldMapping, APISearchConfig
 from .config import CROSSREF_BASE, EUROPEPMC_BASE, OPENALEX_BASE, PUBMED_BASE, S2_BASE
 from .text_utils import extract_year_from_any
+
+
+def _extract_csl_year(container: dict[str, Any]) -> int | None:
+    """Extract year from CSL date-parts structure."""
+    date_parts = (container.get("issued") or {}).get("date-parts")
+    if date_parts and date_parts[0] and isinstance(date_parts[0][0], int):
+        return date_parts[0][0]
+    return None
+
+
+def _extract_crossref_year(item: dict[str, Any]) -> int:
+    """Extract year from Crossref date-parts (tries issued, published-print, published-online)."""
+    for field in ("issued", "published-print", "published-online"):
+        source = item.get(field) or {}
+        date_parts = source.get("date-parts")
+        if date_parts and date_parts[0] and isinstance(date_parts[0][0], int):
+            return date_parts[0][0]
+    return 0
+
+
+def _extract_europepmc_year(article: dict[str, Any]) -> int:
+    """Extract year from Europe PMC pubYear field."""
+    year_str = article.get("pubYear") or ""
+    return int(year_str) if year_str.isdigit() else 0
 
 S2_SEARCH_CONFIG = APISearchConfig(
     api_name="semantic_scholar",
@@ -35,13 +60,7 @@ CROSSREF_SEARCH_CONFIG = APISearchConfig(
         if isinstance(c.get("title"), list) and c.get("title")
         else ""
     ),
-    year_getter=lambda c: (
-        parts[0][0]
-        if (parts := (c.get("issued") or {}).get("date-parts"))
-        and parts[0]
-        and isinstance(parts[0][0], int)
-        else None
-    )
+    year_getter=_extract_csl_year,
 )
 
 OPENALEX_SEARCH_CONFIG = APISearchConfig(
@@ -130,15 +149,7 @@ CROSSREF_FIELD_MAPPING = APIFieldMapping(
         for author in item.get("author") or []
         if f"{author.get('given', '').strip()} {author.get('family', '').strip()}".strip()
     ] if item.get("author") else [],
-    custom_year_extractor=lambda item: (
-        parts[0][0]
-        if (parts := (
-            item.get("issued") or item.get("published-print") or item.get("published-online") or {}
-        ).get("date-parts"))
-        and parts[0]
-        and isinstance(parts[0][0], int)
-        else 0
-    )
+    custom_year_extractor=_extract_crossref_year,
 )
 
 
@@ -203,9 +214,7 @@ EUROPEPMC_FIELD_MAPPING = APIFieldMapping(
         for name in (article.get("authorString") or "").split(",")
         if name.strip()
     ],
-    custom_year_extractor=lambda article: (
-        int(ys) if (ys := article.get("pubYear") or "") and ys.isdigit() else 0
-    )
+    custom_year_extractor=_extract_europepmc_year,
 )
 
 ARXIV_FIELD_MAPPING = APIFieldMapping(

@@ -269,6 +269,9 @@ def _is_initials_token(token: str) -> bool:
             and clean.lower() not in _INITIALS_EXCLUSIONS)
 
 
+_RE_NON_ALNUM = r"[^a-z0-9]"
+
+
 def name_signature(n: Any | None) -> dict[str, Any] | None:
     """
     Derive a compact signature for a person name that keeps the normalized last
@@ -289,7 +292,7 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
         rest = parts[1] if len(parts) > 1 else ""
         rest_tokens = [t for t in normalize_person_name(rest).split() if t]
         initials = "".join(t[0] for t in rest_tokens if t)
-        last_norm = re.sub(r"[^a-z0-9]", "", normalize_person_name(last))
+        last_norm = re.sub(_RE_NON_ALNUM, "", normalize_person_name(last))
         return {"last": last_norm, "initials": initials}
     tokens = n_clean.split()
     if not tokens:
@@ -299,7 +302,7 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
     raw_tokens = to_text(n).strip().split()
     if (len(tokens) == 2 and len(raw_tokens) == 2
             and _is_initials_token(raw_tokens[-1])):
-        last_norm = re.sub(r"[^a-z0-9]", "", tokens[0])
+        last_norm = re.sub(_RE_NON_ALNUM, "", tokens[0])
         initials = re.sub(r"[^a-z]", "", tokens[1])
         return {"last": last_norm, "initials": initials}
     last_start = len(tokens) - 1
@@ -310,7 +313,7 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
             break
     last_tokens = tokens[last_start:]
     first_tokens = tokens[:last_start]
-    last_norm = re.sub(r"[^a-z0-9]", "", "".join(last_tokens))
+    last_norm = re.sub(_RE_NON_ALNUM, "", "".join(last_tokens))
     initials = "".join(t[0] for t in first_tokens if t)
     return {"last": last_norm, "initials": initials}
 

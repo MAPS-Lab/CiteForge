@@ -456,18 +456,6 @@ def process_article(
                 baseline_entry["type"] = "inproceedings"
                 _fixup_written = True
 
-        # Fix lowercase author names
-        _bl_auth = _bl_fields.get("author", "")
-        if isinstance(_bl_auth, str) and _bl_auth:
-            _auth_fixed_val, _auth_was_fixed = mu._fix_author_casing(_bl_auth)
-            if _auth_was_fixed:
-                _bl_fields["author"] = _auth_fixed_val
-                logger.debug(
-                    f"EXISTING_FIXUP | author_capitalized | old={_bl_auth[:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _fixup_written = True
-
         # Backfill howpublished for @misc with arXiv but no howpublished
         if (baseline_entry.get("type") == "misc"
                 and not _bl_fields.get("howpublished")
@@ -476,17 +464,17 @@ def process_article(
             _bl_fields["howpublished"] = "arXiv"
             _fixup_written = True
 
-        # Fix capital "And" in author separators
+        # Fix author casing (lowercase, ALL-CAPS, capital "And" separators)
         _bl_auth2 = _bl_fields.get("author", "")
-        if isinstance(_bl_auth2, str) and " And " in _bl_auth2:
-            _auth2_fixed = re.sub(r'\band\s+And\b', 'and', _bl_auth2)
-            _auth2_fixed = _auth2_fixed.replace(" And ", " and ")
-            _bl_fields["author"] = _auth2_fixed
-            logger.debug(
-                "EXISTING_FIXUP | capital_and_fixed",
-                category=LogCategory.CLEANUP,
-            )
-            _fixup_written = True
+        if isinstance(_bl_auth2, str) and _bl_auth2:
+            _auth2_fixed, _auth2_changed = mu._fix_author_casing(_bl_auth2)
+            if _auth2_changed:
+                _bl_fields["author"] = _auth2_fixed
+                logger.debug(
+                    f"EXISTING_FIXUP | author_casing_fixed | old={_bl_auth2[:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _fixup_written = True
 
         # Normalize howpublished casing
         _bl_hp_before = (_bl_fields.get("howpublished") or "").strip()
@@ -500,7 +488,7 @@ def process_article(
 
         # Escape bare & in field values (bibtex_from_dict handles this on write,
         # but we need to trigger a rewrite for files that were never re-serialized)
-        for _fk, _fv in list(_bl_fields.items()):
+        for _fk, _fv in _bl_fields.items():
             if _fk not in ("url", "doi") and isinstance(_fv, str) and "&" in _fv and r"\&" not in _fv:
                 _fixup_written = True
                 break
@@ -1131,13 +1119,12 @@ def process_article(
             if _p4_fixed != _p4_title:
                 merged_fields["title"] = _p4_fixed
 
-        # Fix capital "And" in author separators from API sources
-        # "Waheed and And Duncan" → "Waheed and Duncan" (remove duplicate separator)
+        # Fix author casing + capital "And" separators from API sources
         _p4_auth = merged_fields.get("author", "")
-        if isinstance(_p4_auth, str) and " And " in _p4_auth:
-            _p4_auth_fixed = re.sub(r'\band\s+And\b', 'and', _p4_auth)
-            _p4_auth_fixed = _p4_auth_fixed.replace(" And ", " and ")
-            merged_fields["author"] = _p4_auth_fixed
+        if isinstance(_p4_auth, str) and _p4_auth:
+            _p4_auth_fixed, _ = mu._fix_author_casing(_p4_auth)
+            if _p4_auth_fixed != _p4_auth:
+                merged_fields["author"] = _p4_auth_fixed
 
         # Normalize howpublished casing after all journal→howpublished moves
         mu._normalize_howpublished(merged_fields)
