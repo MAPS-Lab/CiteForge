@@ -201,7 +201,6 @@ def _try_multiple_candidates(
     flags: dict[str, bool],
     flag_key: str,
     max_candidates: int = 5,
-    all_candidate_dois: list[str] | None = None,
 ) -> tuple[bool, Any | None]:
     """Try candidates from an API source in relevance order until one matches the baseline.
 
@@ -221,27 +220,6 @@ def _try_multiple_candidates(
             candidate_dict = bt.parse_bibtex_to_dict(candidate_bib)
             if not candidate_dict:
                 continue
-
-            # Collect DOIs from candidates likely to be the same paper as baseline
-            # (for preprint-on-disk check). Require: published DOI, year within ±2,
-            # AND title similarity >= 0.3 (loose but filters out unrelated papers).
-            if all_candidate_dois is not None:
-                _c_fields = candidate_dict.get("fields") or {}
-                _c_doi = idu.normalize_doi(_c_fields.get("doi"))
-                if _c_doi and not idu.is_secondary_doi(_c_doi):
-                    from src.text_utils import title_similarity as _ts
-                    _b_fields = baseline_entry.get("fields") or {}
-                    _b_year = str(_b_fields.get("year", ""))
-                    _c_year = str(_c_fields.get("year", ""))
-                    _b_title = _b_fields.get("title", "")
-                    _c_title = _c_fields.get("title", "")
-                    _year_close = (
-                        _b_year and _c_year
-                        and abs(int(_b_year or 0) - int(_c_year or 0)) <= 2
-                    )
-                    _title_related = _ts(_b_title, _c_title) >= 0.3
-                    if _year_close and _title_related:
-                        all_candidate_dois.append(_c_doi)
 
             match = bt.bibtex_entries_match_strict(baseline_entry, candidate_dict)
             if match:
@@ -718,9 +696,6 @@ def process_article(
 
     # ===== PHASE 2: API Enrichment =====
     logger.info("▶ Phase 2: API Enrichment", category=LogCategory.ARTICLE)
-    # Collect DOIs from ALL API candidates (even rejected ones) for
-    # preprint-on-disk dedup check after enrichment completes.
-    _all_cand_dois: list[str] = []
     logger.debug(
         f"PHASE2_START | title={title[:60]} | doi_validated={doi_validated}",
         category=LogCategory.AUDIT,
@@ -806,7 +781,6 @@ def process_article(
                 flags,
                 "crossref",
                 max_candidates=5,
-                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 cr_item = None
@@ -827,7 +801,6 @@ def process_article(
                 flags,
                 "openreview",
                 max_candidates=5,
-                all_candidate_dois=_all_cand_dois,
             )
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.OPENREVIEW)
@@ -847,7 +820,6 @@ def process_article(
                 flags,
                 "arxiv",
                 max_candidates=5,
-                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 arxiv_entry = None
@@ -869,7 +841,6 @@ def process_article(
                 flags,
                 "openalex",
                 max_candidates=5,
-                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 oa_work = None
@@ -898,7 +869,6 @@ def process_article(
                 flags,
                 "pubmed",
                 max_candidates=5,
-                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 pm_article = None
@@ -919,62 +889,11 @@ def process_article(
                 flags,
                 "europepmc",
                 max_candidates=5,
-                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 epmc_article = None
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.EUROPEPMC)
-
-    # ===== PHASE 2.5: Published DOI duplicate check =====
-    # If any enricher returned a published DOI that already exists on disk
-    # for a different file, this article is a preprint of that published paper.
-    # Skip it entirely to prevent churn (file created then deduped every run).
-    if os.path.exists(author_dir):
-        _existing_dois: set[str] = set()
-        for _ef in os.listdir(author_dir):
-            if not _ef.endswith(".bib"):
-                continue
-            _ef_path = os.path.join(author_dir, _ef)
-            if path and os.path.abspath(_ef_path) == os.path.abspath(path):
-                continue  # Skip the baseline file we just wrote
-            try:
-                with open(_ef_path, encoding="utf-8") as _efh:
-                    _ef_entry = bt.parse_bibtex_to_dict(_efh.read())
-                if _ef_entry:
-                    _ef_doi = idu.normalize_doi((_ef_entry.get("fields") or {}).get("doi"))
-                    if _ef_doi and not idu.is_secondary_doi(_ef_doi):
-                        _existing_dois.add(_ef_doi.lower())
-            except (OSError, ValueError):
-                continue
-
-        if _existing_dois:
-            # Check DOIs from accepted enrichers AND rejected candidates
-            _all_enricher_dois: list[tuple[str, str]] = []
-            for _esrc, _edata in enr_list:
-                if not _edata:
-                    continue
-                _edoi = idu.normalize_doi((_edata.get("fields") or {}).get("doi"))
-                if _edoi:
-                    _all_enricher_dois.append((_esrc, _edoi))
-            for _cdoi in _all_cand_dois:
-                _all_enricher_dois.append(("candidate", _cdoi))
-
-            for _esrc, _edoi in _all_enricher_dois:
-                if _edoi.lower() in _existing_dois:
-                    logger.info(
-                        f"PREPRINT_SKIP | enricher={_esrc} returned published DOI={_edoi} "
-                        f"already on disk; this article is a preprint duplicate",
-                        category=LogCategory.DEDUP,
-                    )
-                    # Remove the baseline file we wrote
-                    if path and os.path.exists(path):
-                        os.remove(path)
-                        logger.debug(
-                            f"PREPRINT_SKIP | removed baseline={path}",
-                            category=LogCategory.CLEANUP,
-                        )
-                    return 0
 
     # ===== PHASE 3: Late DOI Discovery =====
     logger.info("▶ Phase 3: Late DOI Discovery", category=LogCategory.ARTICLE)
