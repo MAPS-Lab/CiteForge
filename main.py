@@ -505,7 +505,9 @@ def process_article(
         # Fix capital "And" in author separators
         _bl_auth2 = _bl_fields.get("author", "")
         if isinstance(_bl_auth2, str) and " And " in _bl_auth2:
-            _bl_fields["author"] = _bl_auth2.replace(" And ", " and ")
+            _auth2_fixed = re.sub(r'\band\s+And\b', 'and', _bl_auth2)
+            _auth2_fixed = _auth2_fixed.replace(" And ", " and ")
+            _bl_fields["author"] = _auth2_fixed
             logger.debug(
                 "EXISTING_FIXUP | capital_and_fixed",
                 category=LogCategory.CLEANUP,
@@ -1151,9 +1153,24 @@ def process_article(
                 merged_fields["title"] = _p4_fixed
 
         # Fix capital "And" in author separators from API sources
+        # "Waheed and And Duncan" → "Waheed and Duncan" (remove duplicate separator)
         _p4_auth = merged_fields.get("author", "")
         if isinstance(_p4_auth, str) and " And " in _p4_auth:
-            merged_fields["author"] = _p4_auth.replace(" And ", " and ")
+            _p4_auth_fixed = re.sub(r'\band\s+And\b', 'and', _p4_auth)
+            _p4_auth_fixed = _p4_auth_fixed.replace(" And ", " and ")
+            merged_fields["author"] = _p4_auth_fixed
+
+        # Normalize howpublished casing after all journal→howpublished moves
+        _p4_hp = (merged_fields.get("howpublished") or "").strip()
+        if _p4_hp:
+            _p4_hp_canonical: dict[str, str] = {
+                "arxiv": "arXiv", "biorxiv": "bioRxiv", "medrxiv": "medRxiv",
+                "chemrxiv": "ChemRxiv", "techrxiv": "TechRxiv",
+                "research square": "Research Square", "ssrn": "SSRN",
+            }
+            _p4_hp_key = _p4_hp.lower().split("(")[0].strip()
+            if _p4_hp_key in _p4_hp_canonical:
+                merged_fields["howpublished"] = _p4_hp_canonical[_p4_hp_key]
 
         # Annotate bare stubs: no enrichers, no DOI, no venue
         is_bare_stub = (
