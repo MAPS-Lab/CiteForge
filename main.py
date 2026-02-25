@@ -475,7 +475,9 @@ def process_article(
                 if len(_toks) >= 2:
                     _new_toks: list[str] = []
                     for _t in _toks:
-                        if _t and _t[0].isalpha() and _t[0].islower() and len(_t) > 1:
+                        if (_t and _t[0].isalpha() and _t[0].islower() and len(_t) > 1) or (
+                            _t and len(_t) > 2 and _t.isupper()
+                        ):
                             _new_toks.append(_t.capitalize())
                             _auth_fixed = True
                         else:
