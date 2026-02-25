@@ -450,12 +450,12 @@ def process_article(
             _conf_jnl_lower = _conf_jnl.lower()
             from src.config import CONFERENCE_AS_JOURNAL
             _is_conf = (
-                (_conf_jnl_lower.startswith("proceedings of the")
-                 or _conf_jnl_lower.startswith("proceedings of ")
+                (_conf_jnl_lower.startswith("proceedings of")
+                 or _conf_jnl_lower.startswith("conference on")
                  or "@" in _conf_jnl)
                 and not any(kw in _conf_jnl_lower for kw in (
                     "endowment", "programming languages", "human-computer",
-                    "interactive, mobile", "software engineering", "measurement",
+                    "interactive, mobile", "measurement",
                 ))
             ) or _conf_jnl_lower in CONFERENCE_AS_JOURNAL
             if _is_conf and not _bl_fields.get("booktitle"):
