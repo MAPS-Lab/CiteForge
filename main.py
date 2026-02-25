@@ -895,6 +895,48 @@ def process_article(
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.EUROPEPMC)
 
+    # ===== PHASE 2.5: Published DOI duplicate check =====
+    # If any enricher returned a published DOI that already exists on disk
+    # for a different file, this article is a preprint of that published paper.
+    # Skip it entirely to prevent churn (file created then deduped every run).
+    if os.path.exists(author_dir):
+        _existing_dois: set[str] = set()
+        for _ef in os.listdir(author_dir):
+            if not _ef.endswith(".bib"):
+                continue
+            _ef_path = os.path.join(author_dir, _ef)
+            if path and os.path.abspath(_ef_path) == os.path.abspath(path):
+                continue  # Skip the baseline file we just wrote
+            try:
+                with open(_ef_path, encoding="utf-8") as _efh:
+                    _ef_entry = bt.parse_bibtex_to_dict(_efh.read())
+                if _ef_entry:
+                    _ef_doi = idu.normalize_doi((_ef_entry.get("fields") or {}).get("doi"))
+                    if _ef_doi and not idu.is_secondary_doi(_ef_doi):
+                        _existing_dois.add(_ef_doi.lower())
+            except (OSError, ValueError):
+                continue
+
+        if _existing_dois:
+            for _esrc, _edata in enr_list:
+                if not _edata:
+                    continue
+                _edoi = idu.normalize_doi((_edata.get("fields") or {}).get("doi"))
+                if _edoi and _edoi.lower() in _existing_dois:
+                    logger.info(
+                        f"PREPRINT_SKIP | enricher={_esrc} returned published DOI={_edoi} "
+                        f"already on disk; this article is a preprint duplicate",
+                        category=LogCategory.DEDUP,
+                    )
+                    # Remove the baseline file we wrote
+                    if path and os.path.exists(path):
+                        os.remove(path)
+                        logger.debug(
+                            f"PREPRINT_SKIP | removed baseline={path}",
+                            category=LogCategory.CLEANUP,
+                        )
+                    return 0
+
     # ===== PHASE 3: Late DOI Discovery =====
     logger.info("▶ Phase 3: Late DOI Discovery", category=LogCategory.ARTICLE)
     # Do late DOI negotiation if we haven't validated a DOI, or if the validated
@@ -1156,6 +1198,45 @@ def process_article(
             and not (merged_fields.get("booktitle") or "").strip()
         )
         if is_bare_stub:
+            # Before annotating, check if a published version with matching
+            # authors already exists on disk (handles preprint/published pairs
+            # where titles differ too much for title-based dedup)
+            _stub_authors = merged_fields.get("author", "")
+            _stub_skipped = False
+            if _stub_authors and os.path.exists(author_dir):
+                from src.text_utils import author_overlap_ratio
+                for _sf in os.listdir(author_dir):
+                    if not _sf.endswith(".bib"):
+                        continue
+                    _sf_path = os.path.join(author_dir, _sf)
+                    if path and os.path.abspath(_sf_path) == os.path.abspath(path):
+                        continue
+                    try:
+                        with open(_sf_path, encoding="utf-8") as _sfh:
+                            _sf_entry = bt.parse_bibtex_to_dict(_sfh.read())
+                        if not _sf_entry:
+                            continue
+                        _sf_fields = _sf_entry.get("fields") or {}
+                        _sf_doi = (_sf_fields.get("doi") or "").strip()
+                        # Only match against published entries (have DOI, not preprint)
+                        if not _sf_doi or idu.is_secondary_doi(_sf_doi):
+                            continue
+                        _sf_authors = _sf_fields.get("author", "")
+                        _overlap = author_overlap_ratio(_stub_authors, _sf_authors)
+                        if _overlap >= 0.8:
+                            logger.info(
+                                f"BARE_STUB_SKIP | published_match={_sf} "
+                                f"| author_overlap={_overlap:.2f}",
+                                category=LogCategory.DEDUP,
+                            )
+                            if path and os.path.exists(path):
+                                os.remove(path)
+                            _stub_skipped = True
+                            break
+                    except (OSError, ValueError):
+                        continue
+            if _stub_skipped:
+                return 0
             merged_fields["note"] = "Unenriched: no enrichment sources matched"
             logger.warn(
                 "Bare stub: no venue, no DOI, no enrichment; annotated with note",
