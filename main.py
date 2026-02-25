@@ -1198,45 +1198,6 @@ def process_article(
             and not (merged_fields.get("booktitle") or "").strip()
         )
         if is_bare_stub:
-            # Before annotating, check if a published version with matching
-            # authors already exists on disk (handles preprint/published pairs
-            # where titles differ too much for title-based dedup)
-            _stub_authors = merged_fields.get("author", "")
-            _stub_skipped = False
-            if _stub_authors and os.path.exists(author_dir):
-                from src.text_utils import author_overlap_ratio
-                for _sf in os.listdir(author_dir):
-                    if not _sf.endswith(".bib"):
-                        continue
-                    _sf_path = os.path.join(author_dir, _sf)
-                    if path and os.path.abspath(_sf_path) == os.path.abspath(path):
-                        continue
-                    try:
-                        with open(_sf_path, encoding="utf-8") as _sfh:
-                            _sf_entry = bt.parse_bibtex_to_dict(_sfh.read())
-                        if not _sf_entry:
-                            continue
-                        _sf_fields = _sf_entry.get("fields") or {}
-                        _sf_doi = (_sf_fields.get("doi") or "").strip()
-                        # Only match against published entries (have DOI, not preprint)
-                        if not _sf_doi or idu.is_secondary_doi(_sf_doi):
-                            continue
-                        _sf_authors = _sf_fields.get("author", "")
-                        _overlap = author_overlap_ratio(_stub_authors, _sf_authors)
-                        if _overlap >= 0.8:
-                            logger.info(
-                                f"BARE_STUB_SKIP | published_match={_sf} "
-                                f"| author_overlap={_overlap:.2f}",
-                                category=LogCategory.DEDUP,
-                            )
-                            if path and os.path.exists(path):
-                                os.remove(path)
-                            _stub_skipped = True
-                            break
-                    except (OSError, ValueError):
-                        continue
-            if _stub_skipped:
-                return 0
             merged_fields["note"] = "Unenriched: no enrichment sources matched"
             logger.warn(
                 "Bare stub: no venue, no DOI, no enrichment; annotated with note",
