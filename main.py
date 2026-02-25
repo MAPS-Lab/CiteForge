@@ -1115,6 +1115,19 @@ def process_article(
             if _has_arxiv:
                 merged_fields["howpublished"] = "arXiv"
 
+        # Fix ALL-CAPS titles from enrichment sources (e.g. S2 returns
+        # publisher's ALL-CAPS abstract titles for some journals)
+        _p4_title = merged_fields.get("title", "")
+        if isinstance(_p4_title, str) and _p4_title:
+            _p4_fixed = trim_title_default(_p4_title)
+            if _p4_fixed != _p4_title:
+                merged_fields["title"] = _p4_fixed
+
+        # Fix capital "And" in author separators from API sources
+        _p4_auth = merged_fields.get("author", "")
+        if isinstance(_p4_auth, str) and " And " in _p4_auth:
+            merged_fields["author"] = _p4_auth.replace(" And ", " and ")
+
         # Annotate bare stubs: no enrichers, no DOI, no venue
         is_bare_stub = (
             not enr_list

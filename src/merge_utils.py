@@ -914,6 +914,23 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             duplicate_found = True
                             duplicate_path = existing_path
                             break
+                        # Keys match but titles differ -- check author overlap.
+                        # Same key + strong author overlap = same paper with
+                        # title change between preprint and publication.
+                        _key_author_overlap = author_overlap_ratio(
+                            existing_fields.get('author'), new_fields.get('author')
+                        )
+                        if _key_author_overlap >= 0.8 and key_title_sim >= 0.55:
+                            logger.debug(
+                                f"FILE_MATCH | KEY_AUTHOR_OVERLAP | file={existing_filename} "
+                                f"| key={existing_key} | sim={key_title_sim:.3f} "
+                                f"| author_overlap={_key_author_overlap:.3f}",
+                                category=LogCategory.DEDUP,
+                            )
+                            duplicate_found = True
+                            duplicate_path = existing_path
+                            break
+
                         # Keys match but titles differ significantly -- check if
                         # this is a preprint/published pair before giving up
                         if existing_doi and new_doi and existing_doi != new_doi:
