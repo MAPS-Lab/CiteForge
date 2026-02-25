@@ -120,10 +120,10 @@ def _is_garbage_title(title: str) -> bool:
     ):
         return True
     # Proceedings volumes: "Proceedings of the 2023 Conference on X: Tutorial Abstracts"
-    return bool(re.match(
-        r'^Proceedings\s+of\s+(the\s+)?\d{4}\s+',
-        title, re.IGNORECASE,
-    ))
+    if re.match(r'^Proceedings\s+of\s+(the\s+)?\d{4}\s+', title, re.IGNORECASE):
+        return True
+    # Correction/erratum papers are non-research editorial content
+    return bool(re.match(r'^Correction(s)?\s+(to|of)\s*:', title, re.IGNORECASE))
 
 
 def _is_corrupted_title(title: str) -> bool:
@@ -675,9 +675,28 @@ def process_article(
         path = existing_file_path
         logger.info(f"Using existing file: {path}", category=LogCategory.SKIP)
     else:
-        path, _ = mu.save_entry_to_file(out_dir, effective_id, baseline_entry, gemini_api_key=gemini_api_key,
-                                        author_name=rec.name)
-        logger.success(f"Saved baseline: {path}", category=LogCategory.SAVE, source=LogSource.SYSTEM)
+        path, was_written = mu.save_entry_to_file(
+            out_dir, effective_id, baseline_entry,
+            gemini_api_key=gemini_api_key, author_name=rec.name,
+        )
+        if was_written:
+            logger.success(f"Saved baseline: {path}", category=LogCategory.SAVE, source=LogSource.SYSTEM)
+        else:
+            # save_entry_to_file found a duplicate and skipped writing —
+            # the article is already on disk under a different name.
+            # Skip enrichment entirely to avoid churn.
+            logger.info(
+                f"Baseline duplicate detected; skipping enrichment: {path}",
+                category=LogCategory.SKIP, source=LogSource.SYSTEM,
+            )
+            if summary_csv_path and path:
+                try:
+                    rel = os.path.relpath(path)
+                except (OSError, ValueError):
+                    rel = path or ""
+                if rel and not is_known_summary_path(rel):
+                    append_summary_to_csv(summary_csv_path, rel, 0, flags)
+            return 1
 
     enr_list: list[tuple[str, dict[str, Any]]] = []
 
@@ -1171,6 +1190,25 @@ def process_article(
             _p4_hp_key = _p4_hp.lower().split("(")[0].strip()
             if _p4_hp_key in _p4_hp_canonical:
                 merged_fields["howpublished"] = _p4_hp_canonical[_p4_hp_key]
+
+        # Upgrade @misc with conference/workshop howpublished → @inproceedings
+        # When howpublished is a venue name (not a preprint server), the entry
+        # is a conference/workshop paper that should be @inproceedings.
+        if merged.get("type") == "misc" and merged_fields.get("howpublished"):
+            _hp_val = (merged_fields.get("howpublished") or "").strip()
+            _hp_lower = _hp_val.lower()
+            _is_preprint_hp = any(ps == _hp_lower for ps in PREPRINT_SERVERS) or _hp_lower in (
+                "arxiv", "biorxiv", "medrxiv", "chemrxiv", "techrxiv",
+                "ssrn", "ssrn electronic journal", "research square",
+                "preprints.org", "authorea",
+            )
+            if not _is_preprint_hp and _hp_val:
+                logger.debug(
+                    f"TYPE_CORRECT | misc_workshop->inproceedings | howpublished={_hp_val}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "inproceedings"
+                merged_fields["booktitle"] = merged_fields.pop("howpublished")
 
         # Annotate bare stubs: no enrichers, no DOI, no venue
         is_bare_stub = (
