@@ -530,6 +530,13 @@ def process_article(
                 )
                 _fixup_written = True
 
+        # Escape bare & in field values (bibtex_from_dict handles this on write,
+        # but we need to trigger a rewrite for files that were never re-serialized)
+        for _fk, _fv in list(_bl_fields.items()):
+            if _fk not in ("url", "doi") and isinstance(_fv, str) and "&" in _fv and r"\&" not in _fv:
+                _fixup_written = True
+                break
+
         if _fixup_written and existing_file_path:
             bib_str = bt.bibtex_from_dict(baseline_entry)
             safe_write_file(existing_file_path, bib_str)
