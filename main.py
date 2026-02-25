@@ -222,16 +222,25 @@ def _try_multiple_candidates(
             if not candidate_dict:
                 continue
 
-            # Collect DOIs from candidates that share year + authors with baseline
-            # (for preprint-on-disk check). Only include candidates with relevance
-            # to avoid false matches from unrelated papers by the same author.
+            # Collect DOIs from candidates likely to be the same paper as baseline
+            # (for preprint-on-disk check). Require: published DOI, year within ±2,
+            # AND title similarity >= 0.3 (loose but filters out unrelated papers).
             if all_candidate_dois is not None:
                 _c_fields = candidate_dict.get("fields") or {}
                 _c_doi = idu.normalize_doi(_c_fields.get("doi"))
                 if _c_doi and not idu.is_secondary_doi(_c_doi):
-                    _b_year = str((baseline_entry.get("fields") or {}).get("year", ""))
+                    from src.text_utils import title_similarity as _ts
+                    _b_fields = baseline_entry.get("fields") or {}
+                    _b_year = str(_b_fields.get("year", ""))
                     _c_year = str(_c_fields.get("year", ""))
-                    if _b_year and _c_year and abs(int(_b_year or 0) - int(_c_year or 0)) <= 2:
+                    _b_title = _b_fields.get("title", "")
+                    _c_title = _c_fields.get("title", "")
+                    _year_close = (
+                        _b_year and _c_year
+                        and abs(int(_b_year or 0) - int(_c_year or 0)) <= 2
+                    )
+                    _title_related = _ts(_b_title, _c_title) >= 0.3
+                    if _year_close and _title_related:
                         all_candidate_dois.append(_c_doi)
 
             match = bt.bibtex_entries_match_strict(baseline_entry, candidate_dict)
