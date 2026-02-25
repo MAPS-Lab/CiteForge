@@ -109,7 +109,7 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
     # Fix capital "And" separator first (e.g. "and And Duncan" → "and Duncan")
     val = re.sub(r'\band\s+And\b', 'and', author_val)
     val = val.replace(_AUTHOR_SEPARATOR_CAPITAL, _AUTHOR_SEPARATOR)
-    any_fixed = val != author_val
+    and_was_fixed = val != author_val
     parts = [p.strip() for p in val.split(_AUTHOR_SEPARATOR)]
     fixed_parts: list[str] = []
     any_fixed = False
@@ -128,7 +128,7 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
             fixed_parts.append(" ".join(new_tokens))
         else:
             fixed_parts.append(ap)
-    return " and ".join(fixed_parts), any_fixed
+    return _AUTHOR_SEPARATOR.join(fixed_parts), any_fixed or and_was_fixed
 
 
 def _sanitize_author_digits(name: str) -> str:
@@ -415,10 +415,10 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # that leak from Scholar/DBLP author disambiguation markers
     author_val = merged.get("author", "")
     if author_val:
-        author_parts = [p.strip() for p in str(author_val).split(" and ")]
+        author_parts = [p.strip() for p in str(author_val).split(_AUTHOR_SEPARATOR)]
         author_cleaned = [_sanitize_author_digits(p) for p in author_parts]
         if author_cleaned != author_parts:
-            merged["author"] = " and ".join(author_cleaned)
+            merged["author"] = _AUTHOR_SEPARATOR.join(author_cleaned)
             logger.debug(
                 f"author_digit_sanitize | before={author_val[:80]} | after={merged['author'][:80]}",
                 category=LogCategory.CLEANUP,
