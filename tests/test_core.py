@@ -244,7 +244,7 @@ def test_bibtex_latex_stripping():
         (r"\emph{\textbf{Double}} nested", "Double nested"),
 
         # Special escaped characters
-        (r"Research \& Development", "Research & Development"),
+        (r"Research \& Development", r"Research \& Development"),
         (r"50\% Improvement", "50% Improvement"),
         (r"Price is \$100", "Price is $100"),
         (r"Item \#1", "Item #1"),

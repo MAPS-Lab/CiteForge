@@ -138,6 +138,7 @@ PREPRINT_ONLY_PUBLISHERS = frozenset({
 # Used by merge_utils to reclassify @article→@inproceedings.
 CONFERENCE_AS_JOURNAL: frozenset[str] = frozenset({
     "software engineering",  # German SE conference (Fachtagung Softwaretechnik)
+    "ijcnlp-aacl",           # Int'l Joint Conf on NLP / Asia-Pacific ACL
 })
 
 # Data repository DOI prefixes (deprioritized in DOI selection)

@@ -450,7 +450,7 @@ def process_article(
             _conf_jnl_lower = _conf_jnl.lower()
             from src.config import CONFERENCE_AS_JOURNAL
             _is_conf = (
-                _conf_jnl_lower.startswith("proceedings ")
+                "proceedings" in _conf_jnl_lower
                 or _conf_jnl_lower.startswith("conference on")
                 or "@" in _conf_jnl
                 or _conf_jnl_lower in CONFERENCE_AS_JOURNAL
@@ -1100,7 +1100,7 @@ def process_article(
             _p4_jnl_lower = _p4_jnl.lower()
             from src.config import CONFERENCE_AS_JOURNAL
             _p4_is_conf = (
-                _p4_jnl_lower.startswith("proceedings ")
+                "proceedings" in _p4_jnl_lower
                 or _p4_jnl_lower.startswith("conference on")
                 or "@" in _p4_jnl
                 or _p4_jnl_lower in CONFERENCE_AS_JOURNAL

@@ -379,7 +379,10 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
         if val is not None and str(val).strip():
             val = _normalize_to_ascii(str(val))
             if k == "title":
-                val = _sanitize_title(val)
+                val = _sanitize_title(val) or val
+            # Escape bare & for valid BibTeX (but not in URLs/DOIs)
+            if k not in ("url", "doi") and "&" in val and r"\&" not in val:
+                val = val.replace("&", r"\&")
             lines.append(f"  {k} = {{{val}}},")
     if len(lines) > 1 and lines[-1].endswith(','):
         lines[-1] = lines[-1][:-1]

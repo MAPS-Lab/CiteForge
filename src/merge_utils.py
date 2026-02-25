@@ -353,9 +353,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
 
-    # Fix lowercase author names: ensure each author part has at least one
-    # uppercase letter (catches "darren steeves" or "Evangelos milios").
-    # Skip names that are intentionally lowercase or single tokens.
+    # Fix author name casing: capitalize all-lowercase tokens AND convert
+    # ALL-CAPS tokens to title case (catches "darren steeves", "F VARNO").
     author_val2 = merged.get("author", "")
     if author_val2:
         parts2 = [p.strip() for p in str(author_val2).split(" and ")]
@@ -363,16 +362,17 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         any_fixed = False
         for ap in parts2:
             tokens = ap.split()
-            if len(tokens) >= 2 and all(t[0].islower() for t in tokens if t and t[0].isalpha()):
-                # All tokens start lowercase — capitalize each
-                fixed = " ".join(t.capitalize() for t in tokens)
-                fixed_parts.append(fixed)
-                any_fixed = True
-            elif len(tokens) >= 2:
-                # Check for individual lowercase tokens (e.g. "Evangelos milios")
+            if len(tokens) >= 2:
                 new_tokens = []
                 for t in tokens:
-                    if t and t[0].isalpha() and t[0].islower() and len(t) > 1:
+                    if not t or not t[0].isalpha():
+                        new_tokens.append(t)
+                    elif len(t) > 1 and t[0].islower():
+                        # lowercase token → capitalize
+                        new_tokens.append(t.capitalize())
+                        any_fixed = True
+                    elif len(t) > 2 and t.isupper():
+                        # ALL-CAPS token (>2 chars) → title case
                         new_tokens.append(t.capitalize())
                         any_fixed = True
                     else:
@@ -502,6 +502,19 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         merged.pop("eprint", None)
         merged.pop("archiveprefix", None)
         merged.pop("primaryclass", None)
+        # Update URL to match the published DOI (remove stale preprint URLs)
+        _current_url = (merged.get("url") or "").lower()
+        if _current_url and any(
+            ps in _current_url
+            for ps in ("arxiv.org", "biorxiv.org", "medrxiv.org", "ssrn.com",
+                        "preprints.org", "techrxiv.org", "researchsquare.com",
+                        "10.1101/", "10.2139/", "10.20944/", "10.21203/")
+        ):
+            merged["url"] = f"https://doi.org/{doi_val}"
+            logger.debug(
+                f"url_preprint_replaced | old={_current_url[:60]} | new={merged['url']}",
+                category=LogCategory.CLEANUP,
+            )
         # Clear any remaining arXiv journal value and backfill from enrichers.
         # normalize_arxiv_metadata may have already stripped the arXiv journal;
         # either way, try to recover the real journal from enrichers.
@@ -579,7 +592,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         jnl_for_conf = (merged.get("journal") or "").strip()
         jnl_lower_conf = jnl_for_conf.lower()
         is_conf_proceedings = (
-            jnl_lower_conf.startswith("proceedings ")
+            "proceedings" in jnl_lower_conf
+            or jnl_lower_conf.startswith("conference on")
             or "@" in jnl_for_conf  # IberLEF@SEPLN pattern
             or jnl_lower_conf in CONFERENCE_AS_JOURNAL
         )
