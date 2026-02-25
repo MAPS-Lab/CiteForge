@@ -222,13 +222,17 @@ def _try_multiple_candidates(
             if not candidate_dict:
                 continue
 
-            # Collect DOIs from all candidates for preprint-on-disk check
+            # Collect DOIs from candidates that share year + authors with baseline
+            # (for preprint-on-disk check). Only include candidates with relevance
+            # to avoid false matches from unrelated papers by the same author.
             if all_candidate_dois is not None:
-                _c_doi = idu.normalize_doi(
-                    (candidate_dict.get("fields") or {}).get("doi")
-                )
-                if _c_doi:
-                    all_candidate_dois.append(_c_doi)
+                _c_fields = candidate_dict.get("fields") or {}
+                _c_doi = idu.normalize_doi(_c_fields.get("doi"))
+                if _c_doi and not idu.is_secondary_doi(_c_doi):
+                    _b_year = str((baseline_entry.get("fields") or {}).get("year", ""))
+                    _c_year = str(_c_fields.get("year", ""))
+                    if _b_year and _c_year and abs(int(_b_year or 0) - int(_c_year or 0)) <= 2:
+                        all_candidate_dois.append(_c_doi)
 
             match = bt.bibtex_entries_match_strict(baseline_entry, candidate_dict)
             if match:
