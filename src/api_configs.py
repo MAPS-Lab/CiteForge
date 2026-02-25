@@ -14,7 +14,6 @@ S2_SEARCH_CONFIG = APISearchConfig(
     requires_api_key=True,
     additional_params={
         "limit": 15,
-        # Note: DOI is inside externalIds.DOI, not a top-level field
         "fields": "paperId,title,year,venue,publicationTypes,authors,url,journal,externalIds,publicationDate"
     }
 )
@@ -31,7 +30,6 @@ CROSSREF_SEARCH_CONFIG = APISearchConfig(
         "select": ("title,author,issued,container-title,type,URL,DOI,"
                    "published-print,published-online,publisher,volume,issue,page")
     },
-    # Custom getters for Crossref's format
     title_getter=lambda c: (
         (c.get("title") or [""])[0]
         if isinstance(c.get("title"), list) and c.get("title")
@@ -57,7 +55,6 @@ OPENALEX_SEARCH_CONFIG = APISearchConfig(
         "per-page": 20,
         "mailto": os.getenv("CROSSREF_MAILTO", "")
     },
-    # Custom getters for OpenAlex's nested structure
     authors_getter=lambda w: [
         authorship.get("author", {}).get("display_name", "")
         for authorship in w.get("authorships") or []
@@ -93,8 +90,6 @@ EUROPEPMC_SEARCH_CONFIG = APISearchConfig(
 )
 
 
-# Field Mapping Configurations
-
 S2_FIELD_MAPPING = APIFieldMapping(
     api_name="semantic_scholar",
     title_fields=["title"],
@@ -106,8 +101,6 @@ S2_FIELD_MAPPING = APIFieldMapping(
     arxiv_fields=["externalIds.ArXiv", "externalIds.arXiv"],
     author_name_key="name",
     entry_type_list_field="publicationTypes",
-    extra_field_mappings={},
-    # Custom extractors for nested fields
     custom_author_extractor=lambda paper: [
         a.get("name", "").strip()
         for a in paper.get("authors") or []
@@ -132,7 +125,6 @@ CROSSREF_FIELD_MAPPING = APIFieldMapping(
         "page": "pages",
         "publisher": "publisher"
     },
-    # Custom extractors for Crossref's format
     custom_author_extractor=lambda item: [
         f"{author.get('given', '').strip()} {author.get('family', '').strip()}".strip()
         for author in item.get("author") or []
@@ -160,8 +152,6 @@ OPENALEX_FIELD_MAPPING = APIFieldMapping(
     url_fields=["id"],
     entry_type_field="type",
     venue_hints={"journal": "article"},
-    extra_field_mappings={},
-    # Custom author extractor for OpenAlex's nested structure
     custom_author_extractor=lambda work: [
         authorship.get("author", {}).get("display_name", "").strip()
         for authorship in work.get("authorships") or []
@@ -185,7 +175,6 @@ PUBMED_FIELD_MAPPING = APIFieldMapping(
         "issue": "number",
         "pages": "pages"
     },
-    # Custom extractors for PubMed's format
     custom_author_extractor=lambda article: [
         author.get("name", "").strip()
         for author in article.get("authors") or []
@@ -209,7 +198,6 @@ EUROPEPMC_FIELD_MAPPING = APIFieldMapping(
         "issue": "number",
         "pageInfo": "pages"
     },
-    # Custom extractors
     custom_author_extractor=lambda article: [
         name.strip()
         for name in (article.get("authorString") or "").split(",")
@@ -242,7 +230,6 @@ OPENREVIEW_FIELD_MAPPING = APIFieldMapping(
     venue_fields=["content.venue", "content.venueid"],
     doi_fields=["content.doi"],
     url_fields=["content.pdf", "content.link", "content.homepage"],
-    # Custom handling for nested content
     custom_author_extractor=lambda note: [
         str(a).strip()
         for a in ((note.get("content") or {}).get("authors") or
@@ -260,7 +247,6 @@ DATACITE_FIELD_MAPPING = APIFieldMapping(
     venue_fields=["attributes.publisher"],
     doi_fields=["attributes.doi"],
     url_fields=["attributes.url"],
-    # Custom extractors for DataCite's nested structure
     custom_author_extractor=lambda record: [
         creator.get("name", "").strip()
         for creator in (record.get("attributes") or {}).get("creators") or []

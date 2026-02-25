@@ -397,9 +397,8 @@ def sanitize_bibtex_remove_placeholders(bibtex: str) -> str:
     entry = parse_bibtex_to_dict(bibtex)
     if not entry:
         return bibtex
-    clean = {k: v for k, v in entry["fields"].items() if not has_placeholder(v)}
-    entry2 = {"type": entry["type"], "key": entry["key"], "fields": clean}
-    return bibtex_from_dict(entry2)
+    entry["fields"] = {k: v for k, v in entry["fields"].items() if not has_placeholder(v)}
+    return bibtex_from_dict(entry)
 
 
 def _short_title_for_key(

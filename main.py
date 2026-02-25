@@ -447,15 +447,7 @@ def process_article(
         # Fix conference proceedings misclassified as @article with journal
         if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
             _conf_jnl = (_bl_fields.get("journal") or "").strip()
-            _conf_jnl_lower = _conf_jnl.lower()
-            from src.config import CONFERENCE_AS_JOURNAL
-            _is_conf = (
-                "proceedings" in _conf_jnl_lower
-                or _conf_jnl_lower.startswith("conference on")
-                or "@" in _conf_jnl
-                or _conf_jnl_lower in CONFERENCE_AS_JOURNAL
-            )
-            if _is_conf and not _bl_fields.get("booktitle"):
+            if mu._is_conference_journal(_conf_jnl) and not _bl_fields.get("booktitle"):
                 logger.debug(
                     f"EXISTING_FIXUP | conference_as_journal | journal={_conf_jnl[:60]}",
                     category=LogCategory.CLEANUP,
@@ -467,26 +459,9 @@ def process_article(
         # Fix lowercase author names
         _bl_auth = _bl_fields.get("author", "")
         if isinstance(_bl_auth, str) and _bl_auth:
-            _auth_parts = [p.strip() for p in _bl_auth.split(" and ")]
-            _auth_fixed = False
-            _auth_result: list[str] = []
-            for _ap in _auth_parts:
-                _toks = _ap.split()
-                if len(_toks) >= 2:
-                    _new_toks: list[str] = []
-                    for _t in _toks:
-                        if (_t and _t[0].isalpha() and _t[0].islower() and len(_t) > 1) or (
-                            _t and len(_t) > 2 and _t.isupper()
-                        ):
-                            _new_toks.append(_t.capitalize())
-                            _auth_fixed = True
-                        else:
-                            _new_toks.append(_t)
-                    _auth_result.append(" ".join(_new_toks))
-                else:
-                    _auth_result.append(_ap)
-            if _auth_fixed:
-                _bl_fields["author"] = " and ".join(_auth_result)
+            _auth_fixed_val, _auth_was_fixed = mu._fix_author_casing(_bl_auth)
+            if _auth_was_fixed:
+                _bl_fields["author"] = _auth_fixed_val
                 logger.debug(
                     f"EXISTING_FIXUP | author_capitalized | old={_bl_auth[:60]}",
                     category=LogCategory.CLEANUP,
@@ -514,21 +489,14 @@ def process_article(
             _fixup_written = True
 
         # Normalize howpublished casing
-        _bl_hp = (_bl_fields.get("howpublished") or "").strip()
-        if _bl_hp:
-            _hp_canonical: dict[str, str] = {
-                "arxiv": "arXiv", "biorxiv": "bioRxiv", "medrxiv": "medRxiv",
-                "chemrxiv": "ChemRxiv", "techrxiv": "TechRxiv",
-                "research square": "Research Square", "ssrn": "SSRN",
-            }
-            _hp_key = _bl_hp.lower().split("(")[0].strip()
-            if _hp_key in _hp_canonical and _bl_hp != _hp_canonical[_hp_key]:
-                _bl_fields["howpublished"] = _hp_canonical[_hp_key]
-                logger.debug(
-                    f"EXISTING_FIXUP | howpublished_casing | {_bl_hp}->{_hp_canonical[_hp_key]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _fixup_written = True
+        _bl_hp_before = (_bl_fields.get("howpublished") or "").strip()
+        mu._normalize_howpublished(_bl_fields)
+        if _bl_fields.get("howpublished", "") != _bl_hp_before and _bl_hp_before:
+            logger.debug(
+                f"EXISTING_FIXUP | howpublished_casing | {_bl_hp_before}->{_bl_fields['howpublished']}",
+                category=LogCategory.CLEANUP,
+            )
+            _fixup_written = True
 
         # Escape bare & in field values (bibtex_from_dict handles this on write,
         # but we need to trigger a rewrite for files that were never re-serialized)
@@ -1125,15 +1093,7 @@ def process_article(
         # Reclassify @article with conference proceedings as journal -> @inproceedings
         if merged.get("type") == "article" and merged_fields.get("journal"):
             _p4_jnl = (merged_fields.get("journal") or "").strip()
-            _p4_jnl_lower = _p4_jnl.lower()
-            from src.config import CONFERENCE_AS_JOURNAL
-            _p4_is_conf = (
-                "proceedings" in _p4_jnl_lower
-                or _p4_jnl_lower.startswith("conference on")
-                or "@" in _p4_jnl
-                or _p4_jnl_lower in CONFERENCE_AS_JOURNAL
-            )
-            if _p4_is_conf and not merged_fields.get("booktitle"):
+            if mu._is_conference_journal(_p4_jnl) and not merged_fields.get("booktitle"):
                 logger.debug(
                     f"TYPE_CORRECT | article_conference_journal->inproceedings | journal={_p4_jnl[:60]}",
                     category=LogCategory.AUDIT,
@@ -1180,16 +1140,7 @@ def process_article(
             merged_fields["author"] = _p4_auth_fixed
 
         # Normalize howpublished casing after all journal→howpublished moves
-        _p4_hp = (merged_fields.get("howpublished") or "").strip()
-        if _p4_hp:
-            _p4_hp_canonical: dict[str, str] = {
-                "arxiv": "arXiv", "biorxiv": "bioRxiv", "medrxiv": "medRxiv",
-                "chemrxiv": "ChemRxiv", "techrxiv": "TechRxiv",
-                "research square": "Research Square", "ssrn": "SSRN",
-            }
-            _p4_hp_key = _p4_hp.lower().split("(")[0].strip()
-            if _p4_hp_key in _p4_hp_canonical:
-                merged_fields["howpublished"] = _p4_hp_canonical[_p4_hp_key]
+        mu._normalize_howpublished(merged_fields)
 
         # Upgrade @misc with conference/workshop howpublished → @inproceedings
         # When howpublished is a venue name (not a preprint server), the entry

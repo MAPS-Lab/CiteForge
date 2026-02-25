@@ -59,6 +59,69 @@ _JOURNAL_URL_MAP: dict[str, str] = {
     "ssrn.com": "SSRN Electronic Journal",
 }
 
+# Canonical casing for howpublished preprint server names.
+# Used by merge_with_policy, save_entry_to_file fixup, and Phase 4 post-merge.
+_HOWPUB_CANONICAL: dict[str, str] = {
+    "arxiv": "arXiv",
+    "biorxiv": "bioRxiv",
+    "medrxiv": "medRxiv",
+    "chemrxiv": "ChemRxiv",
+    "techrxiv": "TechRxiv",
+    "research square": "Research Square",
+    "ssrn": "SSRN",
+}
+
+
+def _is_conference_journal(journal: str) -> bool:
+    """Check if a journal name is actually a conference proceedings venue.
+
+    Detects "Proceedings of ...", "Conference on ...", "@" patterns (e.g.
+    IberLEF@SEPLN), and entries in CONFERENCE_AS_JOURNAL.
+    """
+    lower = journal.lower()
+    return (
+        "proceedings" in lower
+        or lower.startswith("conference on")
+        or "@" in journal
+        or lower in CONFERENCE_AS_JOURNAL
+    )
+
+
+def _normalize_howpublished(fields: dict[str, Any]) -> None:
+    """Normalize howpublished casing for known preprint servers in-place."""
+    hp = (fields.get("howpublished") or "").strip()
+    if hp:
+        hp_key = hp.lower().split("(")[0].strip()
+        if hp_key in _HOWPUB_CANONICAL:
+            fields["howpublished"] = _HOWPUB_CANONICAL[hp_key]
+
+
+def _fix_author_casing(author_val: str) -> tuple[str, bool]:
+    """Fix author name casing: capitalize all-lowercase tokens and convert
+    ALL-CAPS tokens (>2 chars) to title case.
+
+    Returns (fixed_string, was_modified).
+    """
+    parts = [p.strip() for p in author_val.split(" and ")]
+    fixed_parts: list[str] = []
+    any_fixed = False
+    for ap in parts:
+        tokens = ap.split()
+        if len(tokens) >= 2:
+            new_tokens: list[str] = []
+            for t in tokens:
+                if not t or not t[0].isalpha():
+                    new_tokens.append(t)
+                elif (len(t) > 1 and t[0].islower()) or (len(t) > 2 and t.isupper()):
+                    new_tokens.append(t.capitalize())
+                    any_fixed = True
+                else:
+                    new_tokens.append(t)
+            fixed_parts.append(" ".join(new_tokens))
+        else:
+            fixed_parts.append(ap)
+    return " and ".join(fixed_parts), any_fixed
+
 
 def _sanitize_author_digits(name: str) -> str:
     """Strip trailing digit suffixes from author names (e.g., 'Das1' -> 'Das')."""
@@ -357,31 +420,9 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # ALL-CAPS tokens to title case (catches "darren steeves", "F VARNO").
     author_val2 = merged.get("author", "")
     if author_val2:
-        parts2 = [p.strip() for p in str(author_val2).split(" and ")]
-        fixed_parts: list[str] = []
-        any_fixed = False
-        for ap in parts2:
-            tokens = ap.split()
-            if len(tokens) >= 2:
-                new_tokens = []
-                for t in tokens:
-                    if not t or not t[0].isalpha():
-                        new_tokens.append(t)
-                    elif len(t) > 1 and t[0].islower():
-                        # lowercase token → capitalize
-                        new_tokens.append(t.capitalize())
-                        any_fixed = True
-                    elif len(t) > 2 and t.isupper():
-                        # ALL-CAPS token (>2 chars) → title case
-                        new_tokens.append(t.capitalize())
-                        any_fixed = True
-                    else:
-                        new_tokens.append(t)
-                fixed_parts.append(" ".join(new_tokens))
-            else:
-                fixed_parts.append(ap)
-        if any_fixed:
-            merged["author"] = " and ".join(fixed_parts)
+        fixed_author, author_was_fixed = _fix_author_casing(str(author_val2))
+        if author_was_fixed:
+            merged["author"] = fixed_author
             logger.debug(
                 f"author_capitalize | before={author_val2[:80]} | after={merged['author'][:80]}",
                 category=LogCategory.CLEANUP,
@@ -590,14 +631,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # is proceedings, not a journal — reclassify as @inproceedings.
     if etype == "article" and merged.get("journal") and not merged.get("booktitle"):
         jnl_for_conf = (merged.get("journal") or "").strip()
-        jnl_lower_conf = jnl_for_conf.lower()
-        is_conf_proceedings = (
-            "proceedings" in jnl_lower_conf
-            or jnl_lower_conf.startswith("conference on")
-            or "@" in jnl_for_conf  # IberLEF@SEPLN pattern
-            or jnl_lower_conf in CONFERENCE_AS_JOURNAL
-        )
-        if is_conf_proceedings:
+        if _is_conference_journal(jnl_for_conf):
             logger.debug(
                 f"conference_as_journal | journal={jnl_for_conf} | type article->inproceedings",
                 category=LogCategory.CLEANUP,
@@ -755,21 +789,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             category=LogCategory.CLEANUP,
         )
 
-    # Normalize howpublished casing for known preprint servers
-    howpub_canonical: dict[str, str] = {
-        "arxiv": "arXiv",
-        "biorxiv": "bioRxiv",
-        "medrxiv": "medRxiv",
-        "chemrxiv": "ChemRxiv",
-        "techrxiv": "TechRxiv",
-        "research square": "Research Square",
-        "ssrn": "SSRN",
-    }
-    _hp = (merged.get("howpublished") or "").strip()
-    if _hp:
-        _hp_key = _hp.lower().split("(")[0].strip()
-        if _hp_key in howpub_canonical:
-            merged["howpublished"] = howpub_canonical[_hp_key]
+    _normalize_howpublished(merged)
 
     unique_sources = sorted(set(field_sources.values()))
     logger.debug(

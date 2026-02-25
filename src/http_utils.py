@@ -63,18 +63,16 @@ def _generate_user_agent_pool() -> list[str]:
         for platform in chrome_platforms
         for cv in chrome_versions
     ]
-    # Firefox on Windows
-    for fv in firefox_versions:
-        agents.append(
-            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{fv}) "
-            f"Gecko/20100101 Firefox/{fv}"
-        )
-    # Firefox on Linux
-    for fv in firefox_versions:
-        agents.append(
-            f"Mozilla/5.0 (X11; Linux x86_64; rv:{fv}) "
-            f"Gecko/20100101 Firefox/{fv}"
-        )
+    # Firefox on Windows and Linux
+    firefox_platforms = [
+        "Windows NT 10.0; Win64; x64",
+        "X11; Linux x86_64",
+    ]
+    for fp in firefox_platforms:
+        for fv in firefox_versions:
+            agents.append(
+                f"Mozilla/5.0 ({fp}; rv:{fv}) Gecko/20100101 Firefox/{fv}"
+            )
     # Safari on macOS
     agents.append(
         f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
@@ -256,14 +254,15 @@ def _get_session() -> requests.Session:
     Rotates the session after ``SESSION_ROTATION_THRESHOLD`` requests to
     prevent long-lived connection correlation.
     """
-    session = getattr(_THREAD_LOCAL, "session", None)
-    count = getattr(_THREAD_LOCAL, "session_request_count", 0)
-    if session is None or count >= SESSION_ROTATION_THRESHOLD:
-        if session is not None:
-            session.close()
-        session = _new_session()
-        _THREAD_LOCAL.session = session
-        _THREAD_LOCAL.session_request_count = 0
+    session: requests.Session | None = getattr(_THREAD_LOCAL, "session", None)
+    count: int = getattr(_THREAD_LOCAL, "session_request_count", 0)
+    if session is not None and count < SESSION_ROTATION_THRESHOLD:
+        return session
+    if session is not None:
+        session.close()
+    session = _new_session()
+    _THREAD_LOCAL.session = session
+    _THREAD_LOCAL.session_request_count = 0
     return session
 
 
@@ -455,18 +454,20 @@ def http_get_text(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> str:
     """
     headers = DEFAULT_BROWSER_HEADERS.copy()
     raw = http_fetch_bytes(url, headers, timeout)
-    if raw.startswith(b"\xef\xbb\xbf"):
-        return raw.decode("utf-8-sig")
-    if raw.startswith(b"\xff\xfe"):
-        try:
-            return raw.decode("utf-16le")
-        except DECODE_ERRORS:
-            pass
-    if raw.startswith(b"\xfe\xff"):
-        try:
-            return raw.decode("utf-16be")
-        except DECODE_ERRORS:
-            pass
+
+    # Try BOM-indicated encodings first
+    bom_encodings: list[tuple[bytes, str]] = [
+        (b"\xef\xbb\xbf", "utf-8-sig"),
+        (b"\xff\xfe", "utf-16le"),
+        (b"\xfe\xff", "utf-16be"),
+    ]
+    for bom, encoding in bom_encodings:
+        if raw.startswith(bom):
+            try:
+                return raw.decode(encoding)
+            except DECODE_ERRORS:
+                pass
+
     try:
         return raw.decode("utf-8")
     except DECODE_ERRORS:

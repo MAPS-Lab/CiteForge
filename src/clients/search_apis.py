@@ -247,14 +247,13 @@ def bibtex_from_csl(csl: dict[str, Any], keyhint: str) -> str:
     number = safe_get_field(csl, "issue")
     pages = safe_get_field(csl, "page")
     publisher = safe_get_field(csl, "publisher")
-    publisher_cleanup = bool(publisher and publisher.strip().lower() == "arxiv")
-    if publisher_cleanup:
+    publisher_is_arxiv = bool(publisher and publisher.strip().lower() == "arxiv")
+    if publisher_is_arxiv:
         publisher = None
-    is_container_array = isinstance(container_raw, list) and len(container_raw) > 1
     logger.debug(
         f"csl | CONVERT | title={title[:50]} | subtitle={bool(subtitle)}"
-        f" | container_title_array={is_container_array}"
-        f" | publisher_cleanup={publisher_cleanup} | entry_type={entry_type}",
+        f" | container_title_array={isinstance(container_raw, list) and len(container_raw) > 1}"
+        f" | publisher_cleanup={publisher_is_arxiv} | entry_type={entry_type}",
         category=LogCategory.SCORE,
     )
     return build_bibtex_entry(
@@ -675,6 +674,18 @@ def _xml_text(el: ElementTree.Element | None) -> str:
     return (el.text or "").strip() if el is not None else ""
 
 
+def _dblp_extract_names(parent: ElementTree.Element, tag: str) -> list[str]:
+    """Extract and sanitize person names from DBLP XML child elements."""
+    names: list[str] = []
+    for el in parent.findall(tag):
+        nm = _xml_text(el)
+        if nm:
+            nm = _sanitize_dblp_author(nm)
+            if nm:
+                names.append(nm)
+    return names
+
+
 def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     """Download a DBLP author XML record and convert entries into publication dicts."""
     if not pid:
@@ -724,20 +735,9 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
                 year = int(year_el.text.strip())
             except PARSE_ERRORS:
                 year = 0
-        authors_list: list[str] = []
-        for ael in child.findall("author"):
-            nm = _xml_text(ael)
-            if nm:
-                nm = _sanitize_dblp_author(nm)
-                if nm:
-                    authors_list.append(nm)
+        authors_list: list[str] = _dblp_extract_names(child, "author")
         if not authors_list:
-            for eel in child.findall("editor"):
-                nm = _xml_text(eel)
-                if nm:
-                    nm = _sanitize_dblp_author(nm)
-                    if nm:
-                        authors_list.append(nm)
+            authors_list = _dblp_extract_names(child, "editor")
         ee = _xml_text(child.find("ee"))
         dburl = _xml_text(child.find("url"))
         doi = _norm_doi(find_doi_in_text(ee) or find_doi_in_text(dburl))

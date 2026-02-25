@@ -49,7 +49,6 @@ from tests.conftest import extract_bibtex_field
 
 class TestBibtexParserInnerQuotes:
     """Test that parse_bibtex_to_dict handles quotes inside braces and outer quotes."""
-
     def test_quotes_inside_braces(self) -> None:
         """Quotes within braces should be preserved as literal characters."""
         bibtex = '@article{key1,\n  title = {AI "systems" review},\n  year = {2024}\n}\n'
@@ -74,7 +73,6 @@ class TestBibtexParserInnerQuotes:
 
 class TestTildeInUrls:
     """Test that bibtex_from_dict preserves tildes in URLs but converts standalone tildes."""
-
     def test_tilde_in_url_preserved(self) -> None:
         """A tilde in a URL (preceded by /) should be kept as-is."""
         entry: dict[str, Any] = {
@@ -88,7 +86,6 @@ class TestTildeInUrls:
         output = bt.bibtex_from_dict(entry)
         url_val = extract_bibtex_field(output, "url")
         assert url_val is not None
-        assert "~" in url_val, f"Tilde should be preserved in URL, got: {url_val}"
         assert "~user" in url_val
 
     def test_standalone_tilde_converted(self) -> None:
@@ -103,13 +100,11 @@ class TestTildeInUrls:
         output = bt.bibtex_from_dict(entry)
         title_val = extract_bibtex_field(output, "title")
         assert title_val is not None
-        assert "~" not in title_val, f"Standalone tilde should be replaced, got: {title_val}"
         assert "word word" in title_val
 
 
 class TestNormalizeTitleWithLatex:
     """Test that normalize_title handles various LaTeX constructs."""
-
     def test_frac_becomes_fraction(self) -> None:
         r"""\\frac{1}{2} should normalize to contain '1/2'."""
         result = text_utils.normalize_title(r"\frac{1}{2}")
@@ -123,8 +118,6 @@ class TestNormalizeTitleWithLatex:
     def test_tilde_replaced(self) -> None:
         """A tilde should be replaced (non-breaking space) during normalization."""
         result = text_utils.normalize_title("hello~world")
-        # The tilde is replaced by the regex in normalize_title that converts
-        # punctuation (including ~) to spaces
         assert "~" not in result
         assert "hello" in result
         assert "world" in result
@@ -136,7 +129,6 @@ class TestSanitizeTitleRepeatedSubtitle:
     _sanitize_title is a nested function inside bibtex_from_dict, so we test it
     indirectly by round-tripping through bibtex_from_dict.
     """
-
     def test_short_repeated_segment_kept(self) -> None:
         """A short repeated subtitle segment (e.g., 'B') should NOT be truncated."""
         entry: dict[str, Any] = {
@@ -149,7 +141,6 @@ class TestSanitizeTitleRepeatedSubtitle:
         output = bt.bibtex_from_dict(entry)
         title_val = extract_bibtex_field(output, "title")
         assert title_val is not None
-        # "B" is only 1 char long, well under 15 chars, so both should remain
         assert title_val.count("B") == 2, f"Short repeated segment should be kept, got: {title_val}"
 
     def test_long_repeated_segment_truncated(self) -> None:
@@ -166,7 +157,6 @@ class TestSanitizeTitleRepeatedSubtitle:
         output = bt.bibtex_from_dict(entry)
         title_val = extract_bibtex_field(output, "title")
         assert title_val is not None
-        # The duplicated long segment should appear only once
         assert title_val.count(long_sub) == 1, (
             f"Long repeated segment should be de-duplicated, got: {title_val}"
         )
@@ -174,7 +164,6 @@ class TestSanitizeTitleRepeatedSubtitle:
 
 class TestSearchApiGenericMultipleCache:
     """Test that search_api_generic_multiple uses cache for repeated queries."""
-
     def test_cache_hit_skips_http(self) -> None:
         """Second call with same args should return cached results without HTTP."""
         config = APISearchConfig(
@@ -196,31 +185,28 @@ class TestSearchApiGenericMultipleCache:
             ],
         }
 
-        # Patch the cache to use a temporary directory and ensure it is enabled
         with (
             patch("src.api_generics.response_cache") as mock_cache,
             patch("src.api_generics.http_get_json", return_value=fake_results) as mock_http,
         ):
-            # First call: cache miss, HTTP hit
             mock_cache.get.return_value = None
             search_api_generic_multiple(
                 title="Machine Learning Fundamentals",
                 author_name="John Smith",
                 config=config,
             )
-            # http_get_json should have been called once
             assert mock_http.call_count == 1
 
-            # Second call: simulate cache hit
-            mock_cache.get.return_value = {"results": [{"title": "Machine Learning Fundamentals",
-                                                         "authors": [{"name": "John Smith"}],
-                                                         "year": 2024}]}
+            mock_cache.get.return_value = {
+                "results": [{"title": "Machine Learning Fundamentals",
+                             "authors": [{"name": "John Smith"}],
+                             "year": 2024}],
+            }
             result2 = search_api_generic_multiple(
                 title="Machine Learning Fundamentals",
                 author_name="John Smith",
                 config=config,
             )
-            # http_get_json should NOT have been called again
             assert mock_http.call_count == 1
             assert len(result2) == 1
             assert result2[0]["title"] == "Machine Learning Fundamentals"
@@ -228,7 +214,6 @@ class TestSearchApiGenericMultipleCache:
 
 class TestDoiValidationSkipsBibtexWhenCslMatches:
     """Test that validate_doi_candidate does not fetch BibTeX when CSL matches."""
-
     @patch("src.doi_utils.search_apis.fetch_bibtex_via_doi")
     @patch("src.doi_utils.search_apis.fetch_csl_via_doi")
     @patch("src.doi_utils.search_apis.bibtex_from_csl")
@@ -239,7 +224,6 @@ class TestDoiValidationSkipsBibtexWhenCslMatches:
         mock_fetch_bibtex: MagicMock,
     ) -> None:
         """When CSL validation succeeds, fetch_bibtex_via_doi should not be called."""
-        # Set up a baseline entry
         baseline_entry: dict[str, Any] = {
             "type": "article",
             "key": "Smith2024",
@@ -250,9 +234,7 @@ class TestDoiValidationSkipsBibtexWhenCslMatches:
             },
         }
 
-        # Mock CSL to return a matching entry
         mock_fetch_csl.return_value = {"title": "Test Paper on Machine Learning", "DOI": "10.1234/test"}
-        # bibtex_from_csl returns a BibTeX string that parse_bibtex_to_dict can parse
         mock_bibtex_from_csl.return_value = (
             "@article{Smith2024,\n"
             "  title = {Test Paper on Machine Learning},\n"
@@ -261,7 +243,6 @@ class TestDoiValidationSkipsBibtexWhenCslMatches:
             "}\n"
         )
 
-        # Patch bibtex_entries_match_strict to return True for the CSL path
         with patch("src.doi_utils.bt.bibtex_entries_match_strict", return_value=True):
             csl_matched, bibtex_matched, _, _ = validate_doi_candidate(
                 doi="10.1234/test",
@@ -269,17 +250,13 @@ class TestDoiValidationSkipsBibtexWhenCslMatches:
                 result_id="Smith2024",
             )
 
-        # CSL should have matched
         assert csl_matched is True
-        # BibTeX should not have been called at all
         mock_fetch_bibtex.assert_not_called()
-        # bibtex_matched should be False since we skipped it
         assert bibtex_matched is False
 
 
 class TestDeduplicatePublicationList:
     """Test _deduplicate_publication_list from src/clients/scholar.py."""
-
     def test_empty_list(self) -> None:
         """Empty input should return empty output."""
         result = _deduplicate_publication_list([])
@@ -313,7 +290,6 @@ class TestDeduplicatePublicationList:
 
 class TestIsSecondaryDoi:
     """Fix 1: is_secondary_doi classifies preprint and data DOIs."""
-
     def test_arxiv_doi(self) -> None:
         assert id_utils.is_secondary_doi("10.48550/arxiv.2401.12345") is True
 
@@ -335,7 +311,6 @@ class TestIsSecondaryDoi:
 
 class TestPagesMaxDigits:
     """Fix 2: SAGE/Wiley article IDs rejected as pages."""
-
     def test_sage_article_id_rejected(self) -> None:
         """16-digit SAGE article IDs should be rejected from pages field."""
         entry = {
@@ -405,7 +380,6 @@ class TestPagesMaxDigits:
 
 class TestHtmlEntityDecode:
     """Fix 3: HTML entities decoded in journal/title fields."""
-
     def test_amp_decoded_in_journal(self) -> None:
         entry = {
             "type": "article",
@@ -431,14 +405,12 @@ class TestHtmlEntityDecode:
             },
         }
         merged = merge_utils.merge_with_policy(entry, [])
-        # HTML tags are stripped, then entities are decoded
         assert "&lt;" not in merged["fields"]["title"]
         assert "&gt;" not in merged["fields"]["title"]
 
 
 class TestTrimTitleArtifacts:
     """Fix 4: 'Check for updates' prefix stripped from titles."""
-
     def test_check_for_updates_stripped(self) -> None:
         result = text_utils.trim_title_default("Check for updates Real Title Here")
         assert result == "Real Title Here"
@@ -459,7 +431,6 @@ class TestTrimTitleArtifacts:
 
 class TestMinTitleWords:
     """Fix 6: Single-word titles rejected as Scholar artifacts."""
-
     def test_single_word_below_minimum(self) -> None:
         """A single-word title has fewer words than MIN_TITLE_WORDS threshold."""
         title = "Games"
@@ -487,7 +458,6 @@ class TestMinTitleWords:
 
 class TestArxivJournalConsistency:
     """Fix 7: Pure arXiv papers have journal removed (arXiv is a preprint server, not a journal)."""
-
     def test_arxiv_eprint_no_journal_stays_empty(self) -> None:
         """An arXiv paper with eprint but no journal should NOT get a journal field."""
         fields: dict[str, Any] = {
@@ -531,7 +501,6 @@ class TestArxivJournalConsistency:
 
 class TestStrongAuthorDedupGate:
     """Fix 8: Strong author overlap allows composite dedup scoring."""
-
     def test_same_authors_moderate_title_sim_matches(self) -> None:
         """Real Alhasani2025 duplicate: same authors, truncated title variant → should match."""
         _title_a = (
@@ -603,7 +572,6 @@ class TestStrongAuthorDedupGate:
 
 class TestGenericSeriesNameMerge:
     """Fix 5: LNCS and other generic series names should be replaced by specific conference names."""
-
     def test_lncs_replaced_by_conference_name(self) -> None:
         """When CSL provides LNCS and enricher provides real conference name, prefer conference."""
         entry = {
@@ -742,7 +710,6 @@ class TestGenericSeriesNameMerge:
 
 class TestSameSourceTypeOverride:
     """Merge must prefer the later type when CSL appears twice (arXiv DOI then published DOI)."""
-
     def test_csl_inproceedings_overrides_csl_article(self) -> None:
         """Second CSL enricher (published DOI) should override first (arXiv DOI) type."""
         entry = {
@@ -817,7 +784,6 @@ class TestSameSourceTypeOverride:
 
 class TestAuthorNameMatches:
     """Tests for author_name_matches used to filter wrong-author entries."""
-
     def test_full_name_match(self) -> None:
         """Full name match: 'Raza Abidi' matches 'Syed Sibte Raza Abidi'."""
         assert author_name_matches("Raza Abidi", "Author One and Syed Sibte Raza Abidi")
@@ -848,7 +814,6 @@ class TestAuthorNameMatches:
 
 class TestTitleLengthWhitespaceNormalization:
     """Title comparison normalizes whitespace so OCR artifacts don't get false length advantage."""
-
     def test_broken_title_replaced_by_correct(self) -> None:
         """'Un met' (Scholar artifact) should be replaced by 'Unmet' from a higher-trust source."""
         entry = {
@@ -874,7 +839,6 @@ class TestTitleLengthWhitespaceNormalization:
 
 class TestLeadingZerosInPages:
     """Pages with leading zeros should have them stripped (e.g., 01-08 → 1-8)."""
-
     def test_leading_zeros_stripped(self) -> None:
         entry = {
             "type": "inproceedings",
@@ -902,7 +866,6 @@ class TestLeadingZerosInPages:
 
 class TestFrontiersJournalDetection:
     """Frontiers in * booktitles should be moved to journal field."""
-
     def test_frontiers_booktitle_becomes_journal(self) -> None:
         entry = {
             "type": "inproceedings",
@@ -944,7 +907,6 @@ class TestFrontiersJournalDetection:
 
 class TestHtmlEntityInSerializer:
     """HTML entities like &amp; should be decoded in bibtex_from_dict output."""
-
     def test_amp_decoded_in_booktitle(self) -> None:
         entry = {
             "type": "inproceedings",
@@ -961,7 +923,6 @@ class TestHtmlEntityInSerializer:
 
 class TestJournalUrlNormalization:
     """Journal fields containing URLs should be normalized to server names."""
-
     def test_arxiv_url_removed_from_journal(self) -> None:
         entry = {
             "type": "article",
@@ -998,10 +959,8 @@ class TestJournalUrlNormalization:
 
 class TestTokenBucketRateLimiter:
     """Tests for the TokenBucketRateLimiter in http_utils."""
-
     def test_acquire_respects_rate(self) -> None:
         """Acquire should block when tokens are exhausted."""
-
         limiter = TokenBucketRateLimiter(rate=100.0, burst=1)
         start = time.monotonic()
         limiter.acquire()
@@ -1010,7 +969,6 @@ class TestTokenBucketRateLimiter:
 
     def test_burst_allows_multiple_immediate(self) -> None:
         """Burst > 1 should allow multiple immediate acquires."""
-
         limiter = TokenBucketRateLimiter(rate=100.0, burst=3)
         start = time.monotonic()
         for _ in range(3):
@@ -1020,7 +978,6 @@ class TestTokenBucketRateLimiter:
 
     def test_rate_limiter_registry(self) -> None:
         """Rate limiter registry returns consistent instances."""
-
         limiter1 = _get_rate_limiter("crossref")
         limiter2 = _get_rate_limiter("crossref")
         assert limiter1 is limiter2
@@ -1028,13 +985,11 @@ class TestTokenBucketRateLimiter:
 
     def test_unknown_namespace_returns_none(self) -> None:
         """Unknown namespaces should return None (no rate limiting)."""
-
         assert _get_rate_limiter("nonexistent_api_xyz") is None
 
 
 class TestDotNotationFieldExtraction:
     """Tests for _resolve_dotted in api_generics.py."""
-
     def test_simple_field(self) -> None:
 
         assert _resolve_dotted({"title": "My Paper"}, "title") == "My Paper"
@@ -1067,17 +1022,14 @@ class TestDotNotationFieldExtraction:
 
     def test_str_variant_list(self) -> None:
         """List values should be unwrapped to first element."""
-
         data = {"title": ["My Paper", "Subtitle"]}
         assert _resolve_dotted_str(data, "title") == "My Paper"
 
 
 class TestDOINormalizationInDedup:
     """Tests that DOI comparisons in save_entry_to_file use normalization."""
-
     def test_doi_url_vs_bare_match(self, tmp_path: Any) -> None:
         """DOIs with and without URL prefix should match as duplicates."""
-
         entry1 = {
             "type": "article",
             "key": "Smith2024:Test",
@@ -1113,11 +1065,9 @@ class TestDOINormalizationInDedup:
 
 class TestHttpPostJson:
     """Tests for http_post_json going through the full HTTP infrastructure."""
-
     @patch("src.http_utils._http_request")
     def test_post_calls_http_request_with_post_method(self, mock_request: MagicMock) -> None:
         """http_post_json should delegate to _http_request with method='POST'."""
-
         mock_request.return_value = b'{"result": "ok"}'
         result = http_post_json(
             "https://generativelanguage.googleapis.com/v1beta/test",
@@ -1132,7 +1082,6 @@ class TestHttpPostJson:
 
     def test_post_sets_content_type(self) -> None:
         """http_post_json should set Content-Type header when not provided."""
-
         with patch("src.http_utils._http_request") as mock_req:
             mock_req.return_value = b'{"ok": true}'
             http_post_json("https://example.com/api", {"data": 1})
@@ -1141,7 +1090,6 @@ class TestHttpPostJson:
 
     def test_post_preserves_custom_content_type(self) -> None:
         """Custom headers with Content-Type should not be overridden."""
-
         with patch("src.http_utils._http_request") as mock_req:
             mock_req.return_value = b'{"ok": true}'
             custom = {"Content-Type": "application/x-custom", "Accept": "application/json"}
@@ -1161,7 +1109,6 @@ def _reset_openreview_session() -> None:
 
 class TestOpenReviewSessionExpiry:
     """Tests for OpenReview session TTL-based expiry."""
-
     def test_expired_session_triggers_relogin(self) -> None:
         """After TTL expires, openreview_login should re-authenticate."""
         import src.clients.search_apis as sa
@@ -1230,7 +1177,6 @@ class TestOpenReviewSessionExpiry:
 
 class TestBaselineThresholdConsistency:
     """Baseline file matching should use >= (not >) for threshold comparison."""
-
     def test_at_threshold_loads_existing_file(self) -> None:
         """Titles with similarity exactly at SIM_MERGE_DUPLICATE_THRESHOLD should match."""
         title = "Exact Same Title For Testing"
@@ -1248,11 +1194,9 @@ class TestBaselineThresholdConsistency:
 
 class TestOrcidUsesHttpGetJson:
     """ORCID should go through http_get_json (shared HTTP infrastructure)."""
-
     @patch("src.clients.utility_apis.http_get_json")
     def test_orcid_calls_http_get_json(self, mock_get: MagicMock) -> None:
         """orcid_fetch_works should use http_get_json, not urllib."""
-
         mock_get.return_value = {"group": []}
         with patch("src.clients.utility_apis.response_cache") as mock_cache:
             mock_cache.get.return_value = None
@@ -1264,11 +1208,9 @@ class TestOrcidUsesHttpGetJson:
 
 class TestGeminiUsesHttpPostJson:
     """Gemini should go through http_post_json (shared HTTP infrastructure)."""
-
     @patch("src.clients.utility_apis.http_post_json")
     def test_gemini_calls_http_post_json(self, mock_post: MagicMock) -> None:
         """gemini_generate_short_title should use http_post_json, not urllib."""
-
         mock_post.return_value = {
             "candidates": [{
                 "content": {
@@ -1285,7 +1227,6 @@ class TestGeminiUsesHttpPostJson:
     @patch("src.clients.utility_apis.http_post_json")
     def test_gemini_handles_value_error(self, mock_post: MagicMock) -> None:
         """Gemini should handle ValueError from non-JSON responses gracefully."""
-
         mock_post.side_effect = ValueError("No JSON object could be decoded")
         result = gemini_generate_short_title("Some Title", "fake-key")
         assert result is None
@@ -1293,7 +1234,6 @@ class TestGeminiUsesHttpPostJson:
 
 class TestHttpRequestPostDispatch:
     """Verify _http_request dispatches to the correct session method."""
-
     @staticmethod
     def _make_mock_session(method: str) -> tuple[MagicMock, MagicMock]:
         """Build a mock session whose *method* returns a successful response.
@@ -1302,7 +1242,6 @@ class TestHttpRequestPostDispatch:
         increments, since patching ``_get_session`` bypasses the real
         initializer.
         """
-
         _THREAD_LOCAL.session_request_count = 0
 
         mock_resp = MagicMock()
@@ -1316,7 +1255,6 @@ class TestHttpRequestPostDispatch:
 
     def test_post_calls_session_post(self) -> None:
         """_http_request('POST', ...) should call session.post, not session.get."""
-
         mock_session, _ = self._make_mock_session("post")
 
         with (
@@ -1330,7 +1268,6 @@ class TestHttpRequestPostDispatch:
 
     def test_get_calls_session_get(self) -> None:
         """_http_request('GET', ...) should call session.get, not session.post."""
-
         mock_session, _ = self._make_mock_session("get")
 
         with (
@@ -1345,7 +1282,6 @@ class TestHttpRequestPostDispatch:
 
 class TestRateLimiterEntries:
     """ORCID and DataCite should have rate limiter entries in config."""
-
     def test_orcid_rate_limiter_exists(self) -> None:
         """_get_rate_limiter should return a limiter for 'orcid' namespace."""
         limiter = _get_rate_limiter("orcid")
@@ -1359,7 +1295,6 @@ class TestRateLimiterEntries:
 
 class TestOpenReviewTTLBoundary:
     """Test the exact boundary of OpenReview session TTL."""
-
     def test_session_expires_at_exact_ttl(self) -> None:
         """Session should be treated as expired when elapsed == TTL (>= check)."""
         import src.clients.search_apis as sa
@@ -1389,22 +1324,18 @@ class TestOpenReviewTTLBoundary:
 
 class TestAbbreviatedVenueExpansion:
     """Abbreviated venue names should be expanded to full conference names."""
-
     def test_determine_entry_type_recognizes_abbreviated_venue(self) -> None:
         """SPIRE in journal field should be detected as inproceedings."""
-
         result = determine_entry_type({"journal": "SPIRE"})
         assert result == "inproceedings"
 
     def test_determine_entry_type_case_insensitive(self) -> None:
         """Abbreviated venue lookup should be case-insensitive."""
-
         result = determine_entry_type({"booktitle": "ircdl"})
         assert result == "inproceedings"
 
     def test_merge_expands_abbreviated_journal(self) -> None:
         """Merge should expand 'SPIRE' in journal to full conference name."""
-
         primary: dict = {
             "type": "article",
             "key": "Test2024:Example",
@@ -1424,7 +1355,6 @@ class TestAbbreviatedVenueExpansion:
 
     def test_merge_expands_abbreviated_booktitle(self) -> None:
         """Merge should expand 'IRCDL' in booktitle to full conference name."""
-
         primary: dict = {
             "type": "inproceedings",
             "key": "Test2024:Example",
@@ -1441,7 +1371,6 @@ class TestAbbreviatedVenueExpansion:
 
     def test_csl_container_title_array_prefers_non_generic(self) -> None:
         """CSL container-title array should prefer non-generic element over LNCS."""
-
         csl = {
             "type": "book-chapter",
             "title": "Data Structures for SMEM-Finding in the PBWT",
@@ -1464,7 +1393,6 @@ class TestAbbreviatedVenueExpansion:
 
     def test_non_abbreviated_venue_unchanged(self) -> None:
         """Normal venue names should not be modified by abbreviation expansion."""
-
         primary: dict = {
             "type": "article",
             "key": "Test2024:Example",
@@ -1481,7 +1409,6 @@ class TestAbbreviatedVenueExpansion:
 
 class TestBiorxivDoiPrefix:
     """L3: bioRxiv DOIs with any 10.1101/ prefix should be classified as preprint."""
-
     def test_biorxiv_old_numeric_doi(self) -> None:
         """Pre-2020 bioRxiv DOI (no date prefix) should be secondary."""
         assert id_utils.is_secondary_doi("10.1101/123456") is True
@@ -1501,7 +1428,6 @@ class TestBiorxivDoiPrefix:
 
 class TestDoiUrlDecoding:
     """L15: _norm_doi should URL-decode percent-encoded characters."""
-
     def test_percent_encoded_slash(self) -> None:
         """DOI with %2F should normalize to match plain slash version."""
         d1 = id_utils.normalize_doi("10.1000/xyz%2Fabc")
@@ -1516,7 +1442,6 @@ class TestDoiUrlDecoding:
 
 class TestNobleParticleMatching:
     """B8/L8: Noble particles (van, von, de, etc.) should produce consistent signatures."""
-
     def test_van_der_waals_first_last(self) -> None:
         """'Johan van der Waals' in First Last format."""
         sig = text_utils.name_signature("Johan van der Waals")
@@ -1568,7 +1493,6 @@ class TestNobleParticleMatching:
 
 class TestEllipsisPlaceholder:
     """L5: Only short strings with ellipsis should be treated as placeholder."""
-
     def test_short_ellipsis_is_placeholder(self) -> None:
         """Short string with ellipsis should be a placeholder."""
         assert text_utils.has_placeholder("Loading...") is True
@@ -1588,7 +1512,6 @@ class TestEllipsisPlaceholder:
 
 class TestCJKTitleNormalization:
     """L7: CJK-only titles should not normalize to empty string."""
-
     def test_cjk_title_not_empty(self) -> None:
         """Chinese characters should not produce empty normalized title."""
         result = text_utils.normalize_title("机器学习方法")
@@ -1609,7 +1532,6 @@ class TestCJKTitleNormalization:
 
 class TestHtmlEntityInNormalizeTitle:
     """D7: HTML entities should be decoded before title normalization."""
-
     def test_amp_decoded(self) -> None:
         """&amp; should become & in normalized title."""
         result = text_utils.normalize_title("Computers &amp; Education")
@@ -1630,7 +1552,6 @@ class TestHtmlEntityInNormalizeTitle:
 
 class TestAuthorOverlapWithInitials:
     """L9: author_overlap_ratio should distinguish authors with same last name but different initials."""
-
     def test_same_last_different_initials_distinguished(self) -> None:
         """'J. Smith' and 'K. Smith' should not be merged when both have initials."""
         ratio = text_utils.author_overlap_ratio(
@@ -1659,7 +1580,6 @@ class TestAuthorOverlapWithInitials:
 
 class TestVenueSimilarityPreprint:
     """L14: venue_similarity should correctly detect preprint servers even with hyphens."""
-
     def test_biorxiv_vs_journal(self) -> None:
         """bioRxiv vs a journal should give 0.5 (preprint/published pair)."""
         sim = text_utils.venue_similarity(
@@ -1679,7 +1599,6 @@ class TestVenueSimilarityPreprint:
 
 class TestBothPreprintDoiDedup:
     """B6: Two entries with different preprint DOIs should NOT match."""
-
     def test_different_arxiv_dois_not_matched(self) -> None:
         """Two different arXiv preprints should not be considered duplicates."""
         entry_a: dict[str, Any] = {
@@ -1710,7 +1629,6 @@ class TestBothPreprintDoiDedup:
 
 class TestYearGapWidened:
     """L6: Year gap > 3 should reject, <= 3 should allow preprint→published."""
-
     def test_3_year_gap_allowed(self) -> None:
         """A 3-year gap (preprint in 2021, published in 2024) should allow matching."""
         entry_a: dict[str, Any] = {
@@ -1768,7 +1686,6 @@ class TestYearGapWidened:
 
 class TestDoiConflictPreserveUpgrade:
     """B1: DOI merge should not revert a preprint→published upgrade."""
-
     def test_preprint_doi_upgraded_to_published(self) -> None:
         """When primary has arXiv DOI and enricher has published DOI, keep published."""
         entry = {
@@ -1791,7 +1708,6 @@ class TestDoiConflictPreserveUpgrade:
 
 class TestPhantomArxivJournal:
     """B2: 'arXiv e-prints' journal should be cleared when published DOI exists."""
-
     def test_arxiv_journal_cleared_with_published_doi(self) -> None:
         """When eprint removed due to published DOI, phantom journal should also go."""
         entry = {
@@ -1856,7 +1772,6 @@ class TestPhantomArxivJournal:
 
 class TestIncollectionPromotionRestricted:
     """B4: incollection→inproceedings should only fire for GENERIC_SERIES_NAMES."""
-
     def test_generic_series_promotes(self) -> None:
         """incollection with LNCS booktitle should become inproceedings."""
         entry = {
@@ -1890,7 +1805,6 @@ class TestIncollectionPromotionRestricted:
 
 class TestCslArticleTypePreserved:
     """L16: CSL/doi_bibtex article type should not be overridden to inproceedings."""
-
     def test_proceedings_journal_becomes_inproceedings(self) -> None:
         """Proceedings-named venues should become @inproceedings, not @article."""
         entry = {
@@ -1943,7 +1857,6 @@ class TestCslArticleTypePreserved:
 
 class TestPreprintServersNoFalsePositives:
     """L19: Journals with 'preprint' substring should not be misclassified."""
-
     def test_preprint_not_in_servers(self) -> None:
         """The generic word 'preprint' should not be in PREPRINT_SERVERS."""
         assert "preprint" not in PREPRINT_SERVERS
@@ -1962,7 +1875,6 @@ class TestPreprintServersNoFalsePositives:
 
 class TestMergeDuplicateThresholdRaised:
     """L1: SIM_MERGE_DUPLICATE_THRESHOLD should be 0.95 (was 0.9)."""
-
     def test_threshold_value(self) -> None:
         assert SIM_MERGE_DUPLICATE_THRESHOLD == 0.95
 
@@ -2002,10 +1914,8 @@ class TestMergeDuplicateThresholdRaised:
 
 class TestSemaphoreReleasedDuring429:
     """B9: Global semaphore should be released before sleeping on 429."""
-
     def test_429_sleep_outside_semaphore(self) -> None:
         """Verify the semaphore is not held during 429 retry sleep."""
-
         _THREAD_LOCAL.session_request_count = 0
 
         mock_resp_429 = MagicMock()
@@ -2036,7 +1946,6 @@ class TestSemaphoreReleasedDuring429:
 
 class TestTokenBucketJitter:
     """L17: TokenBucketRateLimiter.acquire() should include jitter in sleep."""
-
     def test_jitter_import_and_usage(self) -> None:
         """Verify that random.uniform is called during acquire when sleep is needed."""
         import src.http_utils as hu
@@ -2046,7 +1955,6 @@ class TestTokenBucketJitter:
 
     def test_acquire_sleeps_with_jitter_component(self) -> None:
         """When tokens are exhausted, sleep should include a jitter component."""
-
         # Very slow rate = 0.1 tokens/sec, so after burst=1 exhausted,
         # next acquire needs to wait ~10 seconds
         limiter = TokenBucketRateLimiter(rate=0.1, burst=1)
@@ -2071,7 +1979,6 @@ class TestTokenBucketJitter:
 
 class TestEmptyNameSkipped:
     """L12: Records with empty Name but valid IDs should be skipped."""
-
     def test_empty_name_with_scholar_id_skipped(self, tmp_path: Any) -> None:
         """Record with Scholar ID but no Name should be skipped."""
         csv_content = "Name,Scholar Link,DBLP Link\n,https://scholar.google.com/citations?user=abc123,\nJohn Smith,https://scholar.google.com/citations?user=xyz789,\n"
@@ -2086,10 +1993,8 @@ class TestEmptyNameSkipped:
 
 class TestCslEventNameFallback:
     """B10: bibtex_from_csl should use event-name when container is a generic series."""
-
     def test_lncs_with_event_name(self) -> None:
         """When CSL container is LNCS and event-name exists, use event name."""
-
         csl = {
             "type": "book-chapter",
             "title": "Test Paper",
@@ -2108,7 +2013,6 @@ class TestCslEventNameFallback:
 
     def test_non_generic_container_kept(self) -> None:
         """Non-generic container titles should not be replaced by event name."""
-
         csl = {
             "type": "book-chapter",
             "title": "Test Paper",
@@ -2128,7 +2032,6 @@ class TestCslEventNameFallback:
 
 class TestDagstuhlLipicsResolution:
     """Fix 8: Dagstuhl LIPIcs/OASIcs DOIs resolve conference name from DOI pattern."""
-
     @staticmethod
     def _csl_enricher(doi: str) -> list[tuple[str, dict[str, Any]]]:
         """Build a minimal CSL enricher that confirms the DOI."""
@@ -2136,7 +2039,6 @@ class TestDagstuhlLipicsResolution:
 
     def test_lipics_doi_resolves_esa(self) -> None:
         """DOI 10.4230/lipics.esa.2022.59 should resolve to ESA booktitle."""
-
         doi = "10.4230/lipics.esa.2022.59"
         primary: dict = {
             "type": "article",
@@ -2156,7 +2058,6 @@ class TestDagstuhlLipicsResolution:
 
     def test_lipics_doi_resolves_sea(self) -> None:
         """DOI 10.4230/lipics.sea.2023.19 should resolve to SEA booktitle."""
-
         doi = "10.4230/lipics.sea.2023.19"
         primary: dict = {
             "type": "article",
@@ -2176,7 +2077,6 @@ class TestDagstuhlLipicsResolution:
 
     def test_lipics_doi_resolves_cpm_from_misc(self) -> None:
         """DOI 10.4230/lipics.cpm.2024.17 with @misc type should resolve to CPM."""
-
         doi = "10.4230/lipics.cpm.2024.17"
         primary: dict = {
             "type": "misc",
@@ -2216,7 +2116,6 @@ class TestDagstuhlLipicsResolution:
 
 class TestGenericBootitleUpgradeDuringEnforce:
     """Fix 8b: container_enforce upgrades generic booktitle from journal before dropping it."""
-
     def test_lncs_booktitle_upgraded_from_journal(self) -> None:
         """When booktitle is LNCS and journal has specific name, journal wins."""
         primary: dict = {
@@ -2259,7 +2158,6 @@ class TestGenericBootitleUpgradeDuringEnforce:
 class TestCslPreprintVenueOverride:
     """CSL classifies arXiv preprints as @article; venue detection should override
     when the DOI is a secondary/preprint DOI and the venue is a conference."""
-
     def test_arxiv_article_with_conference_journal_becomes_inproceedings(self) -> None:
         """arXiv DOI + conference name in journal -> @inproceedings with booktitle."""
         entry: dict[str, Any] = {
@@ -2346,7 +2244,6 @@ class TestCslPreprintVenueOverride:
 
 class TestEnrichedFileProtection:
     """Prevent unenriched stub from overwriting enriched file during FILE_CLEANUP."""
-
     def test_stub_does_not_overwrite_enriched(self, tmp_path: Any) -> None:
         """When prefer_path points to enriched file (more fields + DOI) and
         new entry is bare stub, FILE_CLEANUP should be blocked."""
@@ -2422,7 +2319,6 @@ class TestEnrichedFileProtection:
 
 class TestPreprintPublisherCleanup:
     """Preprint-only publishers should be stripped from published journal entries."""
-
     def test_openrxiv_stripped_from_published_journal(self) -> None:
         baseline: dict[str, Any] = {
             "type": "article",
@@ -2462,7 +2358,6 @@ class TestPreprintPublisherCleanup:
 
 class TestPreprintJournalDowngrade:
     """@article with a preprint server as journal should become @misc."""
-
     def test_biorxiv_journal_downgrades_to_misc(self) -> None:
         assert any(ps == "biorxiv" for ps in PREPRINT_SERVERS), \
             "biorxiv must be in PREPRINT_SERVERS for this test to be valid"
@@ -2475,7 +2370,6 @@ class TestPreprintJournalDowngrade:
 
 class TestDagstuhlFestschriftDoi:
     """Festschrift DOIs (10.4230/oasics.name.N) should resolve to @inproceedings."""
-
     def test_festschrift_doi_becomes_inproceedings(self) -> None:
         doi = "10.4230/oasics.grossi.10"
         baseline: dict[str, Any] = {
@@ -2525,7 +2419,6 @@ class TestDagstuhlFestschriftDoi:
 
 class TestAuthorDigitSanitization:
     """Author digit suffixes should be stripped during merge."""
-
     def test_trailing_digits_stripped(self) -> None:
         baseline: dict[str, Any] = {
             "type": "misc",
@@ -2564,7 +2457,6 @@ class TestAuthorDigitSanitization:
 
 class TestVenuelessTypeDowngrade:
     """Entries missing required venue fields should be downgraded to @misc."""
-
     def test_article_no_journal_with_published_doi_becomes_misc(self) -> None:
         """@article without journal should be @misc even with a published DOI."""
         baseline: dict[str, Any] = {
@@ -2629,7 +2521,6 @@ class TestVenuelessTypeDowngrade:
 
 class TestArticlePreprintDoiDowngrade:
     """@article with preprint DOI should be downgraded to @misc."""
-
     def test_article_with_arxiv_doi_becomes_misc(self) -> None:
         """@article with arXiv DOI and conference acronym -> @misc."""
         baseline: dict[str, Any] = {
@@ -2715,7 +2606,6 @@ class TestArticlePreprintDoiDowngrade:
 
 class TestReconcileSummaryCSV:
     """reconcile_summary_csv removes phantom entries for deleted files."""
-
     def test_phantom_entries_removed(self, tmp_path: Any) -> None:
         """Rows pointing to non-existent files are stripped from the CSV."""
         import csv as _csv
@@ -2769,7 +2659,6 @@ class TestReconcileSummaryCSV:
 
 class TestCollectOrphanFiles:
     """collect_orphan_files finds .bib files not referenced in the CSV."""
-
     def test_orphan_detected(self, tmp_path: Any) -> None:
         """A .bib file with no CSV entry is reported as an orphan."""
         import csv as _csv
@@ -2823,7 +2712,6 @@ class TestCollectOrphanFiles:
 
 class TestIsKnownSummaryPath:
     """is_known_summary_path checks the in-memory set from init_summary_csv."""
-
     def test_known_path_after_preserve(self, tmp_path: Any) -> None:
         """Paths loaded from an existing CSV are recognized as known."""
         import csv as _csv
@@ -2858,37 +2746,34 @@ class TestIsKnownSummaryPath:
 class TestGarbageTitleDetection:
     """_is_garbage_title catches non-bibliographic titles."""
 
-    def test_email_address(self) -> None:
+    @staticmethod
+    def _is_garbage(title: str) -> bool:
         from main import _is_garbage_title
-        assert _is_garbage_title("spadon@dal.ca Department of CS")
+        return _is_garbage_title(title)
+
+    def test_email_address(self) -> None:
+        assert self._is_garbage("spadon@dal.ca Department of CS")
 
     def test_postal_code(self) -> None:
-        from main import _is_garbage_title
-        assert _is_garbage_title("Halifax, NS B3H 4R2, Canada")
+        assert self._is_garbage("Halifax, NS B3H 4R2, Canada")
 
     def test_department_prefix(self) -> None:
-        from main import _is_garbage_title
-        assert _is_garbage_title("Department of Computer Science")
+        assert self._is_garbage("Department of Computer Science")
 
     def test_complete_volume(self) -> None:
-        from main import _is_garbage_title
-        assert _is_garbage_title("OASIcs, Volume 131, Manzini's Festschrift, Complete Volume")
+        assert self._is_garbage("OASIcs, Volume 131, Manzini's Festschrift, Complete Volume")
 
     def test_series_volume_metadata(self) -> None:
-        from main import _is_garbage_title
-        assert _is_garbage_title("LIPIcs, Volume 308, MFCS 2024, Complete Volume")
+        assert self._is_garbage("LIPIcs, Volume 308, MFCS 2024, Complete Volume")
 
     def test_real_paper_title_not_garbage(self) -> None:
-        from main import _is_garbage_title
-        assert not _is_garbage_title("Finding Simple Solutions to Multi-Task Visual RL")
+        assert not self._is_garbage("Finding Simple Solutions to Multi-Task Visual RL")
 
     def test_year_range_not_phone(self) -> None:
-        from main import _is_garbage_title
-        assert not _is_garbage_title("An Updated Review from 2012-2023")
+        assert not self._is_garbage("An Updated Review from 2012-2023")
 
     def test_empty_title(self) -> None:
-        from main import _is_garbage_title
-        assert not _is_garbage_title("")
+        assert not self._is_garbage("")
 
 
 class TestStaleFileValidation:
@@ -2910,32 +2795,30 @@ class TestStaleFileValidation:
 class TestProceedingsVolumeDetection:
     """Proceedings volume titles should be detected as garbage."""
 
-    def test_proceedings_volume_year_prefix(self) -> None:
+    @staticmethod
+    def _is_garbage(title: str) -> bool:
         from main import _is_garbage_title
+        return _is_garbage_title(title)
+
+    def test_proceedings_volume_year_prefix(self) -> None:
         title = (
             "Proceedings of the 2023 Conference on Empirical Methods "
             "in Natural Language Processing: Tutorial Abstracts"
         )
-        assert _is_garbage_title(title)
+        assert self._is_garbage(title)
 
     def test_proceedings_volume_without_the(self) -> None:
-        from main import _is_garbage_title
-        assert _is_garbage_title("Proceedings of 2024 International Joint Conference on AI")
+        assert self._is_garbage("Proceedings of 2024 International Joint Conference on AI")
 
     def test_real_paper_title_with_proceedings(self) -> None:
-        from main import _is_garbage_title
-        # Regular papers mentioning "proceedings" should NOT be caught
-        assert not _is_garbage_title("Analyzing Proceedings of Major NLP Conferences")
+        assert not self._is_garbage("Analyzing Proceedings of Major NLP Conferences")
 
     def test_workshop_paper_not_caught(self) -> None:
-        from main import _is_garbage_title
-        # Legitimate workshop paper should NOT be caught
-        assert not _is_garbage_title("A Survey of Transformer Architectures for NLP")
+        assert not self._is_garbage("A Survey of Transformer Architectures for NLP")
 
 
 class TestHowpublishedCasingNormalization:
     """howpublished field casing should be normalized to canonical form."""
-
     def test_biorxiv_casing(self) -> None:
         entry = {
             "type": "misc",
@@ -2975,7 +2858,6 @@ class TestHowpublishedCasingNormalization:
 
 class TestArxivEprintsJournalStripping:
     """arXiv e-prints journal should be stripped and entry downgraded to @misc."""
-
     def test_arxiv_eprints_stripped_from_article(self) -> None:
         """@article with journal='arXiv e-prints' should become @misc after merge."""
         entry = {
@@ -2990,5 +2872,4 @@ class TestArxivEprintsJournalStripping:
             },
         }
         result = merge_utils.merge_with_policy(entry, [])
-        # normalize_arxiv_metadata should strip the journal
         assert "journal" not in result["fields"]

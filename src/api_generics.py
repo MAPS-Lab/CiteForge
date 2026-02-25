@@ -341,67 +341,41 @@ def search_api_generic_multiple(
     return top_results
 
 
-def build_bibtex_from_response(
-    response: dict[str, Any],
-    keyhint: str,
-    mapping: APIFieldMapping
+def _first_resolved_str(
+    obj: dict[str, Any], field_names: list[str], *, check_placeholder: bool = False,
 ) -> str | None:
-    """
-    Build a BibTeX entry from an API response using configured field mappings to handle
-    diverse field naming conventions and data structures across different academic APIs.
-    """
-    from .bibtex_build import build_bibtex_entry, determine_entry_type
+    """Return the first non-empty string resolved from a list of dotted field paths."""
+    for name in field_names:
+        value = _resolve_dotted_str(obj, name, check_placeholder=check_placeholder)
+        if value:
+            return value
+    return None
 
-    # Extract title (try all configured fields)
-    title = None
-    for field_name in mapping.title_fields:
-        title = _resolve_dotted_str(response, field_name, check_placeholder=True)
-        if title:
-            break
-    if not title:
-        return None
 
-    # Extract authors using custom extractor or helper
-    if mapping.custom_author_extractor:
-        authors = mapping.custom_author_extractor(response)
-    else:
-        author_data = None
-        for field_name in mapping.author_fields:
-            author_data = _resolve_dotted(response, field_name)
-            if author_data:
-                break
+def _first_resolved_with_transform(
+    obj: dict[str, Any],
+    field_names: list[str],
+    transform: Callable[[str], str | None],
+) -> str | None:
+    """Resolve fields in order, applying *transform* and returning the first truthy result."""
+    for name in field_names:
+        candidate = _resolve_dotted_str(obj, name)
+        if candidate:
+            result = transform(candidate)
+            if result:
+                return result
+    return None
 
-        authors = extract_author_names(
-            author_data,
-            name_key=mapping.author_name_key or "name",
-            given_key=mapping.author_given_key,
-            family_key=mapping.author_family_key
-        )
 
-    if not authors or has_placeholder(", ".join(authors)):
-        return None
-
-    # Extract year using custom extractor or helper
-    if mapping.custom_year_extractor:
-        year = mapping.custom_year_extractor(response)
-    else:
-        year = extract_year_from_any(response, field_names=mapping.year_fields, fallback=0) or 0
-
-    # Determine entry type
-    entry_type = determine_entry_type(
-        response,
-        type_field=mapping.entry_type_field,
-        publication_types_field=mapping.entry_type_list_field,
-        venue_hints=mapping.venue_hints
-    )
-
-    # Extract venue
-    venue = None
+def _extract_venue(
+    response: dict[str, Any], mapping: APIFieldMapping,
+) -> str | None:
+    """Extract the best venue string from an API response, filtering generic series names."""
+    venue: str | None = None
     for field_name in mapping.venue_fields:
         raw_venue = _resolve_dotted(response, field_name)
         # Crossref returns container-title as array: [series_name, conference_name]
-        # Prefer the non-generic element (e.g., "Artificial Intelligence in Medicine"
-        # over "Lecture Notes in Computer Science")
+        # Prefer the non-generic element over generic series names like LNCS
         if isinstance(raw_venue, list) and len(raw_venue) > 1:
             generic_filtered = False
             for candidate in raw_venue:
@@ -435,27 +409,58 @@ def build_bibtex_from_response(
                 )
                 venue = event_name
 
-    doi = None
-    for field_name in mapping.doi_fields:
-        doi_candidate = _resolve_dotted_str(response, field_name)
-        if doi_candidate:
-            doi = find_doi_in_text(doi_candidate)
-            if doi:
-                break
+    return venue
 
-    url = None
-    for field_name in mapping.url_fields:
-        url = _resolve_dotted_str(response, field_name)
-        if url:
-            break
 
-    arxiv_id = None
-    for field_name in mapping.arxiv_fields:
-        arxiv_candidate = _resolve_dotted_str(response, field_name)
-        if arxiv_candidate:
-            arxiv_id = find_arxiv_in_text(arxiv_candidate)
-            if arxiv_id:
+def build_bibtex_from_response(
+    response: dict[str, Any],
+    keyhint: str,
+    mapping: APIFieldMapping
+) -> str | None:
+    """
+    Build a BibTeX entry from an API response using configured field mappings to handle
+    diverse field naming conventions and data structures across different academic APIs.
+    """
+    from .bibtex_build import build_bibtex_entry, determine_entry_type
+
+    title = _first_resolved_str(response, mapping.title_fields, check_placeholder=True)
+    if not title:
+        return None
+
+    if mapping.custom_author_extractor:
+        authors = mapping.custom_author_extractor(response)
+    else:
+        author_data = None
+        for field_name in mapping.author_fields:
+            author_data = _resolve_dotted(response, field_name)
+            if author_data:
                 break
+        authors = extract_author_names(
+            author_data,
+            name_key=mapping.author_name_key or "name",
+            given_key=mapping.author_given_key,
+            family_key=mapping.author_family_key
+        )
+
+    if not authors or has_placeholder(", ".join(authors)):
+        return None
+
+    if mapping.custom_year_extractor:
+        year = mapping.custom_year_extractor(response)
+    else:
+        year = extract_year_from_any(response, field_names=mapping.year_fields, fallback=0) or 0
+
+    entry_type = determine_entry_type(
+        response,
+        type_field=mapping.entry_type_field,
+        publication_types_field=mapping.entry_type_list_field,
+        venue_hints=mapping.venue_hints
+    )
+
+    venue = _extract_venue(response, mapping)
+    doi = _first_resolved_with_transform(response, mapping.doi_fields, find_doi_in_text)
+    url = _first_resolved_str(response, mapping.url_fields)
+    arxiv_id = _first_resolved_with_transform(response, mapping.arxiv_fields, find_arxiv_in_text)
 
     extra_fields = {}
     for source_field, bibtex_field in mapping.extra_field_mappings.items():

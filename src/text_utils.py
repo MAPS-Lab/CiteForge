@@ -179,16 +179,10 @@ def _fix_allcaps_title(s: str) -> str:
     words = s.split()
     result: list[str] = []
     for i, word in enumerate(words):
-        # Preserve words that look like chemical formulas, gene names, etc.
-        # (mixed case within the original ALL-CAPS context means they were
-        # already specially formatted)
         if "-" in word:
-            # Handle hyphenated words: capitalize each part
-            parts = word.split("-")
-            parts = [p.capitalize() if len(p) > 1 else p for p in parts]
+            parts = [p.capitalize() if len(p) > 1 else p for p in word.split("-")]
             result.append("-".join(parts))
-        elif word.startswith("(") or word.startswith("["):
-            # Preserve bracketed content
+        elif word[0] in "([":
             result.append(word[0] + word[1:].capitalize())
         elif i == 0:
             result.append(word.capitalize())

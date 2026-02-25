@@ -152,7 +152,7 @@ def datacite_search_doi(doi: str) -> dict[str, Any] | None:
 
     data = http_get_json(url, timeout=15.0)
 
-    result = data.get("data") or None
+    result = data.get("data")
     if result is not None:
         response_cache.put("datacite", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
     logger.debug(
@@ -177,11 +177,10 @@ def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | No
     if not title:
         return None
 
-    authors: list[str] = []
-    for creator in attributes.get("creators") or []:
-        name = safe_get_field(creator, "name")
-        if name:
-            authors.append(name)
+    authors: list[str] = [
+        name for creator in attributes.get("creators") or []
+        if (name := safe_get_field(creator, "name"))
+    ]
 
     year = 0
     pub_year = attributes.get("publicationYear")
@@ -201,28 +200,20 @@ def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | No
     url = safe_get_field(attributes, "url")
 
     extra_fields: dict[str, str] = {}
-    note_parts = []
-    if resource_type_general:
-        note_parts.append(f"Type: {resource_type_general}")
-    if attributes.get("version"):
-        note_parts.append(f"Version: {attributes['version']}")
+    note_parts = [
+        part for part in [
+            f"Type: {resource_type_general}" if resource_type_general else "",
+            f"Version: {attributes['version']}" if attributes.get("version") else "",
+        ] if part
+    ]
     if note_parts:
         extra_fields["note"] = ", ".join(note_parts)
-
     if venue:
         extra_fields["howpublished"] = venue
 
     return build_bibtex_entry(
-        entry_type=entry_type,
-        title=title,
-        authors=authors,
-        year=year,
-        keyhint=keyhint,
-        venue="",
-        doi=doi,
-        url=url,
-        arxiv_id=None,
-        extra_fields=extra_fields
+        entry_type=entry_type, title=title, authors=authors, year=year,
+        keyhint=keyhint, venue="", doi=doi, url=url, extra_fields=extra_fields,
     )
 
 

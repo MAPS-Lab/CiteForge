@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from typing import Any
 
 import pytest
 
@@ -12,11 +13,11 @@ from tests.test_data import API_SPECIFIC_PAPERS, KNOWN_PAPERS, OPENALEX_CANNED_W
 
 
 @pytest.fixture(scope="module")
-def api_keys() -> dict:
+def api_keys() -> dict[str, Any]:
     return load_api_keys()
 
 
-def test_scholar_connection(api_keys: dict) -> None:
+def test_scholar_connection(api_keys: dict[str, Any]) -> None:
     """Fetch publications from Scholar via SerpAPI and verify article structure."""
     if not api_keys.get("serpapi"):
         pytest.skip("SerpAPI key not available")
@@ -33,7 +34,7 @@ def test_scholar_connection(api_keys: dict) -> None:
         assert "title" in article, f"Article missing 'title' field: {article}"
 
 
-def test_scholar_citation(api_keys: dict) -> None:
+def test_scholar_citation(api_keys: dict[str, Any]) -> None:
     """Fetch a Scholar citation via Serply and build BibTeX from it."""
     if not api_keys.get("serply"):
         pytest.skip("Serply key not available")
@@ -126,7 +127,7 @@ def test_crossref_multiple_candidates() -> None:
         assert isinstance(cand, dict), f"Candidate should be dict, got {type(cand).__name__}"
 
 
-def test_s2_multiple_candidates(api_keys: dict) -> None:
+def test_s2_multiple_candidates(api_keys: dict[str, Any]) -> None:
     """Semantic Scholar multiple-candidate search returns results for a well-known paper."""
     if not api_keys.get("semantic"):
         pytest.skip("Semantic Scholar key not available")

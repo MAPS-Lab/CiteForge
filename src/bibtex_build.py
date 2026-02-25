@@ -179,13 +179,12 @@ def _classify_type_string(typ: str) -> str | None:
 
 def _is_conference_venue(venue: str) -> bool:
     """Check whether a venue string indicates a conference or workshop."""
-    venue_lower = venue.lower()
-    venue_stripped = venue_lower.strip()
+    venue_lower = venue.lower().strip()
     return (
         any(kw in venue_lower for kw in _CONFERENCE_KEYWORDS)
         or any(known in venue_lower for known in KNOWN_CONFERENCE_VENUES)
-        or venue_stripped in ABBREVIATED_VENUE_MAP
-        or any(venue_stripped == full.lower() for full in ABBREVIATED_VENUE_MAP.values())
+        or venue_lower in ABBREVIATED_VENUE_MAP
+        or any(venue_lower == full.lower() for full in ABBREVIATED_VENUE_MAP.values())
     )
 
 
@@ -225,16 +224,13 @@ def determine_entry_type(
                 return classified
 
         # Book chapter heuristic: howpublished + publisher + pages without journal/booktitle
-        howpublished = obj.get("howpublished")
-        publisher = obj.get("publisher")
-        pages = obj.get("pages")
-
-        if howpublished and publisher and pages and not obj.get("journal") and not obj.get("booktitle"):
-            howpub_lower = str(howpublished).lower()
-            if any(kw in howpub_lower for kw in _BOOK_SERIES_KEYWORDS):
+        if (
+            obj.get("howpublished") and obj.get("publisher") and obj.get("pages")
+            and not obj.get("journal") and not obj.get("booktitle")
+        ):
+            if any(kw in str(obj["howpublished"]).lower() for kw in _BOOK_SERIES_KEYWORDS):
                 return "incollection"
-            pub_lower = str(publisher).lower()
-            if any(kw in pub_lower for kw in _BOOK_PUBLISHER_KEYWORDS):
+            if any(kw in str(obj["publisher"]).lower() for kw in _BOOK_PUBLISHER_KEYWORDS):
                 return "incollection"
 
         for venue_field in ("journal", "container-title", "venue", "booktitle"):

@@ -104,7 +104,7 @@ class ColoredFormatter(logging.Formatter):
         LogSource.SYSTEM: WHITE,
     }
 
-    # Category colors
+    # Category colors (audit categories all use DARK_GRAY for file-only output)
     CATEGORY_COLORS: ClassVar[dict[str, str]] = {
         LogCategory.AUTHOR: BOLD_MAGENTA,
         LogCategory.ARTICLE: BOLD_BLUE,
@@ -116,17 +116,15 @@ class ColoredFormatter(logging.Formatter):
         LogCategory.ERROR: RED,
         LogCategory.DEBUG: DARK_GRAY,
         LogCategory.PLAN: MAGENTA,
-        LogCategory.AUDIT: DARK_GRAY,
-        LogCategory.MERGE: DARK_GRAY,
-        LogCategory.CLEANUP: DARK_GRAY,
-        LogCategory.DEDUP: DARK_GRAY,
-        LogCategory.CACHE: DARK_GRAY,
-        LogCategory.SCORE: DARK_GRAY,
-        LogCategory.DOI_VAL: DARK_GRAY,
-        LogCategory.ARXIV: DARK_GRAY,
-        LogCategory.PARSE: DARK_GRAY,
-        LogCategory.SERIAL: DARK_GRAY,
-        LogCategory.CITEKEY: DARK_GRAY,
+        **dict.fromkeys(
+            [
+                LogCategory.AUDIT, LogCategory.MERGE, LogCategory.CLEANUP,
+                LogCategory.DEDUP, LogCategory.CACHE, LogCategory.SCORE,
+                LogCategory.DOI_VAL, LogCategory.ARXIV, LogCategory.PARSE,
+                LogCategory.SERIAL, LogCategory.CITEKEY,
+            ],
+            DARK_GRAY,
+        ),
     }
 
     def __init__(self, fmt: str, use_color: bool = True):

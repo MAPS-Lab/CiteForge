@@ -44,10 +44,7 @@ def normalize_doi(doi: str | None) -> str | None:
 def is_secondary_doi(doi: str) -> bool:
     """Check if DOI belongs to preprint or data repository (deprioritize in selection)."""
     lower = doi.lower()
-    return (
-        any(lower.startswith(p) for p in PREPRINT_DOI_PREFIXES)
-        or any(lower.startswith(p) for p in DATA_DOI_PREFIXES)
-    )
+    return any(lower.startswith(p) for p in PREPRINT_DOI_PREFIXES + DATA_DOI_PREFIXES)
 
 
 def _norm_arxiv_id(s: str | None) -> str | None:
@@ -238,12 +235,11 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
         arxiv_id = _norm_arxiv_id(fields.get("eprint"))
 
     # 2. check DOI for arXiv pattern (10.48550/arxiv.XXXX.XXXXX)
-    if not arxiv_id:
-        doi = fields.get("doi", "")
-        if doi:
-            m = re.search(ARXIV_DOI_EXTRACT_PATTERN, doi)
-            if m:
-                arxiv_id = _norm_arxiv_id(m.group(1))
+    doi = fields.get("doi", "")
+    if not arxiv_id and doi:
+        m = re.search(ARXIV_DOI_EXTRACT_PATTERN, doi)
+        if m:
+            arxiv_id = _norm_arxiv_id(m.group(1))
 
     # 3. check pages field for arXiv ID (pages = "arXiv: 2401.12345")
     # Always check and remove pages if it contains arXiv ID (not valid page numbers)
@@ -261,20 +257,18 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
             fields.pop("pages", None)
 
     # 4. check journal field for arXiv patterns
-    if not arxiv_id:
-        journal = fields.get("journal", "")
-        if journal:
-            m = re.search(r'(?i)arxiv:\s*(\d{4}\.\d{4,5})', journal)
-            if m:
-                arxiv_id = _norm_arxiv_id(m.group(1))
+    journal = fields.get("journal", "")
+    if not arxiv_id and journal:
+        m = re.search(r'(?i)arxiv:\s*(\d{4}\.\d{4,5})', journal)
+        if m:
+            arxiv_id = _norm_arxiv_id(m.group(1))
 
     # 5. check URL for arXiv link
-    if not arxiv_id:
-        url = fields.get("url", "")
-        if url:
-            m = re.search(r'(?i)arxiv\.org/(abs|pdf)/(\d{4}\.\d{4,5})', url)
-            if m:
-                arxiv_id = _norm_arxiv_id(m.group(2))
+    url = fields.get("url", "")
+    if not arxiv_id and url:
+        m = re.search(r'(?i)arxiv\.org/(abs|pdf)/(\d{4}\.\d{4,5})', url)
+        if m:
+            arxiv_id = _norm_arxiv_id(m.group(2))
 
     logger.debug(
         f"ID_SOURCE | eprint={bool(fields.get('eprint'))}"
