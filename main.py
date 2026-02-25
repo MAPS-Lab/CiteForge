@@ -502,6 +502,33 @@ def process_article(
             _bl_fields["howpublished"] = "arXiv"
             _fixup_written = True
 
+        # Fix capital "And" in author separators
+        _bl_auth2 = _bl_fields.get("author", "")
+        if isinstance(_bl_auth2, str) and " And " in _bl_auth2:
+            _bl_fields["author"] = _bl_auth2.replace(" And ", " and ")
+            logger.debug(
+                "EXISTING_FIXUP | capital_and_fixed",
+                category=LogCategory.CLEANUP,
+            )
+            _fixup_written = True
+
+        # Normalize howpublished casing
+        _bl_hp = (_bl_fields.get("howpublished") or "").strip()
+        if _bl_hp:
+            _hp_canonical: dict[str, str] = {
+                "arxiv": "arXiv", "biorxiv": "bioRxiv", "medrxiv": "medRxiv",
+                "chemrxiv": "ChemRxiv", "techrxiv": "TechRxiv",
+                "research square": "Research Square", "ssrn": "SSRN",
+            }
+            _hp_key = _bl_hp.lower().split("(")[0].strip()
+            if _hp_key in _hp_canonical and _bl_hp != _hp_canonical[_hp_key]:
+                _bl_fields["howpublished"] = _hp_canonical[_hp_key]
+                logger.debug(
+                    f"EXISTING_FIXUP | howpublished_casing | {_bl_hp}->{_hp_canonical[_hp_key]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _fixup_written = True
+
         if _fixup_written and existing_file_path:
             bib_str = bt.bibtex_from_dict(baseline_entry)
             safe_write_file(existing_file_path, bib_str)
