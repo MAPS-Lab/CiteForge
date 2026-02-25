@@ -107,7 +107,8 @@ SIM_FILE_DUPLICATE_THRESHOLD = 0.95
 # Preprint detection
 PREPRINT_SERVERS = frozenset({
     'arxiv', 'biorxiv', 'medrxiv', 'chemrxiv', 'research square',
-    'ssrn', 'preprints', 'psyarxiv', 'socarxiv', 'edarxiv',
+    'ssrn', 'social science research network',
+    'preprints', 'psyarxiv', 'socarxiv', 'edarxiv',
     'arxiv e-prints', 'e-prints', 'authorea', 'techrxiv',
     'preprints.org', 'preprint server',
 })
