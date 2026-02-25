@@ -200,7 +200,8 @@ def _try_multiple_candidates(
     enr_list: list[tuple[str, dict[str, Any]]],
     flags: dict[str, bool],
     flag_key: str,
-    max_candidates: int = 5
+    max_candidates: int = 5,
+    all_candidate_dois: list[str] | None = None,
 ) -> tuple[bool, Any | None]:
     """Try candidates from an API source in relevance order until one matches the baseline.
 
@@ -220,6 +221,14 @@ def _try_multiple_candidates(
             candidate_dict = bt.parse_bibtex_to_dict(candidate_bib)
             if not candidate_dict:
                 continue
+
+            # Collect DOIs from all candidates for preprint-on-disk check
+            if all_candidate_dois is not None:
+                _c_doi = idu.normalize_doi(
+                    (candidate_dict.get("fields") or {}).get("doi")
+                )
+                if _c_doi:
+                    all_candidate_dois.append(_c_doi)
 
             match = bt.bibtex_entries_match_strict(baseline_entry, candidate_dict)
             if match:
@@ -696,6 +705,9 @@ def process_article(
 
     # ===== PHASE 2: API Enrichment =====
     logger.info("▶ Phase 2: API Enrichment", category=LogCategory.ARTICLE)
+    # Collect DOIs from ALL API candidates (even rejected ones) for
+    # preprint-on-disk dedup check after enrichment completes.
+    _all_cand_dois: list[str] = []
     logger.debug(
         f"PHASE2_START | title={title[:60]} | doi_validated={doi_validated}",
         category=LogCategory.AUDIT,
@@ -780,7 +792,8 @@ def process_article(
                 enr_list,
                 flags,
                 "crossref",
-                max_candidates=5
+                max_candidates=5,
+                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 cr_item = None
@@ -800,7 +813,8 @@ def process_article(
                 enr_list,
                 flags,
                 "openreview",
-                max_candidates=5
+                max_candidates=5,
+                all_candidate_dois=_all_cand_dois,
             )
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.OPENREVIEW)
@@ -819,7 +833,8 @@ def process_article(
                 enr_list,
                 flags,
                 "arxiv",
-                max_candidates=5
+                max_candidates=5,
+                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 arxiv_entry = None
@@ -840,7 +855,8 @@ def process_article(
                 enr_list,
                 flags,
                 "openalex",
-                max_candidates=5
+                max_candidates=5,
+                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 oa_work = None
@@ -868,7 +884,8 @@ def process_article(
                 enr_list,
                 flags,
                 "pubmed",
-                max_candidates=5
+                max_candidates=5,
+                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 pm_article = None
@@ -888,7 +905,8 @@ def process_article(
                 enr_list,
                 flags,
                 "europepmc",
-                max_candidates=5
+                max_candidates=5,
+                all_candidate_dois=_all_cand_dois,
             )
             if not matched:
                 epmc_article = None
@@ -918,11 +936,19 @@ def process_article(
                 continue
 
         if _existing_dois:
+            # Check DOIs from accepted enrichers AND rejected candidates
+            _all_enricher_dois: list[tuple[str, str]] = []
             for _esrc, _edata in enr_list:
                 if not _edata:
                     continue
                 _edoi = idu.normalize_doi((_edata.get("fields") or {}).get("doi"))
-                if _edoi and _edoi.lower() in _existing_dois:
+                if _edoi:
+                    _all_enricher_dois.append((_esrc, _edoi))
+            for _cdoi in _all_cand_dois:
+                _all_enricher_dois.append(("candidate", _cdoi))
+
+            for _esrc, _edoi in _all_enricher_dois:
+                if _edoi.lower() in _existing_dois:
                     logger.info(
                         f"PREPRINT_SKIP | enricher={_esrc} returned published DOI={_edoi} "
                         f"already on disk; this article is a preprint duplicate",
