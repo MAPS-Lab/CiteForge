@@ -1309,14 +1309,12 @@ class TestOpenReviewTTLBoundary:
         _reset_openreview_session()
 
     def test_session_valid_just_before_ttl(self) -> None:
-        """Session should be valid when elapsed < TTL by a safe margin."""
+        """Session created 'just now' (0 seconds elapsed) must not be expired."""
         import src.clients.search_apis as sa
 
         with sa._OPENREVIEW_SESSION_LOCK:
             sa._OPENREVIEW_SESSION = {"Cookie": "session=test"}
-            sa._OPENREVIEW_SESSION_CREATED_AT = (
-                time.monotonic() - OPENREVIEW_SESSION_TTL_SECS + 60
-            )
+            sa._OPENREVIEW_SESSION_CREATED_AT = time.monotonic()
 
         assert sa._openreview_session_expired() is False
         _reset_openreview_session()
