@@ -90,6 +90,11 @@ _DOI_PREFIX_TO_HOWPUB: tuple[tuple[str, str], ...] = (
     ("10.33774/", "Preprint"),
     ("10.5194/egusphere", "EGU"),
     ("10.2172/", "OSTI"),
+    ("10.31220/agrirxiv", "agriRxiv"),
+    ("10.32388/", "Qeios"),
+    ("10.48448/", "Underline Science"),
+    ("10.32920/", "Institutional Repository"),
+    ("10.5281/zenodo", "Zenodo"),
 )
 
 
@@ -105,12 +110,14 @@ def infer_howpublished_from_doi(doi: str) -> str | None:
 def _is_conference_journal(journal: str) -> bool:
     """Check if a journal name is actually a conference proceedings venue.
 
-    Detects "Proceedings of ...", "Conference on ...", "@" patterns (e.g.
-    IberLEF@SEPLN), and entries in CONFERENCE_AS_JOURNAL.
+    Detects "Proceedings of ...", "Conference on ...", "Tagungsband" (German
+    proceedings), "@" patterns (e.g. IberLEF@SEPLN), and entries in
+    CONFERENCE_AS_JOURNAL.
     """
     lower = journal.lower()
     return (
         "proceedings" in lower
+        or "tagungsband" in lower
         or lower.startswith("conference on")
         or "@" in journal
         or lower in CONFERENCE_AS_JOURNAL

@@ -52,6 +52,7 @@ from src.config import (
     MIN_TITLE_WORDS,
     PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
+    REPOSITORY_AS_JOURNAL,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
     SIM_MERGE_DUPLICATE_THRESHOLD,
@@ -123,7 +124,10 @@ def _is_garbage_title(title: str) -> bool:
     if re.match(r'^Proceedings\s+of\s+(the\s+)?\d{4}\s+', title, re.IGNORECASE):
         return True
     # Correction/erratum papers are non-research editorial content
-    return bool(re.match(r'^Correction(s)?\s+(to|of)\s*:', title, re.IGNORECASE))
+    if re.match(r'^Correction(s)?\s+(to|of)\s*:', title, re.IGNORECASE):
+        return True
+    # Scholar artifacts: EasyChair preprint stubs, truncated titles
+    return bool(re.search(r'\bEasyChair\s+Preprint\b', title, re.IGNORECASE))
 
 
 def _is_corrupted_title(title: str) -> bool:
@@ -469,6 +473,18 @@ def process_article(
                 )
                 _bl_fields["booktitle"] = _bl_fields.pop("journal")
                 baseline_entry["type"] = "inproceedings"
+                _fixup_written = True
+
+        # Downgrade @article with repository/portal as journal → @misc
+        if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
+            _repo_jnl_bl = (_bl_fields.get("journal") or "").lower()
+            if any(rj in _repo_jnl_bl for rj in REPOSITORY_AS_JOURNAL):
+                logger.debug(
+                    f"EXISTING_FIXUP | article_repository->misc | journal={_bl_fields['journal'][:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                baseline_entry["type"] = "misc"
+                _bl_fields.pop("journal", None)
                 _fixup_written = True
 
         # Reclassify @article with university name as journal → @phdthesis
@@ -1189,6 +1205,17 @@ def process_article(
                 merged["type"] = "inproceedings"
                 merged_fields["booktitle"] = merged_fields.pop("journal")
 
+        # Downgrade @article with repository/portal as journal → @misc
+        if merged.get("type") == "article" and merged_fields.get("journal"):
+            _repo_jnl = (merged_fields.get("journal") or "").lower()
+            if any(rj in _repo_jnl for rj in REPOSITORY_AS_JOURNAL):
+                logger.debug(
+                    f"TYPE_CORRECT | article_repository->misc | journal={merged_fields['journal'][:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "misc"
+                merged_fields.pop("journal", None)
+
         # Reclassify @article with university name as journal → @phdthesis
         # (Crossref sometimes returns thesis DOIs with the university as journal)
         if merged.get("type") == "article" and merged_fields.get("journal"):
@@ -1223,11 +1250,12 @@ def process_article(
             elif (merged_fields.get("archiveprefix") or "").lower() == "arxiv":
                 merged_fields["howpublished"] = "arXiv"
 
-        # Fix ALL-CAPS titles from enrichment sources (e.g. S2 returns
-        # publisher's ALL-CAPS abstract titles for some journals)
+        # Fix ALL-CAPS titles and strip [J] artifacts from enrichment sources
         _p4_title = merged_fields.get("title", "")
         if isinstance(_p4_title, str) and _p4_title:
             _p4_fixed = trim_title_default(_p4_title)
+            # Strip [J] bracket artifact (citation format leak from Scholar)
+            _p4_fixed = re.sub(r'\s*\[J\]\s*$', '', _p4_fixed).strip()
             if _p4_fixed != _p4_title:
                 merged_fields["title"] = _p4_fixed
 

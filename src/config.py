@@ -111,6 +111,7 @@ PREPRINT_SERVERS = frozenset({
     'preprints', 'psyarxiv', 'socarxiv', 'edarxiv',
     'arxiv e-prints', 'e-prints', 'authorea', 'techrxiv',
     'preprints.org', 'preprint server',
+    'zenodo', 'agrirxiv', 'qeios',
 })
 PREPRINT_DOI_PREFIXES = (
     '10.48550/arxiv',     # arXiv
@@ -141,6 +142,17 @@ PREPRINT_ONLY_PUBLISHERS = frozenset({
 CONFERENCE_AS_JOURNAL: frozenset[str] = frozenset({
     "software engineering",  # German SE conference (Fachtagung Softwaretechnik)
     "ijcnlp-aacl",           # Int'l Joint Conf on NLP / Asia-Pacific ACL
+    "canada human-computer communications society",  # Graphics Interface publisher
+})
+
+# Strings in journal field that indicate repositories/portals, not real journals.
+# @article with these → @misc (or @inproceedings if conference-like).
+REPOSITORY_AS_JOURNAL: frozenset[str] = frozenset({
+    "tu/e research portal",
+    "escholarship",
+    "california digital library",
+    "eyls",
+    "dspace",
 })
 
 # Data repository DOI prefixes (deprioritized in DOI selection)
