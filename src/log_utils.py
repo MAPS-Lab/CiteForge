@@ -164,7 +164,7 @@ class ColoredFormatter(logging.Formatter):
         return formatted
 
 
-class CategoryAdapter(logging.LoggerAdapter[logging.Logger]):
+class CategoryAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
     """Adapter that passes source and category through to the extra dict."""
 
     def process(self, msg: str, kwargs: MutableMapping[str, Any]) -> tuple[str, MutableMapping[str, Any]]:
