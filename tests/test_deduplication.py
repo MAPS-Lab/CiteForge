@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from src import merge_utils, text_utils
+from src.id_utils import doi_bases_match
 
 
 def test_prevent_duplicate_save_high_similarity(tmp_path: Path) -> None:
@@ -94,3 +95,62 @@ def test_allow_duplicate_save_medium_similarity(tmp_path: Path) -> None:
     author_dir = os.path.dirname(path_a)
     bib_files = [f for f in os.listdir(author_dir) if f.endswith(".bib")]
     assert len(bib_files) == 2, f"Expected 2 bib files, found {len(bib_files)}"
+
+
+# --- DOI version matching ---
+
+
+def test_doi_bases_match_preprints_org_versions() -> None:
+    """Preprints.org DOIs with .v1/.v2 suffixes must be recognized as the same work."""
+    assert doi_bases_match(
+        "10.20944/preprints202304.0409.v1",
+        "10.20944/preprints202304.0409.v2",
+    )
+
+
+def test_doi_bases_match_different_dois() -> None:
+    """Completely different DOIs must NOT match."""
+    assert not doi_bases_match("10.1016/j.ins.2020.09.024", "10.48550/arxiv.1909.04605")
+
+
+def test_doi_bases_match_same_without_version() -> None:
+    """DOIs without version suffixes only match if identical."""
+    assert doi_bases_match("10.1234/paper.2024", "10.1234/paper.2024")
+    assert not doi_bases_match("10.1234/paper.2024", "10.1234/other.2024")
+
+
+def test_doi_version_dedup_in_save(tmp_path: Path) -> None:
+    """save_entry_to_file should deduplicate DOI version variants (e.g. v1/v2)."""
+    out_dir = str(tmp_path)
+    author_id = "TestAuthor"
+    author_name = "Test Author"
+
+    v1 = {
+        "type": "misc",
+        "key": "Author2023:EthicalFrontier",
+        "fields": {
+            "title": "The Ethical Frontier: Navigating the Metaverse in Modern Farming",
+            "author": "Test Author",
+            "year": "2023",
+            "doi": "10.20944/preprints202304.0409.v1",
+        },
+    }
+    path_v1, _ = merge_utils.save_entry_to_file(out_dir, author_id, v1, author_name=author_name)
+    assert os.path.exists(path_v1)
+
+    v2 = {
+        "type": "misc",
+        "key": "Author2023:HarnessingMetaverse",
+        "fields": {
+            "title": "Harnessing the Metaverse for Livestock Welfare: Unleashing Sensor Data",
+            "author": "Test Author",
+            "year": "2023",
+            "doi": "10.20944/preprints202304.0409.v2",
+        },
+    }
+    path_v2, _ = merge_utils.save_entry_to_file(out_dir, author_id, v2, author_name=author_name)
+
+    assert path_v2 == path_v1, "v2 should be matched to v1 via DOI version matching"
+    author_dir = os.path.dirname(path_v1)
+    bib_files = [f for f in os.listdir(author_dir) if f.endswith(".bib")]
+    assert len(bib_files) == 1, f"Expected 1 bib file (deduped), found {len(bib_files)}"

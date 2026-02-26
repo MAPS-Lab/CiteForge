@@ -29,6 +29,7 @@ from .config import (
 from .id_utils import (
     _norm_doi,
     allowlisted_url,
+    doi_bases_match,
     external_ids_match,
     extract_arxiv_eprint,
     is_secondary_doi,
@@ -922,6 +923,17 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                     if existing_doi and new_doi and existing_doi == new_doi:
                         logger.debug(
                             f"FILE_MATCH | DOI_EXACT | file={existing_filename} | doi={existing_doi}",
+                            category=LogCategory.DEDUP,
+                        )
+                        duplicate_found = True
+                        duplicate_path = existing_path
+                        break
+
+                    # DOI version variants (e.g. Preprints.org .v1 / .v2)
+                    if existing_doi and new_doi and doi_bases_match(existing_doi, new_doi):
+                        logger.debug(
+                            f"FILE_MATCH | DOI_VERSION | file={existing_filename}"
+                            f" | doi_a={existing_doi} | doi_b={new_doi}",
                             category=LogCategory.DEDUP,
                         )
                         duplicate_found = True

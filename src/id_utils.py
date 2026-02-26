@@ -47,6 +47,17 @@ def is_secondary_doi(doi: str) -> bool:
     return any(lower.startswith(p) for p in PREPRINT_DOI_PREFIXES + DATA_DOI_PREFIXES)
 
 
+def doi_bases_match(doi_a: str, doi_b: str) -> bool:
+    """Return True when two DOIs are version variants of the same work.
+
+    Handles Preprints.org ``10.20944/preprints202304.0409.v1`` → ``.v2``
+    and similar version-suffixed DOIs.
+    """
+    a = re.sub(r'\.v\d+$', '', doi_a.lower().strip())
+    b = re.sub(r'\.v\d+$', '', doi_b.lower().strip())
+    return bool(a) and a == b
+
+
 def _norm_arxiv_id(s: str | None) -> str | None:
     """
     Clean an arXiv identifier by stripping the arXiv prefix and any version

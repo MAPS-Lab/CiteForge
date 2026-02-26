@@ -56,6 +56,7 @@ from src.config import (
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
     SIM_MERGE_DUPLICATE_THRESHOLD,
+    SIM_PREPRINT_TITLE_THRESHOLD,
     SKIP_SCHOLAR_FOR_EXISTING_FILES,
 )
 from src.doi_utils import process_validated_doi
@@ -1476,6 +1477,21 @@ def process_article(
                         continue
                     edoi = idu.normalize_doi((edict.get("fields") or {}).get("doi", ""))
                     if edoi and edoi in check_dois:
+                        # Guard: verify the DOI match is genuine by comparing
+                        # titles.  Phase-2 candidate DOIs can be false matches
+                        # (API returned the wrong DOI for the query title).
+                        e_title = (edict.get("fields") or {}).get("title", "")
+                        m_title = merged_fields.get("title", "")
+                        if e_title and m_title:
+                            _doi_sim = title_similarity(e_title, m_title)
+                            if _doi_sim < SIM_PREPRINT_TITLE_THRESHOLD:
+                                logger.debug(
+                                    f"CANDIDATE_DOI_DEDUP_REJECTED | doi={edoi}"
+                                    f" | existing={existing_bib}"
+                                    f" | sim={_doi_sim:.3f} | titles_differ",
+                                    category=LogCategory.DEDUP,
+                                )
+                                continue
                         logger.debug(
                             f"CANDIDATE_DOI_DEDUP | doi={edoi} | existing={existing_bib} "
                             f"| skipping_write=True",
