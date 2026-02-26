@@ -69,7 +69,37 @@ _HOWPUB_CANONICAL: dict[str, str] = {
     "techrxiv": "TechRxiv",
     "research square": "Research Square",
     "ssrn": "SSRN",
+    "osf preprints": "OSF Preprints",
+    "preprints.org": "Preprints.org",
+    "openrxiv": "openRxiv",
 }
+
+# Map preprint DOI prefixes → canonical howpublished value.
+# Used to backfill howpublished on @misc entries with preprint DOIs.
+_DOI_PREFIX_TO_HOWPUB: tuple[tuple[str, str], ...] = (
+    ("10.48550/arxiv", "arXiv"),
+    ("10.1101/", "bioRxiv"),
+    ("10.21203/rs.", "Research Square"),
+    ("10.31234/osf.io", "OSF Preprints"),
+    ("10.31219/osf.io", "OSF Preprints"),
+    ("10.26434/chemrxiv", "ChemRxiv"),
+    ("10.20944/preprints", "Preprints.org"),
+    ("10.2139/ssrn", "SSRN"),
+    ("10.64898/", "openRxiv"),
+    ("10.36227/techrxiv", "TechRxiv"),
+    ("10.33774/", "Preprint"),
+    ("10.5194/egusphere", "EGU"),
+    ("10.2172/", "OSTI"),
+)
+
+
+def infer_howpublished_from_doi(doi: str) -> str | None:
+    """Return canonical howpublished for a preprint DOI, or None."""
+    dl = doi.lower()
+    for prefix, name in _DOI_PREFIX_TO_HOWPUB:
+        if dl.startswith(prefix):
+            return name
+    return None
 
 
 def _is_conference_journal(journal: str) -> bool:
@@ -102,7 +132,8 @@ _AUTHOR_SEPARATOR_CAPITAL = " And "
 
 def _fix_author_casing(author_val: str) -> tuple[str, bool]:
     """Fix author name casing: capitalize all-lowercase tokens, convert
-    ALL-CAPS tokens (>2 chars) to title case, and fix capital 'And' separators.
+    ALL-CAPS tokens (>2 chars) to title case, fix 2-char ALL-CAPS surnames
+    when preceded by a mixed-case given name, and fix capital 'And' separators.
 
     Returns (fixed_string, was_modified).
     """
@@ -117,10 +148,20 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
         tokens = ap.split()
         if len(tokens) >= 2:
             new_tokens: list[str] = []
+            has_mixed_case = any(len(t) > 1 and not t.isupper() and t[0].isupper() for t in tokens if t.isalpha())
             for t in tokens:
                 if not t or not t[0].isalpha():
                     new_tokens.append(t)
-                elif (len(t) > 1 and t[0].islower()) or (len(t) > 2 and t.isupper()):
+                elif len(t) > 2 and t.isupper():
+                    # 3+ letter ALL-CAPS → always fix (e.g. "SMITH" → "Smith")
+                    new_tokens.append(t.capitalize())
+                    any_fixed = True
+                elif len(t) == 2 and t.isupper() and has_mixed_case and t == tokens[-1]:
+                    # 2-letter ALL-CAPS as LAST token with a mixed-case sibling → surname
+                    # e.g. "Shu FU" → "Shu Fu", but "JI Munro" keeps "JI" as initials
+                    new_tokens.append(t.capitalize())
+                    any_fixed = True
+                elif len(t) > 1 and t[0].islower():
                     new_tokens.append(t.capitalize())
                     any_fixed = True
                 else:

@@ -23,7 +23,7 @@ DEFAULT_OR_KEY_FILE = "keys/OpenReview.key"
 DEFAULT_GEMINI_KEY_FILE = "keys/Gemini.key"
 
 DEFAULT_OUT_DIR = "output"
-CONTRIBUTION_WINDOW_YEARS = 5
+CONTRIBUTION_WINDOW_YEARS = 8
 
 # Publications per year to fetch from Scholar
 PUBLICATIONS_PER_YEAR = 50
@@ -116,12 +116,14 @@ PREPRINT_DOI_PREFIXES = (
     '10.48550/arxiv',     # arXiv
     '10.21203/rs.',       # Research Square
     '10.31234/osf.io',    # PsyArXiv / SocArXiv / EdArXiv (OSF Preprints)
+    '10.31219/osf.io',    # OSF Preprints (generic OSF DOI prefix)
     '10.1101/',           # bioRxiv / medRxiv (all manuscript IDs)
     '10.26434/chemrxiv',  # ChemRxiv
     '10.20944/preprints', # Preprints.org
     '10.2139/ssrn',       # SSRN
     '10.64898/',          # openRxiv
     '10.36227/techrxiv',  # TechRxiv (IEEE preprints)
+    '10.33774/',          # Cambridge UP preprints (Authoria/MIIR)
 )
 
 # Publishers exclusively associated with preprint servers.

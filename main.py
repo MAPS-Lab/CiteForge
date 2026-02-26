@@ -201,8 +201,14 @@ def _try_multiple_candidates(
     flags: dict[str, bool],
     flag_key: str,
     max_candidates: int = 5,
+    seen_dois: set[str] | None = None,
 ) -> tuple[bool, Any | None]:
     """Try candidates from an API source in relevance order until one matches the baseline.
+
+    When *seen_dois* is provided, every DOI encountered across all candidates
+    (matched or not) is collected.  This enables downstream duplicate detection
+    against files already on disk even when the candidate was rejected by the
+    matching gate.
 
     Returns (matched, matched_candidate) tuple.
     """
@@ -220,6 +226,14 @@ def _try_multiple_candidates(
             candidate_dict = bt.parse_bibtex_to_dict(candidate_bib)
             if not candidate_dict:
                 continue
+
+            # Collect DOI from every parsed candidate for dedup
+            if seen_dois is not None:
+                cand_doi = idu.normalize_doi(
+                    (candidate_dict.get("fields") or {}).get("doi", "")
+                )
+                if cand_doi:
+                    seen_dois.add(cand_doi)
 
             match = bt.bibtex_entries_match_strict(baseline_entry, candidate_dict)
             if match:
@@ -392,7 +406,8 @@ def process_article(
         _fixup_written = False
 
         # Strip preprint server names from journal field
-        if _bl_jnl and any(ps == _bl_jnl for ps in PREPRINT_SERVERS):
+        # Use substring match to catch suffixed forms like "arXiv (Cornell University)"
+        if _bl_jnl and any(ps == _bl_jnl or ps in _bl_jnl for ps in PREPRINT_SERVERS):
             logger.debug(
                 f"EXISTING_FIXUP | preprint_journal_stripped | journal={_bl_fields.get('journal')}",
                 category=LogCategory.CLEANUP,
@@ -456,13 +471,28 @@ def process_article(
                 baseline_entry["type"] = "inproceedings"
                 _fixup_written = True
 
-        # Backfill howpublished for @misc with arXiv but no howpublished
-        if (baseline_entry.get("type") == "misc"
-                and not _bl_fields.get("howpublished")
-                and (((_bl_fields.get("archiveprefix") or "").lower() == "arxiv")
-                     or (_bl_fields.get("doi") or "").lower().startswith("10.48550/arxiv"))):
-            _bl_fields["howpublished"] = "arXiv"
-            _fixup_written = True
+        # Reclassify @article with university name as journal → @phdthesis
+        if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
+            _thesis_jnl_lower = (_bl_fields.get("journal") or "").lower()
+            if "university" in _thesis_jnl_lower or "institut" in _thesis_jnl_lower:
+                logger.debug(
+                    f"EXISTING_FIXUP | article_thesis->phdthesis | journal={_bl_fields['journal'][:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["school"] = _bl_fields.pop("journal")
+                baseline_entry["type"] = "phdthesis"
+                _fixup_written = True
+
+        # Backfill howpublished for @misc with preprint DOI or arXiv eprint
+        if baseline_entry.get("type") == "misc" and not _bl_fields.get("howpublished"):
+            _bl_doi_hp = (_bl_fields.get("doi") or "").strip()
+            _inferred_hp = mu.infer_howpublished_from_doi(_bl_doi_hp) if _bl_doi_hp else None
+            if _inferred_hp:
+                _bl_fields["howpublished"] = _inferred_hp
+                _fixup_written = True
+            elif ((_bl_fields.get("archiveprefix") or "").lower() == "arxiv"):
+                _bl_fields["howpublished"] = "arXiv"
+                _fixup_written = True
 
         # Fix author casing (lowercase, ALL-CAPS, capital "And" separators)
         _bl_auth2 = _bl_fields.get("author", "")
@@ -631,30 +661,45 @@ def process_article(
         path = existing_file_path
         logger.info(f"Using existing file: {path}", category=LogCategory.SKIP)
     else:
-        path, was_written = mu.save_entry_to_file(
-            out_dir, effective_id, baseline_entry,
-            gemini_api_key=gemini_api_key, author_name=rec.name,
-        )
-        if was_written:
-            logger.success(f"Saved baseline: {path}", category=LogCategory.SAVE, source=LogSource.SYSTEM)
-        else:
-            # save_entry_to_file found a duplicate and skipped writing —
-            # the article is already on disk under a different name.
-            # Skip enrichment entirely to avoid churn.
+        # Defer disk write for bare baselines (no DOI) to avoid creating
+        # transient files that get renamed/cleaned during enrichment.
+        # The final entry will be written after Phase 4 by save_entry_to_file.
+        bl_has_doi = bool((baseline_entry.get("fields") or {}).get("doi", "").strip())
+        if not bl_has_doi:
+            path = None
             logger.info(
-                f"Baseline duplicate detected; skipping enrichment: {path}",
+                "Baseline deferred (no DOI; will write after enrichment)",
                 category=LogCategory.SKIP, source=LogSource.SYSTEM,
             )
-            if summary_csv_path and path:
-                try:
-                    rel = os.path.relpath(path)
-                except (OSError, ValueError):
-                    rel = path or ""
-                if rel and not is_known_summary_path(rel):
-                    append_summary_to_csv(summary_csv_path, rel, 0, flags)
-            return 1
+        else:
+            path, was_written = mu.save_entry_to_file(
+                out_dir, effective_id, baseline_entry,
+                gemini_api_key=gemini_api_key, author_name=rec.name,
+            )
+            if was_written:
+                logger.success(f"Saved baseline: {path}", category=LogCategory.SAVE, source=LogSource.SYSTEM)
+            else:
+                # save_entry_to_file found a duplicate and skipped writing —
+                # the article is already on disk under a different name.
+                # Skip enrichment entirely to avoid churn.
+                logger.info(
+                    f"Baseline duplicate detected; skipping enrichment: {path}",
+                    category=LogCategory.SKIP, source=LogSource.SYSTEM,
+                )
+                if summary_csv_path and path:
+                    try:
+                        rel = os.path.relpath(path)
+                    except (OSError, ValueError):
+                        rel = path or ""
+                    if rel and not is_known_summary_path(rel):
+                        append_summary_to_csv(summary_csv_path, rel, 0, flags)
+                return 1
 
     enr_list: list[tuple[str, dict[str, Any]]] = []
+    # Collect DOIs from ALL Phase 2 candidates (matched or not) for
+    # deterministic dedup: if a candidate's DOI already exists on disk,
+    # we skip writing even when the candidate was rejected by the match gate.
+    all_candidate_dois: set[str] = set()
 
     # ===== PHASE 1: Early DOI Validation =====
     logger.info("▶ Phase 1: Early DOI Validation", category=LogCategory.ARTICLE)
@@ -751,7 +796,8 @@ def process_article(
                     enr_list,
                     flags,
                     "s2",
-                    max_candidates=5
+                    max_candidates=5,
+                    seen_dois=all_candidate_dois
                 )
                 if not matched:
                     s2_paper = None
@@ -781,6 +827,7 @@ def process_article(
                 flags,
                 "crossref",
                 max_candidates=5,
+                seen_dois=all_candidate_dois,
             )
             if not matched:
                 cr_item = None
@@ -801,6 +848,7 @@ def process_article(
                 flags,
                 "openreview",
                 max_candidates=5,
+                seen_dois=all_candidate_dois,
             )
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.OPENREVIEW)
@@ -820,6 +868,7 @@ def process_article(
                 flags,
                 "arxiv",
                 max_candidates=5,
+                seen_dois=all_candidate_dois,
             )
             if not matched:
                 arxiv_entry = None
@@ -841,6 +890,7 @@ def process_article(
                 flags,
                 "openalex",
                 max_candidates=5,
+                seen_dois=all_candidate_dois,
             )
             if not matched:
                 oa_work = None
@@ -869,6 +919,7 @@ def process_article(
                 flags,
                 "pubmed",
                 max_candidates=5,
+                seen_dois=all_candidate_dois,
             )
             if not matched:
                 pm_article = None
@@ -889,6 +940,7 @@ def process_article(
                 flags,
                 "europepmc",
                 max_candidates=5,
+                seen_dois=all_candidate_dois,
             )
             if not matched:
                 epmc_article = None
@@ -927,6 +979,20 @@ def process_article(
 
             # Include stashed unvalidated DOI from Phase 1 for retry
             _add_doi("phase1_stash", unvalidated_doi)
+
+            # Infer arXiv DOIs from eprint fields or URLs in matched enrichers
+            # (deterministic — no HTTP required)
+            _arxiv_url_re = re.compile(r'arxiv\.org/abs/(\d{4}\.\d{4,5})', re.IGNORECASE)
+            for _enr_src, _enr_data in enr_list:
+                _eprint = idu.extract_arxiv_eprint(_enr_data)
+                if _eprint:
+                    _add_doi(f"eprint_{_enr_src}", f"10.48550/arxiv.{_eprint}")
+                else:
+                    # Check enricher's URL field for arXiv abstract links
+                    _enr_url = (_enr_data.get("fields") or {}).get("url", "")
+                    _m = _arxiv_url_re.search(str(_enr_url))
+                    if _m:
+                        _add_doi(f"url_{_enr_src}", f"10.48550/arxiv.{_m.group(1)}")
 
             # Only extract DOIs from API results that successfully matched baseline
             if s2_paper and flags.get("s2"):
@@ -968,21 +1034,54 @@ def process_article(
                     numeric_id = str(pmcid).removeprefix("PMC")
                     url_candidates.append(f"https://europepmc.org/article/PMC/{numeric_id}")
 
+            # Deterministic DOI extraction from known URL patterns
+            # (no HTTP required — prevents network non-determinism)
+            _arxiv_abs_re = re.compile(r'arxiv\.org/abs/(\d{4}\.\d{4,5})', re.IGNORECASE)
             for u in filter(None, url_candidates):
-                try:
-                    html = http_get_text(u)
-                except ALL_API_ERRORS:
-                    continue
-                d = idu.find_doi_in_html(html)
-                if d:
+                m = _arxiv_abs_re.search(str(u))
+                if m:
+                    inferred = f"10.48550/arxiv.{m.group(1)}"
+                    doi_candidates.append(inferred)
                     logger.debug(
-                        f"DOI_FROM_HTML | url={u} | doi_found={d}",
+                        f"DOI_FROM_URL | url={u} | doi_inferred={inferred}",
                         category=LogCategory.AUDIT,
                     )
-                    doi_candidates.append(d)
-                    break  # One DOI is enough — skip remaining URL fetches
+                    break
+
+            # Fall back to cached HTML scraping only if no DOI found yet
+            if not doi_candidates:
+                from src.cache import response_cache as _doi_cache
+                for u in filter(None, url_candidates):
+                    _u_str = str(u)
+                    _cached_doi = _doi_cache.get("doi_from_html", _u_str)
+                    if _cached_doi is not None:
+                        _cd = _cached_doi.get("doi", "")
+                        if _cd:
+                            doi_candidates.append(_cd)
+                            logger.debug(
+                                f"DOI_FROM_HTML | url={_u_str} | doi_found={_cd} | cached=True",
+                                category=LogCategory.AUDIT,
+                            )
+                            break
+                        continue  # negative cache hit
+                    try:
+                        html = http_get_text(u)
+                    except ALL_API_ERRORS:
+                        _doi_cache.put("doi_from_html", _u_str, {"doi": ""}, ttl_days=30)
+                        continue
+                    d = idu.find_doi_in_html(html)
+                    _doi_cache.put("doi_from_html", _u_str, {"doi": d or ""}, ttl_days=30)
+                    if d:
+                        logger.debug(
+                            f"DOI_FROM_HTML | url={_u_str} | doi_found={d}",
+                            category=LogCategory.AUDIT,
+                        )
+                        doi_candidates.append(d)
+                        break
 
             doi_candidates = [d for d in {idu.normalize_doi(d) for d in doi_candidates if d} if d]
+            # Feed Phase 3 DOIs into the candidate set for deterministic dedup
+            all_candidate_dois.update(doi_candidates)
             # Published DOIs first, preprint/data DOIs last
             doi_candidates.sort(key=lambda d: 1 if idu.is_secondary_doi(d) else 0)
             published_first = bool(doi_candidates and not idu.is_secondary_doi(doi_candidates[0]))
@@ -1068,9 +1167,10 @@ def process_article(
             merged["type"] = "misc"
 
         # Downgrade @article with preprint server as journal -> @misc
+        # Use substring match to catch suffixed forms like "arXiv (Cornell University)"
         if merged.get("type") == "article":
             j_lower = (merged_fields.get("journal") or "").lower().strip()
-            if j_lower and any(ps == j_lower for ps in PREPRINT_SERVERS):
+            if j_lower and any(ps == j_lower or ps in j_lower for ps in PREPRINT_SERVERS):
                 logger.debug(
                     f"TYPE_CORRECT | article_preprint_journal->misc | journal={j_lower}",
                     category=LogCategory.AUDIT,
@@ -1089,6 +1189,18 @@ def process_article(
                 merged["type"] = "inproceedings"
                 merged_fields["booktitle"] = merged_fields.pop("journal")
 
+        # Reclassify @article with university name as journal → @phdthesis
+        # (Crossref sometimes returns thesis DOIs with the university as journal)
+        if merged.get("type") == "article" and merged_fields.get("journal"):
+            _thesis_jnl = (merged_fields.get("journal") or "").lower()
+            if "university" in _thesis_jnl or "institut" in _thesis_jnl:
+                logger.debug(
+                    f"TYPE_CORRECT | article_thesis->phdthesis | journal={merged_fields['journal'][:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "phdthesis"
+                merged_fields["school"] = merged_fields.pop("journal")
+
         # Downgrade @article with preprint-only DOI -> @misc
         if merged.get("type") == "article":
             _merged_doi = (merged_fields.get("doi") or "").strip()
@@ -1102,13 +1214,13 @@ def process_article(
                 if venue:
                     merged_fields["howpublished"] = merged_fields.pop("journal")
 
-        # Backfill howpublished for @misc entries with arXiv eprint/DOI
+        # Backfill howpublished for @misc entries with preprint DOI or arXiv eprint
         if merged.get("type") == "misc" and not merged_fields.get("howpublished"):
-            _has_arxiv = (
-                (merged_fields.get("archiveprefix") or "").lower() == "arxiv"
-                or (merged_fields.get("doi") or "").lower().startswith("10.48550/arxiv")
-            )
-            if _has_arxiv:
+            _misc_doi = (merged_fields.get("doi") or "").strip()
+            _inferred_hp = mu.infer_howpublished_from_doi(_misc_doi) if _misc_doi else None
+            if _inferred_hp:
+                merged_fields["howpublished"] = _inferred_hp
+            elif (merged_fields.get("archiveprefix") or "").lower() == "arxiv":
                 merged_fields["howpublished"] = "arXiv"
 
         # Fix ALL-CAPS titles from enrichment sources (e.g. S2 returns
@@ -1135,10 +1247,11 @@ def process_article(
         if merged.get("type") == "misc" and merged_fields.get("howpublished"):
             _hp_val = (merged_fields.get("howpublished") or "").strip()
             _hp_lower = _hp_val.lower()
-            _is_preprint_hp = any(ps == _hp_lower for ps in PREPRINT_SERVERS) or _hp_lower in (
+            _is_preprint_hp = any(ps == _hp_lower or ps in _hp_lower for ps in PREPRINT_SERVERS) or _hp_lower in (
                 "arxiv", "biorxiv", "medrxiv", "chemrxiv", "techrxiv",
                 "ssrn", "ssrn electronic journal", "research square",
-                "preprints.org", "authorea",
+                "preprints.org", "authorea", "osf preprints", "openrxiv",
+                "psyarxiv", "socarxiv", "edarxiv",
             )
             if not _is_preprint_hp and _hp_val:
                 logger.debug(
@@ -1194,6 +1307,56 @@ def process_article(
             if path and os.path.isfile(path):
                 os.remove(path)
             return 0
+
+        # Deterministic dedup: check if any DOI (from Phase 2 candidates, Phase 3
+        # discovery, or the merged entry itself) already exists in a DIFFERENT file
+        # on disk.  This prevents oscillation where a preprint/published pair creates
+        # a file under the preprint title that gets enriched and renamed every run.
+        merged_doi = idu.normalize_doi(merged_fields.get("doi", ""))
+        # Also infer DOI from merged eprint field (merge_with_policy may have added it)
+        _merged_eprint = idu.extract_arxiv_eprint(merged)
+        if _merged_eprint:
+            all_candidate_dois.add(idu.normalize_doi(f"10.48550/arxiv.{_merged_eprint}") or "")
+        if merged_doi:
+            all_candidate_dois.add(merged_doi)
+        # Exclude the DOI of the prefer_path file itself to avoid self-matching
+        _prefer_doi = ""
+        if path and os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as _pf:
+                    _pd = bt.parse_bibtex_to_dict(_pf.read())
+                _prefer_doi = idu.normalize_doi((_pd or {}).get("fields", {}).get("doi", "")) or ""
+            except (OSError, UnicodeDecodeError):
+                pass
+        check_dois = all_candidate_dois - {_prefer_doi} if _prefer_doi else all_candidate_dois
+        if check_dois:
+            for existing_bib in os.listdir(author_dir):
+                if not existing_bib.endswith(".bib"):
+                    continue
+                epath = os.path.join(author_dir, existing_bib)
+                if path and os.path.abspath(epath) == os.path.abspath(path):
+                    continue  # skip self
+                try:
+                    with open(epath, encoding="utf-8") as ef:
+                        edict = bt.parse_bibtex_to_dict(ef.read())
+                    if not edict:
+                        continue
+                    edoi = idu.normalize_doi((edict.get("fields") or {}).get("doi", ""))
+                    if edoi and edoi in check_dois:
+                        logger.debug(
+                            f"CANDIDATE_DOI_DEDUP | doi={edoi} | existing={existing_bib} "
+                            f"| skipping_write=True",
+                            category=LogCategory.DEDUP,
+                        )
+                        if path and os.path.isfile(path):
+                            os.remove(path)
+                            logger.debug(
+                                f"FILE_CLEANUP | removed={path} | reason=candidate_doi_on_disk",
+                                category=LogCategory.DEDUP,
+                            )
+                        return 0
+                except (OSError, UnicodeDecodeError):
+                    continue
 
         merged["key"] = (
             bt.build_standard_citekey(merged, gemini_api_key=gemini_api_key)
