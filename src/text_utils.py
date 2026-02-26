@@ -578,6 +578,13 @@ def author_name_matches(target_author: str | None, authors: Any) -> bool:
         cnorm = normalize_person_name(nm)
         if tnorm in cnorm or cnorm in tnorm:
             return True
+    # Fallback: try reversed-word matching for "Lastname Firstname" format
+    # (CSL and some APIs return names without comma: "Rudzicz Frank" instead of "Rudzicz, Frank")
+    target_last = target_sig["last"]
+    for nm in cand_names:
+        tokens = nm.strip().split()
+        if len(tokens) >= 2 and tokens[0].lower().rstrip(",") == target_last:
+            return True
     return False
 
 

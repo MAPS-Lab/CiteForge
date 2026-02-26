@@ -996,9 +996,16 @@ def process_article(
             # Include stashed unvalidated DOI from Phase 1 for retry
             _add_doi("phase1_stash", unvalidated_doi)
 
-            # Infer arXiv DOIs from eprint fields or URLs in matched enrichers
+            # Infer arXiv DOIs from eprint fields or URLs in baseline and enrichers
             # (deterministic — no HTTP required)
+            _bl_eprint = idu.extract_arxiv_eprint(baseline_entry)
+            if _bl_eprint:
+                _add_doi("baseline_eprint", f"10.48550/arxiv.{_bl_eprint}")
             _arxiv_url_re = re.compile(r'arxiv\.org/abs/(\d{4}\.\d{4,5})', re.IGNORECASE)
+            _bl_url = (baseline_entry.get("fields") or {}).get("url", "")
+            _bl_url_m = _arxiv_url_re.search(str(_bl_url))
+            if _bl_url_m:
+                _add_doi("baseline_url", f"10.48550/arxiv.{_bl_url_m.group(1)}")
             for _enr_src, _enr_data in enr_list:
                 _eprint = idu.extract_arxiv_eprint(_enr_data)
                 if _eprint:
@@ -1120,9 +1127,26 @@ def process_article(
                         f"Validating DOI candidate: {doi_candidate}",
                         category=LogCategory.SEARCH, source=LogSource.DOI,
                     )
+                    # When a DOI was inferred from an enricher's arXiv eprint,
+                    # temporarily inject it into the baseline so DOI_EXACT match
+                    # fires in validation (the eprint already confirmed identity;
+                    # the CSL title may differ from the preprint title).
+                    _bl_fields_p3 = baseline_entry.get("fields") or {}
+                    _bl_doi_before = _bl_fields_p3.get("doi")
+                    _doi_norm = idu.normalize_doi(doi_candidate)
+                    _is_eprint_doi = _doi_norm and any(
+                        idu.normalize_doi(f"10.48550/arxiv.{idu.extract_arxiv_eprint(ed) or ''}") == _doi_norm
+                        for _, ed in enr_list
+                        if idu.extract_arxiv_eprint(ed)
+                    )
+                    if _is_eprint_doi and not _bl_doi_before:
+                        _bl_fields_p3["doi"] = doi_candidate
                     candidate_matched = process_validated_doi(
                         doi_candidate, baseline_entry, result_id, enr_list, flags
                     )
+                    # Restore baseline DOI to avoid polluting later logic
+                    if _is_eprint_doi and not _bl_doi_before:
+                        _bl_fields_p3.pop("doi", None)
                     logger.debug(
                         f"DOI_VALIDATE_ATTEMPT | #{doi_idx} | doi={doi_candidate} | result={candidate_matched}",
                         category=LogCategory.AUDIT,
