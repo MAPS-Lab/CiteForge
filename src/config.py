@@ -96,7 +96,7 @@ VALID_YEAR_MAX = 2099
 
 # Response cache
 CACHE_DIR = "data/api_cache"
-CACHE_TTL_SEARCH_DAYS = 30
+CACHE_TTL_SEARCH_DAYS = 60
 CACHE_TTL_DOI_DAYS = 90
 CACHE_TTL_GEMINI_DAYS = 365
 CACHE_ENABLED = True
@@ -165,6 +165,15 @@ DATA_DOI_PREFIXES = (
 
 # Relaxed title similarity for preprint/published pairs
 SIM_PREPRINT_TITLE_THRESHOLD = 0.55
+
+# Journals whose names contain "Proceedings" but are NOT conference proceedings.
+# These override _is_conference_journal() to stay as @article.
+JOURNALS_NAMED_PROCEEDINGS: frozenset[str] = frozenset({
+    "proceedings of the national academy of sciences",
+    "proceedings of the vldb endowment",
+    "proceedings of the ieee",
+    "proceedings of the royal society",
+})
 
 # Conference venues that lack standard keywords (proceedings, conference, etc.)
 KNOWN_CONFERENCE_VENUES = frozenset({

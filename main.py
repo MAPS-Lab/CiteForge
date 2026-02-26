@@ -475,6 +475,17 @@ def process_article(
                 baseline_entry["type"] = "inproceedings"
                 _fixup_written = True
 
+        # Reclassify @article with patent number as journal → @misc
+        if (baseline_entry.get("type") == "article" and _bl_fields.get("journal")
+                and re.match(r'(?i)^US\s+Patent', (_bl_fields.get("journal") or "").strip())):
+                logger.debug(
+                    f"EXISTING_FIXUP | article_patent->misc | journal={_bl_fields['journal'][:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["note"] = _bl_fields.pop("journal")
+                baseline_entry["type"] = "misc"
+                _fixup_written = True
+
         # Downgrade @article with repository/portal as journal → @misc
         if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
             _repo_jnl_bl = (_bl_fields.get("journal") or "").lower()
@@ -1090,10 +1101,10 @@ def process_article(
                     try:
                         html = http_get_text(u)
                     except ALL_API_ERRORS:
-                        _doi_cache.put("doi_from_html", _u_str, {"doi": ""}, ttl_days=30)
+                        _doi_cache.put("doi_from_html", _u_str, {"doi": ""}, ttl_days=60)
                         continue
                     d = idu.find_doi_in_html(html)
-                    _doi_cache.put("doi_from_html", _u_str, {"doi": d or ""}, ttl_days=30)
+                    _doi_cache.put("doi_from_html", _u_str, {"doi": d or ""}, ttl_days=60)
                     if d:
                         logger.debug(
                             f"DOI_FROM_HTML | url={_u_str} | doi_found={d}",
@@ -1228,6 +1239,65 @@ def process_article(
                 )
                 merged["type"] = "inproceedings"
                 merged_fields["booktitle"] = merged_fields.pop("journal")
+
+        # Reclassify @article with patent number as journal → @misc
+        if merged.get("type") == "article" and merged_fields.get("journal"):
+            _patent_jnl = (merged_fields.get("journal") or "").strip()
+            if re.match(r'(?i)^US\s+Patent', _patent_jnl):
+                logger.debug(
+                    f"TYPE_CORRECT | article_patent->misc | journal={_patent_jnl[:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "misc"
+                merged_fields["note"] = _patent_jnl
+                merged_fields.pop("journal", None)
+
+        # Reclassify @article with "Unpublished" journal → @misc
+        if (merged.get("type") == "article" and merged_fields.get("journal")
+                and (merged_fields.get("journal") or "").strip().lower() == "unpublished"):
+            logger.debug("TYPE_CORRECT | article_unpublished->misc", category=LogCategory.AUDIT)
+            merged["type"] = "misc"
+            merged_fields.pop("journal", None)
+
+        # PNAS is a journal despite "Proceedings" in its name
+        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
+            _bt_pnas = (merged_fields.get("booktitle") or "").lower()
+            if "proceedings of the national academy" in _bt_pnas:
+                logger.debug(
+                    "TYPE_CORRECT | inproceedings_pnas->article | booktitle→journal",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "article"
+                merged_fields["journal"] = merged_fields.pop("booktitle")
+
+        # PVLDB is a journal despite "Proceedings" in its name
+        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
+            _bt_pvldb = (merged_fields.get("booktitle") or "").lower()
+            if "proceedings of the vldb" in _bt_pvldb:
+                logger.debug(
+                    "TYPE_CORRECT | inproceedings_pvldb->article",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "article"
+                merged_fields["journal"] = merged_fields.pop("booktitle")
+
+        # Strip URL fragments from booktitle (e.g., "proceedings.mlr.press")
+        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
+            _bt_val = (merged_fields.get("booktitle") or "").strip()
+            if re.match(r'^https?://|^[\w.-]+\.(com|org|net|io|press)\b', _bt_val, re.IGNORECASE):
+                logger.debug(
+                    f"TYPE_CORRECT | inproceedings_url_booktitle->misc | booktitle={_bt_val[:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "misc"
+                merged_fields.pop("booktitle", None)
+
+        # Downgrade @inproceedings with "Preprint" as booktitle → @misc
+        if (merged.get("type") == "inproceedings" and merged_fields.get("booktitle")
+                and (merged_fields.get("booktitle") or "").strip().lower() == "preprint"):
+            logger.debug("TYPE_CORRECT | inproceedings_preprint->misc", category=LogCategory.AUDIT)
+            merged["type"] = "misc"
+            merged_fields.pop("booktitle", None)
 
         # Downgrade @article with repository/portal as journal → @misc
         if merged.get("type") == "article" and merged_fields.get("journal"):

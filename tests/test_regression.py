@@ -1825,10 +1825,10 @@ class TestCslArticleTypePreserved:
             }),
         ]
         merged = merge_utils.merge_with_policy(entry, enrichers)
-        # Proceedings are not journals — must become @inproceedings
-        assert merged["type"] == "inproceedings"
-        assert merged["fields"]["booktitle"] == "Proceedings of the VLDB Endowment"
-        assert "journal" not in merged["fields"]
+        # PVLDB is a journal despite "Proceedings" in its name — stays @article
+        assert merged["type"] == "article"
+        assert merged["fields"]["journal"] == "Proceedings of the VLDB Endowment"
+        assert "booktitle" not in merged["fields"]
 
     def test_proceedings_on_also_becomes_inproceedings(self) -> None:
         """'Proceedings on X' (not just 'of') should also become @inproceedings."""
@@ -2189,8 +2189,8 @@ class TestCslPreprintVenueOverride:
         assert "booktitle" in merged.get("fields", {})
         assert "journal" not in merged.get("fields", {})
 
-    def test_published_doi_proceedings_becomes_inproceedings(self) -> None:
-        """Published DOI + proceedings journal -> @inproceedings (proceedings are not journals)."""
+    def test_published_doi_pvldb_stays_article(self) -> None:
+        """PVLDB is a journal despite 'Proceedings' in name -> stays @article."""
         entry: dict[str, Any] = {
             "type": "misc",
             "key": "Test2024",
@@ -2210,8 +2210,8 @@ class TestCslPreprintVenueOverride:
             }),
         ]
         merged = merge_utils.merge_with_policy(entry, enrichers)
-        assert merged["type"] == "inproceedings"
-        assert merged["fields"]["booktitle"] == "Proceedings of the VLDB Endowment"
+        assert merged["type"] == "article"
+        assert merged["fields"]["journal"] == "Proceedings of the VLDB Endowment"
 
     def test_arxiv_article_with_real_journal_stays_article(self) -> None:
         """arXiv DOI + real journal name (no conference keywords) -> stays @article."""

@@ -14,6 +14,7 @@ from .config import (
     DEDUP_INTERNAL_FIELDS,
     GENERIC_SERIES_NAMES,
     JOURNAL_ONLY_PREFIXES,
+    JOURNALS_NAMED_PROCEEDINGS,
     PAGES_MAX_DIGITS,
     PREPRINT_DOI_PREFIXES,
     PREPRINT_ONLY_PUBLISHERS,
@@ -112,9 +113,13 @@ def _is_conference_journal(journal: str) -> bool:
 
     Detects "Proceedings of ...", "Conference on ...", "Tagungsband" (German
     proceedings), "@" patterns (e.g. IberLEF@SEPLN), and entries in
-    CONFERENCE_AS_JOURNAL.
+    CONFERENCE_AS_JOURNAL.  Excludes journals whose names happen to contain
+    "Proceedings" (e.g. PNAS, PVLDB, Proc. IEEE).
     """
     lower = journal.lower()
+    # Exclude real journals that happen to contain "Proceedings"
+    if any(j in lower for j in JOURNALS_NAMED_PROCEEDINGS):
+        return False
     return (
         "proceedings" in lower
         or "tagungsband" in lower
