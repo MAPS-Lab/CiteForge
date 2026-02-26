@@ -1240,6 +1240,17 @@ def process_article(
                 merged["type"] = "misc"
                 merged_fields.pop("journal", None)
 
+        # Downgrade @inproceedings with repository as booktitle → @misc
+        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
+            _repo_bt = (merged_fields.get("booktitle") or "").lower()
+            if any(rj in _repo_bt for rj in REPOSITORY_AS_JOURNAL):
+                logger.debug(
+                    f"TYPE_CORRECT | inproceedings_repository->misc | booktitle={merged_fields['booktitle'][:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "misc"
+                merged_fields.pop("booktitle", None)
+
         # Reclassify @article with university name as journal → @phdthesis
         # (Crossref sometimes returns thesis DOIs with the university as journal)
         if merged.get("type") == "article" and merged_fields.get("journal"):

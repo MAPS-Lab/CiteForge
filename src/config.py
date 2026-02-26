@@ -153,6 +153,8 @@ REPOSITORY_AS_JOURNAL: frozenset[str] = frozenset({
     "california digital library",
     "eyls",
     "dspace",
+    "zenodo",
+    "cern european organization",
 })
 
 # Data repository DOI prefixes (deprioritized in DOI selection)
