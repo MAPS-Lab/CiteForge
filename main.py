@@ -1491,6 +1491,28 @@ def process_article(
                                     f" | sim={_doi_sim:.3f} | titles_differ",
                                     category=LogCategory.DEDUP,
                                 )
+                                # Revert the mis-attributed DOI so
+                                # save_entry_to_file's DOI_EXACT match won't
+                                # re-discover the same false link.  Fall back
+                                # to the Phase-1-validated DOI (if any) to keep
+                                # the entry stable across runs.
+                                if merged_fields.get("doi") == edoi:
+                                    _fallback = (
+                                        idu.normalize_doi(doi_early)
+                                        if doi_validated and doi_early
+                                        else None
+                                    )
+                                    if _fallback and _fallback != edoi:
+                                        merged_fields["doi"] = _fallback
+                                    else:
+                                        merged_fields.pop("doi", None)
+                                    merged_fields.pop("url", None)
+                                    logger.debug(
+                                        f"DOI_REVERT | removed={edoi}"
+                                        f" | restored={_fallback or 'none'}"
+                                        f" | reason=misattributed_candidate",
+                                        category=LogCategory.DEDUP,
+                                    )
                                 continue
                         logger.debug(
                             f"CANDIDATE_DOI_DEDUP | doi={edoi} | existing={existing_bib} "
