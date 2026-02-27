@@ -39,13 +39,13 @@ jobs:
 
     - name: Create API key files
       env:
-        SERPAPI_KEY: ${{ secrets.SERPAPI }}
+        SERPLY_KEY: ${{ secrets.SERPLY }}
         SEMANTIC_KEY: ${{ secrets.SEMANTICSCHOLAR }}
         OPENREVIEW_KEY: ${{ secrets.OPENREVIEW }}
         GEMINI_KEY: ${{ secrets.GEMINI }}
       run: |
         mkdir -p keys
-        echo "$SERPAPI_KEY" > keys/SerpAPI.key
+        echo "$SERPLY_KEY" > keys/Serply.key
         echo "$SEMANTIC_KEY" > keys/Semantic.key
         echo "$OPENREVIEW_KEY" > keys/OpenReview.key
         echo "$GEMINI_KEY" > keys/Gemini.key

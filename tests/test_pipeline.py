@@ -1,332 +1,271 @@
-import sys
-from pathlib import Path
-from textwrap import dedent
-from unittest.mock import patch
+from __future__ import annotations
+
+import contextlib
 import urllib.error
-import pytest
+from email.message import Message
+from textwrap import dedent
+from typing import Any
+from unittest.mock import patch
 
-from src import bibtex_utils as bt, api_clients as api
-from src.doi_utils import validate_doi_candidate, process_validated_doi
-from src.exceptions import ALL_API_ERRORS
+from src.clients import search_apis
+from src.doi_utils import process_validated_doi, validate_doi_candidate
 
-# ===== DOI VALIDATION PIPELINE TESTS =====
+# Shared baseline entries reused across DOI validation tests
+_BASELINE_FULL: dict[str, Any] = {
+    'type': 'inproceedings',
+    'key': 'Vaswani2017',
+    'fields': {
+        'title': 'Attention Is All You Need',
+        'author': 'Ashish Vaswani and Noam Shazeer and Niki Parmar',
+        'year': '2017',
+    },
+}
 
-def test_validate_doi_candidate_both_formats_match():
+_BASELINE_MINIMAL: dict[str, Any] = {
+    'type': 'inproceedings',
+    'key': 'Vaswani2017',
+    'fields': {
+        'title': 'Attention Is All You Need',
+        'author': 'Ashish Vaswani',
+        'year': '2017',
+    },
+}
+
+_MATCHING_CSL: dict[str, Any] = {
+    'title': 'Attention Is All You Need',
+    'author': [{'given': 'Ashish', 'family': 'Vaswani'}],
+    'issued': {'date-parts': [[2017]]},
+}
+
+_MATCHING_BIBTEX = dedent("""\
+    @inproceedings{Vaswani2017,
+      title = {Attention Is All You Need},
+      author = {Ashish Vaswani and Noam Shazeer},
+      year = {2017}
+    }""")
+
+_WRONG_CSL_BERT: dict[str, Any] = {
+    'title': 'BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding',
+    'author': [{'given': 'Jacob', 'family': 'Devlin'}],
+    'issued': {'date-parts': [[2019]]},
+}
+
+_WRONG_BIBTEX_BERT = dedent("""\
+    @inproceedings{Devlin2019,
+      title = {BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding},
+      author = {Jacob Devlin and Ming-Wei Chang and Kenton Lee and Kristina Toutanova},
+      year = {2019}
+    }""")
+
+_ARXIV_DOI = "10.48550/arXiv.1706.03762"
+_BERT_DOI = "10.18653/v1/N19-1423"
+
+
+def _patch_doi_resolvers(
+    *,
+    csl: Any = None,
+    bibtex: Any = None,
+    bibtex_from_csl: Any = None,
+    csl_side_effect: Any = None,
+    bibtex_side_effect: Any = None,
+) -> contextlib.ExitStack:
+    """Patch DOI resolver functions with the given return values or side effects."""
+    csl_kwargs: dict[str, Any] = (
+        {"side_effect": csl_side_effect} if csl_side_effect else {"return_value": csl}
+    )
+    bib_kwargs: dict[str, Any] = (
+        {"side_effect": bibtex_side_effect} if bibtex_side_effect else {"return_value": bibtex}
+    )
+    stack = contextlib.ExitStack()
+    stack.enter_context(patch.object(search_apis, 'fetch_csl_via_doi', **csl_kwargs))
+    stack.enter_context(patch.object(search_apis, 'fetch_bibtex_via_doi', **bib_kwargs))
+    stack.enter_context(patch.object(search_apis, 'bibtex_from_csl', return_value=bibtex_from_csl))
+    return stack
+
+
+def test_validate_doi_candidate_both_formats_match() -> None:
     """
     Verify that DOI validation succeeds when both CSL and BibTeX metadata
     from the DOI resolver match the baseline publication.
     """
-    # baseline entry representing the known paper we're validating against
-    baseline_entry = {
-        'type': 'inproceedings',
-        'key': 'Vaswani2017',
-        'fields': {
-            'title': 'Attention Is All You Need',
-            'author': 'Ashish Vaswani and Noam Shazeer and Niki Parmar',
-            'year': '2017'
-        }
-    }
-
-    # mock CSL-JSON response that matches baseline metadata
     mock_csl = {
         'type': 'paper-conference',
         'title': 'Attention Is All You Need',
         'author': [
             {'given': 'Ashish', 'family': 'Vaswani'},
-            {'given': 'Noam', 'family': 'Shazeer'}
+            {'given': 'Noam', 'family': 'Shazeer'},
         ],
-        'issued': {'date-parts': [[2017]]}
+        'issued': {'date-parts': [[2017]]},
     }
 
-    # mock BibTeX response that also matches baseline
-    mock_bibtex = dedent("""
-        @inproceedings{Vaswani2017,
-          title = {Attention Is All You Need},
-          author = {Ashish Vaswani and Noam Shazeer},
-          year = {2017}
-        }
-    """).strip()
-    # patch API functions to return matching metadata
-    with patch.object(api, 'fetch_csl_via_doi', return_value=mock_csl):
-        with patch.object(api, 'fetch_bibtex_via_doi', return_value=mock_bibtex):
-            with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex):
-                csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-                    doi="10.48550/arXiv.1706.03762",
-                    baseline_entry=baseline_entry,
-                    result_id="test"
-                )
+    with _patch_doi_resolvers(
+        csl=mock_csl, bibtex=_MATCHING_BIBTEX, bibtex_from_csl=_MATCHING_BIBTEX,
+    ):
+        csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
+            doi=_ARXIV_DOI, baseline_entry=_BASELINE_FULL, result_id="test",
+        )
 
-    # both formats should validate successfully
-    assert csl_matched and bibtex_matched, "Both formats should have matched"
-    # both entries should be returned for enrichment
-    assert csl_entry and bibtex_entry, "Both entries should be returned"
+    # CSL matched, so BibTeX fetch is skipped (Phase 3a optimization)
+    assert csl_matched, "CSL format should have matched"
+    assert not bibtex_matched, "BibTeX should be skipped when CSL matches"
+    assert csl_entry is not None, "CSL entry should be returned"
+    assert bibtex_entry is None, "BibTeX entry should be None (skipped)"
 
-def test_validate_doi_candidate_csl_only_matches():
+
+def test_validate_doi_candidate_csl_only_matches() -> None:
     """
-    Check partial validation where CSL-JSON succeeds but BibTeX fails.
+    Check that when CSL-JSON matches the baseline, BibTeX is skipped
+    (Phase 3a optimization) even if BibTeX would resolve to a wrong paper.
     """
-    baseline_entry = {
+    baseline_entry: dict[str, Any] = {
         'type': 'inproceedings',
         'key': 'Vaswani2017',
         'fields': {
             'title': 'Attention Is All You Need',
             'author': 'Ashish Vaswani and Noam Shazeer',
-            'year': '2017'
-        }
+            'year': '2017',
+        },
     }
 
-    # CSL matches baseline
-    mock_csl = {
-        'title': 'Attention Is All You Need',
-        'author': [{'given': 'Ashish', 'family': 'Vaswani'}],
-        'issued': {'date-parts': [[2017]]}
-    }
-
-    # BibTeX returns wrong paper metadata
-    mock_bibtex_wrong = dedent("""
+    mock_bibtex_wrong = dedent("""\
         @inproceedings{Wrong2018,
           title = {Different Paper About Attention},
           author = {John Doe},
           year = {2018}
-        }
-    """).strip()
-    # CSL-to-BibTeX conversion produces correct metadata
-    mock_bibtex_from_csl = dedent("""
-        @inproceedings{Vaswani2017,
-          title = {Attention Is All You Need},
-          author = {Ashish Vaswani and Noam Shazeer},
-          year = {2017}
-        }
-    """).strip()
-    with patch.object(api, 'fetch_csl_via_doi', return_value=mock_csl):
-        with patch.object(api, 'fetch_bibtex_via_doi', return_value=mock_bibtex_wrong):
-            with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex_from_csl):
-                csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-                    doi="10.48550/arXiv.1706.03762",
-                    baseline_entry=baseline_entry,
-                    result_id="test"
-                )
+        }""")
 
-    # CSL should validate, BibTeX should be rejected
+    with _patch_doi_resolvers(
+        csl=_MATCHING_CSL, bibtex=mock_bibtex_wrong, bibtex_from_csl=_MATCHING_BIBTEX,
+    ):
+        csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
+            doi=_ARXIV_DOI, baseline_entry=baseline_entry, result_id="test",
+        )
+
     assert csl_matched, "CSL should match"
     assert not bibtex_matched, "BibTeX should not match"
-    assert csl_entry, "CSL entry should be returned"
-    assert not bibtex_entry, "BibTeX entry should not be returned"
+    assert csl_entry is not None, "CSL entry should be returned"
+    assert bibtex_entry is None, "BibTeX entry should not be returned"
 
-def test_validate_doi_candidate_neither_matches():
+
+def test_validate_doi_candidate_neither_matches() -> None:
     """
     Test complete rejection when a DOI resolves to metadata for a different paper.
     """
-    baseline_entry = {
-        'type': 'inproceedings',
-        'key': 'Vaswani2017',
-        'fields': {
-            'title': 'Attention Is All You Need',
-            'author': 'Ashish Vaswani',
-            'year': '2017'
-        }
-    }
+    with _patch_doi_resolvers(
+        csl=_WRONG_CSL_BERT, bibtex=_WRONG_BIBTEX_BERT, bibtex_from_csl=_WRONG_BIBTEX_BERT,
+    ):
+        csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
+            doi=_BERT_DOI, baseline_entry=_BASELINE_MINIMAL, result_id="test",
+        )
 
-    # both CSL and BibTeX return metadata for completely different paper (BERT)
-    mock_csl_wrong = {
-        'title': 'BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding',
-        'author': [{'given': 'Jacob', 'family': 'Devlin'}],
-        'issued': {'date-parts': [[2019]]}
-    }
+    assert not csl_matched, "CSL should be rejected"
+    assert not bibtex_matched, "BibTeX should be rejected"
+    assert csl_entry is None, "CSL entry should not be returned"
+    assert bibtex_entry is None, "BibTeX entry should not be returned"
 
-    mock_bibtex_wrong = dedent("""
-        @inproceedings{Devlin2019,
-          title = {BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding},
-          author = {Jacob Devlin and Ming-Wei Chang and Kenton Lee and Kristina Toutanova},
-          year = {2019}
-        }
-    """).strip()
-    with patch.object(api, 'fetch_csl_via_doi', return_value=mock_csl_wrong):
-        with patch.object(api, 'fetch_bibtex_via_doi', return_value=mock_bibtex_wrong):
-            with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex_wrong):
-                csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-                    doi="10.18653/v1/N19-1423", # Real DOI for BERT
-                    baseline_entry=baseline_entry,
-                    result_id="test"
-                )
 
-    # neither format should match; DOI should be rejected entirely
-    assert not csl_matched and not bibtex_matched, "Both formats should be rejected"
-    assert not csl_entry and not bibtex_entry, "No entries should be returned"
-
-def test_validate_doi_candidate_network_errors():
+def test_validate_doi_candidate_network_errors() -> None:
     """
     Verify resilient error handling when DOI resolution fails due to network issues.
     """
-    baseline_entry = {
-        'type': 'inproceedings',
-        'key': 'Vaswani2017',
-        'fields': {
-            'title': 'Attention Is All You Need',
-            'author': 'Ashish Vaswani',
-            'year': '2017'
-        }
-    }
+    with _patch_doi_resolvers(
+        csl_side_effect=urllib.error.URLError("Network error"),
+        bibtex_side_effect=urllib.error.HTTPError(
+            url='test', code=500, msg='Server Error', hdrs=Message(), fp=None,
+        ),
+        bibtex_from_csl=None,
+    ):
+        csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
+            doi=_ARXIV_DOI, baseline_entry=_BASELINE_MINIMAL, result_id="test",
+        )
 
-    # simulate network failures for both formats
-    with patch.object(api, 'fetch_csl_via_doi', side_effect=urllib.error.URLError("Network error")):
-        with patch.object(api, 'fetch_bibtex_via_doi', side_effect=urllib.error.HTTPError(
-            url='test', code=500, msg='Server Error', hdrs={}, fp=None
-        )):
-            csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-                doi="10.48550/arXiv.1706.03762",
-                baseline_entry=baseline_entry,
-                result_id="test"
-            )
+    assert not csl_matched, "CSL should not match on network error"
+    assert not bibtex_matched, "BibTeX should not match on network error"
+    assert csl_entry is None, "CSL entry should not be returned on error"
+    assert bibtex_entry is None, "BibTeX entry should not be returned on error"
 
-    # should gracefully return False without raising exceptions
-    assert not csl_matched and not bibtex_matched, "Should handle network errors gracefully"
-    assert not csl_entry and not bibtex_entry, "Should not return entries on error"
 
-def test_validate_doi_candidate_early_vs_late():
+def test_validate_doi_candidate_bibtex_fallback_when_csl_fails() -> None:
     """
-    Confirm that validation logic remains consistent between early validation
-    and late validation.
+    Confirm that BibTeX fallback triggers when CSL validation fails,
+    exercising the Phase 3a short-circuit logic in reverse.
     """
-    baseline_entry = {
-        'type': 'inproceedings',
-        'key': 'Vaswani2017',
-        'fields': {
-            'title': 'Attention Is All You Need',
-            'author': 'Ashish Vaswani',
-            'year': '2017'
-        }
+    mock_csl_wrong: dict[str, Any] = {
+        'title': 'A Completely Different Paper Title',
+        'author': [{'given': 'John', 'family': 'Doe'}],
+        'issued': {'date-parts': [[2020]]},
     }
 
-    mock_csl = {
-        'title': 'Attention Is All You Need',
-        'author': [{'given': 'Ashish', 'family': 'Vaswani'}],
-        'issued': {'date-parts': [[2017]]}
-    }
+    mock_bibtex_from_csl_wrong = dedent("""\
+        @article{Doe2020,
+          title = {A Completely Different Paper Title},
+          author = {John Doe},
+          year = {2020}
+        }""")
 
-    mock_bibtex = dedent("""
-        @inproceedings{Vaswani2017,
-          title = {Attention Is All You Need},
-          author = {Ashish Vaswani and Noam Shazeer},
-          year = {2017}
-        }
-    """).strip()
-    # test early validation (baseline has DOI already)
-    with patch.object(api, 'fetch_csl_via_doi', return_value=mock_csl):
-        with patch.object(api, 'fetch_bibtex_via_doi', return_value=mock_bibtex):
-            with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex):
-                csl_matched_early, _, _, _ = validate_doi_candidate(
-                    doi="10.48550/arXiv.1706.03762", baseline_entry=baseline_entry,
-                    result_id="test"
-                )
+    with _patch_doi_resolvers(
+        csl=mock_csl_wrong, bibtex=_MATCHING_BIBTEX, bibtex_from_csl=mock_bibtex_from_csl_wrong,
+    ):
+        csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
+            doi=_ARXIV_DOI, baseline_entry=_BASELINE_MINIMAL, result_id="test",
+        )
 
-    # test late validation (DOI found during enrichment)
-    with patch.object(api, 'fetch_csl_via_doi', return_value=mock_csl):
-        with patch.object(api, 'fetch_bibtex_via_doi', return_value=mock_bibtex):
-            with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex):
-                csl_matched_late, _, _, _ = validate_doi_candidate(
-                    doi="10.48550/arXiv.1706.03762", baseline_entry=baseline_entry,
-                    result_id="test"
-                )
+    assert not csl_matched, "CSL should not match (wrong paper)"
+    assert csl_entry is None, "CSL entry should be None"
+    assert bibtex_matched, "BibTeX fallback should match when CSL fails"
+    assert bibtex_entry is not None, "BibTeX entry should be returned"
 
-    # both stages should produce identical validation results
-    assert csl_matched_early and csl_matched_late, "Both early and late should succeed"
 
-def test_process_validated_doi_success():
+def test_process_validated_doi_success() -> None:
     """
     Verify that successful DOI validation properly updates the enrichment
     tracking structures.
     """
-    baseline_entry = {
-        'type': 'inproceedings',
-        'key': 'Vaswani2017',
-        'fields': {
-            'title': 'Attention Is All You Need',
-            'author': 'Ashish Vaswani',
-            'year': '2017'
-        }
-    }
-
-    mock_csl = {
-        'title': 'Attention Is All You Need',
-        'author': [{'given': 'Ashish', 'family': 'Vaswani'}],
-        'issued': {'date-parts': [[2017]]}
-    }
-
-    mock_bibtex = dedent("""
-        @inproceedings{Vaswani2017,
-          title = {Attention Is All You Need},
-          author = {Ashish Vaswani and Noam Shazeer},
-          year = {2017}
-        }
-    """).strip()
-    # track enrichment state before validation
-    enr_list = []
+    enr_list: list[tuple[str, dict[str, Any]]] = []
     flags = {"doi_csl": False, "doi_bibtex": False}
 
-    with patch.object(api, 'fetch_csl_via_doi', return_value=mock_csl):
-        with patch.object(api, 'fetch_bibtex_via_doi', return_value=mock_bibtex):
-            with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex):
-                doi_matched = process_validated_doi(
-                    doi="10.48550/arXiv.1706.03762", baseline_entry=baseline_entry,
-                    result_id="test", enr_list=enr_list, flags=flags
-                )
+    with _patch_doi_resolvers(
+        csl=_MATCHING_CSL, bibtex=_MATCHING_BIBTEX, bibtex_from_csl=_MATCHING_BIBTEX,
+    ):
+        doi_matched = process_validated_doi(
+            doi=_ARXIV_DOI, baseline_entry=_BASELINE_MINIMAL,
+            result_id="test", enr_list=enr_list, flags=flags,
+        )
 
-    # validation should succeed and populate structures
     assert doi_matched, "Should return True"
-    assert len(enr_list) > 0, "Should populate enr_list"
+    assert enr_list, "Should populate enr_list"
 
-    # both flags should be set for summary tracking
-    assert flags.get("doi_csl") and flags.get("doi_bibtex"), "Both flags should be set"
+    # CSL flag should be set; BibTeX skipped (Phase 3a optimization)
+    assert flags.get("doi_csl"), "CSL flag should be set"
+    assert not flags.get("doi_bibtex"), "BibTeX flag should not be set (skipped when CSL matches)"
 
-    # both entries should appear in enrichment list for merging
     source_names = [source for source, _ in enr_list]
-    assert "doi_csl" in source_names or "csl" in source_names, "CSL source should be in enr_list"
-    assert "doi_bibtex" in source_names, "BibTeX source should be in enr_list"
+    assert "csl" in source_names, "CSL source should be in enr_list"
 
-def test_process_validated_doi_failure():
+
+def test_process_validated_doi_failure() -> None:
     """
     Confirm that failed DOI validation leaves enrichment structures untouched.
     """
-    baseline_entry = {
-        'type': 'inproceedings',
-        'key': 'Vaswani2017',
-        'fields': {
-            'title': 'Attention Is All You Need',
-            'author': 'Ashish Vaswani',
-            'year': '2017'
-        }
-    }
-
-    # DOI resolves to wrong paper metadata (BERT)
-    mock_csl_wrong = {
-        'title': 'BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding',
-        'author': [{'given': 'Jacob', 'family': 'Devlin'}],
-        'issued': {'date-parts': [[2019]]}
-    }
-
-    mock_bibtex_wrong = dedent("""
+    mock_bibtex_wrong = dedent("""\
         @inproceedings{Devlin2019,
           title = {BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding},
           author = {Jacob Devlin and Ming-Wei Chang},
           year = {2019}
-        }
-    """).strip()
-    # track state before failed validation
-    enr_list = []
+        }""")
+
+    enr_list: list[tuple[str, dict[str, Any]]] = []
     flags = {"doi_csl": False, "doi_bibtex": False}
 
-    with patch.object(api, 'fetch_csl_via_doi', return_value=mock_csl_wrong):
-        with patch.object(api, 'fetch_bibtex_via_doi', return_value=mock_bibtex_wrong):
-            with patch.object(api, 'bibtex_from_csl', return_value=mock_bibtex_wrong):
-                doi_matched = process_validated_doi(
-                    doi="10.18653/v1/N19-1423", baseline_entry=baseline_entry,
-                    result_id="test", enr_list=enr_list, flags=flags
-                )
+    with _patch_doi_resolvers(
+        csl=_WRONG_CSL_BERT, bibtex=mock_bibtex_wrong, bibtex_from_csl=mock_bibtex_wrong,
+    ):
+        doi_matched = process_validated_doi(
+            doi=_BERT_DOI, baseline_entry=_BASELINE_MINIMAL,
+            result_id="test", enr_list=enr_list, flags=flags,
+        )
 
-    # validation should fail and leave structures unchanged
     assert not doi_matched, "Should return False"
-    assert len(enr_list) == 0, "Should leave enr_list empty"
-
-    # flags should remain False to indicate no enrichment occurred
-    assert not flags.get("doi_csl") and not flags.get("doi_bibtex"), "Flags should remain False"
+    assert not enr_list, "Should leave enr_list empty"
+    assert not flags.get("doi_csl"), "doi_csl flag should remain False"
+    assert not flags.get("doi_bibtex"), "doi_bibtex flag should remain False"

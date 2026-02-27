@@ -17,6 +17,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+data/api_cache/
 downloads/
 eggs/
 .eggs/
@@ -43,7 +44,6 @@ ENV/
 .pytest_cache/
 .coverage
 .tox/
-A2I2/
 htmlcov/
 .mypy_cache/
 .dmypy.json
@@ -51,14 +51,21 @@ dmypy.json
 
 # User data and API keys
 keys/
-data/cache.json
 *.key
 *.keys
 .env
 .env.local
+
+# SonarQube
+.scannerwork/
+coverage.xml
 
 # Temporary files
 *.log
 *.tmp
 temp/
 tmp/
+
+# Local config
+.claude/
+CLAUDE.md

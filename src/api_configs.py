@@ -1,8 +1,33 @@
-from typing import Any, Dict
+import os
+from typing import Any
 
-from .config import S2_BASE, CROSSREF_BASE, OPENALEX_BASE, PUBMED_BASE, EUROPEPMC_BASE
-from .api_generics import APISearchConfig, APIFieldMapping
+from .api_generics import APIFieldMapping, APISearchConfig
+from .config import CROSSREF_BASE, EUROPEPMC_BASE, OPENALEX_BASE, PUBMED_BASE, S2_BASE
 from .text_utils import extract_year_from_any
+
+
+def _extract_csl_year(container: dict[str, Any]) -> int | None:
+    """Extract year from CSL date-parts structure."""
+    date_parts = (container.get("issued") or {}).get("date-parts")
+    if date_parts and date_parts[0] and isinstance(date_parts[0][0], int):
+        return date_parts[0][0]
+    return None
+
+
+def _extract_crossref_year(item: dict[str, Any]) -> int:
+    """Extract year from Crossref date-parts (tries issued, published-print, published-online)."""
+    for field in ("issued", "published-print", "published-online"):
+        source = item.get(field) or {}
+        date_parts = source.get("date-parts")
+        if date_parts and date_parts[0] and isinstance(date_parts[0][0], int):
+            return date_parts[0][0]
+    return 0
+
+
+def _extract_europepmc_year(article: dict[str, Any]) -> int:
+    """Extract year from Europe PMC pubYear field."""
+    year_str = article.get("pubYear") or ""
+    return int(year_str) if year_str.isdigit() else 0
 
 S2_SEARCH_CONFIG = APISearchConfig(
     api_name="semantic_scholar",
@@ -14,7 +39,6 @@ S2_SEARCH_CONFIG = APISearchConfig(
     requires_api_key=True,
     additional_params={
         "limit": 15,
-        # Note: DOI is inside externalIds.DOI, not a top-level field
         "fields": "paperId,title,year,venue,publicationTypes,authors,url,journal,externalIds,publicationDate"
     }
 )
@@ -31,19 +55,12 @@ CROSSREF_SEARCH_CONFIG = APISearchConfig(
         "select": ("title,author,issued,container-title,type,URL,DOI,"
                    "published-print,published-online,publisher,volume,issue,page")
     },
-    # Custom getters for Crossref's format
     title_getter=lambda c: (
         (c.get("title") or [""])[0]
         if isinstance(c.get("title"), list) and c.get("title")
         else ""
     ),
-    year_getter=lambda c: (
-        ((c.get("issued") or {}).get("date-parts") or [[None]])[0][0]
-        if ((c.get("issued") or {}).get("date-parts") and
-            (c.get("issued") or {}).get("date-parts")[0] and
-            isinstance(((c.get("issued") or {}).get("date-parts") or [[None]])[0][0], int))
-        else None
-    )
+    year_getter=_extract_csl_year,
 )
 
 OPENALEX_SEARCH_CONFIG = APISearchConfig(
@@ -55,9 +72,8 @@ OPENALEX_SEARCH_CONFIG = APISearchConfig(
     author_field="authorships",
     additional_params={
         "per-page": 20,
-        "mailto": "citeforge@example.com"
+        "mailto": os.getenv("CROSSREF_MAILTO", "")
     },
-    # Custom getters for OpenAlex's nested structure
     authors_getter=lambda w: [
         authorship.get("author", {}).get("display_name", "")
         for authorship in w.get("authorships") or []
@@ -93,10 +109,6 @@ EUROPEPMC_SEARCH_CONFIG = APISearchConfig(
 )
 
 
-# ============================================================================================
-# Field Mapping Configurations
-# ============================================================================================
-
 S2_FIELD_MAPPING = APIFieldMapping(
     api_name="semantic_scholar",
     title_fields=["title"],
@@ -108,8 +120,6 @@ S2_FIELD_MAPPING = APIFieldMapping(
     arxiv_fields=["externalIds.ArXiv", "externalIds.arXiv"],
     author_name_key="name",
     entry_type_list_field="publicationTypes",
-    extra_field_mappings={},
-    # Custom extractors for nested fields
     custom_author_extractor=lambda paper: [
         a.get("name", "").strip()
         for a in paper.get("authors") or []
@@ -134,36 +144,14 @@ CROSSREF_FIELD_MAPPING = APIFieldMapping(
         "page": "pages",
         "publisher": "publisher"
     },
-    # Custom extractors for Crossref's format
     custom_author_extractor=lambda item: [
         f"{author.get('given', '').strip()} {author.get('family', '').strip()}".strip()
         for author in item.get("author") or []
         if f"{author.get('given', '').strip()} {author.get('family', '').strip()}".strip()
     ] if item.get("author") else [],
-    custom_year_extractor=lambda item: (
-        ((item.get("issued") or item.get("published-print") or item.get("published-online") or {})
-         .get("date-parts") or [[None]])[0][0]
-        if ((item.get("issued") or item.get("published-print") or item.get("published-online") or {})
-            .get("date-parts") or [[None]])[0]
-        and isinstance(((item.get("issued") or item.get("published-print") or item.get("published-online") or {})
-                       .get("date-parts") or [[None]])[0][0], int)
-        else 0
-    )
+    custom_year_extractor=_extract_crossref_year,
 )
 
-
-# Helper for Crossref title extraction
-def _extract_crossref_title(item: Dict[str, Any]) -> str:
-    """
-    Extract title from Crossref's list format.
-    """
-    tlist = item.get("title") or []
-    return (tlist[0] if tlist else "").strip()
-
-
-# Update Crossref mapping to use custom title extractor
-CROSSREF_FIELD_MAPPING.title_fields = ["title"]
-# We'll handle the list extraction in a custom way
 
 OPENALEX_FIELD_MAPPING = APIFieldMapping(
     api_name="openalex",
@@ -175,8 +163,6 @@ OPENALEX_FIELD_MAPPING = APIFieldMapping(
     url_fields=["id"],
     entry_type_field="type",
     venue_hints={"journal": "article"},
-    extra_field_mappings={},
-    # Custom author extractor for OpenAlex's nested structure
     custom_author_extractor=lambda work: [
         authorship.get("author", {}).get("display_name", "").strip()
         for authorship in work.get("authorships") or []
@@ -200,7 +186,6 @@ PUBMED_FIELD_MAPPING = APIFieldMapping(
         "issue": "number",
         "pages": "pages"
     },
-    # Custom extractors for PubMed's format
     custom_author_extractor=lambda article: [
         author.get("name", "").strip()
         for author in article.get("authors") or []
@@ -224,16 +209,12 @@ EUROPEPMC_FIELD_MAPPING = APIFieldMapping(
         "issue": "number",
         "pageInfo": "pages"
     },
-    # Custom extractors
     custom_author_extractor=lambda article: [
         name.strip()
         for name in (article.get("authorString") or "").split(",")
         if name.strip()
     ],
-    custom_year_extractor=lambda article: (
-        (lambda ys: int(ys) if ys and ys.isdigit() else 0)
-        (article.get("pubYear") or "")
-    )
+    custom_year_extractor=_extract_europepmc_year,
 )
 
 ARXIV_FIELD_MAPPING = APIFieldMapping(
@@ -258,7 +239,6 @@ OPENREVIEW_FIELD_MAPPING = APIFieldMapping(
     venue_fields=["content.venue", "content.venueid"],
     doi_fields=["content.doi"],
     url_fields=["content.pdf", "content.link", "content.homepage"],
-    # Custom handling for nested content
     custom_author_extractor=lambda note: [
         str(a).strip()
         for a in ((note.get("content") or {}).get("authors") or
@@ -276,7 +256,6 @@ DATACITE_FIELD_MAPPING = APIFieldMapping(
     venue_fields=["attributes.publisher"],
     doi_fields=["attributes.doi"],
     url_fields=["attributes.url"],
-    # Custom extractors for DataCite's nested structure
     custom_author_extractor=lambda record: [
         creator.get("name", "").strip()
         for creator in (record.get("attributes") or {}).get("creators") or []

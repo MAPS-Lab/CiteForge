@@ -87,7 +87,10 @@ KNOWN_PAPERS = [
     # --- COMPLEX / EDGE CASE PAPERS ---
     {
         "name": "higgs_boson",
-        "title": "Observation of a new particle in the search for the Standard Model Higgs boson with the ATLAS detector at the LHC",
+        "title": (
+            "Observation of a new particle in the search for the"
+            " Standard Model Higgs boson with the ATLAS detector at the LHC"
+        ),
         "authors": ["Georges Aad", "Brad Abbott", "J. Abdallah", "et al."],  # 2932 authors in reality
         "first_author": "Aad",
         "year": 2012,
@@ -162,7 +165,14 @@ KNOWN_PAPERS = [
     },
     {
         "name": "long_title",
-        "title": "A very long title that goes on and on to test the buffer limits and similarity matching algorithms of the system to ensure that it does not crash or produce incorrect results when faced with an unusually verbose publication title that might occur in certain fields like medicine or humanities where titles can be descriptive paragraphs",
+        "title": (
+            "A very long title that goes on and on to test the buffer limits"
+            " and similarity matching algorithms of the system to ensure that"
+            " it does not crash or produce incorrect results when faced with"
+            " an unusually verbose publication title that might occur in"
+            " certain fields like medicine or humanities where titles can be"
+            " descriptive paragraphs"
+        ),
         "authors": ["Verbose Author"],
         "first_author": "Author",
         "year": 2023,
@@ -182,52 +192,44 @@ KNOWN_PAPERS = [
 # Papers optimized for specific APIs (to ensure each API is actually tested)
 API_SPECIFIC_PAPERS = {
     "semantic_scholar": {
-        # This paper should be in S2
         "title": "Attention Is All You Need",
         "first_author": "Vaswani",
         "year": 2017,
     },
     "dblp": {
-        # Donald Knuth's papers are well-established in DBLP
         "author_name": "Donald E. Knuth",
         "dblp_pid": "k/DonaldEKnuth",
         "min_year": 2000,
     },
     "openreview": {
-        # Recent ICLR 2024 paper more likely to be in OpenReview
         "title": "Self-Rewarding Language Models",
         "first_author": "Yuan",
         "year": 2024,
     },
     "openalex": {
-        # Well-known paper that should be in OpenAlex
         "title": "Attention Is All You Need",
         "first_author": "Vaswani",
         "year": 2017,
         "openalex_id": "W2964148859",
     },
     "pubmed": {
-        # Famous CRISPR paper in PubMed
         "title": "A programmable dual-RNA-guided DNA endonuclease in adaptive bacterial immunity",
         "first_author": "Jinek",
         "year": 2012,
         "pubmed_id": "22745249",
     },
     "europepmc": {
-        # Same CRISPR paper should be in Europe PMC
         "title": "A programmable dual-RNA-guided DNA endonuclease in adaptive bacterial immunity",
         "first_author": "Jinek",
         "year": 2012,
         "pmc_id": "PMC6286148",
     },
     "datacite": {
-        # Example dataset DOI (Zenodo dataset)
         "title": "COVID-19 Open Research Dataset",
         "doi": "10.5281/zenodo.3715506",
         "year": 2020,
     },
     "orcid": {
-        # Use a known public ORCID with accessible works
         "orcid_id": "0000-0002-1825-0097",
         "author_name": "Test User",
     },
@@ -237,10 +239,9 @@ API_SPECIFIC_PAPERS = {
 TEST_AUTHOR = {
     "name": "Geoffrey Hinton",
     "email": "test@example.com",
-    # Geoffrey Hinton's Google Scholar ID
     "scholar_id": "JicYPdAAAAAJ",
     "orcid": "",
-    "dblp": "/h/GeoffreyEHinton",  # DBLP person ID
+    "dblp": "/h/GeoffreyEHinton",
 }
 
 # Expected fields that should be present after enrichment
@@ -252,7 +253,12 @@ API_CONFIGS = {
     "serpapi": {
         "required": True,
         "key_file": "keys/SerpAPI.key",
-        "timeout": 30.0,
+        "timeout": 10.0,
+    },
+    "serply": {
+        "required": False,
+        "key_file": "keys/Serply.key",
+        "timeout": 10.0,
     },
     "semantic_scholar": {
         "required": False,
@@ -261,12 +267,12 @@ API_CONFIGS = {
     },
     "crossref": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
     },
     "arxiv": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
     },
     "openreview": {
@@ -276,37 +282,60 @@ API_CONFIGS = {
     },
     "dblp": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
     },
     "doi": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
     },
     "openalex": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
     },
     "pubmed": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
     },
     "europepmc": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
     },
     "datacite": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
     },
     "orcid": {
         "required": False,
-        "key_file": None,  # No auth required
+        "key_file": None,
         "timeout": 15.0,
+    },
+}
+
+# Canned OpenAlex work record for offline fallback in test_openalex_search.
+# Mirrors the essential fields of W2964148859 ("Attention Is All You Need").
+OPENALEX_CANNED_WORK = {
+    "id": "https://openalex.org/W2964148859",
+    "doi": "https://doi.org/10.48550/arXiv.1706.03762",
+    "title": "Attention Is All You Need",
+    "publication_year": 2017,
+    "type": "article",
+    "authorships": [
+        {"author": {"display_name": "Ashish Vaswani"}},
+        {"author": {"display_name": "Noam Shazeer"}},
+        {"author": {"display_name": "Niki Parmar"}},
+        {"author": {"display_name": "Jakob Uszkoreit"}},
+        {"author": {"display_name": "Llion Jones"}},
+        {"author": {"display_name": "Aidan N. Gomez"}},
+        {"author": {"display_name": "Lukasz Kaiser"}},
+        {"author": {"display_name": "Illia Polosukhin"}},
+    ],
+    "primary_location": {
+        "source": {"display_name": "arXiv (Cornell University)"},
     },
 }

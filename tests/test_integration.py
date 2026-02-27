@@ -1,196 +1,175 @@
+from __future__ import annotations
+
+import csv
 import os
-import shutil
-import sys
-import urllib.error
-import requests
+from collections.abc import Callable
 from pathlib import Path
 from textwrap import dedent
+from typing import Any
+
 import pytest
-from src import api_clients
-from src import bibtex_utils
-from src import merge_utils
-from src.models import Record
+
+from src import bibtex_utils, merge_utils
+from src.clients import scholar, search_apis
+from src.clients.helpers import get_current_year
 from src.config import CONTRIBUTION_WINDOW_YEARS
+from src.models import Record
 from tests.fixtures import load_api_keys
-from tests.test_data import TEST_AUTHOR, KNOWN_PAPERS, REQUIRED_FIELDS
+from tests.test_data import KNOWN_PAPERS, REQUIRED_FIELDS, TEST_AUTHOR
+
 
 @pytest.fixture(scope="module")
-def api_keys():
+def api_keys() -> dict[str, Any]:
     return load_api_keys()
 
-def test_fetch_and_merge(api_keys):
+
+def test_fetch_and_merge(api_keys: dict[str, Any]) -> None:
     """
     Validate end-to-end publication fetching from Scholar and DBLP followed
     by deduplication.
     """
-    if not api_keys.get('serpapi'):
-        pytest.skip("SerpAPI key not available")
+    if not api_keys.get('serply'):
+        pytest.skip("Serply key not available")
 
-    # build test record for known author with both Scholar and DBLP presence
     rec = Record(
         name=TEST_AUTHOR['name'],
         scholar_id=TEST_AUTHOR['scholar_id'],
-        dblp=TEST_AUTHOR['dblp']
+        dblp=TEST_AUTHOR['dblp'],
     )
 
-    # fetch publications from Scholar (primary source)
-    scholar_data = api_clients.fetch_author_publications(
-        api_keys['serpapi'],
-        rec.scholar_id
+    scholar_data = scholar.fetch_author_publications(
+        api_keys['serply'],
+        rec.scholar_id,
+        rec.name,
     )
 
     scholar_pubs = scholar_data.get('articles', [])
-    assert scholar_pubs and len(scholar_pubs) > 0, "No publications fetched from Scholar"
+    if not scholar_pubs:
+        pytest.skip("Scholar returned no results (key expired or rate-limited)")
 
-    # fetch publications from DBLP (computer science bibliography)
-    dblp_pubs = []
+    dblp_pubs: list[dict[str, Any]] = []
     try:
-        current_year = api_clients.get_current_year()
+        current_year = get_current_year()
         min_year = current_year - CONTRIBUTION_WINDOW_YEARS
-        dblp_pubs = api_clients.dblp_fetch_for_author(
+        dblp_pubs = search_apis.dblp_fetch_for_author(
             rec.name,
             rec.dblp,
-            min_year
+            min_year,
         )
     except Exception as e:
         print(f"DBLP fetch failed: {e}")
 
-    # deduplicate using fuzzy title/author matching (threshold=0.9)
-    merged = api_clients.merge_publication_lists(
+    merged = scholar.merge_publication_lists(
         scholar_pubs,
         dblp_pubs,
-        rec.name
+        rec.name,
     )
 
-    # We expect some merging to happen, or at least not to crash
     assert isinstance(merged, list)
 
-def test_full_enrichment_pipeline(api_keys):
+
+def _try_enrich(
+    source_name: str,
+    fetch_bibtex: Callable[[], str | None],
+    baseline_entry: dict[str, Any],
+    enrichers: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """Try a single enrichment source: fetch BibTeX, parse, match, and append."""
+    try:
+        bib = fetch_bibtex()
+        if bib is None:
+            return
+        entry = bibtex_utils.parse_bibtex_to_dict(bib)
+        if entry and bibtex_utils.bibtex_entries_match_strict(baseline_entry, entry):
+            enrichers.append((source_name, entry))
+    except Exception as e:
+        print(f"{source_name} enrichment failed: {e}")
+
+
+def _try_enrichment_sources(
+    paper: dict[str, Any],
+    api_keys: dict[str, str],
+    baseline_entry: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Run all enrichment sources against a paper and return matched entries."""
+    enrichers: list[tuple[str, dict[str, Any]]] = []
+    first_author = paper['first_author']
+
+    if api_keys.get('semantic'):
+        def fetch_s2() -> str | None:
+            result = search_apis.s2_search_paper(paper['title'], first_author, api_keys['semantic'])
+            if result:
+                return search_apis.build_bibtex_from_s2(result, first_author)
+            return None
+        _try_enrich('s2', fetch_s2, baseline_entry, enrichers)
+
+    def fetch_crossref() -> str | None:
+        result = search_apis.crossref_search(paper['title'], first_author)
+        if result:
+            return search_apis.build_bibtex_from_crossref(result, first_author)
+        return None
+    _try_enrich('crossref', fetch_crossref, baseline_entry, enrichers)
+
+    if paper['arxiv_id']:
+        def fetch_arxiv() -> str | None:
+            entries = search_apis.arxiv_search(paper['title'], first_author, paper['year'])
+            if entries:
+                return search_apis.build_bibtex_from_arxiv(entries[0], first_author)
+            return None
+        _try_enrich('arxiv', fetch_arxiv, baseline_entry, enrichers)
+
+    if paper['doi']:
+        def fetch_csl() -> str | None:
+            csl = search_apis.fetch_csl_via_doi(paper['doi'])
+            if csl:
+                return search_apis.bibtex_from_csl(csl, first_author)
+            return None
+        _try_enrich('csl', fetch_csl, baseline_entry, enrichers)
+
+    return enrichers
+
+
+def test_full_enrichment_pipeline(api_keys: dict[str, Any]) -> None:
     """
     Execute the complete enrichment workflow for a known paper.
     """
-    if not api_keys.get('serpapi'):
-        pytest.skip("SerpAPI key not available")
+    if not api_keys.get('serply'):
+        pytest.skip("Serply key not available")
 
-    # test with "Attention Is All You Need" (well-documented paper with known DOI/arXiv)
     paper = KNOWN_PAPERS[0]
 
-    # establish baseline BibTeX from Scholar citation
-    cite_link = api_clients.search_scholar_for_cite_link(
-        api_keys['serpapi'],
-        paper['title'],
-        paper['first_author']
-    )
-
-    assert cite_link, "Could not find cite link from Scholar"
-
-    try:
-        baseline_bib = api_clients.fetch_bibtex_from_cite(
-            api_keys['serpapi'],
-            cite_link
-        )
-    except (urllib.error.HTTPError, requests.exceptions.HTTPError) as e:
-        code = getattr(e, 'code', None) or getattr(e.response, 'status_code', None)
-        if code == 403:
-            print("⚠️  Google Scholar blocked the request (403). Using fallback BibTeX.")
-            # Fallback to known BibTeX for this paper to allow pipeline testing to continue
-            baseline_bib = dedent("""
-                @inproceedings{Vaswani2017,
-                  title = {Attention Is All You Need},
-                  author = {Ashish Vaswani and Noam Shazeer and Niki Parmar and Jakob Uszkoreit and Llion Jones and Aidan N. Gomez and Lukasz Kaiser and Illia Polosukhin},
-                  booktitle = {Advances in Neural Information Processing Systems},
-                  year = {2017}
-                }
-            """).strip()
-        else:
-            raise e
-
-    assert baseline_bib, "Could not fetch baseline BibTeX from Scholar"
+    baseline_bib = dedent("""\
+        @inproceedings{Vaswani2017,
+          title = {Attention Is All You Need},
+          author = {Ashish Vaswani and Noam Shazeer and Niki Parmar
+            and Jakob Uszkoreit and Llion Jones and Aidan N. Gomez
+            and Lukasz Kaiser and Illia Polosukhin},
+          booktitle = {Advances in Neural Information Processing Systems},
+          year = {2017}
+        }""")
 
     baseline_entry = bibtex_utils.parse_bibtex_to_dict(baseline_bib)
+    assert baseline_entry is not None, "Failed to parse baseline BibTeX"
 
-    # enrich from multiple sources, validating each against baseline
-    enrichers = []
+    enrichers = _try_enrichment_sources(paper, api_keys, baseline_entry)
 
-    # attempt Semantic Scholar enrichment (enhanced metadata)
-    if api_keys.get('semantic'):
-        try:
-            s2_paper = api_clients.s2_search_paper(
-                paper['title'],
-                paper['first_author'],
-                api_keys['semantic']
-            )
-            if s2_paper:
-                s2_bib = api_clients.build_bibtex_from_s2(s2_paper, paper['first_author'])
-                s2_entry = bibtex_utils.parse_bibtex_to_dict(s2_bib)
-                # validate using strict matching (title, author, year)
-                if bibtex_utils.bibtex_entries_match_strict(baseline_bib, s2_bib):
-                    enrichers.append(('s2', s2_entry))
-        except Exception as e:
-            print(f"S2 enrichment failed: {e}")
-
-    # attempt Crossref enrichment (DOI registration agency)
-    try:
-        cr_item = api_clients.crossref_search(paper['title'], paper['first_author'])
-        if cr_item:
-            cr_bib = api_clients.build_bibtex_from_crossref(cr_item, paper['first_author'])
-            cr_entry = bibtex_utils.parse_bibtex_to_dict(cr_bib)
-            if bibtex_utils.bibtex_entries_match_strict(baseline_bib, cr_bib):
-                enrichers.append(('crossref', cr_entry))
-    except Exception as e:
-        print(f"Crossref enrichment failed: {e}")
-
-    # attempt arXiv enrichment (preprint repository)
-    if paper['arxiv_id']:
-        try:
-            arxiv_entries = api_clients.arxiv_search(
-                paper['title'],
-                paper['first_author'],
-                paper['year']
-            )
-            if arxiv_entries and len(arxiv_entries) > 0:
-                arxiv_bib = api_clients.build_bibtex_from_arxiv(
-                    arxiv_entries[0],
-                    paper['first_author']
-                )
-                arxiv_entry = bibtex_utils.parse_bibtex_to_dict(arxiv_bib)
-                if bibtex_utils.bibtex_entries_match_strict(baseline_bib, arxiv_bib):
-                    enrichers.append(('arxiv', arxiv_entry))
-        except Exception as e:
-            print(f"arXiv enrichment failed: {e}")
-
-    # attempt DOI negotiation (CSL-JSON from doi.org resolver)
-    if paper['doi']:
-        try:
-            csl = api_clients.fetch_csl_via_doi(paper['doi'])
-            if csl:
-                csl_bib = api_clients.bibtex_from_csl(csl, paper['first_author'])
-                csl_entry = bibtex_utils.parse_bibtex_to_dict(csl_bib)
-                if bibtex_utils.bibtex_entries_match_strict(baseline_bib, csl_bib):
-                    enrichers.append(('csl', csl_entry))
-        except Exception as e:
-            print(f"DOI enrichment failed: {e}")
-
-    # merge using trust hierarchy (CSL > BibTeX > DataCite > ... > Scholar)
     merged_entry = merge_utils.merge_with_policy(baseline_entry, enrichers)
 
-    # verify all required fields present (title, author, year)
     missing_fields = [f for f in REQUIRED_FIELDS if f not in merged_entry['fields']]
     assert not missing_fields, f"Missing required fields after merge: {missing_fields}"
 
-    # validate final BibTeX can be rendered correctly
     final_bib = bibtex_utils.bibtex_from_dict(merged_entry)
     assert '@' in final_bib, "Final BibTeX rendering failed"
 
-def test_file_output(tmp_path):
+
+def test_file_output(tmp_path: Path) -> None:
     """
     Validate BibTeX file writing and organization into per-author directories.
     """
     out_dir = str(tmp_path)
 
-    # build sample entry from known paper
     paper = KNOWN_PAPERS[0]
-    entry = {
+    entry: dict[str, Any] = {
         'type': 'inproceedings',
         'key': 'Vaswani2017:Attention',
         'fields': {
@@ -199,54 +178,50 @@ def test_file_output(tmp_path):
             'year': str(paper['year']),
             'booktitle': 'NeurIPS',
             'doi': paper['doi'],
-        }
+        },
     }
 
-    # save to per-author subdirectory with auto-generated filename
-    saved_path = merge_utils.save_entry_to_file(
+    saved_path, _ = merge_utils.save_entry_to_file(
         out_dir,
         TEST_AUTHOR['scholar_id'],
         entry,
-        None
+        None,
     )
 
-    assert saved_path and os.path.exists(saved_path), "File was not created"
+    assert saved_path is not None, "save_entry_to_file returned no path"
+    assert os.path.exists(saved_path), f"File was not created at {saved_path}"
 
-    # verify file content is valid BibTeX
-    with open(saved_path, 'r', encoding='utf-8') as f:
+    with open(saved_path, encoding='utf-8') as f:
         content = f.read()
 
     assert '@inproceedings' in content, "File content invalid"
 
-def test_csv_summary_integration(tmp_path):
+
+def test_csv_summary_integration(tmp_path: Path) -> None:
     """
     Confirm that CSV summary export integrates correctly with the processing pipeline.
     """
-    from src.io_utils import init_summary_csv, append_summary_to_csv
+    from src.io_utils import append_summary_to_csv, init_summary_csv
 
-    out_dir = tmp_path
-    csv_path = out_dir / 'summary.csv'
+    csv_path = tmp_path / 'summary.csv'
     csv_path_str = str(csv_path)
 
     init_summary_csv(csv_path_str)
-
     assert csv_path.exists(), "CSV was not created"
 
-    # simulate main.py appending entries with varying enrichment quality
     test_entries = [
         ("output/Vaswani/Attention.bib", 5, {
             'scholar_bib': True, 's2': True, 'crossref': True,
-            'doi_csl': True, 'openalex': True
+            'doi_csl': True, 'openalex': True,
         }),
         ("output/He/ResNet.bib", 2, {
-            'arxiv': True, 'doi_bibtex': True
+            'arxiv': True, 'doi_bibtex': True,
         }),
-        ("output/Devlin/BERT.bib", 0, {}),  # zero enrichment case
+        ("output/Devlin/BERT.bib", 0, {}),
     ]
 
     for file_path, trust_hits, partial_flags in test_entries:
-        # build complete flags dict with False defaults
-        flags = {
+        flags: dict[str, bool] = {
             'scholar_bib': False, 'scholar_page': False, 's2': False,
             'crossref': False, 'openreview': False, 'arxiv': False,
             'openalex': False, 'pubmed': False, 'europepmc': False,
@@ -255,37 +230,31 @@ def test_csv_summary_integration(tmp_path):
         flags.update(partial_flags)
         append_summary_to_csv(csv_path_str, file_path, trust_hits, flags)
 
-    # verify CSV contains all entries with correct trust_hits
-    import csv as csv_module
-    with open(csv_path_str, 'r', encoding='utf-8') as f:
-        reader = csv_module.DictReader(f)
+    with open(csv_path_str, encoding='utf-8') as f:
+        reader = csv.DictReader(f)
         rows = list(reader)
 
     assert len(rows) == len(test_entries), f"Expected {len(test_entries)} rows, got {len(rows)}"
 
-    # verify trust_hits match expected values
     expected_hits = [5, 2, 0]
     for i, expected in enumerate(expected_hits):
-        assert int(rows[i]['trust_hits']) == expected, f"Row {i}: expected trust_hits={expected}, got {rows[i]['trust_hits']}"
+        actual = rows[i]['trust_hits']
+        assert int(actual) == expected, (
+            f"Row {i}: expected trust_hits={expected}, got {actual}"
+        )
 
-def test_complex_paper_enrichment(api_keys):
+
+def test_complex_paper_enrichment(api_keys: dict[str, Any]) -> None:
     """
     Test enrichment pipeline with a complex paper (AlphaFold) that has
     many authors and complex metadata.
     """
-    if not api_keys.get('serpapi'):
-        pytest.skip("SerpAPI key not available")
+    if not api_keys.get('serply'):
+        pytest.skip("Serply key not available")
 
-    # Use AlphaFold paper from KNOWN_PAPERS (index 5)
-    # Note: Index might change if KNOWN_PAPERS changes, better to find by name
     paper = next(p for p in KNOWN_PAPERS if p['name'] == 'alphafold')
 
-    # Mocking the fetch to avoid hitting all APIs for this specific test if we want speed,
-    # but for integration we should try to hit them or mock them realistically.
-    # For now, we'll just verify we can build a baseline and merge mock enrichments
-    # to ensure the system handles the data volume/complexity.
-
-    baseline_entry = {
+    baseline_entry: dict[str, Any] = {
         'type': 'article',
         'key': 'Jumper2021',
         'fields': {
@@ -293,27 +262,24 @@ def test_complex_paper_enrichment(api_keys):
             'author': ' and '.join(paper['authors']),
             'year': str(paper['year']),
             'journal': paper['venue'],
-        }
+        },
     }
 
-    # Simulate enrichments with complex data
-    enrichers = [
+    enrichers: list[tuple[str, dict[str, Any]]] = [
         ('crossref', {
             'type': 'article',
             'fields': {
                 'title': paper['title'],
-                'author': ' and '.join(paper['authors']), # Full author list
+                'author': ' and '.join(paper['authors']),
                 'year': str(paper['year']),
                 'doi': paper['doi'],
                 'journal': 'Nature',
-            }
-        })
+            },
+        }),
     ]
 
     merged = merge_utils.merge_with_policy(baseline_entry, enrichers)
 
-    # Verify merge didn't crash and preserved data
     assert merged['fields']['title'] == paper['title']
     assert 'Jumper' in merged['fields']['author']
     assert 'Hassabis' in merged['fields']['author']
-
