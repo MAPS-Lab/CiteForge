@@ -95,6 +95,8 @@ from src.text_utils import (
 
 FORCE_ENRICH = "--force" in sys.argv[1:]
 
+_BRACKET_J_RE = re.compile(r'\s*\[J\]\s*$')
+
 
 def _is_garbage_title(title: str) -> bool:
     """Detect non-bibliographic titles from Scholar/DBLP artifacts.
@@ -194,6 +196,39 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
         category=LogCategory.AUDIT,
     )
     return result
+
+
+def _read_doi_from_file(filepath: str) -> str:
+    """Read and normalize the DOI from a .bib file on disk, returning '' on failure."""
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            parsed = bt.parse_bibtex_to_dict(f.read())
+        return idu.normalize_doi((parsed or {}).get("fields", {}).get("doi", "")) or ""
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _revert_misattributed_doi(
+    merged_fields: dict[str, Any],
+    bad_doi: str,
+    doi_validated: bool,
+    doi_early: str | None,
+) -> None:
+    """Replace a mis-attributed DOI with the Phase-1-validated DOI (if any), or remove it."""
+    if merged_fields.get("doi") != bad_doi:
+        return
+    fallback = idu.normalize_doi(doi_early) if doi_validated and doi_early else None
+    if fallback and fallback != bad_doi:
+        merged_fields["doi"] = fallback
+    else:
+        merged_fields.pop("doi", None)
+    merged_fields.pop("url", None)
+    logger.debug(
+        f"DOI_REVERT | removed={bad_doi}"
+        f" | restored={fallback or 'none'}"
+        f" | reason=misattributed_candidate",
+        category=LogCategory.DEDUP,
+    )
 
 
 def _try_multiple_candidates(
@@ -444,8 +479,8 @@ def process_article(
 
         # Strip [J] bracket artifacts from title
         _bl_title = _bl_fields.get("title", "")
-        if isinstance(_bl_title, str) and re.search(r'\s*\[J\]\s*$', _bl_title):
-            _bl_fields["title"] = re.sub(r'\s*\[J\]\s*$', '', _bl_title).strip()
+        if isinstance(_bl_title, str) and _BRACKET_J_RE.search(_bl_title):
+            _bl_fields["title"] = _BRACKET_J_RE.sub('', _bl_title).strip()
             logger.debug(
                 f"EXISTING_FIXUP | bracket_artifact_stripped | title={_bl_title[:60]}",
                 category=LogCategory.CLEANUP,
@@ -1361,7 +1396,7 @@ def process_article(
         if isinstance(_p4_title, str) and _p4_title:
             _p4_fixed = trim_title_default(_p4_title)
             # Strip [J] bracket artifact (citation format leak from Scholar)
-            _p4_fixed = re.sub(r'\s*\[J\]\s*$', '', _p4_fixed).strip()
+            _p4_fixed = _BRACKET_J_RE.sub('', _p4_fixed).strip()
             if _p4_fixed != _p4_title:
                 merged_fields["title"] = _p4_fixed
 
@@ -1447,22 +1482,14 @@ def process_article(
         # on disk.  This prevents oscillation where a preprint/published pair creates
         # a file under the preprint title that gets enriched and renamed every run.
         merged_doi = idu.normalize_doi(merged_fields.get("doi", ""))
-        # Also infer DOI from merged eprint field (merge_with_policy may have added it)
         _merged_eprint = idu.extract_arxiv_eprint(merged)
         if _merged_eprint:
             all_candidate_dois.add(idu.normalize_doi(f"10.48550/arxiv.{_merged_eprint}") or "")
         if merged_doi:
             all_candidate_dois.add(merged_doi)
         # Exclude the DOI of the prefer_path file itself to avoid self-matching
-        _prefer_doi = ""
-        if path and os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8") as _pf:
-                    _pd = bt.parse_bibtex_to_dict(_pf.read())
-                _prefer_doi = idu.normalize_doi((_pd or {}).get("fields", {}).get("doi", "")) or ""
-            except (OSError, UnicodeDecodeError):
-                pass
-        check_dois = all_candidate_dois - {_prefer_doi} if _prefer_doi else all_candidate_dois
+        prefer_doi = _read_doi_from_file(path) if path and os.path.isfile(path) else ""
+        check_dois = all_candidate_dois - {prefer_doi} if prefer_doi else all_candidate_dois
         if check_dois:
             for existing_bib in os.listdir(author_dir):
                 if not existing_bib.endswith(".bib"):
@@ -1476,56 +1503,36 @@ def process_article(
                     if not edict:
                         continue
                     edoi = idu.normalize_doi((edict.get("fields") or {}).get("doi", ""))
-                    if edoi and edoi in check_dois:
-                        # Guard: verify the DOI match is genuine by comparing
-                        # titles.  Phase-2 candidate DOIs can be false matches
-                        # (API returned the wrong DOI for the query title).
-                        e_title = (edict.get("fields") or {}).get("title", "")
-                        m_title = merged_fields.get("title", "")
-                        if e_title and m_title:
-                            _doi_sim = title_similarity(e_title, m_title)
-                            if _doi_sim < SIM_PREPRINT_TITLE_THRESHOLD:
-                                logger.debug(
-                                    f"CANDIDATE_DOI_DEDUP_REJECTED | doi={edoi}"
-                                    f" | existing={existing_bib}"
-                                    f" | sim={_doi_sim:.3f} | titles_differ",
-                                    category=LogCategory.DEDUP,
-                                )
-                                # Revert the mis-attributed DOI so
-                                # save_entry_to_file's DOI_EXACT match won't
-                                # re-discover the same false link.  Fall back
-                                # to the Phase-1-validated DOI (if any) to keep
-                                # the entry stable across runs.
-                                if merged_fields.get("doi") == edoi:
-                                    _fallback = (
-                                        idu.normalize_doi(doi_early)
-                                        if doi_validated and doi_early
-                                        else None
-                                    )
-                                    if _fallback and _fallback != edoi:
-                                        merged_fields["doi"] = _fallback
-                                    else:
-                                        merged_fields.pop("doi", None)
-                                    merged_fields.pop("url", None)
-                                    logger.debug(
-                                        f"DOI_REVERT | removed={edoi}"
-                                        f" | restored={_fallback or 'none'}"
-                                        f" | reason=misattributed_candidate",
-                                        category=LogCategory.DEDUP,
-                                    )
-                                continue
-                        logger.debug(
-                            f"CANDIDATE_DOI_DEDUP | doi={edoi} | existing={existing_bib} "
-                            f"| skipping_write=True",
-                            category=LogCategory.DEDUP,
-                        )
-                        if path and os.path.isfile(path):
-                            os.remove(path)
+                    if not edoi or edoi not in check_dois:
+                        continue
+                    # Guard: verify the DOI match is genuine by comparing titles.
+                    # Phase-2 candidate DOIs can be false matches (API returned
+                    # the wrong DOI for the query title).
+                    e_title = (edict.get("fields") or {}).get("title", "")
+                    m_title = merged_fields.get("title", "")
+                    if e_title and m_title:
+                        doi_sim = title_similarity(e_title, m_title)
+                        if doi_sim < SIM_PREPRINT_TITLE_THRESHOLD:
                             logger.debug(
-                                f"FILE_CLEANUP | removed={path} | reason=candidate_doi_on_disk",
+                                f"CANDIDATE_DOI_DEDUP_REJECTED | doi={edoi}"
+                                f" | existing={existing_bib}"
+                                f" | sim={doi_sim:.3f} | titles_differ",
                                 category=LogCategory.DEDUP,
                             )
-                        return 0
+                            _revert_misattributed_doi(merged_fields, edoi, doi_validated, doi_early)
+                            continue
+                    logger.debug(
+                        f"CANDIDATE_DOI_DEDUP | doi={edoi} | existing={existing_bib} "
+                        f"| skipping_write=True",
+                        category=LogCategory.DEDUP,
+                    )
+                    if path and os.path.isfile(path):
+                        os.remove(path)
+                        logger.debug(
+                            f"FILE_CLEANUP | removed={path} | reason=candidate_doi_on_disk",
+                            category=LogCategory.DEDUP,
+                        )
+                    return 0
                 except (OSError, UnicodeDecodeError):
                     continue
 
