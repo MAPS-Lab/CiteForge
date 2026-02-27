@@ -98,7 +98,7 @@ def to_text(obj: Any) -> str:
                 parts.append(str(nm).strip())
             else:
                 parts.append(str(x).strip())
-        return ", ".join([p for p in parts if p])
+        return ", ".join(p for p in parts if p)
     if isinstance(obj, dict):
         if obj.get("name"):
             return str(obj["name"])
@@ -155,6 +155,13 @@ def normalize_title(t: str | None) -> str:
 
 
 _ARTIFACT_PREFIXES = ("Check for updates ", "Check for Updates ")
+
+_DANGLING_ENDINGS = frozenset({
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "from",
+    "with", "by", "and", "or", "but", "via", "using", "based",
+})
+
+_TRUNCATION_MARKERS = ("...", "\u2026", "et al", _ET_AL, "[truncated]", "[...]")
 
 # Words that should stay uppercase when converting ALL-CAPS titles to title case
 _ACRONYMS = frozenset({
@@ -631,15 +638,9 @@ def extract_year_from_any(
         return fallback
 
     if isinstance(obj, dict):
-        if field_names:
-            for fname in field_names:
-                val = obj.get(fname)
-                if val is not None:
-                    result = extract_year_from_any(val, field_names=None, fallback=None)
-                    if result:
-                        return result
-
-        for fname in ["year", "publication_year", "pub_year", "date", "published"]:
+        _default_year_fields = ["year", "publication_year", "pub_year", "date", "published"]
+        _search_fields = list(field_names) + _default_year_fields if field_names else _default_year_fields
+        for fname in _search_fields:
             val = obj.get(fname)
             if val is not None:
                 result = extract_year_from_any(val, field_names=None, fallback=None)
@@ -703,18 +704,9 @@ def extract_authors_from_any(
         return _sanitize(nm) if _sanitize else nm
 
     if isinstance(obj, dict):
-        if field_names:
-            for fname in field_names:
-                val = obj.get(fname)
-                if val is not None:
-                    authors = extract_authors_from_any(
-                        val, field_names=None, sanitize_dblp=sanitize_dblp,
-                        name_key=name_key, given_key=given_key, family_key=family_key
-                    )
-                    if authors:
-                        return authors
-
-        for fname in ["authors", "author", "authorids", "creators", "contributors"]:
+        _default_fields = ["authors", "author", "authorids", "creators", "contributors"]
+        _search_fields = list(field_names) + _default_fields if field_names else _default_fields
+        for fname in _search_fields:
             val = obj.get(fname)
             if val is not None:
                 authors = extract_authors_from_any(
@@ -891,25 +883,12 @@ def is_truncated(text: str | None) -> bool:
         return False
 
     text_stripped = text.strip()
-    truncation_markers = [
-        "...",
-        "…",
-        "et al",
-        _ET_AL,
-        "[truncated]",
-        "[...]",
-    ]
-
     text_lower = text_stripped.lower()
-    if any(marker in text_lower for marker in truncation_markers):
+    if any(marker in text_lower for marker in _TRUNCATION_MARKERS):
         return True
 
-    dangling_endings = frozenset({
-        "a", "an", "the", "of", "in", "on", "at", "to", "for", "from",
-        "with", "by", "and", "or", "but", "via", "using", "based",
-    })
     last_word = text_lower.rstrip(".,:;").rsplit(None, 1)[-1] if text_lower.strip() else ""
-    return last_word in dangling_endings
+    return last_word in _DANGLING_ENDINGS
 
 
 def get_truncation_score(article_data: dict[str, Any]) -> float:

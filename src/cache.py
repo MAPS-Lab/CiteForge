@@ -71,8 +71,7 @@ class ResponseCache:
                 with contextlib.suppress(OSError):
                     os.remove(path)
                 return None
-            data: dict[str, Any] = entry.get("data", {})
-            return data
+            return entry.get("data", {})
 
     def put(self, namespace: str, key: str, value: dict[str, Any], ttl_days: int = 30) -> None:
         if not CACHE_ENABLED:

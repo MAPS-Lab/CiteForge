@@ -68,11 +68,11 @@ def _generate_user_agent_pool() -> list[str]:
         "Windows NT 10.0; Win64; x64",
         "X11; Linux x86_64",
     ]
-    for fp in firefox_platforms:
-        for fv in firefox_versions:
-            agents.append(
-                f"Mozilla/5.0 ({fp}; rv:{fv}) Gecko/20100101 Firefox/{fv}"
-            )
+    agents.extend(
+        f"Mozilla/5.0 ({fp}; rv:{fv}) Gecko/20100101 Firefox/{fv}"
+        for fp in firefox_platforms
+        for fv in firefox_versions
+    )
     # Safari on macOS
     agents.append(
         f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
@@ -397,8 +397,7 @@ def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
     short preview of invalid data in error messages.
     """
     try:
-        result: dict[str, Any] = json.loads(raw.decode("utf-8"))
-        return result
+        return json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as ex:
         # include a preview for debugging
         preview = raw[:256].decode("utf-8", errors="replace")

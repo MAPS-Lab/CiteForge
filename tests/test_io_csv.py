@@ -160,3 +160,184 @@ def test_csv_directory_creation(tmp_path: Path) -> None:
 
     assert csv_path.exists(), "CSV file was not created in nested directory"
     assert csv_path.parent.exists(), "Parent directory was not created"
+
+
+# ---------------------------------------------------------------------------
+# build_a2i2_folder tests
+# ---------------------------------------------------------------------------
+
+from src.models import Record
+
+
+def _write_bib(path: Path, entry_type: str, key: str, fields: dict[str, str]) -> None:
+    """Write a minimal .bib file for testing."""
+    lines = [f"@{entry_type}{{{key},"]
+    for k, v in fields.items():
+        lines.append(f"  {k} = {{{v}}},")
+    lines.append("}")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _make_a2i2_csv(path: Path, names: list[str]) -> None:
+    """Write a minimal a2i2.csv."""
+    rows = ["Name,Scholar Link,DBLP Link"]
+    for n in names:
+        rows.append(f"{n},,")
+    path.write_text("\n".join(rows), encoding="utf-8")
+
+
+def _make_records(names_and_ids: list[tuple[str, str]]) -> list[Record]:
+    """Create Record objects for testing."""
+    return [Record(name=n, scholar_id=sid) for n, sid in names_and_ids]
+
+
+class TestBuildA2i2Folder:
+    """Tests for the automated a2i2 build step."""
+
+    def test_missing_csv_returns_zero(self, tmp_path: Path) -> None:
+        result = io_utils.build_a2i2_folder(
+            str(tmp_path / "nonexistent.csv"), [], str(tmp_path / "output")
+        )
+        assert result == 0
+
+    def test_basic_collection(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        author_dir = out / "Smith (A1)"
+        author_dir.mkdir(parents=True)
+        _write_bib(author_dir / "Alice2024-TestPaper.bib", "article", "Alice2024:TestPaper", {
+            "title": "A Test Paper on Neural Networks",
+            "author": "Alice Smith",
+            "year": "2024",
+            "journal": "Nature",
+        })
+
+        csv_path = tmp_path / "a2i2.csv"
+        _make_a2i2_csv(csv_path, ["Alice Smith"])
+        records = _make_records([("Alice Smith", "A1")])
+
+        count = io_utils.build_a2i2_folder(str(csv_path), records, str(out))
+        assert count == 1
+        assert (out / "a2i2" / "Alice2024-TestPaper.bib").exists()
+
+    def test_year_filtering(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        author_dir = out / "Jones (B1)"
+        author_dir.mkdir(parents=True)
+        _write_bib(author_dir / "Bob2024-Recent.bib", "article", "Bob2024:Recent", {
+            "title": "Recent Work", "author": "Bob Jones", "year": "2024", "journal": "Science",
+        })
+        _write_bib(author_dir / "Bob2005-Old.bib", "article", "Bob2005:Old", {
+            "title": "Old Work", "author": "Bob Jones", "year": "2005", "journal": "Science",
+        })
+
+        csv_path = tmp_path / "a2i2.csv"
+        _make_a2i2_csv(csv_path, ["Bob Jones"])
+        records = _make_records([("Bob Jones", "B1")])
+
+        count = io_utils.build_a2i2_folder(str(csv_path), records, str(out))
+        assert count == 1
+        assert (out / "a2i2" / "Bob2024-Recent.bib").exists()
+        assert not (out / "a2i2" / "Bob2005-Old.bib").exists()
+
+    def test_dedup_by_doi(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        dir_a = out / "Smith (A1)"
+        dir_b = out / "Jones (B1)"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+
+        # Alice has 3 fields, Bob has 4 — Bob's version is richer
+        _write_bib(dir_a / "Smith2024-SharedPaper.bib", "article", "Smith2024:SharedPaper", {
+            "title": "A Shared Paper", "author": "Alice Smith and Bob Jones",
+            "year": "2024", "doi": "10.1234/shared",
+        })
+        _write_bib(dir_b / "Smith2024-SharedPaper.bib", "article", "Smith2024:SharedPaper", {
+            "title": "A Shared Paper", "author": "Alice Smith and Bob Jones",
+            "year": "2024", "doi": "10.1234/shared", "journal": "Nature",
+        })
+
+        csv_path = tmp_path / "a2i2.csv"
+        _make_a2i2_csv(csv_path, ["Alice Smith", "Bob Jones"])
+        records = _make_records([("Alice Smith", "A1"), ("Bob Jones", "B1")])
+
+        count = io_utils.build_a2i2_folder(str(csv_path), records, str(out))
+        assert count == 1
+
+        # Verify the richer version was kept (has journal field)
+        content = (out / "a2i2" / "Smith2024-SharedPaper.bib").read_text()
+        assert "Nature" in content
+
+    def test_dedup_by_title(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        dir_a = out / "Smith (A1)"
+        dir_b = out / "Jones (B1)"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+
+        # Same title, no DOI — should dedup by title similarity
+        _write_bib(dir_a / "Smith2024-NeuralNet.bib", "article", "Smith2024:NeuralNet", {
+            "title": "Deep Neural Networks for Image Classification",
+            "author": "Alice Smith", "year": "2024",
+        })
+        _write_bib(dir_b / "Smith2024-NeuralNet.bib", "article", "Smith2024:NeuralNet", {
+            "title": "Deep Neural Networks for Image Classification",
+            "author": "Alice Smith and Bob Jones", "year": "2024", "journal": "CVPR",
+        })
+
+        csv_path = tmp_path / "a2i2.csv"
+        _make_a2i2_csv(csv_path, ["Alice Smith", "Bob Jones"])
+        records = _make_records([("Alice Smith", "A1"), ("Bob Jones", "B1")])
+
+        count = io_utils.build_a2i2_folder(str(csv_path), records, str(out))
+        assert count == 1
+
+    def test_complete_rebuild(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        a2i2_dir = out / "a2i2"
+        a2i2_dir.mkdir(parents=True)
+        # Plant a stale file
+        (a2i2_dir / "Stale2020-OldPaper.bib").write_text("@misc{old, title={Old}}")
+
+        author_dir = out / "Smith (A1)"
+        author_dir.mkdir(parents=True)
+        _write_bib(author_dir / "Alice2024-Fresh.bib", "article", "Alice2024:Fresh", {
+            "title": "Fresh Paper", "author": "Alice Smith", "year": "2024", "journal": "Nature",
+        })
+
+        csv_path = tmp_path / "a2i2.csv"
+        _make_a2i2_csv(csv_path, ["Alice Smith"])
+        records = _make_records([("Alice Smith", "A1")])
+
+        count = io_utils.build_a2i2_folder(str(csv_path), records, str(out))
+        assert count == 1
+        assert not (a2i2_dir / "Stale2020-OldPaper.bib").exists()
+        assert (a2i2_dir / "Alice2024-Fresh.bib").exists()
+
+    def test_deterministic_output(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        dir_a = out / "Smith (A1)"
+        dir_b = out / "Jones (B1)"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+
+        _write_bib(dir_a / "Alice2024-Paper.bib", "article", "Alice2024:Paper", {
+            "title": "Alice Paper", "author": "Alice Smith", "year": "2024", "journal": "Nature",
+        })
+        _write_bib(dir_b / "Bob2024-Paper.bib", "article", "Bob2024:Paper", {
+            "title": "Bob Paper", "author": "Bob Jones", "year": "2024", "journal": "Science",
+        })
+
+        csv_path = tmp_path / "a2i2.csv"
+        _make_a2i2_csv(csv_path, ["Alice Smith", "Bob Jones"])
+        records = _make_records([("Alice Smith", "A1"), ("Bob Jones", "B1")])
+
+        io_utils.build_a2i2_folder(str(csv_path), records, str(out))
+        files_1 = sorted((out / "a2i2").iterdir())
+        contents_1 = [f.read_text() for f in files_1]
+
+        io_utils.build_a2i2_folder(str(csv_path), records, str(out))
+        files_2 = sorted((out / "a2i2").iterdir())
+        contents_2 = [f.read_text() for f in files_2]
+
+        assert [f.name for f in files_1] == [f.name for f in files_2]
+        assert contents_1 == contents_2

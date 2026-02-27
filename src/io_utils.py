@@ -383,14 +383,14 @@ def collect_orphan_files(csv_path: str, output_dir: str) -> list[str]:
 
     orphans: list[str] = []
     try:
-        for entry in os.listdir(output_dir):
-            d = os.path.join(output_dir, entry)
-            if not os.path.isdir(d):
+        for dirname in os.listdir(output_dir):
+            subdir = os.path.join(output_dir, dirname)
+            if not os.path.isdir(subdir):
                 continue
-            for fname in os.listdir(d):
+            for fname in os.listdir(subdir):
                 if not fname.endswith(".bib"):
                     continue
-                abs_path = os.path.abspath(os.path.join(d, fname))
+                abs_path = os.path.abspath(os.path.join(subdir, fname))
                 if abs_path not in csv_paths:
                     orphans.append(abs_path)
     except OSError:
@@ -437,3 +437,181 @@ def reconcile_summary_csv(csv_path: str) -> int:
             _SUMMARY_KNOWN_PATHS.update(r["file_path"] for r in rows if r.get("file_path"))
 
         return removed
+
+
+def build_a2i2_folder(
+    a2i2_csv_path: str,
+    records: list[Record],
+    out_dir: str,
+) -> int:
+    """Build the a2i2 joint output folder from A2I2 faculty member directories.
+
+    Collects .bib files from member directories, filters by contribution
+    window, deduplicates across authors (keeping the richest entry), and
+    writes the result to ``out_dir/a2i2/``.
+
+    The folder is completely rebuilt on each call for determinism.
+
+    Returns the number of .bib files written, or 0 if ``a2i2_csv_path``
+    is missing.
+    """
+    from . import bibtex_utils as bt
+    from .clients.helpers import get_current_year
+    from .config import A2I2_OUTPUT_DIR, CONTRIBUTION_WINDOW_YEARS, SIM_MERGE_DUPLICATE_THRESHOLD
+    from .id_utils import doi_bases_match, normalize_doi
+    from .text_utils import format_author_dirname, normalize_person_name, title_similarity
+
+    log = logging.getLogger("CiteForge.io")
+
+    # --- Guard: skip if CSV missing -----------------------------------------
+    resolved = next((p for p in _candidate_paths(a2i2_csv_path) if os.path.exists(p)), None)
+    if not resolved:
+        log.info("a2i2.csv not found at %s; skipping a2i2 build", a2i2_csv_path)
+        return 0
+
+    # --- Step 1: read A2I2 member names from CSV ----------------------------
+    a2i2_names: list[str] = []
+    try:
+        with open(resolved, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                name = (row.get("Name") or "").strip()
+                if name:
+                    a2i2_names.append(name)
+    except CSV_ERRORS:
+        return 0
+    if not a2i2_names:
+        return 0
+
+    # --- Step 2: build name -> Record lookup --------------------------------
+    name_to_rec: dict[str, Record] = {
+        normalize_person_name(rec.name): rec
+        for rec in records
+        if normalize_person_name(rec.name)
+    }
+
+    # --- Step 3: collect .bib files from member directories -----------------
+    current_year = get_current_year()
+    min_year = current_year - (CONTRIBUTION_WINDOW_YEARS - 1)
+
+    all_entries: list[tuple[dict[str, Any], str]] = []  # (parsed_entry, source_path)
+
+    for a2i2_name in a2i2_names:
+        member = name_to_rec.get(normalize_person_name(a2i2_name))
+        if member is None:
+            log.warning("A2I2 member %r not found in input records; skipping", a2i2_name)
+            continue
+
+        author_id = member.scholar_id or member.dblp or ""
+        dirname = format_author_dirname(member.name, author_id)
+        author_dir = os.path.join(out_dir, dirname)
+        if not os.path.isdir(author_dir):
+            continue
+
+        for fname in sorted(os.listdir(author_dir)):
+            if not fname.endswith(".bib"):
+                continue
+            fpath = os.path.join(author_dir, fname)
+            try:
+                with open(fpath, encoding="utf-8") as bf:
+                    content = bf.read()
+                entry = bt.parse_bibtex_to_dict(content)
+            except (OSError, ValueError):
+                continue
+            if not entry:
+                continue
+
+            # Filter by year window
+            year_str = (entry.get("fields") or {}).get("year", "")
+            digits = re.sub(r"[^0-9]", "", str(year_str))[:4]
+            if not digits:
+                continue
+            year = int(digits)
+            if year < min_year or year > current_year:
+                continue
+
+            all_entries.append((entry, fpath))
+
+    # --- Step 4: deduplicate across authors ---------------------------------
+    def _field_count(e: dict[str, Any]) -> int:
+        return sum(1 for v in (e.get("fields") or {}).values() if v and str(v).strip())
+
+    def _pick_richer(
+        a: tuple[dict[str, Any], str],
+        b: tuple[dict[str, Any], str],
+    ) -> tuple[dict[str, Any], str]:
+        ca, cb = _field_count(a[0]), _field_count(b[0])
+        if ca != cb:
+            return a if ca > cb else b
+        return a if a[1] <= b[1] else b  # tiebreak: sorted filepath
+
+    # Pass 1: DOI-based dedup
+    doi_to_idx: dict[str, int] = {}  # normalized_doi -> index in `kept`
+    kept: list[tuple[dict[str, Any], str]] = []
+    seen: set[int] = set()
+
+    for idx, (entry, fpath) in enumerate(all_entries):
+        doi = normalize_doi((entry.get("fields") or {}).get("doi"))
+        if not doi:
+            continue
+
+        matched_key = doi if doi in doi_to_idx else next(
+            (d for d in doi_to_idx if doi_bases_match(doi, d)), None
+        )
+
+        if matched_key is not None:
+            ki = doi_to_idx[matched_key]
+            kept[ki] = _pick_richer(kept[ki], (entry, fpath))
+        else:
+            doi_to_idx[doi] = len(kept)
+            kept.append((entry, fpath))
+        seen.add(idx)
+
+    # Pass 2: title-based dedup for entries without DOI
+    for idx, (entry, fpath) in enumerate(all_entries):
+        if idx in seen:
+            continue
+        title = (entry.get("fields") or {}).get("title", "")
+        if not title:
+            continue
+
+        found_dup = False
+        for ki, (kept_entry, _) in enumerate(kept):
+            kept_title = (kept_entry.get("fields") or {}).get("title", "")
+            if title_similarity(title, kept_title) >= SIM_MERGE_DUPLICATE_THRESHOLD:
+                kept[ki] = _pick_richer(kept[ki], (entry, fpath))
+                found_dup = True
+                break
+        if not found_dup:
+            kept.append((entry, fpath))
+
+    # --- Step 5: clear and rebuild a2i2 directory ---------------------------
+    a2i2_dir = os.path.join(out_dir, A2I2_OUTPUT_DIR)
+    os.makedirs(a2i2_dir, exist_ok=True)
+    for fname in os.listdir(a2i2_dir):
+        fpath = os.path.join(a2i2_dir, fname)
+        if os.path.isfile(fpath):
+            os.remove(fpath)
+
+    # --- Step 6: copy surviving files (byte-fidelity from source) -----------
+    written = 0
+    used_filenames: set[str] = set()
+    for _, src_path in sorted(kept, key=lambda x: os.path.basename(x[1])):
+        fname = os.path.basename(src_path)
+        if fname in used_filenames:
+            base, ext = os.path.splitext(fname)
+            counter = 2
+            while f"{base}_{counter}{ext}" in used_filenames:
+                counter += 1
+            fname = f"{base}_{counter}{ext}"
+        used_filenames.add(fname)
+
+        try:
+            with open(src_path, encoding="utf-8") as sf:
+                content = sf.read()
+            with open(os.path.join(a2i2_dir, fname), "w", encoding="utf-8") as df:
+                df.write(content)
+            written += 1
+        except OSError:
+            continue
+
+    return written

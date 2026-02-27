@@ -23,6 +23,8 @@ DEFAULT_OR_KEY_FILE = "keys/OpenReview.key"
 DEFAULT_GEMINI_KEY_FILE = "keys/Gemini.key"
 
 DEFAULT_OUT_DIR = "output"
+DEFAULT_A2I2_INPUT = "data/a2i2.csv"
+A2I2_OUTPUT_DIR = "a2i2"
 CONTRIBUTION_WINDOW_YEARS = 8
 
 # Publications per year to fetch from Scholar

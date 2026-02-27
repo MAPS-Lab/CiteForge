@@ -41,12 +41,14 @@ from src.clients.search_apis import (
 )
 from src.config import (
     CONTRIBUTION_WINDOW_YEARS,
+    DEFAULT_A2I2_INPUT,
     DEFAULT_INPUT,
     DEFAULT_OUT_DIR,
     DEFAULT_S2_KEY_FILE,
     DEFAULT_SERPAPI_KEY_FILE,
     DEFAULT_SERPLY_KEY_FILE,
     GENERIC_SERIES_NAMES,
+    JOURNALS_NAMED_PROCEEDINGS,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
     MIN_TITLE_WORDS,
@@ -70,6 +72,7 @@ from src.exceptions import (
 from src.http_utils import get_api_call_counts, http_get_text, reset_api_call_counts
 from src.io_utils import (
     append_summary_to_csv,
+    build_a2i2_folder,
     collect_orphan_files,
     flush_summary_csv,
     init_summary_csv,
@@ -96,6 +99,20 @@ from src.text_utils import (
 FORCE_ENRICH = "--force" in sys.argv[1:]
 
 _BRACKET_J_RE = re.compile(r'\s*\[J\]\s*$')
+_ARXIV_ABS_RE = re.compile(r'arxiv\.org/abs/(\d{4}\.\d{4,5})', re.IGNORECASE)
+
+# Pre-compiled patterns for garbage title detection
+_GARBAGE_EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+_GARBAGE_POSTAL_RE = re.compile(r'\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b')
+_GARBAGE_DEPT_RE = re.compile(r'^\s*(Department|Faculty|School|Institute)\s+of\b', re.IGNORECASE)
+_GARBAGE_PHONE_RE = re.compile(r'\+?\d{1,4}[\.\-]\d{2,4}[\.\-]\d{2,}')
+_GARBAGE_VOLUME_RE = re.compile(r'\bComplete\s+Volume\b', re.IGNORECASE)
+_GARBAGE_SERIES_VOL_RE = re.compile(r'^(OASIcs|LIPIcs|LNI|LNCS|Dagstuhl)\b.*\bVolume\s+\d+\b', re.IGNORECASE)
+_GARBAGE_FESTSCHRIFT_RE = re.compile(r'\bFestschrift\b', re.IGNORECASE)
+_GARBAGE_FESTSCHRIFT_META_RE = re.compile(r',\s+[A-Z][a-z]+,\s+[A-Z][a-z]+\b.*\d{4}')
+_GARBAGE_PROCEEDINGS_RE = re.compile(r'^Proceedings\s+of\s+(the\s+)?\d{4}\s+', re.IGNORECASE)
+_GARBAGE_CORRECTION_RE = re.compile(r'^Correction(s)?\s+(to|of)\s*:', re.IGNORECASE)
+_GARBAGE_EASYCHAIR_RE = re.compile(r'\bEasyChair\s+Preprint\b', re.IGNORECASE)
 
 
 def _is_garbage_title(title: str) -> bool:
@@ -106,31 +123,25 @@ def _is_garbage_title(title: str) -> bool:
     """
     if not title:
         return False
-    if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', title):
+    if _GARBAGE_EMAIL_RE.search(title):
         return True
-    if re.search(r'\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b', title):
+    if _GARBAGE_POSTAL_RE.search(title):
         return True
-    if re.search(r'^\s*(Department|Faculty|School|Institute)\s+of\b', title, re.IGNORECASE):
+    if _GARBAGE_DEPT_RE.search(title):
         return True
-    if re.search(r'\+?\d{1,4}[\.\-]\d{2,4}[\.\-]\d{2,}', title):
+    if _GARBAGE_PHONE_RE.search(title):
         return True
-    if re.search(r'\bComplete\s+Volume\b', title, re.IGNORECASE):
+    if _GARBAGE_VOLUME_RE.search(title):
         return True
-    if re.search(r'^(OASIcs|LIPIcs|LNI|LNCS|Dagstuhl)\b.*\bVolume\s+\d+\b', title, re.IGNORECASE):
+    if _GARBAGE_SERIES_VOL_RE.search(title):
         return True
-    if (
-        re.search(r'\bFestschrift\b', title, re.IGNORECASE)
-        and re.search(r',\s+[A-Z][a-z]+,\s+[A-Z][a-z]+\b.*\d{4}', title)
-    ):
+    if _GARBAGE_FESTSCHRIFT_RE.search(title) and _GARBAGE_FESTSCHRIFT_META_RE.search(title):
         return True
-    # Proceedings volumes: "Proceedings of the 2023 Conference on X: Tutorial Abstracts"
-    if re.match(r'^Proceedings\s+of\s+(the\s+)?\d{4}\s+', title, re.IGNORECASE):
+    if _GARBAGE_PROCEEDINGS_RE.match(title):
         return True
-    # Correction/erratum papers are non-research editorial content
-    if re.match(r'^Correction(s)?\s+(to|of)\s*:', title, re.IGNORECASE):
+    if _GARBAGE_CORRECTION_RE.match(title):
         return True
-    # Scholar artifacts: EasyChair preprint stubs, truncated titles
-    return bool(re.search(r'\bEasyChair\s+Preprint\b', title, re.IGNORECASE))
+    return bool(_GARBAGE_EASYCHAIR_RE.search(title))
 
 
 def _is_corrupted_title(title: str) -> bool:
@@ -850,7 +861,7 @@ def process_article(
         try:
             s2_papers = s2_search_papers_multiple(title, rec.name, s2_api_key, max_results=5)
             if s2_papers:
-                matched, s2_paper = _try_multiple_candidates(
+                _, s2_paper = _try_multiple_candidates(
                     LogSource.S2,
                     s2_papers,
                     build_bibtex_from_s2,
@@ -862,9 +873,7 @@ def process_article(
                     max_candidates=5,
                     seen_dois=all_candidate_dois
                 )
-                if not matched:
-                    s2_paper = None
-                elif s2_paper:
+                if s2_paper:
                     s2_id = s2_paper.get("paperId")
                     if s2_id:
                         baseline_entry["fields"]["x_s2_paper_id"] = str(s2_id)
@@ -880,7 +889,7 @@ def process_article(
     try:
         cr_items = crossref_search_multiple(title, rec.name, max_results=5)
         if cr_items:
-            matched, cr_item = _try_multiple_candidates(
+            _, cr_item = _try_multiple_candidates(
                 LogSource.CROSSREF,
                 cr_items,
                 build_bibtex_from_crossref,
@@ -892,8 +901,6 @@ def process_article(
                 max_candidates=5,
                 seen_dois=all_candidate_dois,
             )
-            if not matched:
-                cr_item = None
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.CROSSREF)
 
@@ -921,7 +928,7 @@ def process_article(
     try:
         arxiv_entries = arxiv_search(title, rec.name, year_hint)
         if arxiv_entries:
-            matched, arxiv_entry = _try_multiple_candidates(
+            _, arxiv_entry = _try_multiple_candidates(
                 LogSource.ARXIV,
                 arxiv_entries,
                 build_bibtex_from_arxiv,
@@ -933,8 +940,6 @@ def process_article(
                 max_candidates=5,
                 seen_dois=all_candidate_dois,
             )
-            if not matched:
-                arxiv_entry = None
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.ARXIV)
 
@@ -943,7 +948,7 @@ def process_article(
     try:
         oa_works = openalex_search_multiple(title, rec.name, max_results=5)
         if oa_works:
-            matched, oa_work = _try_multiple_candidates(
+            _, oa_work = _try_multiple_candidates(
                 LogSource.OPENALEX,
                 oa_works,
                 build_bibtex_from_openalex,
@@ -955,9 +960,7 @@ def process_article(
                 max_candidates=5,
                 seen_dois=all_candidate_dois,
             )
-            if not matched:
-                oa_work = None
-            elif oa_work:
+            if oa_work:
                 oa_id = oa_work.get("id")
                 if oa_id:
                     baseline_entry["fields"]["x_openalex_id"] = str(oa_id)
@@ -972,7 +975,7 @@ def process_article(
     try:
         pm_articles = pubmed_search_papers_multiple(title, rec.name, max_results=5)
         if pm_articles:
-            matched, pm_article = _try_multiple_candidates(
+            _, pm_article = _try_multiple_candidates(
                 LogSource.PUBMED,
                 pm_articles,
                 build_bibtex_from_pubmed,
@@ -984,8 +987,6 @@ def process_article(
                 max_candidates=5,
                 seen_dois=all_candidate_dois,
             )
-            if not matched:
-                pm_article = None
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.PUBMED)
     logger.debug(f"SEARCH_START | source=EuropePMC | title={title[:60]}", category=LogCategory.AUDIT)
@@ -993,7 +994,7 @@ def process_article(
     try:
         epmc_articles = europepmc_search_papers_multiple(title, rec.name, max_results=5)
         if epmc_articles:
-            matched, epmc_article = _try_multiple_candidates(
+            _, epmc_article = _try_multiple_candidates(
                 LogSource.EUROPEPMC,
                 epmc_articles,
                 build_bibtex_from_europepmc,
@@ -1005,8 +1006,6 @@ def process_article(
                 max_candidates=5,
                 seen_dois=all_candidate_dois,
             )
-            if not matched:
-                epmc_article = None
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.EUROPEPMC)
 
@@ -1048,9 +1047,8 @@ def process_article(
             _bl_eprint = idu.extract_arxiv_eprint(baseline_entry)
             if _bl_eprint:
                 _add_doi("baseline_eprint", f"10.48550/arxiv.{_bl_eprint}")
-            _arxiv_url_re = re.compile(r'arxiv\.org/abs/(\d{4}\.\d{4,5})', re.IGNORECASE)
             _bl_url = (baseline_entry.get("fields") or {}).get("url", "")
-            _bl_url_m = _arxiv_url_re.search(str(_bl_url))
+            _bl_url_m = _ARXIV_ABS_RE.search(str(_bl_url))
             if _bl_url_m:
                 _add_doi("baseline_url", f"10.48550/arxiv.{_bl_url_m.group(1)}")
             for _enr_src, _enr_data in enr_list:
@@ -1060,7 +1058,7 @@ def process_article(
                 else:
                     # Check enricher's URL field for arXiv abstract links
                     _enr_url = (_enr_data.get("fields") or {}).get("url", "")
-                    _m = _arxiv_url_re.search(str(_enr_url))
+                    _m = _ARXIV_ABS_RE.search(str(_enr_url))
                     if _m:
                         _add_doi(f"url_{_enr_src}", f"10.48550/arxiv.{_m.group(1)}")
 
@@ -1106,9 +1104,8 @@ def process_article(
 
             # Deterministic DOI extraction from known URL patterns
             # (no HTTP required — prevents network non-determinism)
-            _arxiv_abs_re = re.compile(r'arxiv\.org/abs/(\d{4}\.\d{4,5})', re.IGNORECASE)
             for u in filter(None, url_candidates):
-                m = _arxiv_abs_re.search(str(u))
+                m = _ARXIV_ABS_RE.search(str(u))
                 if m:
                     inferred = f"10.48550/arxiv.{m.group(1)}"
                     doi_candidates.append(inferred)
@@ -1295,23 +1292,12 @@ def process_article(
             merged["type"] = "misc"
             merged_fields.pop("journal", None)
 
-        # PNAS is a journal despite "Proceedings" in its name
+        # Journals named "Proceedings of ..." (PNAS, PVLDB, etc.) are journals
         if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _bt_pnas = (merged_fields.get("booktitle") or "").lower()
-            if "proceedings of the national academy" in _bt_pnas:
+            _bt_lower = (merged_fields.get("booktitle") or "").lower()
+            if any(jnp in _bt_lower for jnp in JOURNALS_NAMED_PROCEEDINGS):
                 logger.debug(
-                    "TYPE_CORRECT | inproceedings_pnas->article | booktitle→journal",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "article"
-                merged_fields["journal"] = merged_fields.pop("booktitle")
-
-        # PVLDB is a journal despite "Proceedings" in its name
-        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _bt_pvldb = (merged_fields.get("booktitle") or "").lower()
-            if "proceedings of the vldb" in _bt_pvldb:
-                logger.debug(
-                    "TYPE_CORRECT | inproceedings_pvldb->article",
+                    f"TYPE_CORRECT | inproceedings_journal_proceedings->article | booktitle={_bt_lower[:60]}",
                     category=LogCategory.AUDIT,
                 )
                 merged["type"] = "article"
@@ -1581,13 +1567,8 @@ def process_article(
         total_sources = len(enrichment_sources)
 
         # Group matched and unmatched sources
-        matched_sources: list[str] = []
-        unmatched: list[str] = []
-        for flag_key, source_label in enrichment_sources.items():
-            if flags.get(flag_key):
-                matched_sources.append(source_label)
-            else:
-                unmatched.append(source_label)
+        matched_sources = [label for key, label in enrichment_sources.items() if flags.get(key)]
+        unmatched = [label for key, label in enrichment_sources.items() if not flags.get(key)]
 
         if flags.get("doi_csl"):
             doi_status = "csl"
@@ -1803,12 +1784,12 @@ def count_existing_papers(rec: Record, out_dir: str) -> int:
 
 def _load_csv_titles(csv_path: str) -> dict[str, list[str]]:
     """Load titles from CSV-tracked .bib files, grouped by author directory."""
-    import csv as _csv
+    import csv
 
     result: dict[str, list[str]] = {}
     try:
         with open(csv_path, newline="", encoding="utf-8") as f:
-            for row in _csv.DictReader(f):
+            for row in csv.DictReader(f):
                 fp = row.get("file_path", "")
                 abs_fp = os.path.abspath(fp)
                 author_dir_path = os.path.dirname(abs_fp)
@@ -2047,6 +2028,14 @@ def main() -> int:
                         f"Removed {removed}/{len(orphans)} orphan .bib files (duplicates only)",
                         category=LogCategory.CLEANUP,
                     )
+
+            # Build a2i2 joint output folder
+            a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
+            if a2i2_count:
+                logger.info(
+                    f"Built a2i2 folder: {a2i2_count} deduplicated files",
+                    category=LogCategory.CLEANUP,
+                )
 
             # Write per-author baseline counts
             baseline: dict[str, int] = {}
