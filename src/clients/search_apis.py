@@ -22,6 +22,7 @@ from ..config import (
     OPENREVIEW_BASE,
     OPENREVIEW_SESSION_TTL_SECS,
     PUBMED_BASE,
+    SIM_BEST_ITEM_THRESHOLD,
     SIM_EXACT_PICK_THRESHOLD,
     SIM_MERGE_DUPLICATE_THRESHOLD,
     SIM_TITLE_SIM_MIN,
@@ -1104,4 +1105,147 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
     top = list(results[:max_results])
     cache_value: dict[str, Any] = {"results": top} if top else {"_negative": True}
     response_cache.put("europepmc", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    return top
+
+
+# ============ Venue-based searches (SerpAPI publication string) ============
+
+
+def crossref_search_by_venue(
+    title: str,
+    author_name: str | None,
+    container_title: str,
+    volume: str | None = None,
+    pages: str | None = None,
+    max_results: int = 5,
+) -> list[dict[str, Any]]:
+    """Search Crossref using venue metadata from a SerpAPI publication string.
+
+    Uses ``query.container-title`` for the journal/proceedings name and
+    ``query.bibliographic`` for the title, providing a different search vector
+    from the standard title-based search.
+    """
+    if not title or not container_title:
+        return []
+
+    from ..api_configs import CROSSREF_SEARCH_CONFIG
+    from ..api_generics import _build_scoring_function
+
+    cache_key = (
+        f"venue|{normalize_title(title)}"
+        f"|{(author_name or '').strip().lower()}"
+        f"|{container_title.lower().strip()}"
+    )
+    cached = response_cache.get("crossref_venue", cache_key)
+    if cached is not None:
+        if cached.get("_negative"):
+            return []
+        cached_list: list[dict[str, Any]] = cached.get("results", [])
+        logger.debug(f"crossref_venue | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
+        return cached_list
+
+    config = copy.copy(CROSSREF_SEARCH_CONFIG)
+    params: dict[str, Any] = dict(config.additional_params)
+    params["query.container-title"] = container_title
+    params["query.bibliographic"] = title
+    if author_name:
+        params["query.author"] = author_name
+    mailto = os.getenv("CROSSREF_MAILTO")
+    if mailto:
+        params["mailto"] = mailto
+    params["rows"] = max(max_results, 10)
+
+    url = build_url(config.base_url, params)
+    logger.debug(f"crossref_venue | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
+
+    try:
+        data = http_get_json(url, timeout=config.timeout)
+    except ALL_API_ERRORS:
+        return []
+
+    results = safe_get_nested(data, *config.result_path, default=[])
+    if not results:
+        response_cache.put("crossref_venue", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        return []
+
+    score_fn = _build_scoring_function(title, author_name, config)
+    scored = []
+    for item in results:
+        try:
+            score = score_fn(item)
+            if score is not None and score >= SIM_BEST_ITEM_THRESHOLD:
+                scored.append((score, item))
+        except FIELD_ACCESS_ERRORS:
+            continue
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = [item for _, item in scored[:max_results]]
+    cache_value: dict[str, Any] = {"results": [dict(r) for r in top]} if top else {"_negative": True}
+    response_cache.put("crossref_venue", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    return top
+
+
+def openalex_search_by_venue(
+    title: str,
+    author_name: str | None,
+    venue_name: str,
+    max_results: int = 5,
+) -> list[dict[str, Any]]:
+    """Search OpenAlex with a venue name filter for better precision.
+
+    Adds ``filter=primary_location.source.display_name.search:<venue>``
+    alongside the title search to narrow results to the right journal.
+    """
+    if not title or not venue_name:
+        return []
+
+    from ..api_configs import OPENALEX_SEARCH_CONFIG
+    from ..api_generics import _build_scoring_function
+
+    cache_key = (
+        f"venue|{normalize_title(title)}"
+        f"|{(author_name or '').strip().lower()}"
+        f"|{venue_name.lower().strip()}"
+    )
+    cached = response_cache.get("openalex_venue", cache_key)
+    if cached is not None:
+        if cached.get("_negative"):
+            return []
+        cached_list: list[dict[str, Any]] = cached.get("results", [])
+        logger.debug(f"openalex_venue | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
+        return cached_list
+
+    config = copy.copy(OPENALEX_SEARCH_CONFIG)
+    params: dict[str, Any] = dict(config.additional_params)
+    params["search"] = title
+    params["filter"] = f"primary_location.source.display_name.search:{venue_name}"
+    params["per-page"] = max(max_results, 10)
+
+    url = build_url(config.base_url, params)
+    logger.debug(f"openalex_venue | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
+
+    try:
+        data = http_get_json(url, timeout=config.timeout)
+    except ALL_API_ERRORS:
+        return []
+
+    results = safe_get_nested(data, *config.result_path, default=[])
+    if not results:
+        response_cache.put("openalex_venue", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        return []
+
+    score_fn = _build_scoring_function(title, author_name, config)
+    scored = []
+    for item in results:
+        try:
+            score = score_fn(item)
+            if score is not None and score >= SIM_BEST_ITEM_THRESHOLD:
+                scored.append((score, item))
+        except FIELD_ACCESS_ERRORS:
+            continue
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = [item for _, item in scored[:max_results]]
+    cache_value: dict[str, Any] = {"results": [dict(r) for r in top]} if top else {"_negative": True}
+    response_cache.put("openalex_venue", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
     return top

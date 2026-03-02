@@ -31,9 +31,11 @@ from src.clients.search_apis import (
     build_bibtex_from_openreview,
     build_bibtex_from_pubmed,
     build_bibtex_from_s2,
+    crossref_search_by_venue,
     crossref_search_multiple,
     dblp_fetch_for_author,
     europepmc_search_papers_multiple,
+    openalex_search_by_venue,
     openalex_search_multiple,
     openreview_search_papers_multiple,
     pubmed_search_papers_multiple,
@@ -48,12 +50,13 @@ from src.config import (
     DEFAULT_SERPAPI_KEY_FILE,
     DEFAULT_SERPLY_KEY_FILE,
     GENERIC_SERIES_NAMES,
-    JOURNALS_NAMED_PROCEEDINGS,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
     MIN_TITLE_WORDS,
     PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
+    PUB_PARSE_TIER1_MIN_CONFIDENCE,
+    PUB_PARSE_TIER2_MIN_CONFIDENCE,
     REPOSITORY_AS_JOURNAL,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
@@ -88,6 +91,7 @@ from src.io_utils import (
 )
 from src.log_utils import LogCategory, LogSource, logger
 from src.models import Record
+from src.publication_parser import parse_publication_string
 from src.text_utils import (
     author_name_matches,
     format_author_dirname,
@@ -498,6 +502,20 @@ def process_article(
             )
             _fixup_written = True
 
+        # Strip trailing ellipsis from truncated venue/title fields
+        for _ell_field in ("journal", "booktitle", "title"):
+            _ell_val = _bl_fields.get(_ell_field, "")
+            if isinstance(_ell_val, str) and _ell_val.rstrip().endswith(("...", "\u2026")):
+                from src.publication_parser import _strip_ellipsis
+                _ell_clean = _strip_ellipsis(_ell_val)
+                if _ell_clean != _ell_val:
+                    logger.debug(
+                        f"EXISTING_FIXUP | ellipsis_stripped | {_ell_field}={_ell_val[:60]}",
+                        category=LogCategory.CLEANUP,
+                    )
+                    _bl_fields[_ell_field] = _ell_clean
+                    _fixup_written = True
+
         # Fix ALL-CAPS titles
         _bl_title2 = _bl_fields.get("title", "")
         if isinstance(_bl_title2, str) and _bl_title2:
@@ -521,6 +539,18 @@ def process_article(
                 _bl_fields["booktitle"] = _bl_fields.pop("journal")
                 baseline_entry["type"] = "inproceedings"
                 _fixup_written = True
+
+        # Reclassify @article with "Unpublished" journal → @misc
+        if (baseline_entry.get("type") == "article" and _bl_fields.get("journal")
+                and (_bl_fields.get("journal") or "").strip().lower() == "unpublished"):
+            logger.debug(
+                "EXISTING_FIXUP | article_unpublished->misc",
+                category=LogCategory.CLEANUP,
+            )
+            _bl_fields.pop("journal", None)
+            _bl_fields.pop("publisher", None)
+            baseline_entry["type"] = "misc"
+            _fixup_written = True
 
         # Reclassify @article with patent number as journal → @misc
         if (baseline_entry.get("type") == "article" and _bl_fields.get("journal")
@@ -556,6 +586,21 @@ def process_article(
                 _bl_fields["school"] = _bl_fields.pop("journal")
                 baseline_entry["type"] = "phdthesis"
                 _fixup_written = True
+
+        # Remove preprint DOI from @article that has a real journal+volume/pages
+        if (baseline_entry.get("type") == "article"
+                and _bl_fields.get("journal")
+                and _bl_fields.get("doi")
+                and idu.is_secondary_doi(_bl_fields["doi"])
+                and (_bl_fields.get("volume") or _bl_fields.get("pages"))):
+            logger.debug(
+                f"EXISTING_FIXUP | remove_preprint_doi_from_article"
+                f" | doi={_bl_fields['doi']} | journal={_bl_fields['journal'][:40]}",
+                category=LogCategory.CLEANUP,
+            )
+            _bl_fields.pop("doi", None)
+            _bl_fields.pop("url", None)
+            _fixup_written = True
 
         # Backfill howpublished for @misc with preprint DOI or arXiv eprint
         if baseline_entry.get("type") == "misc" and not _bl_fields.get("howpublished"):
@@ -1009,6 +1054,90 @@ def process_article(
     except ALL_API_ERRORS as e:
         logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.EUROPEPMC)
 
+    # ===== PHASE 2.5: Venue-Based Search (SerpAPI publication string) =====
+    # Only attempt when no enrichment matched so far — avoids redundant API calls.
+    if not enr_list:
+        pub_string = art.get("publication") or ""
+        if pub_string:
+            parsed_pub = parse_publication_string(pub_string)
+            if parsed_pub and parsed_pub.confidence >= PUB_PARSE_TIER1_MIN_CONFIDENCE:
+                logger.info(
+                    f"▶ Phase 2.5: Venue search | venue={parsed_pub.venue_name[:40]} "
+                    f"| type={parsed_pub.venue_type} | conf={parsed_pub.confidence:.2f}",
+                    category=LogCategory.ARTICLE,
+                )
+
+                # Inject arXiv ID from publication string (enables Phase 3 DOI discovery)
+                if parsed_pub.arxiv_id and not bf.get("eprint"):
+                    bf["eprint"] = parsed_pub.arxiv_id
+                    bf["archiveprefix"] = "arXiv"
+                    ax_doi = idu.normalize_doi(f"10.48550/arxiv.{parsed_pub.arxiv_id}")
+                    if ax_doi:
+                        all_candidate_dois.add(ax_doi)
+
+                # Inject DOI fragment from bioRxiv/medRxiv publication string
+                if parsed_pub.doi_fragment and not bf.get("doi"):
+                    bf["doi"] = parsed_pub.doi_fragment
+                    norm_doi = idu.normalize_doi(parsed_pub.doi_fragment)
+                    if norm_doi:
+                        all_candidate_dois.add(norm_doi)
+
+                # Tier 1: venue-based Crossref search (journal/conference only)
+                if parsed_pub.venue_type in ("journal", "conference"):
+                    try:
+                        cr_venue_items = crossref_search_by_venue(
+                            title, rec.name,
+                            container_title=parsed_pub.venue_name,
+                            volume=parsed_pub.volume or None,
+                            pages=parsed_pub.pages or None,
+                            max_results=5,
+                        )
+                        if cr_venue_items:
+                            _try_multiple_candidates(
+                                LogSource.CROSSREF,
+                                cr_venue_items,
+                                build_bibtex_from_crossref,
+                                baseline_entry,
+                                result_id,
+                                enr_list,
+                                flags,
+                                "crossref",
+                                max_candidates=5,
+                                seen_dois=all_candidate_dois,
+                            )
+                    except ALL_API_ERRORS as e:
+                        logger.warn(
+                            f"Venue-based Crossref error: {e}",
+                            category=LogCategory.ERROR, source=LogSource.CROSSREF,
+                        )
+
+                # Tier 1: venue-based OpenAlex search (only if Crossref missed)
+                if not enr_list and parsed_pub.venue_type in ("journal", "conference"):
+                    try:
+                        oa_venue_items = openalex_search_by_venue(
+                            title, rec.name,
+                            venue_name=parsed_pub.venue_name,
+                            max_results=5,
+                        )
+                        if oa_venue_items:
+                            _try_multiple_candidates(
+                                LogSource.OPENALEX,
+                                oa_venue_items,
+                                build_bibtex_from_openalex,
+                                baseline_entry,
+                                result_id,
+                                enr_list,
+                                flags,
+                                "openalex",
+                                max_candidates=5,
+                                seen_dois=all_candidate_dois,
+                            )
+                    except ALL_API_ERRORS as e:
+                        logger.warn(
+                            f"Venue-based OpenAlex error: {e}",
+                            category=LogCategory.ERROR, source=LogSource.OPENALEX,
+                        )
+
     # ===== PHASE 3: Late DOI Discovery =====
     logger.info("▶ Phase 3: Late DOI Discovery", category=LogCategory.ARTICLE)
     # Do late DOI negotiation if we haven't validated a DOI, or if the validated
@@ -1262,6 +1391,19 @@ def process_article(
                 merged["type"] = "misc"
                 merged_fields["howpublished"] = merged_fields.pop("journal")
 
+        # Strip trailing ellipsis from truncated venue/title fields
+        for _ell_field_p4 in ("journal", "booktitle", "title"):
+            _ell_val_p4 = (merged_fields.get(_ell_field_p4) or "")
+            if _ell_val_p4.rstrip().endswith(("...", "\u2026")):
+                from src.publication_parser import _strip_ellipsis
+                _ell_clean_p4 = _strip_ellipsis(_ell_val_p4)
+                if _ell_clean_p4 != _ell_val_p4:
+                    logger.debug(
+                        f"TYPE_CORRECT | ellipsis_stripped | {_ell_field_p4}={_ell_val_p4[:60]}",
+                        category=LogCategory.AUDIT,
+                    )
+                    merged_fields[_ell_field_p4] = _ell_clean_p4
+
         # Reclassify @article with conference proceedings as journal -> @inproceedings
         if merged.get("type") == "article" and merged_fields.get("journal"):
             _p4_jnl = (merged_fields.get("journal") or "").strip()
@@ -1295,7 +1437,7 @@ def process_article(
         # Journals named "Proceedings of ..." (PNAS, PVLDB, etc.) are journals
         if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
             _bt_lower = (merged_fields.get("booktitle") or "").lower()
-            if any(jnp in _bt_lower for jnp in JOURNALS_NAMED_PROCEEDINGS):
+            if mu._matches_journal_named_proceedings(_bt_lower):
                 logger.debug(
                     f"TYPE_CORRECT | inproceedings_journal_proceedings->article | booktitle={_bt_lower[:60]}",
                     category=LogCategory.AUDIT,
@@ -1355,18 +1497,28 @@ def process_article(
                 merged["type"] = "phdthesis"
                 merged_fields["school"] = merged_fields.pop("journal")
 
-        # Downgrade @article with preprint-only DOI -> @misc
+        # Handle @article with preprint DOI
         if merged.get("type") == "article":
             _merged_doi = (merged_fields.get("doi") or "").strip()
             if _merged_doi and idu.is_secondary_doi(_merged_doi):
                 venue = merged_fields.get("journal", "")
-                logger.debug(
-                    f"TYPE_CORRECT | article_preprint_doi->misc | doi={_merged_doi} | venue={venue}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "misc"
-                if venue:
-                    merged_fields["howpublished"] = merged_fields.pop("journal")
+                # If article has real journal+volume/pages, keep as article but strip preprint DOI
+                if venue and (merged_fields.get("volume") or merged_fields.get("pages")):
+                    logger.debug(
+                        f"TYPE_CORRECT | remove_preprint_doi_from_article"
+                        f" | doi={_merged_doi} | journal={venue[:40]}",
+                        category=LogCategory.AUDIT,
+                    )
+                    merged_fields.pop("doi", None)
+                    merged_fields.pop("url", None)
+                else:
+                    logger.debug(
+                        f"TYPE_CORRECT | article_preprint_doi->misc | doi={_merged_doi} | venue={venue}",
+                        category=LogCategory.AUDIT,
+                    )
+                    merged["type"] = "misc"
+                    if venue:
+                        merged_fields["howpublished"] = merged_fields.pop("journal")
 
         # Backfill howpublished for @misc entries with preprint DOI or arXiv eprint
         if merged.get("type") == "misc" and not merged_fields.get("howpublished"):
@@ -1424,11 +1576,65 @@ def process_article(
             and not (merged_fields.get("booktitle") or "").strip()
         )
         if is_bare_stub:
-            merged_fields["note"] = "Unenriched: no enrichment sources matched"
-            logger.warn(
-                "Bare stub: no venue, no DOI, no enrichment; annotated with note",
-                category=LogCategory.AUDIT,
-            )
+            # Tier 2: populate fields directly from SerpAPI publication string
+            pub_string = art.get("publication") or ""
+            parsed_pub = parse_publication_string(pub_string)
+            tier2_applied = False
+
+            if parsed_pub and parsed_pub.confidence >= PUB_PARSE_TIER2_MIN_CONFIDENCE:
+                if parsed_pub.venue_type == "journal":
+                    merged_fields["journal"] = parsed_pub.venue_name
+                    if parsed_pub.volume:
+                        merged_fields["volume"] = parsed_pub.volume
+                    if parsed_pub.issue:
+                        merged_fields["number"] = parsed_pub.issue
+                    if parsed_pub.pages:
+                        merged_fields["pages"] = parsed_pub.pages
+                    merged["type"] = "article"
+                    merged_fields["note"] = "Venue from SerpAPI publication string (unverified)"
+                    tier2_applied = True
+                    logger.info(
+                        f"TIER2 | journal={parsed_pub.venue_name} "
+                        f"| vol={parsed_pub.volume} | pages={parsed_pub.pages}",
+                        category=LogCategory.AUDIT,
+                    )
+                elif parsed_pub.venue_type == "conference":
+                    merged_fields["booktitle"] = parsed_pub.venue_name
+                    if parsed_pub.pages:
+                        merged_fields["pages"] = parsed_pub.pages
+                    merged["type"] = "inproceedings"
+                    merged_fields["note"] = "Venue from SerpAPI publication string (unverified)"
+                    tier2_applied = True
+                    logger.info(
+                        f"TIER2 | booktitle={parsed_pub.venue_name} | pages={parsed_pub.pages}",
+                        category=LogCategory.AUDIT,
+                    )
+
+            if parsed_pub and not tier2_applied:
+                if parsed_pub.venue_type == "patent":
+                    merged_fields["note"] = f"US Patent {parsed_pub.patent_number}"
+                    tier2_applied = True
+                    logger.info(
+                        f"TIER2 | patent={parsed_pub.patent_number}",
+                        category=LogCategory.AUDIT,
+                    )
+                elif parsed_pub.venue_type == "preprint":
+                    merged_fields["howpublished"] = parsed_pub.venue_name
+                    if parsed_pub.arxiv_id:
+                        merged_fields["eprint"] = parsed_pub.arxiv_id
+                        merged_fields["archiveprefix"] = "arXiv"
+                    tier2_applied = True
+                    logger.info(
+                        f"TIER2 | preprint={parsed_pub.venue_name}",
+                        category=LogCategory.AUDIT,
+                    )
+
+            if not tier2_applied:
+                merged_fields["note"] = "Unenriched: no enrichment sources matched"
+                logger.warn(
+                    "Bare stub: no venue, no DOI, no enrichment; annotated with note",
+                    category=LogCategory.AUDIT,
+                )
 
         # Skip entries with type "book" (proceedings volumes, edited books — not individual papers)
         if merged.get("type") == "book":
@@ -1455,6 +1661,17 @@ def process_article(
             category=LogCategory.AUDIT,
         )
         if merged_authors and not author_found:
+            # Check if enrichment corrupted the author field (misattributed DOI).
+            # If the ORIGINAL file had the correct author, keep it — don't delete.
+            if path and os.path.isfile(path) and baseline_entry:
+                baseline_authors = (baseline_entry.get("fields") or {}).get("author", "")
+                if baseline_authors and author_name_matches(rec.name, baseline_authors):
+                    logger.warn(
+                        f"Enrichment corrupted author field ('{str(merged_authors)[:60]}'); "
+                        f"keeping original file: {os.path.basename(path)}",
+                        category=LogCategory.SKIP, source=LogSource.SYSTEM,
+                    )
+                    return 0
             logger.warn(
                 f"Target author '{rec.name}' not found in paper authors; skipping",
                 category=LogCategory.SKIP, source=LogSource.SYSTEM,

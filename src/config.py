@@ -301,3 +301,7 @@ REQUEST_DELAY_MAX = 1.0
 
 # OpenReview session TTL (seconds)
 OPENREVIEW_SESSION_TTL_SECS = 3600
+
+# SerpAPI publication string parsing thresholds
+PUB_PARSE_TIER1_MIN_CONFIDENCE = 0.5   # Minimum confidence for venue-based API search
+PUB_PARSE_TIER2_MIN_CONFIDENCE = 0.7   # Minimum confidence for direct field population

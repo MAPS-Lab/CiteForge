@@ -2871,3 +2871,62 @@ class TestArxivEprintsJournalStripping:
         }
         result = merge_utils.merge_with_policy(entry, [])
         assert "journal" not in result["fields"]
+
+
+class TestJournalNamedProceedingsWordBoundary:
+    """_matches_journal_named_proceedings must use word-boundary matching."""
+
+    def test_exact_match(self) -> None:
+        assert merge_utils._matches_journal_named_proceedings("proceedings of the ieee")
+
+    def test_match_with_comma_suffix(self) -> None:
+        assert merge_utils._matches_journal_named_proceedings(
+            "proceedings of the ieee, vol. 100"
+        )
+
+    def test_no_match_slash_suffix(self) -> None:
+        """IEEE/CVF conference must NOT match the IEEE journal."""
+        assert not merge_utils._matches_journal_named_proceedings(
+            "proceedings of the ieee/cvf winter conference on applications of computer vision"
+        )
+
+    def test_conference_journal_detects_ieee_cvf(self) -> None:
+        """After the word-boundary fix, IEEE/CVF conference IS classified as conference."""
+        assert merge_utils._is_conference_journal(
+            "Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision"
+        )
+
+    def test_pnas_still_excluded(self) -> None:
+        assert not merge_utils._is_conference_journal(
+            "Proceedings of the National Academy of Sciences"
+        )
+
+
+class TestStripEllipsis:
+    """_strip_ellipsis removes trailing '...' and dangling prepositions."""
+
+    def test_no_ellipsis(self) -> None:
+        from src.publication_parser import _strip_ellipsis
+        assert _strip_ellipsis("Normal Text") == "Normal Text"
+
+    def test_trailing_dots(self) -> None:
+        from src.publication_parser import _strip_ellipsis
+        assert _strip_ellipsis("Workshop on Bridging Language...") == "Workshop on Bridging Language"
+
+    def test_trailing_dots_with_preposition(self) -> None:
+        from src.publication_parser import _strip_ellipsis
+        result = _strip_ellipsis("CHI Conference on Human Factors in ...")
+        assert result == "CHI Conference on Human Factors"
+        assert not result.endswith(" in")
+
+    def test_unicode_ellipsis(self) -> None:
+        from src.publication_parser import _strip_ellipsis
+        assert _strip_ellipsis("Some Text\u2026") == "Some Text"
+
+    def test_parser_strips_ellipsis_from_venue(self) -> None:
+        from src.publication_parser import parse_publication_string
+        result = parse_publication_string(
+            "Extended Abstracts of the 2019 CHI Conference on Human Factors in Computing ..., 2019"
+        )
+        assert result is not None
+        assert not result.venue_name.endswith("...")

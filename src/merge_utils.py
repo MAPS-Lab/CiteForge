@@ -109,6 +109,22 @@ def infer_howpublished_from_doi(doi: str) -> str | None:
     return None
 
 
+def _matches_journal_named_proceedings(text_lower: str) -> bool:
+    """Word-boundary match against JOURNALS_NAMED_PROCEEDINGS.
+
+    Avoids false positives like "proceedings of the ieee/cvf winter
+    conference" matching "proceedings of the ieee" (the journal).
+    """
+    for jnp in JOURNALS_NAMED_PROCEEDINGS:
+        idx = text_lower.find(jnp)
+        if idx == -1:
+            continue
+        end = idx + len(jnp)
+        if end >= len(text_lower) or text_lower[end] in (" ", ",", ".", ";", ":"):
+            return True
+    return False
+
+
 def _is_conference_journal(journal: str) -> bool:
     """Check if a journal name is actually a conference proceedings venue.
 
@@ -119,7 +135,7 @@ def _is_conference_journal(journal: str) -> bool:
     """
     lower = journal.lower()
     # Exclude real journals that happen to contain "Proceedings"
-    if any(j in lower for j in JOURNALS_NAMED_PROCEEDINGS):
+    if _matches_journal_named_proceedings(lower):
         return False
     return (
         "proceedings" in lower
@@ -956,10 +972,16 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             preprint_sim = title_similarity(e_title, n_title)
                             if preprint_sim >= SIM_PREPRINT_TITLE_THRESHOLD:
                                 score = compute_dedup_score(existing_fields, new_fields)
-                                if score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
+                                # The preprint-pair bonus (0.10) in composite is
+                                # circular here — we already verified the XOR
+                                # precondition.  Subtract it to avoid inflating
+                                # the composite with evidence we already used.
+                                effective_score = score - 0.10
+                                if effective_score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
                                     logger.debug(
                                         f"FILE_MATCH | PREPRINT_PAIR | file={existing_filename}"
                                         f" | sim={preprint_sim:.3f} | composite={score:.3f}"
+                                        f" | effective={effective_score:.3f}"
                                         f" | e_preprint={e_preprint} n_preprint={n_preprint}",
                                         category=LogCategory.DEDUP,
                                     )
