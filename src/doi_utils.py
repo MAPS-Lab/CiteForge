@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from . import bibtex_utils as bt
@@ -112,30 +113,28 @@ def _log_rejection_details(
         category=LogCategory.SKIP, source=LogSource.DOI,
     )
     baseline_title = normalize_title(baseline_entry.get("fields", {}).get("title"))
-    csl_title_sim = -1.0
-    bibtex_title_sim = -1.0
 
-    # Check CSL title if available
+    def _title_sim_from_bibtex(raw_bibtex: str | None) -> float:
+        """Extract title similarity from raw BibTeX string, returning -1.0 on failure."""
+        if not raw_bibtex:
+            return -1.0
+        try:
+            parsed = bt.parse_bibtex_to_dict(raw_bibtex)
+            if parsed:
+                return title_similarity(
+                    baseline_title,
+                    normalize_title(parsed.get("fields", {}).get("title")),
+                )
+        except Exception:  # noqa: S110
+            pass
+        return -1.0
+
+    csl_bib = None
     if csl:
-        try:
-            csl_bib_check = search_apis.bibtex_from_csl(csl, keyhint=result_id)
-            if csl_bib_check:
-                csl_dict = bt.parse_bibtex_to_dict(csl_bib_check)
-                if csl_dict:
-                    csl_title = normalize_title(csl_dict.get("fields", {}).get("title"))
-                    csl_title_sim = title_similarity(baseline_title, csl_title)
-        except Exception:  # noqa: S110
-            pass
-
-    # Check BibTeX title if available
-    if doi_bib:
-        try:
-            bib_dict = bt.parse_bibtex_to_dict(doi_bib)
-            if bib_dict:
-                bib_title = normalize_title(bib_dict.get("fields", {}).get("title"))
-                bibtex_title_sim = title_similarity(baseline_title, bib_title)
-        except Exception:  # noqa: S110
-            pass
+        with contextlib.suppress(Exception):
+            csl_bib = search_apis.bibtex_from_csl(csl, keyhint=result_id)
+    csl_title_sim = _title_sim_from_bibtex(csl_bib)
+    bibtex_title_sim = _title_sim_from_bibtex(doi_bib)
 
     logger.debug(
         f"REJECTION_DETAIL | doi={doi}"
@@ -155,10 +154,9 @@ def validate_doi_candidate(
     Validate a DOI by fetching metadata in multiple formats and checking baseline match,
     returning validation success flags and parsed entries.
     """
-    # Try CSL-JSON format first
     csl_matched, csl_entry, csl = _validate_csl(doi, baseline_entry, result_id)
 
-    # Skip BibTeX fetch when CSL already matched — saves 1 HTTP call per validated DOI
+    # Skip BibTeX fetch when CSL already matched
     if not csl_matched:
         bibtex_matched, bibtex_entry, doi_bib = _validate_bibtex(doi, baseline_entry)
     else:
@@ -194,7 +192,6 @@ def process_validated_doi(
         doi, baseline_entry, result_id
     )
 
-    # Add validated entries to enrichment list
     if csl_entry:
         enr_list.append(("csl", csl_entry))
         flags["doi_csl"] = True
@@ -202,13 +199,11 @@ def process_validated_doi(
         enr_list.append(("doi_bibtex", bibtex_entry))
         flags["doi_bibtex"] = True
 
-    doi_matched = csl_matched or bibtex_matched
-
-    if doi_matched:
+    if csl_matched or bibtex_matched:
         formats = [name for name, ok in [("CSL", csl_matched), ("BibTeX", bibtex_matched)] if ok]
         logger.success(
             f"{doi} validated successfully ({', '.join(formats)})",
             category=LogCategory.MATCH, source=LogSource.DOI,
         )
 
-    return doi_matched
+    return csl_matched or bibtex_matched

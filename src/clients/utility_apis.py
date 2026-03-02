@@ -8,11 +8,11 @@ from typing import Any
 
 from ..cache import response_cache
 from ..config import CACHE_TTL_DOI_DAYS, CACHE_TTL_SEARCH_DAYS, DATACITE_BASE, GEMINI_BASE, ORCID_BASE
-from ..exceptions import ALL_API_ERRORS, NUMERIC_ERRORS
+from ..exceptions import ALL_API_ERRORS
 from ..http_utils import handle_api_errors, http_get_json, http_post_json
 from ..id_utils import _norm_doi
 from ..log_utils import LogCategory, LogSource, logger
-from ..text_utils import normalize_title
+from ..text_utils import extract_year_from_any, normalize_title
 from .helpers import _best_item_by_score
 
 # ============ Gemini ============
@@ -95,11 +95,8 @@ def gemini_generate_short_title(
         return None
 
     candidates = data.get("candidates") or []
-    if candidates:
-        parts = candidates[0].get("content", {}).get("parts") or []
-        raw_text = parts[0].get("text", "").strip() if parts else ""
-    else:
-        raw_text = ""
+    parts = (candidates[0].get("content", {}).get("parts") or []) if candidates else []
+    raw_text = parts[0].get("text", "").strip() if parts else ""
     short_title = re.sub(r"\s+", "", raw_text.strip("\"'"))
 
     if not short_title or len(short_title) > 100:
@@ -182,13 +179,7 @@ def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | No
         if (name := safe_get_field(creator, "name"))
     ]
 
-    year = 0
-    pub_year = attributes.get("publicationYear")
-    if pub_year:
-        try:
-            year = int(pub_year)
-        except NUMERIC_ERRORS:
-            year = 0
+    year = extract_year_from_any(attributes.get("publicationYear"), fallback=0) or 0
 
     venue = safe_get_field(attributes, "publisher")
 
@@ -288,18 +279,6 @@ def orcid_search_work_by_title(orcid_id: str, title: str, _author_name: str | No
             )
             return dict(work)
 
-    def get_orcid_title(w: dict[str, Any]) -> str:
-        return w.get("title") or ""
-
-    def get_orcid_year(w: dict[str, Any]) -> int | None:
-        year = w.get("year")
-        if not year:
-            return None
-        try:
-            return int(year)
-        except NUMERIC_ERRORS:
-            return None
-
     from ..bibtex_build import create_scoring_function
     # NOTE: ORCID work-summary responses do not include contributor lists,
     # so we skip author matching (author_name=None) to avoid rejecting all
@@ -308,9 +287,9 @@ def orcid_search_work_by_title(orcid_id: str, title: str, _author_name: str | No
         title=title,
         author_name=None,
         year_hint=None,
-        title_getter=get_orcid_title,
+        title_getter=lambda w: w.get("title") or "",
         authors_getter=lambda w: w.get("contributors") or [],
-        year_getter=get_orcid_year,
+        year_getter=lambda w: extract_year_from_any(w.get("year"), fallback=None),
     )
 
     result = _best_item_by_score(works, score_fn)

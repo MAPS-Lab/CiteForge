@@ -223,17 +223,17 @@ _RATE_LIMITER_LOCK = threading.Lock()
 
 def _get_rate_limiter(namespace: str) -> TokenBucketRateLimiter | None:
     """Return the rate limiter for *namespace*, creating it on first access."""
-    if namespace not in RATE_LIMITS:
+    config = RATE_LIMITS.get(namespace)
+    if config is None:
         return None
     limiter = _RATE_LIMITER_REGISTRY.get(namespace)
     if limiter is not None:
         return limiter
     with _RATE_LIMITER_LOCK:
         # Double-check after acquiring lock
-        limiter = _RATE_LIMITER_REGISTRY.get(namespace)
-        if limiter is not None:
-            return limiter
-        rate, burst = RATE_LIMITS[namespace]
+        if namespace in _RATE_LIMITER_REGISTRY:
+            return _RATE_LIMITER_REGISTRY[namespace]
+        rate, burst = config
         limiter = TokenBucketRateLimiter(rate, burst)
         _RATE_LIMITER_REGISTRY[namespace] = limiter
         return limiter
@@ -256,14 +256,14 @@ def _get_session() -> requests.Session:
     """
     session: requests.Session | None = getattr(_THREAD_LOCAL, "session", None)
     count: int = getattr(_THREAD_LOCAL, "session_request_count", 0)
-    if session is not None and count < SESSION_ROTATION_THRESHOLD:
-        return session
     if session is not None:
+        if count < SESSION_ROTATION_THRESHOLD:
+            return session
         session.close()
-    session = _new_session()
-    _THREAD_LOCAL.session = session
+    new_session = _new_session()
+    _THREAD_LOCAL.session = new_session
     _THREAD_LOCAL.session_request_count = 0
-    return session
+    return new_session
 
 
 def handle_api_errors(default_return: Any = None) -> Callable[[Callable[..., T]], Callable[..., T]]:
@@ -296,7 +296,7 @@ def _parse_retry_after(ra: str | None) -> float:
     except NUMERIC_ERRORS:
         try:
             dt = parsedate_to_datetime(ra)
-            if getattr(dt, "tzinfo", None) is None:
+            if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
         except NUMERIC_ERRORS:
@@ -409,8 +409,7 @@ def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any
     Fetch JSON from a URL using a generic User-Agent and JSON Accept header,
     returning the parsed response as a dictionary.
     """
-    headers = DEFAULT_JSON_HEADERS.copy()
-    raw = http_fetch_bytes(url, headers, timeout)
+    raw = http_fetch_bytes(url, DEFAULT_JSON_HEADERS.copy(), timeout)
     return _decode_json_bytes(raw, url)
 
 
@@ -426,10 +425,7 @@ def http_post_json(
     (rate limiting, concurrency, retries, header randomization).
     """
     h = (headers or DEFAULT_JSON_HEADERS).copy()
-    # Explicit Content-Type as a defensive default; requests sets it when
-    # json= is used, but callers may pass custom header dicts without it.
-    if "Content-Type" not in h:
-        h["Content-Type"] = "application/json"
+    h.setdefault("Content-Type", "application/json")
     raw = _http_request("POST", url, h, timeout, json_payload=payload)
     return _decode_json_bytes(raw, url)
 
@@ -451,16 +447,14 @@ def http_get_text(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> str:
     byte order marks, trying UTF-8 first, and falling back to Latin-1 when
     needed.
     """
-    headers = DEFAULT_BROWSER_HEADERS.copy()
-    raw = http_fetch_bytes(url, headers, timeout)
+    raw = http_fetch_bytes(url, DEFAULT_BROWSER_HEADERS.copy(), timeout)
 
     # Try BOM-indicated encodings first
-    bom_encodings: list[tuple[bytes, str]] = [
+    for bom, encoding in (
         (b"\xef\xbb\xbf", "utf-8-sig"),
         (b"\xff\xfe", "utf-16le"),
         (b"\xfe\xff", "utf-16be"),
-    ]
-    for bom, encoding in bom_encodings:
+    ):
         if raw.startswith(bom):
             try:
                 return raw.decode(encoding)

@@ -218,9 +218,8 @@ def _is_preprint_doi(doi: str) -> bool:
 
 def _pop_fields(target: dict[str, Any], field_names: set[str] | frozenset[str], log_tag: str) -> None:
     """Remove *field_names* from *target*, logging any that were actually present."""
-    removed = [f for f in field_names if f in target]
-    for f in field_names:
-        target.pop(f, None)
+    _sentinel = object()
+    removed = [f for f in field_names if target.pop(f, _sentinel) is not _sentinel]
     if removed:
         logger.debug(f"{log_tag} | fields={removed}", category=LogCategory.CLEANUP)
 
@@ -338,10 +337,9 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
 
             # special handling for journal field: never downgrade from published journal to preprint server
             if k == "journal":
-                cur_journal_lower = str(cur).lower() if cur else ''
+                cur_journal_lower = str(cur).lower()
                 new_journal_lower = str(v).lower()
 
-                # Check if current is NOT a preprint but new IS a preprint
                 cur_is_preprint = any(ps in cur_journal_lower for ps in PREPRINT_SERVERS)
                 new_is_preprint = any(ps in new_journal_lower for ps in PREPRINT_SERVERS)
 
@@ -358,7 +356,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 # Compare content length without whitespace so OCR artifacts
                 # (e.g., "Un met" vs "Unmet") don't give the broken title a
                 # false length advantage.
-                cur_len = len(re.sub(r'\s+', '', str(cur))) if cur else 0
+                cur_len = len(re.sub(r'\s+', '', str(cur)))
                 new_len = len(re.sub(r'\s+', '', str(v)))
 
                 # If new title is significantly shorter (< 70% of current length),
@@ -377,7 +375,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
 
             # special handling for booktitle: prefer specific conference name over generic series
             if k == "booktitle":
-                cur_lower = str(cur).lower().strip() if cur else ""
+                cur_lower = str(cur).lower().strip()
                 new_lower = str(v).lower().strip()
                 # If current is a generic series name and new is more specific, always accept
                 if cur_lower in GENERIC_SERIES_NAMES and new_lower not in GENERIC_SERIES_NAMES:
@@ -496,13 +494,13 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
 
     # Fix author name casing: capitalize all-lowercase tokens AND convert
     # ALL-CAPS tokens to title case (catches "darren steeves", "F VARNO").
-    author_val2 = merged.get("author", "")
-    if author_val2:
-        fixed_author, author_was_fixed = _fix_author_casing(str(author_val2))
+    author_val = merged.get("author", "")
+    if author_val:
+        fixed_author, author_was_fixed = _fix_author_casing(str(author_val))
         if author_was_fixed:
             merged["author"] = fixed_author
             logger.debug(
-                f"author_capitalize | before={author_val2[:80]} | after={merged['author'][:80]}",
+                f"author_capitalize | before={author_val[:80]} | after={merged['author'][:80]}",
                 category=LogCategory.CLEANUP,
             )
 
@@ -594,7 +592,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 merged[field] = cleaned.strip()
 
     title_val = merged.get("title", "")
-    if title_val and isinstance(title_val, str) and title_val.rstrip() != title_val.rstrip().rstrip('*'):
+    if title_val and isinstance(title_val, str) and title_val.rstrip().endswith('*'):
         logger.debug("title_asterisk | removed trailing *", category=LogCategory.CLEANUP)
         merged["title"] = title_val.rstrip().rstrip('*').rstrip()
 
@@ -708,7 +706,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # PACMHCI, etc.) as journal volumes. Any venue named "Proceedings of..."
     # is proceedings, not a journal — reclassify as @inproceedings.
     if etype == "article" and merged.get("journal") and not merged.get("booktitle"):
-        jnl_for_conf = (merged.get("journal") or "").strip()
+        jnl_for_conf = merged["journal"].strip()
         if _is_conference_journal(jnl_for_conf):
             logger.debug(
                 f"conference_as_journal | journal={jnl_for_conf} | type article->inproceedings",
@@ -761,8 +759,9 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # appears in 'journal', move it to 'booktitle' (correct BibTeX field for conferences)
     for venue_field in ("journal", "booktitle", "howpublished"):
         venue_val = (merged.get(venue_field) or "").strip()
-        if venue_val and venue_val.lower() in ABBREVIATED_VENUE_MAP:
-            expanded = ABBREVIATED_VENUE_MAP[venue_val.lower()]
+        venue_key = venue_val.lower()
+        if venue_val and venue_key in ABBREVIATED_VENUE_MAP:
+            expanded = ABBREVIATED_VENUE_MAP[venue_key]
             logger.debug(f"venue_expand | {venue_val}->{expanded} | field={venue_field}", category=LogCategory.CLEANUP)
             if venue_field == "journal":
                 merged.pop("journal", None)
@@ -811,7 +810,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
 
     # Promote incollection to inproceedings for known proceedings series (LNCS, SHTI, etc.)
     if etype == "incollection" and merged.get("booktitle"):
-        bt_lower = (merged.get("booktitle") or "").lower().strip()
+        bt_lower = merged["booktitle"].lower().strip()
         series_lower = (merged.get("series") or "").lower().strip()
         if bt_lower in GENERIC_SERIES_NAMES or series_lower in GENERIC_SERIES_NAMES:
             logger.debug(
@@ -1168,9 +1167,6 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                 existing_is_preprint = existing_doi and _is_preprint_doi(existing_doi)
                 new_is_preprint = new_doi and _is_preprint_doi(new_doi)
 
-                def _keep_existing() -> tuple[bool, str]:
-                    return True, os.path.basename(duplicate_path)
-
                 def _replace_existing() -> None:
                     nonlocal dedup_replaced
                     dedup_replaced = True
@@ -1187,7 +1183,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             f"| file={dup_basename}",
                             category=LogCategory.DEDUP,
                         )
-                        skip_write, filename = _keep_existing()
+                        skip_write = True
                     elif existing_is_preprint and not new_is_preprint:
                         # Existing is preprint, new is published -> replace preprint
                         logger.debug(
@@ -1209,7 +1205,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                                 f"| file={dup_basename}",
                                 category=LogCategory.DEDUP,
                             )
-                            skip_write, filename = _keep_existing()
+                            skip_write = True
                         else:
                             logger.debug(
                                 f"DECISION | REPLACE | reason=new_more_complete | file={dup_basename}",
@@ -1222,7 +1218,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                         f"DECISION | KEEP_EXISTING | reason=existing_has_doi | file={dup_basename}",
                         category=LogCategory.DEDUP,
                     )
-                    skip_write, filename = _keep_existing()
+                    skip_write = True
                 elif new_doi and not existing_doi:
                     # New has DOI, existing doesn't -> replace existing
                     logger.debug(

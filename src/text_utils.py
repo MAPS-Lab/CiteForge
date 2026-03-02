@@ -505,7 +505,7 @@ def _is_preprint_fields(fields: dict[str, Any]) -> bool:
     if any(doi.startswith(p) for p in PREPRINT_DOI_PREFIXES):
         return True
     journal = str(fields.get("journal") or "").lower()
-    return any(ps == journal or ps in journal for ps in PREPRINT_SERVERS)
+    return any(ps in journal for ps in PREPRINT_SERVERS)
 
 
 def compute_dedup_score(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> float:
@@ -601,10 +601,8 @@ def author_in_text(target_author: str | None, text: Any) -> bool:
     """
     if not target_author or not text:
         return False
-    last = name_signature(target_author)
-    if not last:
-        return False
-    last_tok = last.get("last") or ""
+    sig = name_signature(target_author)
+    last_tok = (sig or {}).get("last", "")
     if not last_tok:
         return False
     txt = normalize_person_name(to_text(text))
@@ -622,9 +620,7 @@ def extract_year_from_any(
     and Unix timestamps, falling back when no plausible year is found.
     """
     if isinstance(obj, int):
-        if VALID_YEAR_MIN <= obj <= VALID_YEAR_MAX:
-            return obj
-        return fallback
+        return obj if VALID_YEAR_MIN <= obj <= VALID_YEAR_MAX else fallback
 
     if isinstance(obj, str):
         m = re.search(r"(19|20)\d{2}", obj)
@@ -695,13 +691,11 @@ def extract_authors_from_any(
         return authors
 
     # Lazy import to avoid circular dependency; cached after first call
-    _sanitize: Any = None
     if sanitize_dblp:
         from .clients.helpers import _sanitize_dblp_author
-        _sanitize = _sanitize_dblp_author
-
-    def _maybe_sanitize(nm: str) -> str:
-        return _sanitize(nm) if _sanitize else nm
+        _sanitize: Any = _sanitize_dblp_author
+    else:
+        _sanitize = None
 
     if isinstance(obj, dict):
         _default_fields = ["authors", "author", "authorids", "creators", "contributors"]
@@ -724,7 +718,7 @@ def extract_authors_from_any(
             nm = _name_from_dict(obj)
 
         if nm:
-            nm = _maybe_sanitize(nm)
+            nm = _sanitize(nm) if _sanitize else nm
             if nm:
                 authors.append(nm)
         return authors
@@ -734,7 +728,7 @@ def extract_authors_from_any(
             if isinstance(item, str):
                 nm = item.strip()
                 if nm:
-                    nm = _maybe_sanitize(nm)
+                    nm = _sanitize(nm) if _sanitize else nm
                     if nm:
                         authors.append(nm)
             elif isinstance(item, dict):
@@ -750,7 +744,7 @@ def extract_authors_from_any(
                         nm = f"{given} {family}".strip() if (given or family) else ""
 
                 if nm:
-                    nm = _maybe_sanitize(nm)
+                    nm = _sanitize(nm) if _sanitize else nm
                     if nm:
                         authors.append(nm)
             else:
@@ -780,21 +774,19 @@ def extract_authors_from_any(
             parts = [p.strip() for p in obj_str.split(";")]
             authors = [p for p in parts if p]
         elif "," in obj_str and " " in obj_str:
+            parts = [p.strip() for p in obj_str.split(",")]
             if obj_str.count(",") > 1:
-                parts = [p.strip() for p in obj_str.split(",")]
                 authors = [p for p in parts if p]
+            elif (
+                len(parts) == 2
+                and (
+                    all(_ABBREVIATED_AUTHOR_PATTERN.match(p) for p in parts)
+                    or all(" " in p.strip() for p in parts)
+                )
+            ):
+                authors = parts
             else:
-                parts = [p.strip() for p in obj_str.split(",")]
-                if len(parts) == 2:
-                    if (
-                        all(_ABBREVIATED_AUTHOR_PATTERN.match(p) for p in parts)
-                        or all(" " in p.strip() for p in parts)
-                    ):
-                        authors = parts
-                    else:
-                        authors = [obj_str]
-                else:
-                    authors = [obj_str]
+                authors = [obj_str]
         else:
             authors = [obj_str]
 
@@ -896,25 +888,15 @@ def get_truncation_score(article_data: dict[str, Any]) -> float:
     Calculate a truncation score for an article by checking key fields, returning
     a value between 0.0 (complete) and 1.0 (fully truncated).
     """
-    fields_to_check: list[str] = []
-
-    title = article_data.get("title")
-    if title:
-        fields_to_check.append(str(title))
-
-    author_info = article_data.get("author_info")
-    if author_info:
-        fields_to_check.append(str(author_info))
-
-    pub_info = article_data.get("publication_info") or article_data.get("snippet")
-    if pub_info:
-        fields_to_check.append(str(pub_info))
-
+    candidates = [
+        article_data.get("title"),
+        article_data.get("author_info"),
+        article_data.get("publication_info") or article_data.get("snippet"),
+    ]
+    fields_to_check = [str(v) for v in candidates if v]
     if not fields_to_check:
         return 0.0
-
-    truncated_count = sum(1 for f in fields_to_check if is_truncated(f))
-    return truncated_count / len(fields_to_check)
+    return sum(1 for f in fields_to_check if is_truncated(f)) / len(fields_to_check)
 
 
 def safe_get_field(
@@ -966,7 +948,7 @@ def safe_get_nested(obj: Any, *keys: str, default: Any = None) -> Any:
         current = current.get(key)
         if current is None:
             return default
-    return current if current is not None else default
+    return current
 
 
 def extract_author_names(

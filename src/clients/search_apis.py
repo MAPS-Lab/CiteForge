@@ -59,6 +59,10 @@ from ..text_utils import (
 )
 from .helpers import _best_item_by_score, _sanitize_dblp_author, _score_candidate_generic
 
+_DBLP_ALLOWED_TAGS = frozenset({"article", "inproceedings", "incollection", "phdthesis", "mastersthesis"})
+_DBLP_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+_NON_WORD_RE = re.compile(r"\W+")
+
 # ============ Semantic Scholar ============
 
 def s2_search_paper(title: str, author_name: str | None, api_key: str | None) -> dict[str, Any] | None:
@@ -282,8 +286,7 @@ def arxiv_search(
         if cached.get("_negative"):
             return []
         logger.debug(f"arxiv | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        entries_cached: list[dict[str, Any]] = cached.get("entries", [])
-        return entries_cached
+        return list(cached.get("entries", []))
     q_parts = [f'ti:"{title}"']
     if author_name:
         q_parts.append(f'au:"{author_name}"')
@@ -302,10 +305,7 @@ def arxiv_search(
     except XML_PARSE_ERRORS:
         return []
 
-    def _ns_uri(tag: str) -> str:
-        return tag[1:].split("}")[0] if tag.startswith("{") else ""
-
-    atom_ns = _ns_uri(root.tag)
+    atom_ns = root.tag[1:].split("}")[0] if root.tag.startswith("{") else ""
 
     def qn(ns: str, local: str) -> str:
         return f"{{{ns}}}{local}" if ns else local
@@ -338,14 +338,14 @@ def arxiv_search(
             if link_el.attrib.get("rel", "") == "alternate":
                 link_abs = link_el.attrib.get("href", "")
         doi_val = ""
-        for ch in entry_el.iter():
-            if ch.tag.split("}")[-1] == "doi" and ch.text:
-                doi_val = find_doi_in_text(ch.text.strip()) or ""
-                break
         pc = ""
         for ch in entry_el.iter():
-            if ch.tag.split("}")[-1] == "primary_category":
+            local_tag = ch.tag.split("}")[-1]
+            if not doi_val and local_tag == "doi" and ch.text:
+                doi_val = find_doi_in_text(ch.text.strip()) or ""
+            elif not pc and local_tag == "primary_category":
                 pc = ch.attrib.get("term", "") or ""
+            if doi_val and pc:
                 break
         arxiv_id = find_arxiv_in_text(link_abs or entry_id) or ""
         entries.append({
@@ -405,7 +405,7 @@ def _or_note_year(note: dict[str, Any]) -> int | None:
         if isinstance(ms, (int, float)):
             return datetime.fromtimestamp(float(ms) / 1000.0, timezone.utc).year
     except (*NUMERIC_ERRORS, OSError):
-        return None
+        pass
     return None
 
 
@@ -481,6 +481,43 @@ def openreview_login(creds: tuple[str, ...] | None) -> dict[str, str] | None:
     return None
 
 
+def _or_fetch_candidates(title: str, headers: dict[str, str]) -> list[dict[str, Any]]:
+    """Fetch OpenReview candidate notes via term lookup, falling back to search."""
+    candidates: list[dict[str, Any]] = []
+
+    def _extend(req_url: str) -> None:
+        raw = http_fetch_bytes(req_url, headers, timeout=30.0)
+        data = json.loads(raw.decode("utf-8"))
+        notes = data.get("notes") or data.get("data") or []
+        if isinstance(notes, list):
+            candidates.extend(notes)
+
+    try:
+        url = build_url(f"{OPENREVIEW_BASE}/notes", {"term": title, "details": "metadata"})
+        _extend(url)
+    except (*ALL_API_ERRORS, ValueError):
+        pass
+    if not candidates:
+        try:
+            url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"q": title, "limit": 20})
+            _extend(url)
+        except (*ALL_API_ERRORS, ValueError):
+            pass
+    return candidates
+
+
+def _or_is_exact_match(
+    cand: dict[str, Any], target_norm: str, author_name: str | None,
+) -> bool:
+    """Check if an OpenReview note is an exact title match with compatible authors."""
+    if normalize_title(_or_note_title(cand)) != target_norm:
+        return False
+    if not author_name:
+        return True
+    cand_authors = _or_note_authors(cand)
+    return _or_authors_are_ids(cand_authors) or author_name_matches(author_name, cand_authors)
+
+
 def openreview_search_paper(
     title: str, author_name: str | None, creds: tuple[str, ...] | None,
 ) -> dict[str, Any] | None:
@@ -495,38 +532,14 @@ def openreview_search_paper(
         logger.debug(f"openreview | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached if cached else None
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
-    candidates: list[dict[str, Any]] = []
-
-    def _extend_with_notes(req_url: str) -> None:
-        raw = http_fetch_bytes(req_url, headers, timeout=30.0)
-        data = json.loads(raw.decode("utf-8"))
-        notes = data.get("notes") or data.get("data") or []
-        if isinstance(notes, list):
-            candidates.extend(notes)
-
-    try:
-        url = build_url(f"{OPENREVIEW_BASE}/notes", {"term": title, "details": "metadata"})
-        _extend_with_notes(url)
-    except (*ALL_API_ERRORS, ValueError):
-        pass
-    if not candidates:
-        try:
-            url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"q": title, "limit": 20})
-            _extend_with_notes(url)
-        except (*ALL_API_ERRORS, ValueError):
-            pass
+    candidates = _or_fetch_candidates(title, headers)
     if not candidates:
         response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return None
 
     target_norm = normalize_title(title)
     for cand in candidates:
-        cand_authors = _or_note_authors(cand)
-        if normalize_title(_or_note_title(cand)) == target_norm and (
-            not author_name
-            or _or_authors_are_ids(cand_authors)
-            or author_name_matches(author_name, cand_authors)
-        ):
+        if _or_is_exact_match(cand, target_norm, author_name):
             response_cache.put("openreview", cache_key, dict(cand), ttl_days=CACHE_TTL_SEARCH_DAYS)
             logger.debug(f"openreview | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return cand
@@ -567,40 +580,13 @@ def openreview_search_papers_multiple(
         logger.debug(f"openreview_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("results", []))
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
-    candidates: list[dict[str, Any]] = []
-
-    def _extend_with_notes(req_url: str) -> None:
-        raw = http_fetch_bytes(req_url, headers, timeout=30.0)
-        data = json.loads(raw.decode("utf-8"))
-        notes = data.get("notes") or data.get("data") or []
-        if isinstance(notes, list):
-            candidates.extend(notes)
-
-    try:
-        url = build_url(f"{OPENREVIEW_BASE}/notes", {"term": title, "details": "metadata"})
-        _extend_with_notes(url)
-    except (*ALL_API_ERRORS, ValueError):
-        pass
-    if not candidates:
-        try:
-            url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"q": title, "limit": 20})
-            _extend_with_notes(url)
-        except (*ALL_API_ERRORS, ValueError):
-            pass
+    candidates = _or_fetch_candidates(title, headers)
     if not candidates:
         response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return []
 
     target_norm = normalize_title(title)
-    exact: list[dict[str, Any]] = []
-    for cand in candidates:
-        cand_authors = _or_note_authors(cand)
-        if normalize_title(_or_note_title(cand)) == target_norm and (
-            not author_name
-            or _or_authors_are_ids(cand_authors)
-            or author_name_matches(author_name, cand_authors)
-        ):
-            exact.append(cand)
+    exact = [c for c in candidates if _or_is_exact_match(c, target_norm, author_name)]
     if exact:
         candidates = exact
 
@@ -632,18 +618,14 @@ def openreview_search_papers_multiple(
 
 def dblp_extract_pid(val: str | None) -> str | None:
     """Extract a DBLP person identifier from a hint value."""
-    if not val:
-        return None
-    s = str(val).strip()
+    s = str(val).strip() if val else ""
     if not s:
         return None
     m = re.search(r"/pid/([^/#?]+)", s)
     if m:
         return m.group(1)
     m = re.match(r"^(pid:)?([0-9a-zA-Z/._-]+)$", s)
-    if m:
-        return m.group(2)
-    return None
+    return m.group(2) if m else None
 
 
 @handle_api_errors(default_return=None)
@@ -707,7 +689,6 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     except XML_PARSE_ERRORS:
         return []
     articles: list[dict[str, Any]] = []
-    dblp_allowed_tags = {"article", "inproceedings", "incollection", "phdthesis", "mastersthesis"}
     for r in root.findall("r"):
         child = None
         for ch in r:
@@ -717,7 +698,7 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
         if child is None:
             continue
         tag_name = str(child.tag)
-        allowed = tag_name in dblp_allowed_tags
+        allowed = tag_name in _DBLP_ALLOWED_TAGS
         title_el = child.find("title")
         title_val = "".join(title_el.itertext()) if title_el is not None else ""
         title = trim_title_default(title_val or "") if allowed else ""
@@ -731,7 +712,7 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
             continue
         year = 0
         year_el = child.find("year")
-        if year_el is not None and year_el.text and re.match(r"^(19|20)\d{2}$", year_el.text.strip()):
+        if year_el is not None and year_el.text and _DBLP_YEAR_RE.match(year_el.text.strip()):
             try:
                 year = int(year_el.text.strip())
             except PARSE_ERRORS:
@@ -753,8 +734,7 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
         if doi:
             art["result_id"] = f"dblp:doi:{doi}"
         else:
-            _san = re.sub(r"\W+", "_", normalize_title(title))
-            art["result_id"] = f"dblp:{_san[:64]}"
+            art["result_id"] = f"dblp:{_NON_WORD_RE.sub('_', normalize_title(title))[:64]}"
         articles.append(art)
     if articles:
         response_cache.put("dblp", cache_key, {"articles": articles}, ttl_days=CACHE_TTL_SEARCH_DAYS)
@@ -1037,13 +1017,7 @@ def build_bibtex_from_europepmc(article: dict[str, Any], keyhint: str) -> str | 
     if not title:
         return None
     authors = extract_author_names(article.get("authorString"))
-    year = 0
-    year_str = article.get("pubYear") or ""
-    if year_str:
-        try:
-            year = int(year_str)
-        except NUMERIC_ERRORS:
-            year = 0
+    year = extract_year_from_any(article.get("pubYear"), fallback=0) or 0
     venue = safe_get_field(article, "journalTitle") or safe_get_field(article, "bookTitle")
     entry_type = determine_entry_type(
         article, type_field="pubType",

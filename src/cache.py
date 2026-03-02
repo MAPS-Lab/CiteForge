@@ -41,17 +41,17 @@ class ResponseCache:
 
     def _lock_for(self, namespace: str) -> threading.Lock:
         with self._meta_lock:
-            if namespace not in self._locks:
-                self._locks[namespace] = threading.Lock()
-            return self._locks[namespace]
+            return self._locks.setdefault(namespace, threading.Lock())
 
     @staticmethod
     def _key_hash(key: str) -> str:
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
+    def _ns_dir(self, namespace: str) -> str:
+        return os.path.join(self._cache_dir, namespace)
+
     def _entry_path(self, namespace: str, key: str) -> str:
-        ns_dir = os.path.join(self._cache_dir, namespace)
-        return os.path.join(ns_dir, f"{self._key_hash(key)}.json")
+        return os.path.join(self._ns_dir(namespace), f"{self._key_hash(key)}.json")
 
     def get(self, namespace: str, key: str) -> dict[str, Any] | None:
         if not CACHE_ENABLED:
@@ -83,7 +83,7 @@ class ResponseCache:
         )
         lock = self._lock_for(namespace)
         with lock:
-            ns_dir = os.path.join(self._cache_dir, namespace)
+            ns_dir = self._ns_dir(namespace)
             os.makedirs(ns_dir, exist_ok=True)
             entry = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
             path = self._entry_path(namespace, key)

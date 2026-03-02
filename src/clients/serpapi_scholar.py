@@ -123,6 +123,7 @@ def serpapi_fetch_author_publications(
     author_id: str,
     num: int = 250,
     sort: str = "pubdate",
+    min_year: int = 0,
 ) -> dict[str, Any]:
     """Fetch publications for an author via SerpAPI Scholar Author endpoint.
 
@@ -130,11 +131,19 @@ def serpapi_fetch_author_publications(
     ID for exact profile matching.  Paginates automatically until *num*
     results are collected or no more pages are available.
 
+    When *min_year* > 0 and *sort* is ``"pubdate"``, pagination continues
+    until all articles in the year window have been fetched (i.e., the
+    newest article on the last page has year < *min_year*).  The *num*
+    parameter still acts as a hard safety cap.
+
     Args:
         api_key: SerpAPI key.
         author_id: Google Scholar profile ID (e.g., ``"dg7f4K8AAAAJ"``).
-        num: Maximum number of articles to return.
+        num: Maximum number of articles to return (hard safety cap).
         sort: Sort order — ``"pubdate"`` or ``"citedby"``.
+        min_year: Minimum publication year to fetch.  When > 0 and *sort*
+            is ``"pubdate"``, pagination stops once a full page falls
+            below this year.  0 disables year-bounded stopping.
 
     Returns:
         Dict matching the CiteForge ``fetch_author_publications()`` contract::
@@ -144,17 +153,21 @@ def serpapi_fetch_author_publications(
     if not api_key or not author_id:
         return {"articles": [], "search_metadata": {"status": "Error", "source": "serpapi"}}
 
+    year_bounded = min_year > 0 and sort == "pubdate"
     articles: list[dict[str, Any]] = []
     start = 0
 
     for _page in range(_MAX_PAGES):
         page_size = min(num - len(articles), _PAGE_SIZE)
+        if page_size <= 0:
+            break
         data = _serpapi_get(api_key, author_id, start=start, num=page_size, sort=sort)
 
         page_articles = data.get("articles") or []
         if not page_articles:
             break
 
+        page_start = len(articles)
         for item in page_articles:
             converted = _convert_article(item)
             if converted:
@@ -162,6 +175,20 @@ def serpapi_fetch_author_publications(
 
         if len(articles) >= num:
             break
+
+        # Year-bounded stop: if ALL articles with valid years on this page
+        # are below min_year, we've passed the contribution window.
+        if year_bounded and len(articles) > page_start:
+            page_years = [a["year"] for a in articles[page_start:]
+                          if isinstance(a["year"], int) and a["year"] > 0]
+            if page_years:
+                max_year = max(page_years)
+                if max_year < min_year:
+                    _log.debug(
+                        "Year-bounded stop for %s: page max year %d < min_year %d",
+                        author_id, max_year, min_year,
+                    )
+                    break
 
         pagination = data.get("serpapi_pagination") or {}
         if not pagination.get("next"):

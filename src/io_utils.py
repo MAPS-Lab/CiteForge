@@ -35,6 +35,8 @@ _SUMMARY_CSV_FIELDNAMES = [
     "doi_bibtex",
 ]
 
+_SUMMARY_CSV_FLAG_FIELDS = [f for f in _SUMMARY_CSV_FIELDNAMES if f not in ("file_path", "trust_hits")]
+
 _CSV_LOCK = threading.Lock()
 
 
@@ -89,7 +91,6 @@ def _read_key_file(
                 return lines
         except FileNotFoundError as e:
             last_err = e
-            continue
 
     if required:
         if last_err:
@@ -164,18 +165,14 @@ def read_records(path: str = DEFAULT_INPUT) -> list[Record]:
                     scholar_link = (row.get("Scholar Link") or "").strip()
                     dblp_link = (row.get("DBLP Link") or "").strip()
 
-                    scholar_id = ""
-                    if scholar_link:
-                        m = re.search(r"user=([^&]+)", scholar_link)
-                        if m:
-                            scholar_id = m.group(1)
+                    m = re.search(r"user=([^&]+)", scholar_link) if scholar_link else None
+                    scholar_id = m.group(1) if m else ""
 
                     dblp_id = ""
                     if dblp_link:
                         if "/pid/" in dblp_link:
                             m = re.search(r"/pid/(.+?)(?:\.[a-z0-9]+)?$", dblp_link)
-                            if m:
-                                dblp_id = m.group(1)
+                            dblp_id = m.group(1) if m else ""
                         else:
                             dblp_id = dblp_link
 
@@ -313,9 +310,8 @@ def append_summary_to_csv(csv_path: str, file_path: str, trust_hits: int, flags:
     Updated entries (same file_path) are tracked in memory and flushed at end of run.
     Thread-safe via _CSV_LOCK.
     """
-    flag_fields = [f for f in _SUMMARY_CSV_FIELDNAMES if f not in ("file_path", "trust_hits")]
     new_row: dict[str, Any] = {"file_path": file_path, "trust_hits": trust_hits}
-    new_row.update({f: int(bool(flags.get(f))) for f in flag_fields})
+    new_row.update({f: int(bool(flags.get(f))) for f in _SUMMARY_CSV_FLAG_FIELDS})
 
     with _CSV_LOCK:
         if file_path in _SUMMARY_KNOWN_PATHS:
@@ -383,18 +379,22 @@ def collect_orphan_files(csv_path: str, output_dir: str) -> list[str]:
 
     orphans: list[str] = []
     try:
-        for dirname in os.listdir(output_dir):
-            subdir = os.path.join(output_dir, dirname)
-            if not os.path.isdir(subdir):
-                continue
-            for fname in os.listdir(subdir):
-                if not fname.endswith(".bib"):
-                    continue
-                abs_path = os.path.abspath(os.path.join(subdir, fname))
-                if abs_path not in csv_paths:
-                    orphans.append(abs_path)
+        subdirs = [
+            os.path.join(output_dir, d) for d in os.listdir(output_dir)
+            if os.path.isdir(os.path.join(output_dir, d))
+        ]
     except OSError:
-        pass
+        return []
+
+    for subdir in subdirs:
+        try:
+            for fname in os.listdir(subdir):
+                if fname.endswith(".bib"):
+                    abs_path = os.path.abspath(os.path.join(subdir, fname))
+                    if abs_path not in csv_paths:
+                        orphans.append(abs_path)
+        except OSError:
+            continue
 
     return sorted(orphans)
 
@@ -522,10 +522,10 @@ def build_a2i2_folder(
 
             # Filter by year window
             year_str = (entry.get("fields") or {}).get("year", "")
-            digits = re.sub(r"[^0-9]", "", str(year_str))[:4]
-            if not digits:
+            m = re.search(r"\d{4}", str(year_str))
+            if not m:
                 continue
-            year = int(digits)
+            year = int(m.group())
             if year < min_year or year > current_year:
                 continue
 

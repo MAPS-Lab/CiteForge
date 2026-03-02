@@ -19,6 +19,10 @@ _SERPLY_HTTP_PATCH = "src.clients.serply_scholar.http_fetch_bytes"
 _SERPAPI_HTTP_PATCH = "src.clients.serpapi_scholar.http_fetch_bytes"
 
 
+def _json_bytes(obj: Any) -> bytes:
+    return json.dumps(obj).encode("utf-8")
+
+
 def _make_serply_response(
     articles: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -49,11 +53,8 @@ def _make_serply_article(
     """Build a single Serply article item matching real API structure."""
     names = author_names or ["J Smith", "J Doe"]
     authors_list = [{"name": n, "link": f"https://scholar.google.com/citations?user={n}"} for n in names]
-    names_str = (
-        (", ".join(names) + " - " + description.split(" - ", 1)[-1])
-        if " - " in description
-        else description
-    )
+    _prefix, _, suffix = description.partition(" - ")
+    names_str = f"{', '.join(names)} - {suffix}" if suffix else description
     return {
         "title": title,
         "link": link,
@@ -114,7 +115,7 @@ class TestSerpapiFetchAuthorPublications:
     def test_basic_conversion(self, mock_http: MagicMock) -> None:
         """SerpAPI article -> CiteForge article dict."""
         response = _make_serpapi_response([_make_serpapi_article()])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("test_key", "dg7f4K8AAAAJ", num=10)
 
@@ -141,8 +142,8 @@ class TestSerpapiFetchAuthorPublications:
         page2 = _make_serpapi_response(page2_articles, has_next=False)
 
         mock_http.side_effect = [
-            json.dumps(page1).encode("utf-8"),
-            json.dumps(page2).encode("utf-8"),
+            _json_bytes(page1),
+            _json_bytes(page2),
         ]
 
         result = serpapi_fetch_author_publications("key", "author_id", num=10)
@@ -166,7 +167,7 @@ class TestSerpapiFetchAuthorPublications:
         """Results should be trimmed to num parameter."""
         articles = [_make_serpapi_article(title=f"Paper {i}") for i in range(5)]
         response = _make_serpapi_response(articles)
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("key", "author_id", num=3)
         assert len(result["articles"]) == 3
@@ -176,7 +177,7 @@ class TestSerpapiFetchAuthorPublications:
         """Pagination should stop when serpapi_pagination.next is absent."""
         articles = [_make_serpapi_article(title="Only Page")]
         response = _make_serpapi_response(articles, has_next=False)
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("key", "author_id", num=200)
         assert len(result["articles"]) == 1
@@ -186,7 +187,7 @@ class TestSerpapiFetchAuthorPublications:
     def test_empty_results(self, mock_http: MagicMock) -> None:
         """Empty articles array should return no articles."""
         response = _make_serpapi_response([])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("key", "author_id")
         assert result["articles"] == []
@@ -204,7 +205,7 @@ class TestSerpapiFetchAuthorPublications:
         """Result without year should have empty year."""
         article = _make_serpapi_article(year="")
         response = _make_serpapi_response([article])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("key", "author_id")
         assert result["articles"][0]["year"] == ""
@@ -214,7 +215,7 @@ class TestSerpapiFetchAuthorPublications:
         """Result without publication should not have publication_info."""
         article = _make_serpapi_article(publication="")
         response = _make_serpapi_response([article])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("key", "author_id")
         art = result["articles"][0]
@@ -225,7 +226,7 @@ class TestSerpapiFetchAuthorPublications:
     def test_url_contains_author_id(self, mock_http: MagicMock) -> None:
         """SerpAPI request URL should contain the author_id parameter."""
         response = _make_serpapi_response([_make_serpapi_article()])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         serpapi_fetch_author_publications("key", "dg7f4K8AAAAJ", num=5)
 
@@ -236,10 +237,8 @@ class TestSerpapiFetchAuthorPublications:
     @patch(_SERPAPI_HTTP_PATCH)
     def test_titleless_article_dropped(self, mock_http: MagicMock) -> None:
         """Article without a title should be silently dropped."""
-        article = _make_serpapi_article()
-        article["title"] = ""
-        response = _make_serpapi_response([article])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        response = _make_serpapi_response([_make_serpapi_article(title="")])
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("key", "author_id")
         assert result["articles"] == []
@@ -256,7 +255,7 @@ class TestSerpapiFetchAuthorPublications:
         """Non-digit year (e.g., 'N/A') should produce empty string year."""
         article = _make_serpapi_article(year="N/A")
         response = _make_serpapi_response([article])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("key", "author_id")
         assert result["articles"][0]["year"] == ""
@@ -267,10 +266,95 @@ class TestSerpapiFetchAuthorPublications:
         article = _make_serpapi_article()
         del article["authors"]
         response = _make_serpapi_response([article])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serpapi_fetch_author_publications("key", "author_id")
         assert result["articles"][0]["authors"] == ""
+
+    @patch(_SERPAPI_HTTP_PATCH)
+    def test_year_bounded_stop(self, mock_http: MagicMock) -> None:
+        """Pagination stops when all page articles are below min_year."""
+        page1 = _make_serpapi_response(
+            [_make_serpapi_article(title=f"P{i}", year="2024") for i in range(3)],
+            has_next=True,
+        )
+        page2 = _make_serpapi_response(
+            [_make_serpapi_article(title=f"Old{i}", year="2018") for i in range(3)],
+            has_next=True,
+        )
+        mock_http.side_effect = [
+            _json_bytes(page1),
+            _json_bytes(page2),
+        ]
+        result = serpapi_fetch_author_publications("key", "aid", num=1000, min_year=2019)
+        assert len(result["articles"]) == 6
+        assert mock_http.call_count == 2
+
+    @patch(_SERPAPI_HTTP_PATCH)
+    def test_year_bounded_continues_mixed_page(self, mock_http: MagicMock) -> None:
+        """Pagination continues when page has mix of in/out-of-window articles."""
+        page1 = _make_serpapi_response(
+            [
+                _make_serpapi_article(title="New", year="2024"),
+                _make_serpapi_article(title="Old", year="2017"),
+                _make_serpapi_article(title="Recent", year="2020"),
+            ],
+            has_next=True,
+        )
+        page2 = _make_serpapi_response(
+            [_make_serpapi_article(title="Ancient", year="2015")],
+            has_next=False,
+        )
+        mock_http.side_effect = [
+            _json_bytes(page1),
+            _json_bytes(page2),
+        ]
+        result = serpapi_fetch_author_publications("key", "aid", num=1000, min_year=2019)
+        assert len(result["articles"]) == 4
+        assert mock_http.call_count == 2
+
+    @patch(_SERPAPI_HTTP_PATCH)
+    def test_year_bounded_ignores_missing_years(self, mock_http: MagicMock) -> None:
+        """Articles without years should not trigger year-bounded stop."""
+        page1 = _make_serpapi_response(
+            [
+                _make_serpapi_article(title="No Year", year=""),
+                _make_serpapi_article(title="Also No Year", year="N/A"),
+            ],
+            has_next=True,
+        )
+        page2 = _make_serpapi_response(
+            [_make_serpapi_article(title="Has Year", year="2020")],
+            has_next=False,
+        )
+        mock_http.side_effect = [
+            _json_bytes(page1),
+            _json_bytes(page2),
+        ]
+        result = serpapi_fetch_author_publications("key", "aid", num=1000, min_year=2019)
+        assert len(result["articles"]) == 3
+        assert mock_http.call_count == 2
+
+    @patch(_SERPAPI_HTTP_PATCH)
+    def test_num_cap_still_applies_with_min_year(self, mock_http: MagicMock) -> None:
+        """num parameter should still cap results even with year-bounded fetching."""
+        articles = [_make_serpapi_article(title=f"P{i}", year="2024") for i in range(5)]
+        mock_http.return_value = _json_bytes(_make_serpapi_response(articles))
+        result = serpapi_fetch_author_publications("key", "aid", num=3, min_year=2019)
+        assert len(result["articles"]) == 3
+
+    @patch(_SERPAPI_HTTP_PATCH)
+    def test_year_bounded_disabled_when_not_pubdate(self, mock_http: MagicMock) -> None:
+        """Year-bounded stop should not apply when sort != pubdate."""
+        page1 = _make_serpapi_response(
+            [_make_serpapi_article(title="Old", year="2010")],
+            has_next=False,
+        )
+        mock_http.return_value = _json_bytes(page1)
+        result = serpapi_fetch_author_publications(
+            "key", "aid", num=1000, min_year=2019, sort="citedby",
+        )
+        assert len(result["articles"]) == 1
 
 
 class TestSerplyFetchAuthorPublications:
@@ -280,7 +364,7 @@ class TestSerplyFetchAuthorPublications:
     def test_basic_conversion(self, mock_http: MagicMock) -> None:
         """Serply article -> CiteForge article dict."""
         response = _make_serply_response([_make_serply_article()])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_author_publications("test_key", "John Smith", num=10)
 
@@ -303,7 +387,7 @@ class TestSerplyFetchAuthorPublications:
         """Result without year in description should have empty year."""
         article = _make_serply_article(description="J Smith - Some venue - example.com")
         response = _make_serply_response([article])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_author_publications("test_key", "John Smith")
         assert result["articles"][0]["year"] == ""
@@ -317,7 +401,7 @@ class TestSerplyFetchAuthorPublications:
     def test_empty_results(self, mock_http: MagicMock) -> None:
         """Empty articles array should return no articles."""
         response = _make_serply_response([])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_author_publications("key", "John Smith")
         assert result["articles"] == []
@@ -339,7 +423,7 @@ class TestSerplyFetchAuthorPublications:
             _make_serply_article(title="Paper C", description="C - J3, 2022 - z.com"),
         ]
         response = _make_serply_response(articles)
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_author_publications("key", "John Smith", num=10)
         assert len(result["articles"]) == 3
@@ -351,7 +435,7 @@ class TestSerplyFetchAuthorPublications:
         """Results should be trimmed to num parameter."""
         articles = [_make_serply_article(title=f"Paper {i}") for i in range(5)]
         response = _make_serply_response(articles)
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_author_publications("key", "John Smith", num=3)
         assert len(result["articles"]) == 3
@@ -361,7 +445,7 @@ class TestSerplyFetchAuthorPublications:
         """Result without journal in description should not have publication_info."""
         article = _make_serply_article(description="J Smith")
         response = _make_serply_response([article])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_author_publications("key", "John Smith")
         art = result["articles"][0]
@@ -375,7 +459,7 @@ class TestSerplyFetchAuthorPublications:
         article["author"]["authors"] = []  # Empty list
         article["author"]["names"] = "A Smith, B Jones - Nature, 2024 - nature.com"
         response = _make_serply_response([article])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_author_publications("key", "John Smith")
         assert result["articles"][0]["authors"] == "A Smith, B Jones"
@@ -384,7 +468,7 @@ class TestSerplyFetchAuthorPublications:
     def test_identity_encoding_header(self, mock_http: MagicMock) -> None:
         """Serply requests should use Accept-Encoding: identity to avoid compression issues."""
         response = _make_serply_response([_make_serply_article()])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         serply_fetch_author_publications("key", "John Smith")
         mock_http.assert_called_once()
@@ -395,7 +479,7 @@ class TestSerplyFetchAuthorPublications:
     def test_query_path_encoding(self, mock_http: MagicMock) -> None:
         """Serply uses path-based query encoding: quoted name, no q= or author: prefix."""
         response = _make_serply_response([_make_serply_article()])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         serply_fetch_author_publications("key", "Gabriel Spadon", num=5)
 
@@ -415,7 +499,7 @@ class TestSerplyFetchCitation:
     def test_citation_found(self, mock_http: MagicMock) -> None:
         """First article should be returned as field dict."""
         response = _make_serply_response([_make_serply_article()])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_citation("key", "Machine Learning in Healthcare", "John Smith")
         assert result is not None
@@ -430,7 +514,7 @@ class TestSerplyFetchCitation:
     def test_citation_no_results(self, mock_http: MagicMock) -> None:
         """Empty articles should return None."""
         response = _make_serply_response([])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_citation("key", "Nonexistent Paper", "Nobody")
         assert result is None
@@ -452,7 +536,7 @@ class TestSerplyFetchCitation:
         """Result with only title should return dict with just title."""
         item: dict[str, Any] = {"title": "Minimal Paper"}
         response = _make_serply_response([item])
-        mock_http.return_value = json.dumps(response).encode("utf-8")
+        mock_http.return_value = _json_bytes(response)
 
         result = serply_fetch_citation("key", "Minimal Paper", "Author")
         assert result is not None
@@ -492,7 +576,7 @@ class TestFacadeCacheBehavior:
 
         result = fetch_author_publications("key", "author_b", "Author B")
         assert result["articles"][0]["title"] == "Fresh"
-        mock_serpapi.assert_called_once_with("key", "author_b", num=100)
+        mock_serpapi.assert_called_once_with("key", "author_b", num=100, min_year=0)
         mock_cache.put.assert_called_once()
         put_args = mock_cache.put.call_args[0]
         assert put_args[0] == "serpapi_publications"
@@ -563,6 +647,40 @@ class TestFacadeCacheBehavior:
         """Empty title should return None without calling Serply."""
         result = fetch_scholar_citation("key", "", "Author")
         assert result is None
+
+    @patch("src.clients.scholar.response_cache")
+    @patch("src.clients.scholar.serpapi_fetch_author_publications")
+    def test_stale_cache_invalidated(
+        self, mock_serpapi: MagicMock, mock_cache: MagicMock,
+    ) -> None:
+        """Cache with count-truncated results should be invalidated and re-fetched."""
+        stale_data = {
+            "articles": [{"title": f"P{i}", "year": 2021 + (i % 5)} for i in range(200)],
+            "search_metadata": {"status": "Success"},
+        }
+        mock_cache.get.return_value = stale_data
+        mock_serpapi.return_value = {
+            "articles": [{"title": "Fresh"}],
+            "search_metadata": {"status": "Success", "source": "serpapi"},
+        }
+        fetch_author_publications("key", "auth_x", "Author X", num=400, min_year=2019)
+        mock_cache.invalidate.assert_called_once()
+        mock_serpapi.assert_called_once()
+
+    @patch("src.clients.scholar.response_cache")
+    @patch("src.clients.scholar.serpapi_fetch_author_publications")
+    def test_complete_cache_not_invalidated(
+        self, mock_serpapi: MagicMock, mock_cache: MagicMock,
+    ) -> None:
+        """Cache covering the full window should not be invalidated."""
+        complete_data = {
+            "articles": [{"title": f"P{i}", "year": 2015 + (i % 10)} for i in range(155)],
+            "search_metadata": {"status": "Success"},
+        }
+        mock_cache.get.return_value = complete_data
+        fetch_author_publications("key", "auth_y", "Author Y", num=400, min_year=2019)
+        mock_cache.invalidate.assert_not_called()
+        mock_serpapi.assert_not_called()
 
 
 class TestThreadSafety:

@@ -55,8 +55,24 @@ def _first_author_sortkey(authors: Any) -> str:
     return ""
 
 
+def _cache_covers_window(cached: dict[str, Any], min_year: int) -> bool:
+    """Check whether a cached SerpAPI result covers the full contribution window.
+
+    Returns *False* when the cache was likely truncated by the old count-based
+    regime (article count is a multiple of 100 AND the oldest article is still
+    above *min_year*).
+    """
+    articles = cached.get("articles") or []
+    years = [a.get("year") for a in articles
+             if isinstance(a.get("year"), int) and a["year"] > 0]
+    if not years or min(years) <= min_year:
+        return True
+    return len(articles) % 100 != 0
+
+
 def fetch_author_publications(
-    api_key: str, author_id: str, _author_name: str, num: int = 100,
+    api_key: str, author_id: str, _author_name: str,
+    num: int = 100, min_year: int = 0,
 ) -> dict[str, Any]:
     """Fetch publications for an author from Google Scholar via SerpAPI.
 
@@ -67,14 +83,23 @@ def fetch_author_publications(
         api_key: SerpAPI key.
         author_id: Google Scholar profile ID.
         _author_name: Author name (unused by SerpAPI, kept for interface compat).
-        num: Maximum number of articles to return.
+        num: Maximum number of articles to return (hard safety cap).
+        min_year: Minimum publication year.  When > 0, stale caches that
+            do not cover the window are invalidated and re-fetched.
     """
     cache_key = f"{author_id}|page_0"
     cached = response_cache.get("serpapi_publications", cache_key)
     if cached is not None:
-        return cached or {}
+        if min_year > 0 and not _cache_covers_window(cached, min_year):
+            _log.info(
+                "Cache for %s does not cover min_year=%d; re-fetching",
+                author_id, min_year,
+            )
+            response_cache.invalidate("serpapi_publications", cache_key)
+        else:
+            return cached or {}
 
-    result = serpapi_fetch_author_publications(api_key, author_id, num=num)
+    result = serpapi_fetch_author_publications(api_key, author_id, num=num, min_year=min_year)
     if result and result.get("articles"):
         response_cache.put("serpapi_publications", cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
         _log.info("Fetched %d articles via SerpAPI for %s", len(result["articles"]), author_id)
@@ -171,7 +196,7 @@ def _deduplicate_publication_list(
         p_title_raw = pub.get("title") or ""
         p_title = trim_title_default(p_title_raw)
         p_norm = normalize_title(p_title)
-        p_year = pub.get("year") or None
+        p_year = pub.get("year")
         p_authors = pub.get("authors") or []
 
         if p_norm and p_norm in seen_normalized:
@@ -180,7 +205,7 @@ def _deduplicate_publication_list(
         is_duplicate = False
         for existing in deduplicated:
             e_title = existing.get("title") or ""
-            e_year = existing.get("year") or None
+            e_year = existing.get("year")
             e_authors = existing.get("authors") or []
             tsim = title_similarity(p_title, e_title) if p_title and e_title else 0.0
             if tsim < SIM_TITLE_SIM_MIN:
@@ -208,32 +233,30 @@ def _deduplicate_publication_list(
 def merge_publication_lists(primary: list[dict[str, Any]], secondary: list[dict[str, Any]],
                             target_author: str | None) -> list[dict[str, Any]]:
     """Merge two publication lists into one unified list with complete deduplication."""
-    primary_deduped = _deduplicate_publication_list(primary, target_author) if primary else []
-    secondary_deduped = _deduplicate_publication_list(secondary, target_author) if secondary else []
+    primary_deduped = _deduplicate_publication_list(primary, target_author)
+    secondary_deduped = _deduplicate_publication_list(secondary, target_author)
     merged: list[dict[str, Any]] = list(primary_deduped)
     if not secondary_deduped:
         return merged
     for sec in secondary_deduped:
         s_title_raw = sec.get("title") or ""
         s_title = trim_title_default(s_title_raw)
-        s_year = sec.get("year") or None
+        s_year = sec.get("year")
         s_authors = sec.get("authors") or []
-        best = 0.0
+        is_duplicate = False
         for p in merged:
             tsim = title_similarity(s_title, p.get("title") or "") if s_title else 0.0
             if tsim < SIM_TITLE_SIM_MIN:
                 continue
-            ps_year = p.get("year") or None
-            sc = _score_candidate_generic(
-                target_title=p.get("title") or "", target_author=target_author, target_year=ps_year,
+            score = _score_candidate_generic(
+                target_title=p.get("title") or "", target_author=target_author, target_year=p.get("year"),
                 cand_title=s_title, cand_authors=s_authors, cand_year=s_year,
                 title_sim=title_similarity, author_match=authors_overlap,
             )
-            if sc > best:
-                best = sc
-            if best >= SIM_MERGE_DUPLICATE_THRESHOLD:
+            if score >= SIM_MERGE_DUPLICATE_THRESHOLD:
+                is_duplicate = True
                 break
-        if best < SIM_MERGE_DUPLICATE_THRESHOLD:
+        if not is_duplicate:
             sec2 = dict(sec)
             if s_title and s_title != s_title_raw:
                 sec2["title"] = s_title

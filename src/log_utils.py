@@ -133,10 +133,8 @@ class ColoredFormatter(logging.Formatter):
 
     def _colored_tag(self, label: str, color_map: dict[str, str]) -> str:
         """Build a colored `[label]` tag, falling back to plain text if no color mapping exists."""
-        color = color_map.get(label)
-        if color:
-            return f"{color}[{label}]{self.RESET}"
-        return f"[{label}]"
+        color = color_map.get(label, "")
+        return f"{color}[{label}]{self.RESET}" if color else f"[{label}]"
 
     def format(self, record: logging.LogRecord) -> str:
         original_msg = record.msg
@@ -246,13 +244,11 @@ class Logger:
         with contextlib.suppress(OSError):
             os.makedirs(os.path.dirname(path), exist_ok=True)
 
+        self._close_thread_handler()
         try:
-            self._close_thread_handler()
-
             handler = logging.FileHandler(path, mode="w", encoding="utf-8")
             handler.setLevel(logging.DEBUG)
             handler.setFormatter(logging.Formatter(self.LOG_FORMAT, datefmt=self.DATE_FORMAT))
-
             self._thread_local.handler = handler
             self._thread_local.log_file_path = path
         except OSError as e:

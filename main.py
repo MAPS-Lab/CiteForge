@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import random
@@ -91,9 +92,10 @@ from src.io_utils import (
 )
 from src.log_utils import LogCategory, LogSource, logger
 from src.models import Record
-from src.publication_parser import parse_publication_string
+from src.publication_parser import _strip_ellipsis, parse_publication_string
 from src.text_utils import (
     author_name_matches,
+    extract_year_from_any,
     format_author_dirname,
     has_placeholder,
     title_similarity,
@@ -117,6 +119,7 @@ _GARBAGE_FESTSCHRIFT_META_RE = re.compile(r',\s+[A-Z][a-z]+,\s+[A-Z][a-z]+\b.*\d
 _GARBAGE_PROCEEDINGS_RE = re.compile(r'^Proceedings\s+of\s+(the\s+)?\d{4}\s+', re.IGNORECASE)
 _GARBAGE_CORRECTION_RE = re.compile(r'^Correction(s)?\s+(to|of)\s*:', re.IGNORECASE)
 _GARBAGE_EASYCHAIR_RE = re.compile(r'\bEasyChair\s+Preprint\b', re.IGNORECASE)
+_FILENAME_YEAR_RE = re.compile(r'/[A-Za-z]+(\d{4})-')
 
 
 def _is_garbage_title(title: str) -> bool:
@@ -127,25 +130,18 @@ def _is_garbage_title(title: str) -> bool:
     """
     if not title:
         return False
-    if _GARBAGE_EMAIL_RE.search(title):
-        return True
-    if _GARBAGE_POSTAL_RE.search(title):
-        return True
-    if _GARBAGE_DEPT_RE.search(title):
-        return True
-    if _GARBAGE_PHONE_RE.search(title):
-        return True
-    if _GARBAGE_VOLUME_RE.search(title):
-        return True
-    if _GARBAGE_SERIES_VOL_RE.search(title):
-        return True
-    if _GARBAGE_FESTSCHRIFT_RE.search(title) and _GARBAGE_FESTSCHRIFT_META_RE.search(title):
-        return True
-    if _GARBAGE_PROCEEDINGS_RE.match(title):
-        return True
-    if _GARBAGE_CORRECTION_RE.match(title):
-        return True
-    return bool(_GARBAGE_EASYCHAIR_RE.search(title))
+    return bool(
+        _GARBAGE_EMAIL_RE.search(title)
+        or _GARBAGE_POSTAL_RE.search(title)
+        or _GARBAGE_DEPT_RE.search(title)
+        or _GARBAGE_PHONE_RE.search(title)
+        or _GARBAGE_VOLUME_RE.search(title)
+        or _GARBAGE_SERIES_VOL_RE.search(title)
+        or (_GARBAGE_FESTSCHRIFT_RE.search(title) and _GARBAGE_FESTSCHRIFT_META_RE.search(title))
+        or _GARBAGE_PROCEEDINGS_RE.match(title)
+        or _GARBAGE_CORRECTION_RE.match(title)
+        or _GARBAGE_EASYCHAIR_RE.search(title)
+    )
 
 
 def _is_corrupted_title(title: str) -> bool:
@@ -153,8 +149,7 @@ def _is_corrupted_title(title: str) -> bool:
 
     Matches patterns like "Li2 ()" -- author name + numeric affiliation + empty parens.
     """
-    affiliation_fragments = re.findall(r'\b[A-Z][a-z]+\d+\s*\(\)', title)
-    return len(affiliation_fragments) >= 2
+    return len(re.findall(r'\b[A-Z][a-z]+\d+\s*\(\)', title)) >= 2
 
 
 def _entry_is_complete(entry: dict[str, Any]) -> bool:
@@ -321,6 +316,7 @@ def process_article(
     total: int | None = None,
     gemini_api_key: str | None = None,
     summary_csv_path: str | None = None,
+    min_year: int = 0,
 ) -> int:
     """Enrich a single publication from baseline through 4-phase pipeline and save to disk.
 
@@ -348,19 +344,19 @@ def process_article(
         "doi_bibtex": False,
     }
 
-    word_count = len(title.split()) if title else 0
-    corrupted = _is_corrupted_title(title) if title else False
-    garbage = _is_garbage_title(title) if title else False
-    title_valid = bool(title) and word_count >= MIN_TITLE_WORDS and not corrupted and not garbage
-    logger.debug(
-        f"TITLE_VALIDATE | raw={title[:60]} | words={word_count} | corrupted={corrupted} "
-        f"| garbage={garbage} | valid={title_valid}",
-        category=LogCategory.AUDIT,
-    )
-
     if not title:
         logger.error("Missing required field: title; skipping article", category=LogCategory.SKIP)
         return 0
+
+    word_count = len(title.split())
+    corrupted = _is_corrupted_title(title)
+    garbage = _is_garbage_title(title)
+    logger.debug(
+        f"TITLE_VALIDATE | raw={title[:60]} | words={word_count} | corrupted={corrupted} "
+        f"| garbage={garbage} | valid={word_count >= MIN_TITLE_WORDS and not corrupted and not garbage}",
+        category=LogCategory.AUDIT,
+    )
+
     if word_count < MIN_TITLE_WORDS:
         logger.warn(
             f"Title too short (probable artifact): '{title}'; skipping",
@@ -385,15 +381,14 @@ def process_article(
             category=LogCategory.ARTICLE,
         )
 
-    idx_prefix = f"[{idx}/{total}] " if (isinstance(idx, int) and isinstance(total, int)) else ""
+    idx_prefix = f"[{idx}/{total}] " if idx is not None and total is not None else ""
     art_source = (art.get("source") or "scholar").strip()
 
     logger.substep(f"{idx_prefix}Processing Article", category=LogCategory.ARTICLE)
     logger.info(f"Title: {title}", category=LogCategory.ARTICLE)
     if year_hint:
         logger.info(f"Year: {year_hint}", category=LogCategory.ARTICLE)
-    if art_source:
-        logger.info(f"Source: {art_source}", category=LogCategory.ARTICLE)
+    logger.info(f"Source: {art_source}", category=LogCategory.ARTICLE)
 
     effective_id = rec.scholar_id or rec.dblp or ""
     author_dirname = format_author_dirname(rec.name, effective_id)
@@ -506,7 +501,6 @@ def process_article(
         for _ell_field in ("journal", "booktitle", "title"):
             _ell_val = _bl_fields.get(_ell_field, "")
             if isinstance(_ell_val, str) and _ell_val.rstrip().endswith(("...", "\u2026")):
-                from src.publication_parser import _strip_ellipsis
                 _ell_clean = _strip_ellipsis(_ell_val)
                 if _ell_clean != _ell_val:
                     logger.debug(
@@ -530,7 +524,7 @@ def process_article(
 
         # Fix conference proceedings misclassified as @article with journal
         if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
-            _conf_jnl = (_bl_fields.get("journal") or "").strip()
+            _conf_jnl = _bl_fields["journal"].strip()
             if mu._is_conference_journal(_conf_jnl) and not _bl_fields.get("booktitle"):
                 logger.debug(
                     f"EXISTING_FIXUP | conference_as_journal | journal={_conf_jnl[:60]}",
@@ -542,7 +536,7 @@ def process_article(
 
         # Reclassify @article with "Unpublished" journal → @misc
         if (baseline_entry.get("type") == "article" and _bl_fields.get("journal")
-                and (_bl_fields.get("journal") or "").strip().lower() == "unpublished"):
+                and _bl_fields["journal"].strip().lower() == "unpublished"):
             logger.debug(
                 "EXISTING_FIXUP | article_unpublished->misc",
                 category=LogCategory.CLEANUP,
@@ -554,31 +548,30 @@ def process_article(
 
         # Reclassify @article with patent number as journal → @misc
         if (baseline_entry.get("type") == "article" and _bl_fields.get("journal")
-                and re.match(r'(?i)^US\s+Patent', (_bl_fields.get("journal") or "").strip())):
-                logger.debug(
-                    f"EXISTING_FIXUP | article_patent->misc | journal={_bl_fields['journal'][:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["note"] = _bl_fields.pop("journal")
-                baseline_entry["type"] = "misc"
-                _fixup_written = True
+                and re.match(r'(?i)^US\s+Patent', _bl_fields["journal"].strip())):
+            logger.debug(
+                f"EXISTING_FIXUP | article_patent->misc | journal={_bl_fields['journal'][:60]}",
+                category=LogCategory.CLEANUP,
+            )
+            _bl_fields["note"] = _bl_fields.pop("journal")
+            baseline_entry["type"] = "misc"
+            _fixup_written = True
 
         # Downgrade @article with repository/portal as journal → @misc
-        if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
-            _repo_jnl_bl = (_bl_fields.get("journal") or "").lower()
-            if any(rj in _repo_jnl_bl for rj in REPOSITORY_AS_JOURNAL):
-                logger.debug(
-                    f"EXISTING_FIXUP | article_repository->misc | journal={_bl_fields['journal'][:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                baseline_entry["type"] = "misc"
-                _bl_fields.pop("journal", None)
-                _fixup_written = True
+        if (baseline_entry.get("type") == "article" and _bl_fields.get("journal")
+                and any(rj in _bl_fields["journal"].lower() for rj in REPOSITORY_AS_JOURNAL)):
+            logger.debug(
+                f"EXISTING_FIXUP | article_repository->misc | journal={_bl_fields['journal'][:60]}",
+                category=LogCategory.CLEANUP,
+            )
+            baseline_entry["type"] = "misc"
+            _bl_fields.pop("journal", None)
+            _fixup_written = True
 
         # Reclassify @article with university name as journal → @phdthesis
         if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
-            _thesis_jnl_lower = (_bl_fields.get("journal") or "").lower()
-            if "university" in _thesis_jnl_lower or "institut" in _thesis_jnl_lower:
+            _jnl_lower = _bl_fields["journal"].lower()
+            if "university" in _jnl_lower or "institut" in _jnl_lower:
                 logger.debug(
                     f"EXISTING_FIXUP | article_thesis->phdthesis | journal={_bl_fields['journal'][:60]}",
                     category=LogCategory.CLEANUP,
@@ -696,9 +689,7 @@ def process_article(
     # If no existing file found, build minimal BibTeX baseline
     if not existing_file_loaded:
         logger.info("Creating baseline BibTeX entry", category=LogCategory.ARTICLE, source=LogSource.SYSTEM)
-        authors_list = extract_authors_from_article(art) or []
-        year = get_article_year(art)
-        scholar_bib = bt.build_minimal_bibtex(title, authors_list, year, keyhint=result_id)
+        scholar_bib = bt.build_minimal_bibtex(title, authors_list, year_hint or 0, keyhint=result_id)
 
         baseline_entry = bt.parse_bibtex_to_dict(scholar_bib)
         if baseline_entry is None:
@@ -709,17 +700,14 @@ def process_article(
                 "key": result_id or "entry",
                 "fields": {"title": title} if title else {}
             }
-        bl_fields = sorted((baseline_entry.get("fields") or {}).keys())
-        logger.debug(
-            f"BASELINE_CREATE | source=scholar_minimal | fields=[{', '.join(bl_fields)}]",
-            category=LogCategory.AUDIT,
-        )
+        _bl_source = "scholar_minimal"
     else:
-        bl_fields = sorted((baseline_entry.get("fields") or {}).keys()) if baseline_entry else []
-        logger.debug(
-            f"BASELINE_CREATE | source=existing_file | fields=[{', '.join(bl_fields)}]",
-            category=LogCategory.AUDIT,
-        )
+        _bl_source = "existing_file"
+    _bl_field_names = sorted((baseline_entry.get("fields") or {}).keys()) if baseline_entry else []
+    logger.debug(
+        f"BASELINE_CREATE | source={_bl_source} | fields=[{', '.join(_bl_field_names)}]",
+        category=LogCategory.AUDIT,
+    )
     if baseline_entry is None:  # Safety net (should not happen)
         logger.error("Failed to create baseline entry; skipping article", category=LogCategory.ERROR)
         return 0
@@ -777,14 +765,26 @@ def process_article(
 
     # Save baseline only if we didn't load from existing file
     if existing_file_loaded:
+        # Remove existing files outside the contribution window
+        if min_year > 0 and existing_file_path:
+            ex_year = extract_year_from_any(
+                (baseline_entry or {}).get("fields", {}).get("year"), fallback=0
+            ) or 0
+            if 0 < ex_year < min_year:
+                logger.info(
+                    f"Removing out-of-window existing file (year={ex_year} < {min_year}): "
+                    f"{os.path.basename(existing_file_path)}",
+                    category=LogCategory.CLEANUP,
+                )
+                os.remove(existing_file_path)
+                return 0
         path = existing_file_path
         logger.info(f"Using existing file: {path}", category=LogCategory.SKIP)
     else:
         # Defer disk write for bare baselines (no DOI) to avoid creating
         # transient files that get renamed/cleaned during enrichment.
         # The final entry will be written after Phase 4 by save_entry_to_file.
-        bl_has_doi = bool((baseline_entry.get("fields") or {}).get("doi", "").strip())
-        if not bl_has_doi:
+        if not bf.get("doi", "").strip():
             path = None
             logger.info(
                 "Baseline deferred (no DOI; will write after enrichment)",
@@ -809,8 +809,8 @@ def process_article(
                     try:
                         rel = os.path.relpath(path)
                     except (OSError, ValueError):
-                        rel = path or ""
-                    if rel and not is_known_summary_path(rel):
+                        rel = path
+                    if not is_known_summary_path(rel):
                         append_summary_to_csv(summary_csv_path, rel, 0, flags)
                 return 1
 
@@ -826,13 +826,13 @@ def process_article(
     # if the baseline already has a DOI, use it to get better metadata early on
     doi_validated = False  # Track if we successfully validated the DOI
     unvalidated_doi: str | None = None  # Stash failed DOI for Phase 3 retry
-    p1_doi = (baseline_entry.get("fields") or {}).get("doi")
+    p1_doi = bf.get("doi")
     logger.debug(
         f"PHASE1_START | doi={p1_doi} | has_doi={bool(p1_doi)}",
         category=LogCategory.AUDIT,
     )
     try:
-        doi_early = idu.normalize_doi((baseline_entry.get("fields") or {}).get("doi"))
+        doi_early = idu.normalize_doi(bf.get("doi"))
         if doi_early:
             logger.info(f"Validating DOI: {doi_early}", category=LogCategory.SEARCH, source=LogSource.DOI)
             doi_matched = process_validated_doi(
@@ -842,7 +842,7 @@ def process_article(
             # If DOI failed validation, stash it for Phase 3 and remove from baseline
             if not doi_matched:
                 unvalidated_doi = doi_early
-                baseline_entry.get("fields", {}).pop("doi", None)
+                bf.pop("doi", None)
                 logger.warn(
                     "DOI validation failed, removed from baseline (will retry in Phase 3)",
                     category=LogCategory.ARTICLE, source=LogSource.DOI,
@@ -1142,7 +1142,7 @@ def process_article(
     logger.info("▶ Phase 3: Late DOI Discovery", category=LogCategory.ARTICLE)
     # Do late DOI negotiation if we haven't validated a DOI, or if the validated
     # DOI is a preprint (we may find a published DOI to upgrade to)
-    baseline_doi = idu.normalize_doi((baseline_entry.get("fields") or {}).get("doi"))
+    baseline_doi = idu.normalize_doi(bf.get("doi"))
     is_secondary = bool(baseline_doi and idu.is_secondary_doi(baseline_doi))
     run_phase3 = not doi_validated or is_secondary
     logger.debug(
@@ -1176,7 +1176,7 @@ def process_article(
             _bl_eprint = idu.extract_arxiv_eprint(baseline_entry)
             if _bl_eprint:
                 _add_doi("baseline_eprint", f"10.48550/arxiv.{_bl_eprint}")
-            _bl_url = (baseline_entry.get("fields") or {}).get("url", "")
+            _bl_url = bf.get("url", "")
             _bl_url_m = _ARXIV_ABS_RE.search(str(_bl_url))
             if _bl_url_m:
                 _add_doi("baseline_url", f"10.48550/arxiv.{_bl_url_m.group(1)}")
@@ -1211,7 +1211,7 @@ def process_article(
 
             url_candidates: list[str] = []
             # URLs from baseline are always safe to use
-            base_url = (baseline_entry.get("fields") or {}).get("url")
+            base_url = bf.get("url")
             if base_url:
                 url_candidates.append(base_url)
             # Only use URLs from API results that successfully matched baseline
@@ -1304,8 +1304,7 @@ def process_article(
                     # temporarily inject it into the baseline so DOI_EXACT match
                     # fires in validation (the eprint already confirmed identity;
                     # the CSL title may differ from the preprint title).
-                    _bl_fields_p3 = baseline_entry.get("fields") or {}
-                    _bl_doi_before = _bl_fields_p3.get("doi")
+                    _bl_doi_before = bf.get("doi")
                     _doi_norm = idu.normalize_doi(doi_candidate)
                     _is_eprint_doi = _doi_norm and any(
                         idu.normalize_doi(f"10.48550/arxiv.{idu.extract_arxiv_eprint(ed) or ''}") == _doi_norm
@@ -1313,13 +1312,13 @@ def process_article(
                         if idu.extract_arxiv_eprint(ed)
                     )
                     if _is_eprint_doi and not _bl_doi_before:
-                        _bl_fields_p3["doi"] = doi_candidate
+                        bf["doi"] = doi_candidate
                     candidate_matched = process_validated_doi(
                         doi_candidate, baseline_entry, result_id, enr_list, flags
                     )
                     # Restore baseline DOI to avoid polluting later logic
                     if _is_eprint_doi and not _bl_doi_before:
-                        _bl_fields_p3.pop("doi", None)
+                        bf.pop("doi", None)
                     logger.debug(
                         f"DOI_VALIDATE_ATTEMPT | #{doi_idx} | doi={doi_candidate} | result={candidate_matched}",
                         category=LogCategory.AUDIT,
@@ -1395,7 +1394,6 @@ def process_article(
         for _ell_field_p4 in ("journal", "booktitle", "title"):
             _ell_val_p4 = (merged_fields.get(_ell_field_p4) or "")
             if _ell_val_p4.rstrip().endswith(("...", "\u2026")):
-                from src.publication_parser import _strip_ellipsis
                 _ell_clean_p4 = _strip_ellipsis(_ell_val_p4)
                 if _ell_clean_p4 != _ell_val_p4:
                     logger.debug(
@@ -1406,7 +1404,7 @@ def process_article(
 
         # Reclassify @article with conference proceedings as journal -> @inproceedings
         if merged.get("type") == "article" and merged_fields.get("journal"):
-            _p4_jnl = (merged_fields.get("journal") or "").strip()
+            _p4_jnl = merged_fields["journal"].strip()
             if mu._is_conference_journal(_p4_jnl) and not merged_fields.get("booktitle"):
                 logger.debug(
                     f"TYPE_CORRECT | article_conference_journal->inproceedings | journal={_p4_jnl[:60]}",
@@ -1417,7 +1415,7 @@ def process_article(
 
         # Reclassify @article with patent number as journal → @misc
         if merged.get("type") == "article" and merged_fields.get("journal"):
-            _patent_jnl = (merged_fields.get("journal") or "").strip()
+            _patent_jnl = merged_fields["journal"].strip()
             if re.match(r'(?i)^US\s+Patent', _patent_jnl):
                 logger.debug(
                     f"TYPE_CORRECT | article_patent->misc | journal={_patent_jnl[:60]}",
@@ -1429,14 +1427,14 @@ def process_article(
 
         # Reclassify @article with "Unpublished" journal → @misc
         if (merged.get("type") == "article" and merged_fields.get("journal")
-                and (merged_fields.get("journal") or "").strip().lower() == "unpublished"):
+                and merged_fields["journal"].strip().lower() == "unpublished"):
             logger.debug("TYPE_CORRECT | article_unpublished->misc", category=LogCategory.AUDIT)
             merged["type"] = "misc"
             merged_fields.pop("journal", None)
 
         # Journals named "Proceedings of ..." (PNAS, PVLDB, etc.) are journals
         if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _bt_lower = (merged_fields.get("booktitle") or "").lower()
+            _bt_lower = merged_fields["booktitle"].lower()
             if mu._matches_journal_named_proceedings(_bt_lower):
                 logger.debug(
                     f"TYPE_CORRECT | inproceedings_journal_proceedings->article | booktitle={_bt_lower[:60]}",
@@ -1447,7 +1445,7 @@ def process_article(
 
         # Strip URL fragments from booktitle (e.g., "proceedings.mlr.press")
         if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _bt_val = (merged_fields.get("booktitle") or "").strip()
+            _bt_val = merged_fields["booktitle"].strip()
             if re.match(r'^https?://|^[\w.-]+\.(com|org|net|io|press)\b', _bt_val, re.IGNORECASE):
                 logger.debug(
                     f"TYPE_CORRECT | inproceedings_url_booktitle->misc | booktitle={_bt_val[:60]}",
@@ -1458,38 +1456,36 @@ def process_article(
 
         # Downgrade @inproceedings with "Preprint" as booktitle → @misc
         if (merged.get("type") == "inproceedings" and merged_fields.get("booktitle")
-                and (merged_fields.get("booktitle") or "").strip().lower() == "preprint"):
+                and merged_fields["booktitle"].strip().lower() == "preprint"):
             logger.debug("TYPE_CORRECT | inproceedings_preprint->misc", category=LogCategory.AUDIT)
             merged["type"] = "misc"
             merged_fields.pop("booktitle", None)
 
         # Downgrade @article with repository/portal as journal → @misc
-        if merged.get("type") == "article" and merged_fields.get("journal"):
-            _repo_jnl = (merged_fields.get("journal") or "").lower()
-            if any(rj in _repo_jnl for rj in REPOSITORY_AS_JOURNAL):
-                logger.debug(
-                    f"TYPE_CORRECT | article_repository->misc | journal={merged_fields['journal'][:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "misc"
-                merged_fields.pop("journal", None)
+        if (merged.get("type") == "article" and merged_fields.get("journal")
+                and any(rj in merged_fields["journal"].lower() for rj in REPOSITORY_AS_JOURNAL)):
+            logger.debug(
+                f"TYPE_CORRECT | article_repository->misc | journal={merged_fields['journal'][:60]}",
+                category=LogCategory.AUDIT,
+            )
+            merged["type"] = "misc"
+            merged_fields.pop("journal", None)
 
         # Downgrade @inproceedings with repository as booktitle → @misc
-        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _repo_bt = (merged_fields.get("booktitle") or "").lower()
-            if any(rj in _repo_bt for rj in REPOSITORY_AS_JOURNAL):
-                logger.debug(
-                    f"TYPE_CORRECT | inproceedings_repository->misc | booktitle={merged_fields['booktitle'][:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "misc"
-                merged_fields.pop("booktitle", None)
+        if (merged.get("type") == "inproceedings" and merged_fields.get("booktitle")
+                and any(rj in merged_fields["booktitle"].lower() for rj in REPOSITORY_AS_JOURNAL)):
+            logger.debug(
+                f"TYPE_CORRECT | inproceedings_repository->misc | booktitle={merged_fields['booktitle'][:60]}",
+                category=LogCategory.AUDIT,
+            )
+            merged["type"] = "misc"
+            merged_fields.pop("booktitle", None)
 
         # Reclassify @article with university name as journal → @phdthesis
         # (Crossref sometimes returns thesis DOIs with the university as journal)
         if merged.get("type") == "article" and merged_fields.get("journal"):
-            _thesis_jnl = (merged_fields.get("journal") or "").lower()
-            if "university" in _thesis_jnl or "institut" in _thesis_jnl:
+            _jnl_lower = merged_fields["journal"].lower()
+            if "university" in _jnl_lower or "institut" in _jnl_lower:
                 logger.debug(
                     f"TYPE_CORRECT | article_thesis->phdthesis | journal={merged_fields['journal'][:60]}",
                     category=LogCategory.AUDIT,
@@ -1653,7 +1649,7 @@ def process_article(
 
         # Verify target author appears in the paper's author list to catch
         # Scholar profile contamination (e.g., different person with same surname)
-        merged_authors = (merged.get("fields") or {}).get("author", "")
+        merged_authors = merged_fields.get("author", "")
         author_found = not merged_authors or author_name_matches(rec.name, merged_authors)
         logger.debug(
             f"AUTHOR_FILTER | target={rec.name} | paper_authors={str(merged_authors)[:80]} "
@@ -1664,7 +1660,7 @@ def process_article(
             # Check if enrichment corrupted the author field (misattributed DOI).
             # If the ORIGINAL file had the correct author, keep it — don't delete.
             if path and os.path.isfile(path) and baseline_entry:
-                baseline_authors = (baseline_entry.get("fields") or {}).get("author", "")
+                baseline_authors = bf.get("author", "")
                 if baseline_authors and author_name_matches(rec.name, baseline_authors):
                     logger.warn(
                         f"Enrichment corrupted author field ('{str(merged_authors)[:60]}'); "
@@ -1744,6 +1740,20 @@ def process_article(
             or merged.get("key")
             or "Entry"
         )
+
+        # Year-window guard: reject files whose enriched year falls outside the window
+        if min_year > 0:
+            final_year = extract_year_from_any(merged.get("fields", {}).get("year"), fallback=0) or 0
+            if 0 < final_year < min_year:
+                logger.info(
+                    f"Skipping out-of-window entry (year={final_year} < {min_year}): {title[:60]}",
+                    category=LogCategory.SKIP,
+                )
+                # Clean up baseline file if we created one
+                if path and os.path.isfile(path):
+                    os.remove(path)
+                return 0
+
         path2, was_written = mu.save_entry_to_file(out_dir, effective_id, merged, prefer_path=path,
                                                     gemini_api_key=gemini_api_key, author_name=rec.name)
         if path2 != path:
@@ -1863,10 +1873,11 @@ def process_record(
             max_fetch_retries = 3
 
             # SerpAPI call — pagination handled internally by serpapi_scholar
-            data: dict[str, Any] = {}
+            data = {}
             for attempt in range(1, max_fetch_retries + 1):
                 data = fetch_author_publications(
-                    serpapi_key, rec.scholar_id, rec.name, num=MAX_PUBLICATIONS_PER_AUTHOR,
+                    serpapi_key, rec.scholar_id, rec.name,
+                    num=MAX_PUBLICATIONS_PER_AUTHOR, min_year=min_year,
                 )
                 if data.get("articles"):
                     break  # Got articles -- valid response
@@ -1883,10 +1894,12 @@ def process_record(
                     category=LogCategory.ERROR, source=LogSource.SCHOLAR,
                 )
             else:
-                status = (data.get("search_metadata") or {}).get("status")
-                if status and status.lower() == "error":
-                    err = data.get("error") or "Unknown error"
-                    raise RuntimeError(f"CiteForge error for author {rec.scholar_id}: {err}")
+                status = (data.get("search_metadata") or {}).get("status", "")
+                if status.lower() == "error":
+                    raise RuntimeError(
+                        f"CiteForge error for author {rec.scholar_id}: "
+                        f"{data.get('error') or 'Unknown error'}"
+                    )
 
                 scholar_articles = data.get("articles", [])
                 logger.debug(
@@ -1901,7 +1914,7 @@ def process_record(
                 for a in scholar_articles:
                     try:
                         if a.get("title"):
-                            a["title"] = trim_title_default(strip_html_tags(a.get("title") or ""))
+                            a["title"] = trim_title_default(strip_html_tags(a["title"]))
                     except (TypeError, AttributeError):
                         pass
                 logger.info(
@@ -1971,6 +1984,7 @@ def process_record(
                     rec, art, serply_key, out_dir, s2_api_key, or_creds,
                     idx=idx + 1, total=total_entries,
                     gemini_api_key=gemini_api_key, summary_csv_path=summary_csv_path,
+                    min_year=min_year,
                 )
             except FULL_OPERATION_ERRORS as e:
                 logger.error(f"Article error: {e}", category=LogCategory.ERROR)
@@ -1989,10 +2003,6 @@ def count_existing_papers(rec: Record, out_dir: str) -> int:
     effective_id = rec.scholar_id or rec.dblp or ""
     author_dirname = format_author_dirname(rec.name, effective_id)
     author_dir = os.path.join(out_dir, author_dirname)
-
-    if not os.path.exists(author_dir):
-        return 0
-
     try:
         return sum(1 for f in os.listdir(author_dir) if f.endswith('.bib'))
     except OSError:
@@ -2001,8 +2011,6 @@ def count_existing_papers(rec: Record, out_dir: str) -> int:
 
 def _load_csv_titles(csv_path: str) -> dict[str, list[str]]:
     """Load titles from CSV-tracked .bib files, grouped by author directory."""
-    import csv
-
     result: dict[str, list[str]] = {}
     try:
         with open(csv_path, newline="", encoding="utf-8") as f:
@@ -2113,7 +2121,9 @@ def main() -> int:
         eid = r.scholar_id or r.dblp or ""
         return os.path.isdir(os.path.join(out_dir, format_author_dirname(r.name, eid)))
 
-    records_sorted = sorted(records, key=lambda r: (1 if _has_output(r) else 0, records.index(r)))
+    records_sorted = [
+        r for _, r in sorted(enumerate(records), key=lambda ir: (_has_output(ir[1]), ir[0]))
+    ]
 
     logger.step(f"Starting parallel execution with {MAX_WORKERS} workers", category=LogCategory.PLAN)
 
@@ -2246,6 +2256,26 @@ def main() -> int:
                         category=LogCategory.CLEANUP,
                     )
 
+            # Remove .bib files outside the contribution window
+            window_min = get_current_year() - (CONTRIBUTION_WINDOW_YEARS - 1)
+            window_removed = 0
+            for entry in os.listdir(out_dir):
+                d = os.path.join(out_dir, entry)
+                if not os.path.isdir(d) or entry == "a2i2":
+                    continue
+                for fname in os.listdir(d):
+                    if not fname.endswith(".bib"):
+                        continue
+                    m = _FILENAME_YEAR_RE.search(f"/{fname}")
+                    if m and int(m.group(1)) < window_min:
+                        os.remove(os.path.join(d, fname))
+                        window_removed += 1
+            if window_removed:
+                logger.info(
+                    f"Removed {window_removed} out-of-window files (year < {window_min})",
+                    category=LogCategory.CLEANUP,
+                )
+
             # Build a2i2 joint output folder
             a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
             if a2i2_count:
@@ -2259,7 +2289,7 @@ def main() -> int:
             for entry in sorted(os.listdir(out_dir)):
                 d = os.path.join(out_dir, entry)
                 if os.path.isdir(d):
-                    baseline[entry] = len([f for f in os.listdir(d) if f.endswith(".bib")])
+                    baseline[entry] = sum(1 for f in os.listdir(d) if f.endswith(".bib"))
             baseline_path = os.path.join(out_dir, "baseline.json")
             try:
                 with open(baseline_path, "w", encoding="utf-8") as bf:

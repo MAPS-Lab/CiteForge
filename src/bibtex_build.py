@@ -88,12 +88,12 @@ def build_bibtex_entry(
     )
 
     fields: dict[str, str | None] = {
-        "title": title or None,
+        "title": title,
         "author": format_author_field(authors),
         "year": str(year) if year else None,
-        container_field: venue or None,
-        "doi": doi or None,
-        "url": url or None,
+        container_field: venue,
+        "doi": doi,
+        "url": url,
     }
 
     if arxiv_id:
@@ -127,8 +127,7 @@ def create_scoring_function(
     from .clients.helpers import _score_candidate_generic
     from .text_utils import author_name_matches, title_similarity
 
-    if author_match_fn is None:
-        author_match_fn = author_name_matches
+    author_match_fn = author_match_fn or author_name_matches
 
     def score_fn(candidate: Any) -> float:
         """
@@ -218,19 +217,18 @@ def determine_entry_type(
                     return "incollection"
 
         typ = (obj.get(type_field) or "").lower()
-        if typ:
-            classified = _classify_type_string(typ)
-            if classified:
-                return classified
+        if typ and (classified := _classify_type_string(typ)):
+            return classified
 
         # Book chapter heuristic: howpublished + publisher + pages without journal/booktitle
         if (
             obj.get("howpublished") and obj.get("publisher") and obj.get("pages")
             and not obj.get("journal") and not obj.get("booktitle")
         ):
-            if any(kw in str(obj["howpublished"]).lower() for kw in _BOOK_SERIES_KEYWORDS):
-                return "incollection"
-            if any(kw in str(obj["publisher"]).lower() for kw in _BOOK_PUBLISHER_KEYWORDS):
+            hp_lower = str(obj["howpublished"]).lower()
+            pub_lower = str(obj["publisher"]).lower()
+            if (any(kw in hp_lower for kw in _BOOK_SERIES_KEYWORDS)
+                    or any(kw in pub_lower for kw in _BOOK_PUBLISHER_KEYWORDS)):
                 return "incollection"
 
         for venue_field in ("journal", "container-title", "venue", "booktitle"):

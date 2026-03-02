@@ -196,4 +196,4 @@ def scholarly_fetch_citation(
     if bib.get("venue"):
         fields.setdefault("journal", str(bib["venue"]))
 
-    return fields if fields else None
+    return fields or None

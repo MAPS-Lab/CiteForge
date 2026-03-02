@@ -155,25 +155,18 @@ def allowlisted_url(url: str | None) -> str | None:
         return None
     u = url.strip()
 
-    # Check for DOI URLs and normalize them
     doi_match = re.search(r'^https?://(dx\.)?doi\.org/(\S+)$', u, flags=re.IGNORECASE)
     if doi_match:
-        # Normalize to https://doi.org/...
-        doi_suffix = doi_match.group(2)
-        result = f"https://doi.org/{doi_suffix}"
+        result = f"https://doi.org/{doi_match.group(2)}"
         logger.debug(
             f"URL_ALLOWLIST | url={url[:60]} | type=doi | normalized={result}",
             category=LogCategory.AUDIT, source=LogSource.DOI,
         )
         return result
 
-    # Check for arXiv URLs and normalize to HTTPS
     arxiv_match = re.search(r'^https?://arxiv\.org/(abs|pdf)/(\S+)$', u, flags=re.IGNORECASE)
     if arxiv_match:
-        # Normalize to https://arxiv.org/...
-        arxiv_type = arxiv_match.group(1)
-        arxiv_id = arxiv_match.group(2)
-        result = f"https://arxiv.org/{arxiv_type}/{arxiv_id}"
+        result = f"https://arxiv.org/{arxiv_match.group(1)}/{arxiv_match.group(2)}"
         logger.debug(
             f"URL_ALLOWLIST | url={url[:60]} | type=arxiv | normalized={result}",
             category=LogCategory.AUDIT, source=LogSource.ARXIV,

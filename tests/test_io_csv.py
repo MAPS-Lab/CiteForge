@@ -5,6 +5,7 @@ from pathlib import Path
 from textwrap import dedent
 
 from src import io_utils
+from src.models import Record
 
 _SOURCE_FLAG_KEYS = [
     'scholar_bib', 'scholar_page', 's2', 'crossref', 'openreview',
@@ -55,12 +56,10 @@ def test_csv_initialization(tmp_path: Path) -> None:
     assert csv_path.exists(), "CSV file was not created"
 
     with open(csv_path, encoding='utf-8') as f:
-        reader = csv.reader(f)
-        header = next(reader)
+        header = next(csv.reader(f))
 
-    expected_columns = ['file_path', 'trust_hits', *_SOURCE_FLAG_KEYS]
-    assert header == expected_columns, (
-        f"Header mismatch. Expected {len(expected_columns)} columns, got {len(header)}"
+    assert header == ['file_path', 'trust_hits', *_SOURCE_FLAG_KEYS], (
+        f"Header mismatch: got {len(header)} columns"
     )
 
 
@@ -115,16 +114,13 @@ def test_csv_append_multiple_entries(tmp_path: Path) -> None:
         io_utils.append_summary_to_csv(csv_path_str, file_path, trust_hits, flags)
 
     with open(csv_path, encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = list(csv.DictReader(f))
 
     assert len(rows) == len(test_entries), f"Expected {len(test_entries)} rows, got {len(rows)}"
 
     for i, (expected_path, expected_hits, _) in enumerate(test_entries):
         assert rows[i]['file_path'] == expected_path, f"Row {i}: file path mismatch"
         assert int(rows[i]['trust_hits']) == expected_hits, f"Row {i}: trust hits mismatch"
-
-    assert int(rows[1]['trust_hits']) == 0, "Zero enrichment entry not handled correctly"
 
 
 def test_csv_edge_cases(tmp_path: Path) -> None:
@@ -143,8 +139,7 @@ def test_csv_edge_cases(tmp_path: Path) -> None:
     io_utils.append_summary_to_csv(csv_path_str, special_path, 2, flags)
 
     with open(csv_path, encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = list(csv.DictReader(f))
 
     assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
     assert rows[0]['file_path'] == long_path, "Long path not preserved correctly"
@@ -165,8 +160,6 @@ def test_csv_directory_creation(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # build_a2i2_folder tests
 # ---------------------------------------------------------------------------
-
-from src.models import Record
 
 
 def _write_bib(path: Path, entry_type: str, key: str, fields: dict[str, str]) -> None:

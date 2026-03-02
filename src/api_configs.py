@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from typing import Any
 
@@ -6,21 +8,25 @@ from .config import CROSSREF_BASE, EUROPEPMC_BASE, OPENALEX_BASE, PUBMED_BASE, S
 from .text_utils import extract_year_from_any
 
 
-def _extract_csl_year(container: dict[str, Any]) -> int | None:
-    """Extract year from CSL date-parts structure."""
-    date_parts = (container.get("issued") or {}).get("date-parts")
+def _year_from_date_parts(source: dict[str, Any]) -> int | None:
+    """Extract year from a CSL date-parts structure, or ``None`` if absent."""
+    date_parts = source.get("date-parts")
     if date_parts and date_parts[0] and isinstance(date_parts[0][0], int):
         return date_parts[0][0]
     return None
 
 
+def _extract_csl_year(container: dict[str, Any]) -> int | None:
+    """Extract year from CSL date-parts structure."""
+    return _year_from_date_parts(container.get("issued") or {})
+
+
 def _extract_crossref_year(item: dict[str, Any]) -> int:
     """Extract year from Crossref date-parts (tries issued, published-print, published-online)."""
     for field in ("issued", "published-print", "published-online"):
-        source = item.get(field) or {}
-        date_parts = source.get("date-parts")
-        if date_parts and date_parts[0] and isinstance(date_parts[0][0], int):
-            return date_parts[0][0]
+        year = _year_from_date_parts(item.get(field) or {})
+        if year is not None:
+            return year
     return 0
 
 

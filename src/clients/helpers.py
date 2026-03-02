@@ -14,6 +14,12 @@ from ..config import (
 from ..log_utils import LogCategory, logger
 from ..text_utils import extract_year_from_any
 
+_HTML_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MULTI_WS_RE = re.compile(r"\s+")
+_DBLP_PAREN_SUFFIX_RE = re.compile(r"\s*\(\d{1,4}\)\s*$")
+_DBLP_NUMERIC_SUFFIX_RE = re.compile(r"\s+\d{1,4}\s*$")
+
 
 def _score_candidate_generic(
         target_title: str,
@@ -87,13 +93,12 @@ def extract_authors_from_article(art: dict[str, Any]) -> list[str] | None:
 
     names = extract_author_names(authors, name_key="name")
 
-    def _is_truncation_marker(name_str: str) -> bool:
-        low = name_str.strip().lower()
-        return low in ("...", "\u2026") or "et al" in low
+    filtered_names = [
+        n for n in names
+        if n and n.strip().lower() not in ("...", "\u2026") and "et al" not in n.strip().lower()
+    ]
 
-    filtered_names = [n for n in names if n and not _is_truncation_marker(n)]
-
-    return filtered_names if filtered_names else None
+    return filtered_names or None
 
 
 def get_article_year(art: dict[str, Any]) -> int:
@@ -112,10 +117,9 @@ def strip_html_tags(s: str) -> str:
     Remove HTML tags, convert <br> to newlines, and collapse multiple
     whitespace characters into single spaces.
     """
-    cleaned = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.strip()
+    cleaned = _HTML_BR_RE.sub("\n", s)
+    cleaned = _HTML_TAG_RE.sub(" ", cleaned)
+    return _MULTI_WS_RE.sub(" ", cleaned).strip()
 
 
 def _sanitize_dblp_author(name: str) -> str:
@@ -128,10 +132,8 @@ def _sanitize_dblp_author(name: str) -> str:
     """
     if not name:
         return name
-    s = name.strip()
-    s = re.sub(r"\s*\(\d{1,4}\)\s*$", "", s)  # "John Smith (0001)" or "(1)"
-    s = re.sub(r"\s+\d{1,4}\s*$", "", s)       # "John Smith 0001" or "Smith 1"
-    return s
+    s = _DBLP_PAREN_SUFFIX_RE.sub("", name.strip())
+    return _DBLP_NUMERIC_SUFFIX_RE.sub("", s)
 
 
 def get_current_year() -> int:

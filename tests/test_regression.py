@@ -291,120 +291,79 @@ class TestDeduplicatePublicationList:
 class TestIsSecondaryDoi:
     """Fix 1: is_secondary_doi classifies preprint and data DOIs."""
     def test_arxiv_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.48550/arxiv.2401.12345") is True
+        assert id_utils.is_secondary_doi("10.48550/arxiv.2401.12345")
 
     def test_psyarxiv_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.31234/osf.io/abcde") is True
+        assert id_utils.is_secondary_doi("10.31234/osf.io/abcde")
 
     def test_figshare_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.6084/m9.figshare.12345678") is True
+        assert id_utils.is_secondary_doi("10.6084/m9.figshare.12345678")
 
     def test_zenodo_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.5281/zenodo.7654321") is True
+        assert id_utils.is_secondary_doi("10.5281/zenodo.7654321")
 
     def test_published_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.1145/1234567.1234568") is False
+        assert not id_utils.is_secondary_doi("10.1145/1234567.1234568")
 
     def test_nature_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.1038/s41586-024-00001-1") is False
+        assert not id_utils.is_secondary_doi("10.1038/s41586-024-00001-1")
 
 
 class TestPagesMaxDigits:
     """Fix 2: SAGE/Wiley article IDs rejected as pages."""
-    def test_sage_article_id_rejected(self) -> None:
-        """16-digit SAGE article IDs should be rejected from pages field."""
-        entry = {
+
+    @staticmethod
+    def _merge_pages(pages: str) -> dict[str, Any]:
+        """Merge a pages value into a minimal article entry via Crossref enricher."""
+        entry: dict[str, Any] = {
             "type": "article",
             "key": "Test2023",
             "fields": {"title": "Test", "author": "Author", "year": "2023"},
         }
-        enrichers = [
-            ("crossref", {"fields": {"pages": "20552076231171496"}}),
-        ]
-        merged = merge_utils.merge_with_policy(entry, enrichers)
-        assert "pages" not in merged["fields"]
+        return merge_utils.merge_with_policy(
+            entry, [("crossref", {"fields": {"pages": pages}})],
+        )
+
+    def test_sage_article_id_rejected(self) -> None:
+        """16-digit SAGE article IDs should be rejected from pages field."""
+        assert "pages" not in self._merge_pages("20552076231171496")["fields"]
 
     def test_normal_pages_accepted(self) -> None:
         """Normal page ranges (e.g., 123--456) should be accepted."""
-        entry = {
-            "type": "article",
-            "key": "Test2023",
-            "fields": {"title": "Test", "author": "Author", "year": "2023"},
-        }
-        enrichers = [
-            ("crossref", {"fields": {"pages": "123--456"}}),
-        ]
-        merged = merge_utils.merge_with_policy(entry, enrichers)
-        assert merged["fields"].get("pages") == "123--456"
+        assert self._merge_pages("123--456")["fields"].get("pages") == "123--456"
 
     def test_short_pages_accepted(self) -> None:
         """Single page numbers should be accepted."""
-        entry = {
-            "type": "article",
-            "key": "Test2023",
-            "fields": {"title": "Test", "author": "Author", "year": "2023"},
-        }
-        enrichers = [
-            ("crossref", {"fields": {"pages": "42"}}),
-        ]
-        merged = merge_utils.merge_with_policy(entry, enrichers)
-        assert merged["fields"].get("pages") == "42"
+        assert self._merge_pages("42")["fields"].get("pages") == "42"
 
     def test_max_digits_boundary(self) -> None:
         """Pages with exactly PAGES_MAX_DIGITS digits should be accepted."""
-        pages = "1" * PAGES_MAX_DIGITS  # e.g., "12345678"
-        entry = {
-            "type": "article",
-            "key": "Test2023",
-            "fields": {"title": "Test", "author": "Author", "year": "2023"},
-        }
-        enrichers = [
-            ("crossref", {"fields": {"pages": pages}}),
-        ]
-        merged = merge_utils.merge_with_policy(entry, enrichers)
-        assert merged["fields"].get("pages") == pages
+        pages = "1" * PAGES_MAX_DIGITS
+        assert self._merge_pages(pages)["fields"].get("pages") == pages
 
     def test_large_page_range_accepted(self) -> None:
         """IEEE-style 5-digit page ranges like 13905-13917 should be accepted."""
-        entry = {
-            "type": "article",
-            "key": "Test2023",
-            "fields": {"title": "Test", "author": "Author", "year": "2023"},
-        }
-        enrichers = [
-            ("crossref", {"fields": {"pages": "13905-13917"}}),
-        ]
-        merged = merge_utils.merge_with_policy(entry, enrichers)
-        assert merged["fields"].get("pages") == "13905-13917"
+        assert self._merge_pages("13905-13917")["fields"].get("pages") == "13905-13917"
 
 
 class TestHtmlEntityDecode:
     """Fix 3: HTML entities decoded in journal/title fields."""
+
+    @staticmethod
+    def _article(**extra_fields: str) -> dict[str, Any]:
+        fields = {"title": "Test Paper", "author": "Author", "year": "2023", **extra_fields}
+        return {"type": "article", "key": "Test2023", "fields": fields}
+
     def test_amp_decoded_in_journal(self) -> None:
-        entry = {
-            "type": "article",
-            "key": "Test2023",
-            "fields": {
-                "title": "Test Paper",
-                "author": "Author",
-                "year": "2023",
-                "journal": "Computers &amp; Education",
-            },
-        }
-        merged = merge_utils.merge_with_policy(entry, [])
+        merged = merge_utils.merge_with_policy(
+            self._article(journal="Computers &amp; Education"), [],
+        )
         assert merged["fields"]["journal"] == "Computers & Education"
 
     def test_lt_gt_decoded_in_title(self) -> None:
-        entry = {
-            "type": "article",
-            "key": "Test2023",
-            "fields": {
-                "title": "A &lt;b&gt;Bold&lt;/b&gt; Approach",
-                "author": "Author",
-                "year": "2023",
-            },
-        }
-        merged = merge_utils.merge_with_policy(entry, [])
+        merged = merge_utils.merge_with_policy(
+            self._article(title="A &lt;b&gt;Bold&lt;/b&gt; Approach"), [],
+        )
         assert "&lt;" not in merged["fields"]["title"]
         assert "&gt;" not in merged["fields"]["title"]
 
@@ -838,41 +797,29 @@ class TestTitleLengthWhitespaceNormalization:
 
 
 class TestLeadingZerosInPages:
-    """Pages with leading zeros should have them stripped (e.g., 01-08 → 1-8)."""
+    """Pages with leading zeros should have them stripped (e.g., 01-08 -> 1-8)."""
+
+    @staticmethod
+    def _merge_with_pages(pages: str, entry_type: str = "article", **venue: str) -> dict[str, Any]:
+        entry: dict[str, Any] = {"type": entry_type, "fields": {"title": "Some Paper", "pages": pages, **venue}}
+        return merge_utils.merge_with_policy(entry, [])
+
     def test_leading_zeros_stripped(self) -> None:
-        entry = {
-            "type": "inproceedings",
-            "fields": {"title": "Some Paper", "pages": "01-08", "booktitle": "Some Conf"},
-        }
-        merged = merge_utils.merge_with_policy(entry, [])
-        assert merged["fields"]["pages"] == "1-8"
+        assert self._merge_with_pages("01-08", "inproceedings", booktitle="Some Conf")["fields"]["pages"] == "1-8"
 
     def test_no_leading_zeros_unchanged(self) -> None:
-        entry = {
-            "type": "article",
-            "fields": {"title": "Some Paper", "pages": "123-456", "journal": "J"},
-        }
-        merged = merge_utils.merge_with_policy(entry, [])
-        assert merged["fields"]["pages"] == "123-456"
+        assert self._merge_with_pages("123-456", journal="J")["fields"]["pages"] == "123-456"
 
     def test_single_page_leading_zero(self) -> None:
-        entry = {
-            "type": "article",
-            "fields": {"title": "Some Paper", "pages": "07", "journal": "J"},
-        }
-        merged = merge_utils.merge_with_policy(entry, [])
-        assert merged["fields"]["pages"] == "7"
+        assert self._merge_with_pages("07", journal="J")["fields"]["pages"] == "7"
 
 
 class TestFrontiersJournalDetection:
     """Frontiers in * booktitles should be moved to journal field."""
     def test_frontiers_booktitle_becomes_journal(self) -> None:
-        entry = {
+        entry: dict[str, Any] = {
             "type": "inproceedings",
-            "fields": {
-                "title": "Some Paper",
-                "booktitle": "Frontiers in Bioinformatics",
-            },
+            "fields": {"title": "Some Paper", "booktitle": "Frontiers in Bioinformatics"},
         }
         merged = merge_utils.merge_with_policy(entry, [])
         assert merged["fields"].get("journal") == "Frontiers in Bioinformatics"
@@ -880,25 +827,17 @@ class TestFrontiersJournalDetection:
         assert merged["type"] == "article"
 
     def test_frontiers_not_moved_when_journal_exists(self) -> None:
-        entry = {
+        entry: dict[str, Any] = {
             "type": "article",
-            "fields": {
-                "title": "Some Paper",
-                "journal": "Nature",
-                "booktitle": "Frontiers in Immunology",
-            },
+            "fields": {"title": "Some Paper", "journal": "Nature", "booktitle": "Frontiers in Immunology"},
         }
         merged = merge_utils.merge_with_policy(entry, [])
-        # journal stays as Nature; booktitle removed because type is article
         assert merged["fields"].get("journal") == "Nature"
 
     def test_non_frontiers_booktitle_unchanged(self) -> None:
-        entry = {
+        entry: dict[str, Any] = {
             "type": "inproceedings",
-            "fields": {
-                "title": "Some Paper",
-                "booktitle": "International Conference on AI",
-            },
+            "fields": {"title": "Some Paper", "booktitle": "International Conference on AI"},
         }
         merged = merge_utils.merge_with_policy(entry, [])
         assert merged["fields"].get("booktitle") == "International Conference on AI"
@@ -923,38 +862,21 @@ class TestHtmlEntityInSerializer:
 
 class TestJournalUrlNormalization:
     """Journal fields containing URLs should be normalized to server names."""
+
+    @staticmethod
+    def _merge_journal(url: str) -> dict[str, Any]:
+        entry: dict[str, Any] = {"type": "article", "fields": {"title": "Some Paper", "journal": url}}
+        return merge_utils.merge_with_policy(entry, [])
+
     def test_arxiv_url_removed_from_journal(self) -> None:
-        entry = {
-            "type": "article",
-            "fields": {
-                "title": "Some Paper",
-                "journal": "https://arxiv.org/pdf/2302.08018",
-            },
-        }
-        merged = merge_utils.merge_with_policy(entry, [])
-        assert "journal" not in merged["fields"]
+        assert "journal" not in self._merge_journal("https://arxiv.org/pdf/2302.08018")["fields"]
 
     def test_techrxiv_url_becomes_journal_name(self) -> None:
-        entry = {
-            "type": "article",
-            "fields": {
-                "title": "Some Paper",
-                "journal": "https://www.techrxiv.org/users/770734/articles/846181-test",
-            },
-        }
-        merged = merge_utils.merge_with_policy(entry, [])
+        merged = self._merge_journal("https://www.techrxiv.org/users/770734/articles/846181-test")
         assert merged["fields"]["journal"] == "TechRxiv"
 
     def test_unknown_url_dropped(self) -> None:
-        entry = {
-            "type": "article",
-            "fields": {
-                "title": "Some Paper",
-                "journal": "https://example.com/papers/123",
-            },
-        }
-        merged = merge_utils.merge_with_policy(entry, [])
-        assert "journal" not in merged["fields"]
+        assert "journal" not in self._merge_journal("https://example.com/papers/123")["fields"]
 
 
 class TestTokenBucketRateLimiter:
@@ -991,31 +913,25 @@ class TestTokenBucketRateLimiter:
 class TestDotNotationFieldExtraction:
     """Tests for _resolve_dotted in api_generics.py."""
     def test_simple_field(self) -> None:
-
         assert _resolve_dotted({"title": "My Paper"}, "title") == "My Paper"
 
     def test_nested_field(self) -> None:
-
         data = {"externalIds": {"DOI": "10.1234/test", "ArXiv": "2301.00001"}}
         assert _resolve_dotted(data, "externalIds.DOI") == "10.1234/test"
         assert _resolve_dotted(data, "externalIds.ArXiv") == "2301.00001"
 
     def test_deeply_nested(self) -> None:
-
         data = {"primary_location": {"source": {"display_name": "Nature"}}}
         assert _resolve_dotted(data, "primary_location.source.display_name") == "Nature"
 
     def test_missing_nested_field(self) -> None:
-
         data = {"externalIds": {"ArXiv": "2301.00001"}}
         assert _resolve_dotted(data, "externalIds.DOI") is None
 
     def test_missing_parent(self) -> None:
-
         assert _resolve_dotted({"title": "test"}, "externalIds.DOI") is None
 
     def test_str_variant(self) -> None:
-
         data = {"journal": {"name": "Nature"}}
         assert _resolve_dotted_str(data, "journal.name") == "Nature"
         assert _resolve_dotted_str(data, "journal.missing") is None
@@ -1107,6 +1023,14 @@ def _reset_openreview_session() -> None:
         sa._OPENREVIEW_SESSION_CREATED_AT = 0.0
 
 
+def _make_openreview_mock(cookie: str) -> MagicMock:
+    """Build a mock HTTP response for OpenReview login."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.headers = {"Set-Cookie": f"session={cookie}"}
+    return resp
+
+
 class TestOpenReviewSessionExpiry:
     """Tests for OpenReview session TTL-based expiry."""
     def test_expired_session_triggers_relogin(self) -> None:
@@ -1115,17 +1039,11 @@ class TestOpenReviewSessionExpiry:
 
         _reset_openreview_session()
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.headers = {"Set-Cookie": "session=abc123"}
-
         mock_session = MagicMock()
-        mock_session.post.return_value = mock_resp
-
+        mock_session.post.return_value = _make_openreview_mock("abc123")
         creds = ("user@example.com", "password123")
 
         with patch("src.clients.search_apis._get_session", return_value=mock_session):
-            # First login
             result1 = sa.openreview_login(creds)
             assert result1 is not None
             assert result1["Cookie"] == "session=abc123"
@@ -1133,14 +1051,9 @@ class TestOpenReviewSessionExpiry:
 
             # Simulate session expiry by backdating the timestamp
             with sa._OPENREVIEW_SESSION_LOCK:
-                sa._OPENREVIEW_SESSION_CREATED_AT = 0.0  # epoch = expired
+                sa._OPENREVIEW_SESSION_CREATED_AT = 0.0
 
-            # Second login should re-authenticate
-            mock_resp2 = MagicMock()
-            mock_resp2.raise_for_status = MagicMock()
-            mock_resp2.headers = {"Set-Cookie": "session=refreshed"}
-            mock_session.post.return_value = mock_resp2
-
+            mock_session.post.return_value = _make_openreview_mock("refreshed")
             result2 = sa.openreview_login(creds)
             assert result2 is not None
             assert result2["Cookie"] == "session=refreshed"
@@ -1154,20 +1067,14 @@ class TestOpenReviewSessionExpiry:
 
         _reset_openreview_session()
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.headers = {"Set-Cookie": "session=valid"}
-
         mock_session = MagicMock()
-        mock_session.post.return_value = mock_resp
-
+        mock_session.post.return_value = _make_openreview_mock("valid")
         creds = ("user@example.com", "password123")
 
         with patch("src.clients.search_apis._get_session", return_value=mock_session):
             result1 = sa.openreview_login(creds)
             assert result1 is not None
 
-            # Call again immediately — should reuse without re-login
             result2 = sa.openreview_login(creds)
             assert result2 is result1
             assert mock_session.post.call_count == 1
@@ -1235,28 +1142,18 @@ class TestGeminiUsesHttpPostJson:
 class TestHttpRequestPostDispatch:
     """Verify _http_request dispatches to the correct session method."""
     @staticmethod
-    def _make_mock_session(method: str) -> tuple[MagicMock, MagicMock]:
-        """Build a mock session whose *method* returns a successful response.
-
-        Also initializes the thread-local request counter that ``_http_request``
-        increments, since patching ``_get_session`` bypasses the real
-        initializer.
-        """
+    def _make_mock_session(method: str) -> MagicMock:
+        """Build a mock session whose *method* returns a successful response."""
         _THREAD_LOCAL.session_request_count = 0
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.content = b'{"ok": true}'
+        mock_resp = MagicMock(status_code=200, content=b'{"ok": true}')
         mock_resp.raise_for_status = MagicMock()
-
         mock_session = MagicMock()
         getattr(mock_session, method).return_value = mock_resp
-        return mock_session, mock_resp
+        return mock_session
 
     def test_post_calls_session_post(self) -> None:
         """_http_request('POST', ...) should call session.post, not session.get."""
-        mock_session, _ = self._make_mock_session("post")
-
+        mock_session = self._make_mock_session("post")
         with (
             patch("src.http_utils._get_session", return_value=mock_session),
             patch("src.http_utils._get_rate_limiter", return_value=None),
@@ -1268,8 +1165,7 @@ class TestHttpRequestPostDispatch:
 
     def test_get_calls_session_get(self) -> None:
         """_http_request('GET', ...) should call session.get, not session.post."""
-        mock_session, _ = self._make_mock_session("get")
-
+        mock_session = self._make_mock_session("get")
         with (
             patch("src.http_utils._get_session", return_value=mock_session),
             patch("src.http_utils._get_rate_limiter", return_value=None),
@@ -1295,28 +1191,30 @@ class TestRateLimiterEntries:
 
 class TestOpenReviewTTLBoundary:
     """Test the exact boundary of OpenReview session TTL."""
-    def test_session_expires_at_exact_ttl(self) -> None:
-        """Session should be treated as expired when elapsed == TTL (>= check)."""
+
+    @staticmethod
+    def _set_session_age(elapsed: float) -> None:
+        """Set a fake OpenReview session with the given elapsed time."""
         import src.clients.search_apis as sa
 
         with sa._OPENREVIEW_SESSION_LOCK:
             sa._OPENREVIEW_SESSION = {"Cookie": "session=test"}
-            sa._OPENREVIEW_SESSION_CREATED_AT = (
-                time.monotonic() - OPENREVIEW_SESSION_TTL_SECS
-            )
+            sa._OPENREVIEW_SESSION_CREATED_AT = time.monotonic() - elapsed
 
-        assert sa._openreview_session_expired() is True
+    def test_session_expires_at_exact_ttl(self) -> None:
+        """Session should be treated as expired when elapsed == TTL (>= check)."""
+        import src.clients.search_apis as sa
+
+        self._set_session_age(OPENREVIEW_SESSION_TTL_SECS)
+        assert sa._openreview_session_expired()
         _reset_openreview_session()
 
     def test_session_valid_just_before_ttl(self) -> None:
         """Session created 'just now' (0 seconds elapsed) must not be expired."""
         import src.clients.search_apis as sa
 
-        with sa._OPENREVIEW_SESSION_LOCK:
-            sa._OPENREVIEW_SESSION = {"Cookie": "session=test"}
-            sa._OPENREVIEW_SESSION_CREATED_AT = time.monotonic()
-
-        assert sa._openreview_session_expired() is False
+        self._set_session_age(0.0)
+        assert not sa._openreview_session_expired()
         _reset_openreview_session()
 
 
@@ -1409,19 +1307,19 @@ class TestBiorxivDoiPrefix:
     """L3: bioRxiv DOIs with any 10.1101/ prefix should be classified as preprint."""
     def test_biorxiv_old_numeric_doi(self) -> None:
         """Pre-2020 bioRxiv DOI (no date prefix) should be secondary."""
-        assert id_utils.is_secondary_doi("10.1101/123456") is True
+        assert id_utils.is_secondary_doi("10.1101/123456")
 
     def test_biorxiv_date_prefixed_doi(self) -> None:
         """Post-2020 bioRxiv DOI (date prefix) should be secondary."""
-        assert id_utils.is_secondary_doi("10.1101/2021.01.01.123456") is True
+        assert id_utils.is_secondary_doi("10.1101/2021.01.01.123456")
 
     def test_medrxiv_doi(self) -> None:
         """medRxiv DOIs also use 10.1101/ prefix."""
-        assert id_utils.is_secondary_doi("10.1101/2022.05.15.492001") is True
+        assert id_utils.is_secondary_doi("10.1101/2022.05.15.492001")
 
     def test_non_biorxiv_doi(self) -> None:
         """Regular published DOI should NOT be classified as secondary."""
-        assert id_utils.is_secondary_doi("10.1038/s41586-024-00001-1") is False
+        assert not id_utils.is_secondary_doi("10.1038/s41586-024-00001-1")
 
 
 class TestDoiUrlDecoding:
@@ -1916,14 +1814,8 @@ class TestSemaphoreReleasedDuring429:
         """Verify the semaphore is not held during 429 retry sleep."""
         _THREAD_LOCAL.session_request_count = 0
 
-        mock_resp_429 = MagicMock()
-        mock_resp_429.status_code = 429
-        mock_resp_429.headers = {}
-        mock_resp_429.content = b""
-
-        mock_resp_200 = MagicMock()
-        mock_resp_200.status_code = 200
-        mock_resp_200.content = b'{"ok": true}'
+        mock_resp_429 = MagicMock(status_code=429, headers={}, content=b"")
+        mock_resp_200 = MagicMock(status_code=200, content=b'{"ok": true}')
         mock_resp_200.raise_for_status = MagicMock()
 
         mock_session = MagicMock()
@@ -1937,7 +1829,6 @@ class TestSemaphoreReleasedDuring429:
             mock_time.monotonic.return_value = 1000.0
             mock_time.sleep = MagicMock()
             result = _http_request("GET", "https://example.com/api", {}, 10.0)
-            # Should have slept between 429 and retry
             assert mock_time.sleep.called
             assert result == b'{"ok": true}'
 

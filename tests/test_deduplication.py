@@ -9,6 +9,11 @@ from src import merge_utils, text_utils
 from src.id_utils import doi_bases_match
 
 
+def _count_bib_files(directory: str) -> int:
+    """Count .bib files in a directory."""
+    return sum(1 for f in os.listdir(directory) if f.endswith(".bib"))
+
+
 def test_prevent_duplicate_save_high_similarity(tmp_path: Path) -> None:
     """Test that save_entry_to_file prevents creating new file for >= 95% title similarity."""
     out_dir = str(tmp_path)
@@ -47,10 +52,7 @@ def test_prevent_duplicate_save_high_similarity(tmp_path: Path) -> None:
     path_b, _ = merge_utils.save_entry_to_file(out_dir, author_id, entry_b, author_name=author_name)
 
     assert path_b == path_a, "Should have reused the existing file path"
-
-    author_dir = os.path.dirname(path_a)
-    bib_files = [f for f in os.listdir(author_dir) if f.endswith(".bib")]
-    assert len(bib_files) == 1, f"Expected 1 bib file, found {len(bib_files)}: {bib_files}"
+    assert _count_bib_files(os.path.dirname(path_a)) == 1
 
 
 def test_allow_duplicate_save_medium_similarity(tmp_path: Path) -> None:
@@ -91,10 +93,7 @@ def test_allow_duplicate_save_medium_similarity(tmp_path: Path) -> None:
     path_b, _ = merge_utils.save_entry_to_file(out_dir, author_id, entry_b, author_name=author_name)
 
     assert path_b != path_a, f"Should have created a new file for similarity {sim:.2f}"
-
-    author_dir = os.path.dirname(path_a)
-    bib_files = [f for f in os.listdir(author_dir) if f.endswith(".bib")]
-    assert len(bib_files) == 2, f"Expected 2 bib files, found {len(bib_files)}"
+    assert _count_bib_files(os.path.dirname(path_a)) == 2
 
 
 # --- DOI version matching ---
@@ -151,6 +150,4 @@ def test_doi_version_dedup_in_save(tmp_path: Path) -> None:
     path_v2, _ = merge_utils.save_entry_to_file(out_dir, author_id, v2, author_name=author_name)
 
     assert path_v2 == path_v1, "v2 should be matched to v1 via DOI version matching"
-    author_dir = os.path.dirname(path_v1)
-    bib_files = [f for f in os.listdir(author_dir) if f.endswith(".bib")]
-    assert len(bib_files) == 1, f"Expected 1 bib file (deduped), found {len(bib_files)}"
+    assert _count_bib_files(os.path.dirname(path_v1)) == 1

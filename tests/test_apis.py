@@ -81,14 +81,13 @@ def test_openalex_search() -> None:
     with contextlib.suppress(Exception):
         work = search_apis.openalex_search_paper(paper["title"], paper["first_author"])
 
-    if not work and paper.get("openalex_id"):
+    if not work:
         with contextlib.suppress(Exception):
             work = http_get_json(
-                f"https://api.openalex.org/works/{paper['openalex_id']}", timeout=15
+                f"https://api.openalex.org/works/{paper['openalex_id']}", timeout=15,
             )
 
-    if not work:
-        work = OPENALEX_CANNED_WORK
+    work = work or OPENALEX_CANNED_WORK
 
     bibtex = search_apis.build_bibtex_from_openalex(work, paper["first_author"])
     assert bibtex and "@" in bibtex, "BibTeX building from OpenAlex failed"
@@ -99,18 +98,17 @@ def test_openalex_search() -> None:
 
 def test_all_multiple_candidate_functions_exist() -> None:
     """Verify all multiple-candidate wrapper functions are present and callable."""
-    required_functions = [
+    for func_name in (
         "crossref_search_multiple",
         "openalex_search_multiple",
         "s2_search_papers_multiple",
         "pubmed_search_papers_multiple",
         "europepmc_search_papers_multiple",
         "openreview_search_papers_multiple",
-    ]
-
-    for func_name in required_functions:
-        func = getattr(search_apis, func_name, None)
-        assert callable(func), f"Function {func_name} not found or not callable"
+    ):
+        assert callable(getattr(search_apis, func_name, None)), (
+            f"Function {func_name} not found or not callable"
+        )
 
 
 def test_crossref_multiple_candidates() -> None:
@@ -161,29 +159,26 @@ def test_multiple_candidate_empty_inputs() -> None:
 
 def test_api_configs() -> None:
     """APISearchConfig objects are present and complete."""
-    config_names = ["S2_SEARCH_CONFIG", "CROSSREF_SEARCH_CONFIG", "OPENALEX_SEARCH_CONFIG"]
-    for name in config_names:
-        assert hasattr(api_configs, name), f"Missing: {name}"
-        cfg = getattr(api_configs, name)
-        assert isinstance(cfg, api_generics.APISearchConfig), f"{name} wrong type"
+    for name in ("S2_SEARCH_CONFIG", "CROSSREF_SEARCH_CONFIG", "OPENALEX_SEARCH_CONFIG"):
+        cfg = getattr(api_configs, name, None)
+        assert isinstance(cfg, api_generics.APISearchConfig), f"{name} missing or wrong type"
         assert cfg.api_name and cfg.base_url, f"{name} incomplete"
 
 
 def test_api_field_mappings() -> None:
     """APIFieldMapping objects are present and complete."""
-    mapping_names = ["S2_FIELD_MAPPING", "CROSSREF_FIELD_MAPPING", "OPENALEX_FIELD_MAPPING"]
-    for name in mapping_names:
-        assert hasattr(api_configs, name), f"Missing: {name}"
-        mapping = getattr(api_configs, name)
-        assert isinstance(mapping, api_generics.APIFieldMapping), f"{name} wrong type"
+    for name in ("S2_FIELD_MAPPING", "CROSSREF_FIELD_MAPPING", "OPENALEX_FIELD_MAPPING"):
+        mapping = getattr(api_configs, name, None)
+        assert isinstance(mapping, api_generics.APIFieldMapping), f"{name} missing or wrong type"
         assert mapping.title_fields and mapping.author_fields, f"{name} incomplete"
 
 
 def test_doi_validation_functions() -> None:
     """DOI validation utilities are present and callable."""
     for func_name in ("validate_doi_candidate", "process_validated_doi"):
-        func = getattr(doi_utils, func_name, None)
-        assert callable(func), f"{func_name} not found or not callable"
+        assert callable(getattr(doi_utils, func_name, None)), (
+            f"{func_name} not found or not callable"
+        )
 
 
 def test_bibtex_building_from_openalex_canned() -> None:

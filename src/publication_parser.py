@@ -117,11 +117,9 @@ def _classify_venue_type(venue: str) -> str:
     """Classify a venue name as journal, conference, preprint, or unknown."""
     low = venue.lower().strip()
 
-    # Preprint servers
     if any(ps in low for ps in PREPRINT_SERVERS):
         return "preprint"
 
-    # Conference keywords
     if (
         any(kw in low for kw in _CONFERENCE_KW)
         or any(known in low for known in KNOWN_CONFERENCE_VENUES)
@@ -129,7 +127,6 @@ def _classify_venue_type(venue: str) -> str:
     ):
         return "conference"
 
-    # Default to journal (most publication strings with vol/issue/pages are journals)
     return "journal"
 
 
@@ -142,24 +139,18 @@ _TRAILING_PREPOSITIONS = re.compile(
 def _strip_ellipsis(text: str) -> str:
     """Strip trailing ``...`` and dangling prepositions from truncated strings."""
     t = text.rstrip()
-    if t.endswith("..."):
-        t = t[:-3].rstrip()
-    elif t.endswith("\u2026"):  # unicode ellipsis
-        t = t[:-1].rstrip()
-    else:
-        return text
-    # Remove dangling preposition left behind (e.g. "... for ..." → "...")
-    t = _TRAILING_PREPOSITIONS.sub("", t)
-    return t.rstrip(" ,;:")
+    for suffix in ("...", "\u2026"):
+        if t.endswith(suffix):
+            t = t[:-len(suffix)].rstrip()
+            t = _TRAILING_PREPOSITIONS.sub("", t)
+            return t.rstrip(" ,;:")
+    return text
 
 
 def _is_page_like(token: str) -> bool:
     """Return True if *token* looks like a page range or article number."""
     t = token.strip().rstrip(",").strip()
-    if not t:
-        return False
-    # Page range: "1-34", "9506-9531", "e77783"
-    return bool(re.fullmatch(r"\w[\w\u2013-]*", t))
+    return bool(t and re.fullmatch(r"\w[\w\u2013-]*", t))
 
 
 # ---------------------------------------------------------------------------
@@ -278,11 +269,9 @@ def parse_publication_string(pub: str | None) -> ParsedPublication | None:
         year = int(m.group(2))
         vtype = _classify_venue_type(venue)
 
-        # Short publisher-only strings get low confidence
-        word_count = len(venue.split())
         if vtype == "conference":
             conf = 0.70
-        elif word_count <= 2:
+        elif len(venue.split()) <= 2:
             vtype = "publisher"
             conf = 0.30
         else:

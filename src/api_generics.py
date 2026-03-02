@@ -49,17 +49,13 @@ def _resolve_dotted_str(obj: dict[str, Any], field: str, *, check_placeholder: b
     placeholder string.
     """
     value = _resolve_dotted(obj, field)
-    if value is None:
-        return None
     # Handle list values (common in API responses)
     if isinstance(value, list):
         value = value[0] if value else None
     if value is None:
         return None
     s = str(value).strip()
-    if not s:
-        return None
-    if check_placeholder and has_placeholder(s):
+    if not s or (check_placeholder and has_placeholder(s)):
         return None
     return s
 
@@ -222,13 +218,14 @@ def search_api_generic(
     for item in results:
         item_title = get_title(item)
         norm_match = normalize_title(item_title) == target_norm
-        author_ok = True
         if norm_match and author_name:
             item_authors = get_authors(item)
             author_ok = (
                 author_name_matches(author_name, item_authors)
                 or author_in_text(author_name, item_authors)
             )
+        else:
+            author_ok = True
         logger.debug(
             f"{config.api_name} | EXACT_CHECK | item_title={item_title[:50]}"
             f" | normalized_match={norm_match} | author_check={bool(author_name)}"
@@ -316,17 +313,16 @@ def search_api_generic_multiple(
     for item in results:
         try:
             score = score_fn(item)
-            accepted = score is not None and score >= effective_threshold
-            logger.debug(
-                f"{config.api_name} | ITEM_SCORE | score={score:.3f}"
-                f" | threshold={effective_threshold:.3f} | accepted={accepted}",
-                category=LogCategory.SCORE,
-            )
-            if accepted:
-                scored_results.append((score, item))
         except FIELD_ACCESS_ERRORS:
-            # Skip items that cause scoring errors (missing fields, wrong types, etc.)
             continue
+        accepted = score is not None and score >= effective_threshold
+        logger.debug(
+            f"{config.api_name} | ITEM_SCORE | score={score:.3f}"
+            f" | threshold={effective_threshold:.3f} | accepted={accepted}",
+            category=LogCategory.SCORE,
+        )
+        if accepted:
+            scored_results.append((score, item))
 
     scored_results.sort(key=lambda x: x[0], reverse=True)
     top_results = [item for _, item in scored_results[:max_results]]
@@ -377,18 +373,15 @@ def _extract_venue(
         # Crossref returns container-title as array: [series_name, conference_name]
         # Prefer the non-generic element over generic series names like LNCS
         if isinstance(raw_venue, list) and len(raw_venue) > 1:
-            generic_filtered = False
-            for candidate in raw_venue:
-                candidate_str = str(candidate).strip()
-                if candidate_str and candidate_str.lower() not in GENERIC_SERIES_NAMES:
-                    venue = candidate_str
-                    generic_filtered = True
-                    break
-            if not venue:
-                venue = _resolve_dotted_str(response, field_name)
+            non_generic = next(
+                (str(c).strip() for c in raw_venue
+                 if str(c).strip() and str(c).strip().lower() not in GENERIC_SERIES_NAMES),
+                None,
+            )
+            venue = non_generic or _resolve_dotted_str(response, field_name)
             logger.debug(
                 f"{mapping.api_name} | VENUE_ARRAY | elements={len(raw_venue)}"
-                f" | generic_filtered={generic_filtered} | selected={(venue or '')[:50]}",
+                f" | generic_filtered={non_generic is not None} | selected={(venue or '')[:50]}",
                 category=LogCategory.SCORE,
             )
         else:
@@ -430,11 +423,10 @@ def build_bibtex_from_response(
     if mapping.custom_author_extractor:
         authors = mapping.custom_author_extractor(response)
     else:
-        author_data = None
-        for field_name in mapping.author_fields:
-            author_data = _resolve_dotted(response, field_name)
-            if author_data:
-                break
+        author_data = next(
+            (v for f in mapping.author_fields if (v := _resolve_dotted(response, f))),
+            None,
+        )
         authors = extract_author_names(
             author_data,
             name_key=mapping.author_name_key or "name",

@@ -129,8 +129,7 @@ def _parse_description(description: str) -> tuple[str, str]:
     elif middle:
         journal = middle.strip()
 
-    # Clean up non-breaking spaces
-    journal = journal.replace("\xa0", " ").strip()
+    journal = journal.strip()
 
     return year_str, journal
 
@@ -147,7 +146,7 @@ def _extract_authors(item: dict[str, Any]) -> str:
 
     authors_list = author_data.get("authors")
     if isinstance(authors_list, list):
-        names = [str(a.get("name") or "") for a in authors_list if isinstance(a, dict) and a.get("name")]
+        names = [str(a["name"]) for a in authors_list if isinstance(a, dict) and a.get("name")]
         if names:
             return " and ".join(names)
 
@@ -287,4 +286,4 @@ def serply_fetch_citation(
     if link:
         fields["url"] = link
 
-    return fields if fields else None
+    return fields or None

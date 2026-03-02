@@ -486,8 +486,8 @@ def test_bibtex_extra_fields() -> None:
 
 def test_config() -> None:
     """Test configuration constants."""
-    for const in ['CONTRIBUTION_WINDOW_YEARS', 'SIM_EXACT_PICK_THRESHOLD']:
-        assert hasattr(config, const) and getattr(config, const) is not None, f"Missing constant: {const}"
+    for const in ('CONTRIBUTION_WINDOW_YEARS', 'SIM_EXACT_PICK_THRESHOLD'):
+        assert getattr(config, const, None) is not None, f"Missing constant: {const}"
 
 
 def test_safe_file_operations(tmp_path: Path) -> None:
@@ -677,10 +677,8 @@ def test_save_entry_to_file(tmp_path: Path) -> None:
 
 def test_exception_definitions() -> None:
     """Test that exception tuples are properly defined."""
-    required = ['HTTP_ERRORS', 'NETWORK_ERRORS', 'ALL_API_ERRORS', 'FILE_IO_ERRORS']
-    for name in required:
-        assert hasattr(exceptions, name), f"Missing: {name}"
-        assert isinstance(getattr(exceptions, name), tuple), f"{name} not a tuple"
+    for name in ('HTTP_ERRORS', 'NETWORK_ERRORS', 'ALL_API_ERRORS', 'FILE_IO_ERRORS'):
+        assert isinstance(getattr(exceptions, name, None), tuple), f"{name} missing or not a tuple"
 
 
 def test_http_error_decorator() -> None:
@@ -714,47 +712,40 @@ def test_no_duplicate_titles_per_author() -> None:
         if not author_dir.is_dir():
             continue
 
-        bib_files = sorted(author_dir.glob("*.bib"))
         entries = []
-
-        for bib_file in bib_files:
+        for bib_file in sorted(author_dir.glob("*.bib")):
             try:
-                content = bib_file.read_text(encoding="utf-8")
-                entry = bt.parse_bibtex_to_dict(content)
+                entry = bt.parse_bibtex_to_dict(bib_file.read_text(encoding="utf-8"))
                 if entry:
                     entry["_filename"] = bib_file.name
                     entries.append(entry)
             except Exception:  # noqa: S110
                 pass  # intentionally skip unparseable .bib files
 
-        # Compare all pairs within this author
         for i, e1 in enumerate(entries):
             for e2 in entries[i + 1:]:
                 t1 = e1.get("fields", {}).get("title", "")
                 t2 = e2.get("fields", {}).get("title", "")
-
                 if not t1 or not t2:
                     continue
 
                 sim = text_utils.title_similarity(t1, t2)
+                if sim < 0.95:
+                    continue
 
-                if sim >= 0.95:
-                    # Check if DOIs are different (different papers with similar titles)
-                    d1 = e1.get("fields", {}).get("doi", "").strip().lower()
-                    d2 = e2.get("fields", {}).get("doi", "").strip().lower()
+                d1 = e1.get("fields", {}).get("doi", "").strip().lower()
+                d2 = e2.get("fields", {}).get("doi", "").strip().lower()
+                if d1 and d2 and d1 != d2:
+                    continue
 
-                    # If both have DOIs and they differ, these are different papers
-                    if d1 and d2 and d1 != d2:
-                        continue
-
-                    duplicates.append({
-                        "author": author_dir.name,
-                        "file1": e1["_filename"],
-                        "file2": e2["_filename"],
-                        "similarity": sim,
-                        "title1": t1[:60],
-                        "title2": t2[:60],
-                    })
+                duplicates.append({
+                    "author": author_dir.name,
+                    "file1": e1["_filename"],
+                    "file2": e2["_filename"],
+                    "similarity": sim,
+                    "title1": t1[:60],
+                    "title2": t2[:60],
+                })
 
     if duplicates:
         msg_lines = ["Found duplicate entries that should be deduplicated:"]

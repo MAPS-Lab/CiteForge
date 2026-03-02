@@ -86,6 +86,16 @@ def _try_enrich(
         print(f"{source_name} enrichment failed: {e}")
 
 
+def _fetch_and_build(
+    search_fn: Callable[[], Any],
+    build_fn: Callable[[Any, str], str | None],
+    first_author: str,
+) -> str | None:
+    """Search for a paper and build BibTeX if found."""
+    result = search_fn()
+    return build_fn(result, first_author) if result else None
+
+
 def _try_enrichment_sources(
     paper: dict[str, Any],
     api_keys: dict[str, str],
@@ -94,36 +104,29 @@ def _try_enrichment_sources(
     """Run all enrichment sources against a paper and return matched entries."""
     enrichers: list[tuple[str, dict[str, Any]]] = []
     first_author = paper['first_author']
+    title = paper['title']
 
     if api_keys.get('semantic'):
-        def fetch_s2() -> str | None:
-            result = search_apis.s2_search_paper(paper['title'], first_author, api_keys['semantic'])
-            if result:
-                return search_apis.build_bibtex_from_s2(result, first_author)
-            return None
-        _try_enrich('s2', fetch_s2, baseline_entry, enrichers)
+        _try_enrich('s2', lambda: _fetch_and_build(
+            lambda: search_apis.s2_search_paper(title, first_author, api_keys['semantic']),
+            search_apis.build_bibtex_from_s2, first_author,
+        ), baseline_entry, enrichers)
 
-    def fetch_crossref() -> str | None:
-        result = search_apis.crossref_search(paper['title'], first_author)
-        if result:
-            return search_apis.build_bibtex_from_crossref(result, first_author)
-        return None
-    _try_enrich('crossref', fetch_crossref, baseline_entry, enrichers)
+    _try_enrich('crossref', lambda: _fetch_and_build(
+        lambda: search_apis.crossref_search(title, first_author),
+        search_apis.build_bibtex_from_crossref, first_author,
+    ), baseline_entry, enrichers)
 
     if paper['arxiv_id']:
         def fetch_arxiv() -> str | None:
-            entries = search_apis.arxiv_search(paper['title'], first_author, paper['year'])
-            if entries:
-                return search_apis.build_bibtex_from_arxiv(entries[0], first_author)
-            return None
+            entries = search_apis.arxiv_search(title, first_author, paper['year'])
+            return search_apis.build_bibtex_from_arxiv(entries[0], first_author) if entries else None
         _try_enrich('arxiv', fetch_arxiv, baseline_entry, enrichers)
 
     if paper['doi']:
         def fetch_csl() -> str | None:
             csl = search_apis.fetch_csl_via_doi(paper['doi'])
-            if csl:
-                return search_apis.bibtex_from_csl(csl, first_author)
-            return None
+            return search_apis.bibtex_from_csl(csl, first_author) if csl else None
         _try_enrich('csl', fetch_csl, baseline_entry, enrichers)
 
     return enrichers
@@ -190,11 +193,7 @@ def test_file_output(tmp_path: Path) -> None:
 
     assert saved_path is not None, "save_entry_to_file returned no path"
     assert os.path.exists(saved_path), f"File was not created at {saved_path}"
-
-    with open(saved_path, encoding='utf-8') as f:
-        content = f.read()
-
-    assert '@inproceedings' in content, "File content invalid"
+    assert '@inproceedings' in Path(saved_path).read_text(encoding='utf-8'), "File content invalid"
 
 
 def test_csv_summary_integration(tmp_path: Path) -> None:
@@ -220,27 +219,23 @@ def test_csv_summary_integration(tmp_path: Path) -> None:
         ("output/Devlin/BERT.bib", 0, {}),
     ]
 
+    _flag_keys = [
+        'scholar_bib', 'scholar_page', 's2', 'crossref', 'openreview',
+        'arxiv', 'openalex', 'pubmed', 'europepmc', 'doi_csl', 'doi_bibtex',
+    ]
     for file_path, trust_hits, partial_flags in test_entries:
-        flags: dict[str, bool] = {
-            'scholar_bib': False, 'scholar_page': False, 's2': False,
-            'crossref': False, 'openreview': False, 'arxiv': False,
-            'openalex': False, 'pubmed': False, 'europepmc': False,
-            'doi_csl': False, 'doi_bibtex': False,
-        }
-        flags.update(partial_flags)
+        flags = {k: partial_flags.get(k, False) for k in _flag_keys}
         append_summary_to_csv(csv_path_str, file_path, trust_hits, flags)
 
     with open(csv_path_str, encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = list(csv.DictReader(f))
 
     assert len(rows) == len(test_entries), f"Expected {len(test_entries)} rows, got {len(rows)}"
 
-    expected_hits = [5, 2, 0]
-    for i, expected in enumerate(expected_hits):
-        actual = rows[i]['trust_hits']
-        assert int(actual) == expected, (
-            f"Row {i}: expected trust_hits={expected}, got {actual}"
+    for i, (_, expected_hits, _) in enumerate(test_entries):
+        actual = int(rows[i]['trust_hits'])
+        assert actual == expected_hits, (
+            f"Row {i}: expected trust_hits={expected_hits}, got {actual}"
         )
 
 

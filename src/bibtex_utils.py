@@ -326,7 +326,7 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
     def _sanitize_title(title_val: str | None) -> str | None:
         if title_val is None:
             return None
-        t = str(title_val).strip()
+        t = title_val.strip()
         dup_suffix_removed = False
         trailing_period = False
 
@@ -426,8 +426,7 @@ def _short_title_for_key(
     if gemini_api_key and use_cache:
         cached = response_cache.get("gemini", normalized_title)
         if cached is not None:
-            saved_short = "" if cached.get("_negative") else cached.get("short_title", "")
-            saved_short = re.sub(r"[\n\r\t]", "", saved_short) if saved_short else ""
+            saved_short = re.sub(r"[\n\r\t]", "", cached.get("short_title", "")) if not cached.get("_negative") else ""
             if saved_short:
                 return saved_short
             # Fall through to algorithmic path for negative/empty cache hits
@@ -511,7 +510,7 @@ def build_standard_citekey(entry: dict[str, Any], gemini_api_key: str | None = N
     y = str(y_int) if y_int else "0000"
     author = fields.get("author") or ""
     last = _first_author_lastname(author) or "anon"
-    last_cap = last[:1].upper() + last[1:] if last else "Anon"
+    last_cap = last[:1].upper() + last[1:]
     short = _short_title_for_key(title, max_words=BIBTEX_KEY_MAX_WORDS, gemini_api_key=gemini_api_key) or "Title"
     return f"{last_cap}{y}:{short}"
 
@@ -536,9 +535,7 @@ def short_filename_for_entry(entry: dict[str, Any], gemini_api_key: str | None =
 
     def _build_filename(num_words: int) -> str:
         short = _short_title_for_key(title, max_words=num_words, gemini_api_key=gemini_api_key) or "Title"
-        base = re.sub(r"[^A-Za-z0-9_\-]+", "", f"{last_cap}{y}-{short}")
-        if len(base) > BIBTEX_FILENAME_MAX_LENGTH:
-            base = base[:BIBTEX_FILENAME_MAX_LENGTH]
+        base = re.sub(r"[^A-Za-z0-9_\-]+", "", f"{last_cap}{y}-{short}")[:BIBTEX_FILENAME_MAX_LENGTH]
         return f"{base}.bib"
 
     for num_words in range(max_words, 11):
@@ -562,10 +559,10 @@ def _years_diverge(af: dict[str, Any], bf: dict[str, Any], max_gap: int = 3) -> 
 
 def _is_preprint_entry(fields: dict[str, Any]) -> bool:
     """Check if a BibTeX entry looks like a preprint based on DOI prefix or journal name."""
-    doi = str(fields.get("doi") or "").lower()
+    doi = (fields.get("doi") or "").lower()
     if any(doi.startswith(p) for p in PREPRINT_DOI_PREFIXES):
         return True
-    journal = str(fields.get("journal") or "").lower()
+    journal = (fields.get("journal") or "").lower()
     return any(ps in journal for ps in PREPRINT_SERVERS)
 
 
@@ -591,25 +588,19 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
         if a_doi == b_doi:
             logger.debug(f"ENTRY_MATCH | DOI_EXACT | doi={a_doi} | result=True", category=LogCategory.DEDUP)
             return True
-        a_preprint_doi = any(a_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
-        b_preprint_doi = any(b_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
-        if not (a_preprint_doi or b_preprint_doi):
-            # Both published with different DOIs = different papers
+        a_is_preprint = any(a_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
+        b_is_preprint = any(b_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
+        if a_is_preprint == b_is_preprint:
+            # Both same class (both published or both preprint) with different DOIs = different papers
+            label = "DIFF_PREPRINT_DOI" if a_is_preprint else "DIFF_PUBLISHED_DOI"
             logger.debug(
-                f"ENTRY_REJECT | DIFF_PUBLISHED_DOI | a={a_doi} b={b_doi} | result=False",
-                category=LogCategory.DEDUP,
-            )
-            return False
-        if a_preprint_doi and b_preprint_doi:
-            # Both preprints with different DOIs = different papers
-            logger.debug(
-                f"ENTRY_REJECT | DIFF_PREPRINT_DOI | a={a_doi} b={b_doi} | result=False",
+                f"ENTRY_REJECT | {label} | a={a_doi} b={b_doi} | result=False",
                 category=LogCategory.DEDUP,
             )
             return False
         # Exactly one DOI is a preprint — fall through to multi-signal scoring
-        preprint_doi = a_doi if a_preprint_doi else b_doi
-        published_doi = b_doi if a_preprint_doi else a_doi
+        preprint_doi = a_doi if a_is_preprint else b_doi
+        published_doi = b_doi if a_is_preprint else a_doi
         logger.debug(
             f"ENTRY_FALLTHROUGH | PREPRINT_PUBLISHED_PAIR"
             f" | preprint={preprint_doi} published={published_doi}",
@@ -617,8 +608,8 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
         )
 
     # Fast path 2: arXiv eprint match (exact)
-    a_ax = extract_arxiv_eprint(entry_a) or ""
-    b_ax = extract_arxiv_eprint(entry_b) or ""
+    a_ax = extract_arxiv_eprint(entry_a)
+    b_ax = extract_arxiv_eprint(entry_b)
     if a_ax and b_ax:
         if a_ax == b_ax:
             logger.debug(f"ENTRY_MATCH | ARXIV_EXACT | id={a_ax} | result=True", category=LogCategory.DEDUP)
@@ -695,7 +686,7 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
         and len(b_authors) >= 2
     )
 
-    preprint_pair = bool(a_preprint ^ b_preprint)
+    preprint_pair = a_preprint != b_preprint
     ext_ids = external_ids_match(af, bf)
 
     if not preprint_pair and not ext_ids and not high_author_match:
