@@ -2266,10 +2266,26 @@ def main() -> int:
                 for fname in os.listdir(d):
                     if not fname.endswith(".bib"):
                         continue
+                    fpath = os.path.join(d, fname)
+                    # Try filename year first
                     m = _FILENAME_YEAR_RE.search(f"/{fname}")
-                    if m and int(m.group(1)) < window_min:
-                        os.remove(os.path.join(d, fname))
-                        window_removed += 1
+                    if m:
+                        if int(m.group(1)) < window_min:
+                            os.remove(fpath)
+                            window_removed += 1
+                        continue
+                    # Fallback: read BibTeX year field for non-standard filenames
+                    try:
+                        with open(fpath, encoding="utf-8") as bf:
+                            parsed = bt.parse_bibtex_to_dict(bf.read())
+                        bib_year = extract_year_from_any(
+                            (parsed or {}).get("fields", {}).get("year"), fallback=0
+                        ) or 0
+                        if 0 < bib_year < window_min:
+                            os.remove(fpath)
+                            window_removed += 1
+                    except (OSError, ValueError):
+                        pass
             if window_removed:
                 logger.info(
                     f"Removed {window_removed} out-of-window files (year < {window_min})",
