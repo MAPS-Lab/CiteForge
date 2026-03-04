@@ -147,8 +147,8 @@ CONFERENCE_AS_JOURNAL: frozenset[str] = frozenset({
     "canada human-computer communications society",  # Graphics Interface publisher
 })
 
-# Strings in journal field that indicate repositories/portals, not real journals.
-# @article with these → @misc (or @inproceedings if conference-like).
+# Strings in journal/booktitle that indicate repositories/portals, not real venues.
+# @article/@inproceedings with these → @misc.
 REPOSITORY_AS_JOURNAL: frozenset[str] = frozenset({
     "tu/e research portal",
     "escholarship",
@@ -157,6 +157,18 @@ REPOSITORY_AS_JOURNAL: frozenset[str] = frozenset({
     "dspace",
     "zenodo",
     "cern european organization",
+    "figshare",
+    "underline science",
+    "research portal",
+})
+
+# Institutional repositories → entries should be @phdthesis (if thesis) or @misc
+INSTITUTIONAL_REPOSITORIES: frozenset[str] = frozenset({
+    "deep blue",
+    "uwspace",
+    "prism",
+    "mspace",
+    "tspace",
 })
 
 # Data repository DOI prefixes (deprioritized in DOI selection)
@@ -176,6 +188,38 @@ JOURNALS_NAMED_PROCEEDINGS: frozenset[str] = frozenset({
     "proceedings of the ieee",
     "proceedings of the royal society",
 })
+
+# Procedia/IFAC series: published as journal volumes but are conference proceedings.
+# @article with these as journal → @inproceedings (journal → booktitle).
+PROCEEDINGS_SERIES_AS_JOURNAL: frozenset[str] = frozenset({
+    "procedia cirp",
+    "procedia computer science",
+    "procedia manufacturing",
+    "procedia engineering",
+    "ifac-papersonline",
+    "ifac papersonline",
+})
+
+# ACM PACM journals: named "Proceedings of the ACM" but are real journals.
+# @inproceedings with these as booktitle → @article (booktitle → journal).
+ACM_JOURNAL_PROCEEDINGS: frozenset[str] = frozenset({
+    "proceedings of the acm on human-computer interaction",
+    "proceedings of the acm on networking",
+    "proceedings of the acm on software engineering",
+    "proceedings of the acm on programming languages",
+    "proceedings of the acm on interactive, mobile, wearable and ubiquitous technologies",
+    "proceedings of the acm on management of data",
+    "pacm on human-computer interaction",
+    "pacm on networking",
+    "pacm on software engineering",
+    "pacm hci",
+})
+
+# Publisher corrections: {journal_lower_substring: correct_publisher}
+PUBLISHER_CORRECTIONS: dict[str, str] = {
+    "journal of computational biology": "Mary Ann Liebert",
+    "computational and structural biotechnology journal": "Elsevier",
+}
 
 # Conference venues that lack standard keywords (proceedings, conference, etc.)
 KNOWN_CONFERENCE_VENUES = frozenset({
@@ -247,6 +291,144 @@ JOURNAL_ONLY_PREFIXES = (
 
 # Author name suffixes to strip when extracting last names
 AUTHOR_NAME_SUFFIXES = frozenset({'jr', 'sr', 'ii', 'iii', 'iv', 'v'})
+
+# Fused compound words: hyphens stripped by Google Scholar.
+# Maps lowercased fused form → correctly hyphenated replacement.
+# Suffixes that reliably form hyphenated compound adjectives in scientific text.
+# Used by _fix_fused_compounds() as a fallback after dictionary lookup.
+# The suffix approach matches words like "Knowledgedriven" → "Knowledge-Driven"
+# when the prefix has ≥3 characters starting with an uppercase letter.
+COMPOUND_SUFFIXES: tuple[str, ...] = (
+    "based", "driven", "aware", "oriented", "informed", "powered", "defined",
+    "assisted", "enriched", "preserved", "focused", "engaged", "organized",
+    "grained", "specific", "dependent", "efficient", "adaptive", "cooperative",
+    "free", "level", "dimensional", "sensitive", "agnostic",
+    "centric", "intensive", "delivered",
+)
+
+# Dictionary of fused compound words for cases NOT caught by suffix-based detection:
+# - Acronym prefixes (AI, FM, EEG, 6G, D2D, DNS, etc.)
+# - Short prefixes (In, E, Low, etc.)
+# - Irregular patterns (realtime, objectoriented, etc.)
+# - Multi-word compounds (stateoftheart, endtoend, etc.)
+FUSED_COMPOUND_WORDS: dict[str, str] = {
+    # --- Multi-word compounds ---
+    "stateoftheart": "State-of-the-Art",
+    "endtoend": "End-to-End",
+    "end-toend": "End-to-End",
+    # --- Acronym prefixes (not caught by suffix regex: [A-Z][a-z]{2,}) ---
+    "aidriven": "AI-Driven",
+    "aipowered": "AI-Powered",
+    "aibased": "AI-Based",
+    "eegbased": "EEG-Based",
+    "eegdriven": "EEG-Driven",
+    "dnsbased": "DNS-Based",
+    "fmindex": "FM-Index",
+    "d2dassisted": "D2D-Assisted",
+    "6gempowered": "6G-Empowered",
+    "llmbased": "LLM-Based",
+    "llmpowered": "LLM-Powered",
+    "sdnbased": "SDN-Based",
+    "ganbased": "GAN-Based",
+    "drlbased": "DRL-Based",
+    "iotbased": "IoT-Based",
+    "gnntransformerbased": "GNN-Transformer-Based",
+    "chatgptbased": "ChatGPT-Based",
+    # --- Short prefixes (< 3 lowercase chars after initial capital) ---
+    "innetwork": "In-Network",
+    "ecommerce": "E-Commerce",
+    # --- "Real-Time" and similar non-suffix patterns ---
+    "realtime": "Real-Time",
+    "longterm": "Long-Term",
+    "shortterm": "Short-Term",
+    "lowcost": "Low-Cost",
+    "lowpower": "Low-Power",
+    "lowlatency": "Low-Latency",
+    "lowcomplexity": "Low-Complexity",
+    "lowresource": "Low-Resource",
+    "lowdimensional": "Low-Dimensional",
+    "lowfrequency": "Low-Frequency",
+    "highlevel": "High-Level",
+    "highperformance": "High-Performance",
+    "higherorder": "Higher-Order",
+    # --- Irregular patterns (suffix not in COMPOUND_SUFFIXES) ---
+    "realworld": "Real-World",
+    "objectoriented": "Object-Oriented",
+    "firstorder": "First-Order",
+    "worstcase": "Worst-Case",
+    "breadthfirst": "Breadth-First",
+    "longread": "Long-Read",
+    "shortread": "Short-Read",
+    "prefixfree": "Prefix-Free",
+    "donorrecipient": "Donor-Recipient",
+    "arabicenglish": "Arabic-English",
+    "physicianpatient": "Physician-Patient",
+    "dialoguenote": "Dialogue-Note",
+    "microcluster": "Micro-Cluster",
+    "earlystage": "Early-Stage",
+    "performanceenergy": "Performance-Energy",
+    "transportlayer": "Transport-Layer",
+    "conceptlevel": "Concept-Level",
+    "countylevel": "County-Level",
+    "sessionlevel": "Session-Level",
+    "selforganizing": "Self-Organizing",
+    "selftracking": "Self-Tracking",
+    "multiaccess": "Multi-Access",
+    "multiagent": "Multi-Agent",
+    "multiarmed": "Multi-Armed",
+    "multiobjective": "Multi-Objective",
+    "multistage": "Multi-Stage",
+    "multitask": "Multi-Task",
+    "multimodal": "Multi-Modal",
+    "multiscale": "Multi-Scale",
+    "multirequest": "Multi-Request",
+    "crosslingual": "Cross-Lingual",
+    "crossdomain": "Cross-Domain",
+    "crossspecies": "Cross-Species",
+    "crosslayer": "Cross-Layer",
+    "crossentropy": "Cross-Entropy",
+    "crossdevice": "Cross-Device",
+    "noncooperative": "Non-Cooperative",
+    "nonshared": "Non-Shared",
+    "metalearning": "Meta-Learning",
+    "metaanalysis": "Meta-Analysis",
+    "testtime": "Test-Time",
+    "obsessivecompulsive": "Obsessive-Compulsive",
+    "genomewide": "Genome-Wide",
+    "selfsupervised": "Self-Supervised",
+    "largescale": "Large-Scale",
+    "finetuning": "Fine-Tuning",
+    "finetuned": "Fine-Tuned",
+    "noninvasive": "Non-Invasive",
+    "semisupervised": "Semi-Supervised",
+    "braincomputer": "Brain-Computer",
+    "hybridpointing": "Hybrid-Pointing",
+    "sexdependent": "Sex-Dependent",
+    "geneenvironment": "Gene-Environment",
+    "yalebrown": "Yale-Brown",
+    "interdataset": "Inter-Dataset",
+    "eyetracking": "Eye-Tracking",
+    "zeroshot": "Zero-Shot",
+    "fewshot": "Few-Shot",
+    "pretrained": "Pre-Trained",
+    "pretraining": "Pre-Training",
+    "fullduplex": "Full-Duplex",
+    "halfduplex": "Half-Duplex",
+    "deeplearning": "Deep-Learning",
+    "reinforcementlearning": "Reinforcement-Learning",
+    "machinelearning": "Machine-Learning",
+    "openaccess": "Open-Access",
+    "opensource": "Open-Source",
+    "energyefficient": "Energy-Efficient",
+    "costeffective": "Cost-Effective",
+    "softwaredefined": "Software-Defined",
+    "timecritical": "Time-Critical",
+    "phonebased": "Phone-Based",
+    "populationbased": "Population-Based",
+    "taskspecific": "Task-Specific",
+    # --- Layer/tracking compounds (not in COMPOUND_SUFFIXES due to false positives) ---
+    "physicallayer": "Physical-Layer",
+}
 
 # Multi-signal dedup thresholds
 SIM_DEDUP_COMPOSITE_THRESHOLD = 0.60   # composite score to treat as same paper

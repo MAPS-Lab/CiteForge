@@ -43,6 +43,8 @@ from src.clients.search_apis import (
     s2_search_papers_multiple,
 )
 from src.config import (
+    ACM_JOURNAL_PROCEEDINGS,
+    COMPOUND_SUFFIXES,
     CONTRIBUTION_WINDOW_YEARS,
     DEFAULT_A2I2_INPUT,
     DEFAULT_INPUT,
@@ -50,14 +52,19 @@ from src.config import (
     DEFAULT_S2_KEY_FILE,
     DEFAULT_SERPAPI_KEY_FILE,
     DEFAULT_SERPLY_KEY_FILE,
+    FUSED_COMPOUND_WORDS,
     GENERIC_SERIES_NAMES,
+    INSTITUTIONAL_REPOSITORIES,
+    JOURNALS_NAMED_PROCEEDINGS,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
     MIN_TITLE_WORDS,
     PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
+    PROCEEDINGS_SERIES_AS_JOURNAL,
     PUB_PARSE_TIER1_MIN_CONFIDENCE,
     PUB_PARSE_TIER2_MIN_CONFIDENCE,
+    PUBLISHER_CORRECTIONS,
     REPOSITORY_AS_JOURNAL,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
@@ -150,6 +157,153 @@ def _is_corrupted_title(title: str) -> bool:
     Matches patterns like "Li2 ()" -- author name + numeric affiliation + empty parens.
     """
     return len(re.findall(r'\b[A-Z][a-z]+\d+\s*\(\)', title)) >= 2
+
+
+def _fix_fused_compounds(title: str) -> str:
+    """Fix fused compound words in titles (hyphens stripped by Google Scholar).
+
+    Two-pass approach:
+    1. Dictionary lookup for special cases (acronyms, irregular patterns).
+    2. Suffix-based detection for common compound adjective suffixes
+       (e.g. "Knowledgedriven" → "Knowledge-Driven").
+    """
+    if not title:
+        return title
+    result = title
+    # Pass 1: Dictionary-based fixes (highest priority, handles acronyms & irregulars)
+    for fused_lower, replacement in FUSED_COMPOUND_WORDS.items():
+        pattern = re.compile(re.escape(fused_lower), re.IGNORECASE)
+        result = pattern.sub(replacement, result)
+    # Pass 2: Suffix-based detection for remaining fused compounds.
+    # Matches title-cased words: [A-Z][a-z]{2,} prefix + known compound suffix.
+    for suffix in COMPOUND_SUFFIXES:
+        sfx_pat = re.compile(r'\b([A-Z][a-z]{2,})(' + re.escape(suffix) + r')\b')
+        result = sfx_pat.sub(lambda m: m.group(1) + '-' + m.group(2).capitalize(), result)
+    return result
+
+
+def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
+    """Apply entry type and field corrections to a parsed BibTeX entry.
+
+    Returns True if any changes were made.
+    Used by both the per-article fixup and the post-run orphan fixup.
+    """
+    fields = entry.get("fields") or {}
+    changed = False
+    etype = entry.get("type", "")
+
+    # Reclassify @article with Procedia/IFAC series → @inproceedings
+    if etype == "article" and fields.get("journal"):
+        jnl_lower = fields["journal"].strip().lower()
+        if any(jnl_lower.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL):
+            fields["booktitle"] = fields.pop("journal")
+            entry["type"] = "inproceedings"
+            changed = True
+
+    # Reclassify @inproceedings with PACM journal → @article
+    if entry.get("type") == "inproceedings" and fields.get("booktitle"):
+        bt_lower = fields["booktitle"].strip().lower()
+        if any(bt_lower.startswith(pj) or bt_lower == pj for pj in ACM_JOURNAL_PROCEEDINGS):
+            fields["journal"] = fields.pop("booktitle")
+            entry["type"] = "article"
+            changed = True
+
+    # Reclassify @inproceedings with PNAS/PVLDB journal → @article
+    if entry.get("type") == "inproceedings" and fields.get("booktitle"):
+        bt_lower = fields["booktitle"].strip().lower()
+        if any(bt_lower.startswith(j) for j in JOURNALS_NAMED_PROCEEDINGS):
+            fields["journal"] = fields.pop("booktitle")
+            entry["type"] = "article"
+            changed = True
+
+    # Reclassify @inproceedings with institutional repository → @phdthesis
+    if entry.get("type") == "inproceedings" and fields.get("booktitle"):
+        bt_lower = fields["booktitle"].strip().lower()
+        if any(ir in bt_lower for ir in INSTITUTIONAL_REPOSITORIES):
+            fields["school"] = fields.pop("booktitle")
+            entry["type"] = "phdthesis"
+            changed = True
+
+    # Downgrade @inproceedings with repository as booktitle → @misc
+    if (entry.get("type") == "inproceedings" and fields.get("booktitle")
+            and any(rj in fields["booktitle"].lower() for rj in REPOSITORY_AS_JOURNAL)):
+        entry["type"] = "misc"
+        fields.pop("booktitle", None)
+        changed = True
+
+    # Downgrade @article with repository as journal → @misc
+    if (entry.get("type") == "article" and fields.get("journal")
+            and any(rj in fields["journal"].lower() for rj in REPOSITORY_AS_JOURNAL)):
+        entry["type"] = "misc"
+        fields.pop("journal", None)
+        changed = True
+
+    # Downgrade @inproceedings with "Preprint" as booktitle → @misc
+    if (entry.get("type") == "inproceedings" and fields.get("booktitle")
+            and fields["booktitle"].strip().lower() == "preprint"):
+        entry["type"] = "misc"
+        fields.pop("booktitle", None)
+        changed = True
+
+    # Reclassify @inproceedings with "Handbook" in booktitle → @incollection
+    if (entry.get("type") == "inproceedings" and fields.get("booktitle")
+            and "handbook" in fields["booktitle"].lower()):
+        entry["type"] = "incollection"
+        changed = True
+
+    # Reclassify @article with conference proceedings in journal → @inproceedings
+    # (but NOT for ACM PACM journals which are legitimately named "Proceedings of...")
+    if entry.get("type") == "article" and fields.get("journal"):
+        jnl = fields["journal"].strip()
+        jnl_lower = jnl.lower()
+        is_pacm = any(jnl_lower.startswith(pj) or jnl_lower == pj for pj in ACM_JOURNAL_PROCEEDINGS)
+        if mu._is_conference_journal(jnl) and not fields.get("booktitle") and not is_pacm:
+            fields["booktitle"] = fields.pop("journal")
+            entry["type"] = "inproceedings"
+            changed = True
+
+    # Fix fused compound words in title
+    title = fields.get("title", "")
+    if isinstance(title, str) and title:
+        fixed_title = _fix_fused_compounds(title)
+        if fixed_title != title:
+            fields["title"] = fixed_title
+            changed = True
+
+    # Strip [preprint] marker from title
+    title = fields.get("title", "")
+    if isinstance(title, str) and re.search(r'\[preprint\]', title, re.IGNORECASE):
+        fields["title"] = re.sub(r'\s*\[preprint\]\s*$', '', title, flags=re.IGNORECASE).strip()
+        changed = True
+
+    # Fix line-break hyphenation artifacts (e.g. "Optimiza-Tion" → "Optimization")
+    title = fields.get("title", "")
+    if isinstance(title, str) and re.search(r'\w-[A-Z][a-z]', title):
+        fields["title"] = re.sub(
+            r'(\w)-([A-Z])([a-z])', lambda m: m.group(1) + m.group(2).lower() + m.group(3), title
+        )
+        changed = True
+
+    # Strip URLs embedded in booktitle/journal
+    for url_field in ("booktitle", "journal"):
+        url_val = (fields.get(url_field) or "").strip()
+        if url_val and re.search(r'https?://', url_val):
+            url_cleaned = re.sub(r',?\s*https?://\S+', '', url_val).strip().rstrip(',')
+            if url_cleaned and url_cleaned != url_val:
+                fields[url_field] = url_cleaned
+                changed = True
+
+    # Apply publisher corrections
+    pub_journal = (fields.get("journal") or "").lower()
+    if pub_journal:
+        for jnl_key, correct_pub in PUBLISHER_CORRECTIONS.items():
+            if jnl_key in pub_journal:
+                cur_pub = fields.get("publisher", "")
+                if cur_pub and cur_pub != correct_pub:
+                    fields["publisher"] = correct_pub
+                    changed = True
+
+    return changed
 
 
 def _entry_is_complete(entry: dict[str, Any]) -> bool:
@@ -579,6 +733,140 @@ def process_article(
                 _bl_fields["school"] = _bl_fields.pop("journal")
                 baseline_entry["type"] = "phdthesis"
                 _fixup_written = True
+
+        # Reclassify @article with Procedia/IFAC series → @inproceedings
+        if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
+            _proc_jnl = _bl_fields["journal"].strip().lower()
+            if any(_proc_jnl.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL):
+                logger.debug(
+                    f"EXISTING_FIXUP | article_procedia->inproceedings | journal={_bl_fields['journal'][:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["booktitle"] = _bl_fields.pop("journal")
+                baseline_entry["type"] = "inproceedings"
+                _fixup_written = True
+
+        # Reclassify @inproceedings with PACM journal → @article
+        if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
+            _pacm_bt = _bl_fields["booktitle"].strip().lower()
+            if any(_pacm_bt.startswith(pj) or _pacm_bt == pj for pj in ACM_JOURNAL_PROCEEDINGS):
+                logger.debug(
+                    f"EXISTING_FIXUP | inproceedings_pacm->article | booktitle={_bl_fields['booktitle'][:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["journal"] = _bl_fields.pop("booktitle")
+                baseline_entry["type"] = "article"
+                _fixup_written = True
+
+        # Reclassify @inproceedings with PNAS/PVLDB journal → @article
+        if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
+            _jnp_bt = _bl_fields["booktitle"].strip().lower()
+            if any(_jnp_bt.startswith(j) for j in JOURNALS_NAMED_PROCEEDINGS):
+                logger.debug(
+                    f"EXISTING_FIXUP | inproceedings_journal_proceedings->article | booktitle={_jnp_bt[:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["journal"] = _bl_fields.pop("booktitle")
+                baseline_entry["type"] = "article"
+                _fixup_written = True
+
+        # Reclassify @inproceedings with institutional repository → @phdthesis
+        if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
+            _inst_bt = _bl_fields["booktitle"].strip().lower()
+            if any(ir in _inst_bt for ir in INSTITUTIONAL_REPOSITORIES):
+                logger.debug(
+                    f"EXISTING_FIXUP | inproceedings_repository->phdthesis | booktitle={_bl_fields['booktitle'][:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["school"] = _bl_fields.pop("booktitle")
+                baseline_entry["type"] = "phdthesis"
+                _fixup_written = True
+
+        # Downgrade @inproceedings with repository as booktitle → @misc
+        if (baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle")
+                and any(rj in _bl_fields["booktitle"].lower() for rj in REPOSITORY_AS_JOURNAL)):
+            logger.debug(
+                f"EXISTING_FIXUP | inproceedings_repository->misc | booktitle={_bl_fields['booktitle'][:60]}",
+                category=LogCategory.CLEANUP,
+            )
+            baseline_entry["type"] = "misc"
+            _bl_fields.pop("booktitle", None)
+            _fixup_written = True
+
+        # Downgrade @inproceedings with "Preprint" as booktitle → @misc
+        if (baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle")
+                and _bl_fields["booktitle"].strip().lower() == "preprint"):
+            logger.debug("EXISTING_FIXUP | inproceedings_preprint->misc", category=LogCategory.CLEANUP)
+            baseline_entry["type"] = "misc"
+            _bl_fields.pop("booktitle", None)
+            _fixup_written = True
+
+        # Reclassify @inproceedings with "Handbook" in booktitle → @incollection
+        if (baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle")
+                and "handbook" in _bl_fields["booktitle"].lower()):
+            logger.debug(
+                f"EXISTING_FIXUP | inproceedings_handbook->incollection | "
+                f"booktitle={_bl_fields['booktitle'][:60]}",
+                category=LogCategory.CLEANUP,
+            )
+            baseline_entry["type"] = "incollection"
+            _fixup_written = True
+
+        # Strip [preprint] marker from title
+        _bl_title_pp = _bl_fields.get("title", "")
+        if isinstance(_bl_title_pp, str) and re.search(r'\[preprint\]', _bl_title_pp, re.IGNORECASE):
+            _bl_fields["title"] = re.sub(r'\s*\[preprint\]\s*$', '', _bl_title_pp, flags=re.IGNORECASE).strip()
+            _fixup_written = True
+
+        # Fix line-break hyphenation artifacts (e.g. "Optimiza-Tion" → "Optimization")
+        _bl_title_hyph = _bl_fields.get("title", "")
+        if isinstance(_bl_title_hyph, str) and re.search(r'\w-[A-Z][a-z]', _bl_title_hyph):
+            _bl_fields["title"] = re.sub(
+                r'(\w)-([A-Z])([a-z])', lambda m: m.group(1) + m.group(2).lower() + m.group(3), _bl_title_hyph
+            )
+            _fixup_written = True
+
+        # Fix fused compound words in title (hyphens stripped by Scholar)
+        _bl_title_fused = _bl_fields.get("title", "")
+        if isinstance(_bl_title_fused, str) and _bl_title_fused:
+            _bl_title_fixed = _fix_fused_compounds(_bl_title_fused)
+            if _bl_title_fixed != _bl_title_fused:
+                _bl_fields["title"] = _bl_title_fixed
+                _fixup_written = True
+
+        # Strip URLs embedded in booktitle/journal
+        for _url_field in ("booktitle", "journal"):
+            _url_val = (_bl_fields.get(_url_field) or "").strip()
+            if _url_val and re.search(r'https?://', _url_val):
+                _url_cleaned = re.sub(r',?\s*https?://\S+', '', _url_val).strip().rstrip(',')
+                if _url_cleaned and _url_cleaned != _url_val:
+                    _bl_fields[_url_field] = _url_cleaned
+                    _fixup_written = True
+
+        # Apply publisher corrections
+        _pub_journal_bl = (_bl_fields.get("journal") or "").lower()
+        if _pub_journal_bl:
+            for _pub_jnl_key, _pub_correct in PUBLISHER_CORRECTIONS.items():
+                if _pub_jnl_key in _pub_journal_bl:
+                    _cur_pub_bl = _bl_fields.get("publisher", "")
+                    if _cur_pub_bl and _cur_pub_bl != _pub_correct:
+                        _bl_fields["publisher"] = _pub_correct
+                        _fixup_written = True
+
+        # Delete entries where title equals journal or booktitle (corrupted Scholar data)
+        _bl_title_venue = (_bl_fields.get("title") or "").strip().lower()
+        if _bl_title_venue:
+            _bl_journal_venue = (_bl_fields.get("journal") or "").strip().lower()
+            _bl_booktitle_venue = (_bl_fields.get("booktitle") or "").strip().lower()
+            if (_bl_journal_venue and _bl_title_venue == _bl_journal_venue) or \
+               (_bl_booktitle_venue and _bl_title_venue == _bl_booktitle_venue):
+                logger.debug(
+                    f"EXISTING_FIXUP | title_is_venue | title={_bl_title_venue[:60]} | deleting",
+                    category=LogCategory.CLEANUP,
+                )
+                if existing_file_path and os.path.exists(existing_file_path):
+                    os.remove(existing_file_path)
+                return 0
 
         # Remove preprint DOI from @article that has a real journal+volume/pages
         if (baseline_entry.get("type") == "article"
@@ -1413,6 +1701,50 @@ def process_article(
                 merged["type"] = "inproceedings"
                 merged_fields["booktitle"] = merged_fields.pop("journal")
 
+        # Reclassify @article with Procedia/IFAC series journal → @inproceedings
+        if merged.get("type") == "article" and merged_fields.get("journal"):
+            _proc_jnl_lower = merged_fields["journal"].strip().lower()
+            if any(_proc_jnl_lower.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL):
+                logger.debug(
+                    f"TYPE_CORRECT | article_procedia->inproceedings | journal={merged_fields['journal'][:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "inproceedings"
+                merged_fields["booktitle"] = merged_fields.pop("journal")
+
+        # Reclassify @inproceedings with PACM journal as booktitle → @article
+        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
+            _pacm_bt_lower = merged_fields["booktitle"].strip().lower()
+            if any(_pacm_bt_lower.startswith(pj) or _pacm_bt_lower == pj for pj in ACM_JOURNAL_PROCEEDINGS):
+                logger.debug(
+                    f"TYPE_CORRECT | inproceedings_pacm->article | booktitle={merged_fields['booktitle'][:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "article"
+                merged_fields["journal"] = merged_fields.pop("booktitle")
+
+        # Reclassify @inproceedings with PNAS/PVLDB journal as booktitle → @article
+        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
+            _jnp_bt_lower = merged_fields["booktitle"].strip().lower()
+            if any(_jnp_bt_lower.startswith(j) for j in JOURNALS_NAMED_PROCEEDINGS):
+                logger.debug(
+                    f"TYPE_CORRECT | inproceedings_journal_proceedings->article | booktitle={_jnp_bt_lower[:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "article"
+                merged_fields["journal"] = merged_fields.pop("booktitle")
+
+        # Reclassify @inproceedings with institutional repository → @phdthesis
+        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
+            _inst_bt_lower = merged_fields["booktitle"].strip().lower()
+            if any(ir in _inst_bt_lower for ir in INSTITUTIONAL_REPOSITORIES):
+                logger.debug(
+                    f"TYPE_CORRECT | inproceedings_repository->phdthesis | booktitle={merged_fields['booktitle'][:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "phdthesis"
+                merged_fields["school"] = merged_fields.pop("booktitle")
+
         # Reclassify @article with patent number as journal → @misc
         if merged.get("type") == "article" and merged_fields.get("journal"):
             _patent_jnl = merged_fields["journal"].strip()
@@ -1460,6 +1792,16 @@ def process_article(
             logger.debug("TYPE_CORRECT | inproceedings_preprint->misc", category=LogCategory.AUDIT)
             merged["type"] = "misc"
             merged_fields.pop("booktitle", None)
+
+        # Reclassify @inproceedings with "Handbook" in booktitle → @incollection
+        if (merged.get("type") == "inproceedings" and merged_fields.get("booktitle")
+                and "handbook" in merged_fields["booktitle"].lower()):
+            logger.debug(
+                f"TYPE_CORRECT | inproceedings_handbook->incollection | "
+                f"booktitle={merged_fields['booktitle'][:60]}",
+                category=LogCategory.AUDIT,
+            )
+            merged["type"] = "incollection"
 
         # Downgrade @article with repository/portal as journal → @misc
         if (merged.get("type") == "article" and merged_fields.get("journal")
@@ -1525,14 +1867,40 @@ def process_article(
             elif (merged_fields.get("archiveprefix") or "").lower() == "arxiv":
                 merged_fields["howpublished"] = "arXiv"
 
-        # Fix ALL-CAPS titles and strip [J] artifacts from enrichment sources
+        # Fix ALL-CAPS titles and strip [J]/[preprint] artifacts from enrichment sources
         _p4_title = merged_fields.get("title", "")
         if isinstance(_p4_title, str) and _p4_title:
             _p4_fixed = trim_title_default(_p4_title)
             # Strip [J] bracket artifact (citation format leak from Scholar)
             _p4_fixed = _BRACKET_J_RE.sub('', _p4_fixed).strip()
+            # Strip [preprint] marker from title text
+            _p4_fixed = re.sub(r'\s*\[preprint\]\s*$', '', _p4_fixed, flags=re.IGNORECASE).strip()
+            # Fix line-break hyphenation artifacts (e.g. "Optimiza-Tion" → "Optimization")
+            _p4_fixed = re.sub(
+                r'(\w)-([A-Z])([a-z])',
+                lambda m: m.group(1) + m.group(2).lower() + m.group(3), _p4_fixed,
+            )
+            # Fix fused compound words (hyphens stripped by Scholar)
+            _p4_fixed = _fix_fused_compounds(_p4_fixed)
             if _p4_fixed != _p4_title:
                 merged_fields["title"] = _p4_fixed
+
+        # Strip URLs embedded in booktitle/journal (keep text before URL)
+        for _url_field in ("booktitle", "journal"):
+            _url_val = (merged_fields.get(_url_field) or "").strip()
+            if _url_val and re.search(r'https?://', _url_val):
+                _url_cleaned = re.sub(r',?\s*https?://\S+', '', _url_val).strip().rstrip(',')
+                if _url_cleaned and _url_cleaned != _url_val:
+                    merged_fields[_url_field] = _url_cleaned
+
+        # Apply publisher corrections (e.g. SAGE → Mary Ann Liebert for JCB)
+        _pub_journal = (merged_fields.get("journal") or "").lower()
+        if _pub_journal:
+            for _pub_jnl_key, _pub_correct in PUBLISHER_CORRECTIONS.items():
+                if _pub_jnl_key in _pub_journal:
+                    _cur_pub = merged_fields.get("publisher", "")
+                    if _cur_pub and _cur_pub != _pub_correct:
+                        merged_fields["publisher"] = _pub_correct
 
         # Fix author casing + capital "And" separators from API sources
         _p4_auth = merged_fields.get("author", "")
@@ -1631,6 +1999,22 @@ def process_article(
                     "Bare stub: no venue, no DOI, no enrichment; annotated with note",
                     category=LogCategory.AUDIT,
                 )
+
+        # Delete entries where title equals journal or booktitle (corrupted Scholar data).
+        # Placed after Tier 2 filling so it catches entries populated from SerpAPI pub strings.
+        _p4_title_lower = (merged_fields.get("title") or "").strip().lower()
+        if _p4_title_lower:
+            _p4_journal_lower = (merged_fields.get("journal") or "").strip().lower()
+            _p4_booktitle_lower = (merged_fields.get("booktitle") or "").strip().lower()
+            if (_p4_journal_lower and _p4_title_lower == _p4_journal_lower) or \
+               (_p4_booktitle_lower and _p4_title_lower == _p4_booktitle_lower):
+                logger.debug(
+                    f"TITLE_IS_VENUE | title={_p4_title_lower[:60]} | skipping entry",
+                    category=LogCategory.AUDIT,
+                )
+                if path and os.path.isfile(path):
+                    os.remove(path)
+                return 0
 
         # Skip entries with type "book" (proceedings volumes, edited books — not individual papers)
         if merged.get("type") == "book":
@@ -2289,6 +2673,33 @@ def main() -> int:
             if window_removed:
                 logger.info(
                     f"Removed {window_removed} out-of-window files (year < {window_min})",
+                    category=LogCategory.CLEANUP,
+                )
+
+            # Post-run fixup: apply entry type and field corrections to ALL .bib files
+            # This catches orphans (files not processed during enrichment) and any
+            # entries where Phase 4 corrections were undone by Tier 2 filling.
+            postrun_fixed = 0
+            for pr_entry_name in sorted(os.listdir(out_dir)):
+                pr_dir = os.path.join(out_dir, pr_entry_name)
+                if not os.path.isdir(pr_dir) or pr_entry_name == "a2i2":
+                    continue
+                for pr_fname in sorted(os.listdir(pr_dir)):
+                    if not pr_fname.endswith(".bib"):
+                        continue
+                    pr_fpath = os.path.join(pr_dir, pr_fname)
+                    try:
+                        with open(pr_fpath, encoding="utf-8") as prf:
+                            pr_parsed = bt.parse_bibtex_to_dict(prf.read())
+                        if pr_parsed and _fixup_bib_entry(pr_parsed):
+                            bib_str = bt.bibtex_from_dict(pr_parsed)
+                            safe_write_file(pr_fpath, bib_str)
+                            postrun_fixed += 1
+                    except (OSError, ValueError):
+                        pass
+            if postrun_fixed:
+                logger.info(
+                    f"Post-run fixup: corrected {postrun_fixed} .bib files",
                     category=LogCategory.CLEANUP,
                 )
 

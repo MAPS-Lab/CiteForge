@@ -19,6 +19,7 @@ from .config import (
     PREPRINT_DOI_PREFIXES,
     PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
+    PUBLISHER_CORRECTIONS,
     SIM_DEDUP_COMPOSITE_THRESHOLD,
     SIM_FILE_DUPLICATE_THRESHOLD,
     SIM_PREPRINT_TITLE_THRESHOLD,
@@ -564,6 +565,20 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
         merged["publisher"] = "Cold Spring Harbor Laboratory"
+
+    # Apply journal-specific publisher corrections (e.g. SAGE → Mary Ann Liebert for JCB)
+    if journal_lower:
+        for _jnl_key, _correct_pub in PUBLISHER_CORRECTIONS.items():
+            if _jnl_key in journal_lower:
+                _cur_pub = merged.get("publisher", "")
+                if _cur_pub and _cur_pub != _correct_pub:
+                    logger.debug(
+                        f"publisher_correct | journal={journal_lower[:50]} "
+                        f"| publisher={_cur_pub}->{_correct_pub}",
+                        category=LogCategory.CLEANUP,
+                    )
+                    merged["publisher"] = _correct_pub
+                break
 
     # Strip preprint-only publishers from entries that have a real journal
     pub_lower = (merged.get("publisher") or "").lower().strip()

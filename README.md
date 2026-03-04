@@ -22,7 +22,7 @@
 
 Google Scholar entries are often incomplete, missing DOIs, or formatted inconsistently. Manually cross-referencing Crossref, Semantic Scholar, arXiv, PubMed, and other databases is tedious and error-prone, especially for authors with large publication records across multiple venues.
 
-CiteForge automates this process. It retrieves author publications via [SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/), queries 13 academic APIs for metadata, deduplicates results through fuzzy title and author matching, and merges fields using a 14-level trust hierarchy that prefers authoritative sources over less reliable ones.
+CiteForge automates this process. It retrieves author publications via [SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/), queries 13 academic APIs for metadata, deduplicates results through fuzzy title and author matching, and merges fields using a 13-level trust hierarchy that prefers authoritative sources over less reliable ones.
 
 ---
 
@@ -80,12 +80,13 @@ API responses are cached under `data/api_cache/` with monthly expiry. Subsequent
 
 ## Pipeline
 
-Each article passes through four phases:
+Each article passes through five phases:
 
 | Phase | Name | Description |
 |:-----:|------|-------------|
 | 1 | DOI Validation | Resolve DOIs via CSL-JSON with BibTeX fallback |
-| 2 | API Enrichment | Query 7 APIs, score and select best candidate per source |
+| 2 | API Enrichment | Query S2, Crossref, arXiv, OpenAlex, PubMed, Europe PMC, DBLP, and OpenReview |
+| 2.5 | Venue Enrichment | Parse SerpAPI publication strings for venue-based API search (fallback) |
 | 3 | Late DOI Discovery | Collect DOI candidates; prefer published over preprint |
 | 4 | Trust-Based Merge | Combine fields by source rank, then deduplicate on disk |
 
@@ -172,13 +173,13 @@ All parameters live in [`src/config.py`](src/config.py):
 | Parameter | Default | Description |
 |-----------|:-------:|-------------|
 | `MAX_WORKERS` | 12 | Parallel author processing threads |
-| `CONTRIBUTION_WINDOW_YEARS` | 5 | Years of publications to fetch |
+| `CONTRIBUTION_WINDOW_YEARS` | 7 | Years of publications to fetch |
 | `PUBLICATIONS_PER_YEAR` | 50 | Target publications per year |
 | `SIM_MERGE_DUPLICATE_THRESHOLD` | 0.95 | Title similarity for file-level dedup |
 | `SIM_PREPRINT_TITLE_THRESHOLD` | 0.55 | Relaxed threshold for preprint/published pairs |
-| `REQUEST_DELAY_MIN` / `_MAX` | 0.1 / 0.5s | Courtesy delay between API requests |
+| `REQUEST_DELAY_MIN` / `_MAX` | 0.3 / 1.0s | Courtesy delay between API requests |
 | `CACHE_ENABLED` | True | Local API response caching |
-| `TRUST_ORDER` | 14 levels | Source priority for field-by-field merge |
+| `TRUST_ORDER` | 13 levels | Source priority for field-by-field merge |
 
 ---
 
@@ -189,7 +190,7 @@ pip install -e .[dev]
 pytest tests/ -v --tb=short
 ```
 
-318 tests across 14 modules. Integration tests requiring API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
+398 tests across 15 modules. Integration tests requiring API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
 All three quality gates must pass before merge:
 
@@ -206,7 +207,7 @@ pytest tests/ -v --tb=short          # Tests
 
 | Module | Purpose |
 |--------|---------|
-| `main.py` | Orchestrator: thread pool, 4-phase pipeline, CLI entry |
+| `main.py` | Orchestrator: thread pool, 5-phase pipeline, CLI entry |
 | `src/config.py` | Thresholds, trust order, HTTP params, API URLs |
 | `src/merge_utils.py` | Trust hierarchy merge, file save, multi-level dedup |
 | `src/bibtex_utils.py` | BibTeX parsing, serialization, entry matching |
@@ -216,6 +217,7 @@ pytest tests/ -v --tb=short          # Tests
 | `src/id_utils.py` | DOI classification, arXiv extraction, version matching |
 | `src/api_generics.py` | Generic search/build abstractions |
 | `src/api_configs.py` | Per-API field mapping configurations |
+| `src/publication_parser.py` | SerpAPI publication string parsing, venue/type inference |
 | `src/cache.py` | Disk-based API response cache with monthly expiry |
 | `src/http_utils.py` | HTTP session, retry, backoff, token bucket rate limiting |
 | `src/io_utils.py` | CSV I/O, key loading, phantom/orphan reconciliation |
@@ -225,6 +227,7 @@ pytest tests/ -v --tb=short          # Tests
 | `src/clients/scholar.py` | Google Scholar facade (SerpAPI + Serply) |
 | `src/clients/serpapi_scholar.py` | SerpAPI author publication retrieval |
 | `src/clients/serply_scholar.py` | Serply citation detail lookups |
+| `src/clients/scholarly_scholar.py` | Google Scholar web-scraping fallback |
 | `src/clients/search_apis.py` | S2, Crossref, arXiv, OpenReview, OpenAlex, PubMed, Europe PMC |
 | `src/clients/utility_apis.py` | DataCite, ORCID, DOI resolvers |
 | `src/clients/helpers.py` | Shared scoring and deduplication helpers |
