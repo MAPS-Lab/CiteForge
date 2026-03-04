@@ -43,6 +43,7 @@ from src.clients.search_apis import (
     s2_search_papers_multiple,
 )
 from src.config import (
+    ABBREVIATED_VENUE_MAP,
     ACM_JOURNAL_PROCEEDINGS,
     COMPOUND_SUFFIXES,
     CONTRIBUTION_WINDOW_YEARS,
@@ -312,6 +313,19 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
                 if cur_pub and cur_pub != correct_pub:
                     fields["publisher"] = correct_pub
                     changed = True
+
+    # Strip publisher when it duplicates the journal/booktitle name
+    pub = (fields.get("publisher") or "").strip()
+    container = (fields.get("journal") or fields.get("booktitle") or "").strip()
+    if pub and container and pub.lower() == container.lower():
+        del fields["publisher"]
+        changed = True
+
+    # Expand abbreviated venue names in booktitle (e.g., "NIME 2021" → full name)
+    bt = (fields.get("booktitle") or "").strip()
+    if bt and bt.lower() in ABBREVIATED_VENUE_MAP:
+        fields["booktitle"] = ABBREVIATED_VENUE_MAP[bt.lower()]
+        changed = True
 
     return changed
 

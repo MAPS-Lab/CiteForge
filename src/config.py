@@ -160,6 +160,7 @@ REPOSITORY_AS_JOURNAL: frozenset[str] = frozenset({
     "figshare",
     "underline science",
     "research portal",
+    "osti",
 })
 
 # Institutional repositories → entries should be @phdthesis (if thesis) or @misc
@@ -261,6 +262,13 @@ ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "ubicomp": "Ubiquitous Computing",
     "iui": "Intelligent User Interfaces",
     "dis": "Designing Interactive Systems",
+    "nime": "New Interfaces for Musical Expression",
+    "nime 2021": "New Interfaces for Musical Expression",
+    "nime 2022": "New Interfaces for Musical Expression",
+    "egu": "EGU General Assembly",
+    "aimc": "AI Music Creativity Conference",
+    "wnut": "Workshop on Noisy User-generated Text",
+    "nlp4musa": "NLP for Music and Audio Workshop",
 }
 
 # Reject digit-only pages longer than this (SAGE/Wiley article IDs)
@@ -310,7 +318,7 @@ COMPOUND_SUFFIXES: tuple[str, ...] = (
     "free", "level", "dimensional", "sensitive", "agnostic",
     "centric", "intensive", "delivered",
     "enhanced", "enhancing", "induced", "enabled", "augmented", "conditioned",
-    "embedded", "preserving",
+    "embedded", "preserving", "centered", "aided",
 )
 
 # Dictionary of fused compound words for cases NOT caught by suffix-based detection:
@@ -596,6 +604,84 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "digitaltwinenabled": "Digital-Twin-Enabled",
     "spaceairmarine": "Space-Air-Marine",
     "aerialmarine": "Aerial-Marine",
+    # --- Session 25, Iteration 1: Partially-fused multi-word compounds ---
+    "state-of-theart": "State-of-the-Art",
+    "out-ofview": "Out-of-View",
+    "out-ofdomain": "Out-of-Domain",
+    "sum-oflocaleffects": "Sum-of-Local-Effects",
+    "first-inhuman": "First-in-Human",
+    "llms-asjudges": "LLMs-as-Judges",
+    "sequence-tosequence": "Sequence-to-Sequence",
+    "text-toimage": "Text-to-Image",
+    "earth-tomars": "Earth-to-Mars",
+    "modelintheloop": "Model-in-the-Loop",
+    "learntorecommend": "Learn-to-Recommend",
+    "delaytrajectoryaccuracy": "Delay-Trajectory-Accuracy",
+    # --- Session 25, Iteration 1: Acronym-prefix compounds ---
+    "iotenabled": "IoT-Enabled",
+    "aienabled": "AI-Enabled",
+    "aiassisted": "AI-Assisted",
+    "aiadaptive": "AI-Adaptive",
+    "llmgenerated": "LLM-Generated",
+    "nfvenabled": "NFV-Enabled",
+    "uavcooperative": "UAV-Cooperative",
+    "fhircompliant": "FHIR-Compliant",
+    "dsgvocompliance": "DSGVO-Compliance",
+    "bwtruns": "BWT-Runs",
+    "slpcompressed": "SLP-Compressed",
+    "krakenlike": "KRAKEN-Like",
+    "smemfinding": "SMEM-Finding",
+    "enigmaataxia": "ENIGMA-Ataxia",
+    # --- Session 25, Iteration 1: Regular compound adjectives ---
+    "whitebox": "White-Box",
+    "communityacquired": "Community-Acquired",
+    "allcause": "All-Cause",
+    "humancomputer": "Human-Computer",
+    "humananimalcomputer": "Human-Animal-Computer",
+    "referenceguided": "Reference-Guided",
+    "motivationalcognitive": "Motivational-Cognitive",
+    "misogynymotivated": "Misogyny-Motivated",
+    "impulsivitycompulsivity": "Impulsivity-Compulsivity",
+    "informationgeometric": "Information-Geometric",
+    "focaluncertainty": "Focal-Uncertainty",
+    "keypointtrajectory": "Keypoint-Trajectory",
+    "metaaugmentation": "Meta-Augmentation",
+    "metadimensionality": "Meta-Dimensionality",
+    "minimumlength": "Minimum-Length",
+    # --- Session 25, Iteration 2: Fused words at word boundaries ---
+    "burrowswheeler": "Burrows-Wheeler",
+    "populationscale": "Population-Scale",
+    "visionlanguage": "Vision-Language",
+    "driftaligned": "Drift-Aligned",
+    "safetycritical": "Safety-Critical",
+    "doubleedge": "Double-Edge",
+    "satelliteterrestrial": "Satellite-Terrestrial",
+    "twotier": "Two-Tier",
+    "stackelbergbargaining": "Stackelberg-Bargaining",
+    "multipleaspect": "Multiple-Aspect",
+    "energyawareness": "Energy-Awareness",
+    "scalesecond": "Scale-Second",
+    "zerotargetassumption": "Zero-Target-Assumption",
+    "multipsych": "MULTI-PSYCH",
+    # --- Session 25, Iteration 2: Partially-fused multi-word compounds ---
+    "model-in-theloop": "Model-in-the-Loop",
+    "learn-torecommend": "Learn-to-Recommend",
+    "diffuse-anddenoise": "Diffuse-and-Denoise",
+    # --- Session 25, Iteration 3: Acronym-prefix compounds ---
+    "sdiot": "SD-IoT",
+    "gaoptimized": "GA-Optimized",
+    "gptwritingprompts": "GPT-WritingPrompts",
+    "legoprover": "LEGO-Prover",
+    "ligdoctor": "LIG-Doctor",
+    "stxvote": "STX-Vote",
+    "tsdetector": "TS-Detector",
+    "oodprobe": "OOD-Probe",
+    "veremiextension": "VeReMi-Extension",
+    # --- Session 25, Iteration 3: Fused words at word boundaries ---
+    "emotionsemantic": "Emotion-Semantic",
+    "resumejob": "Resume-Job",
+    # --- Session 25, Iteration 3: Em-dash loss ---
+    "chatgptis": "ChatGPT---Is",
 }
 
 # Multi-signal dedup thresholds
