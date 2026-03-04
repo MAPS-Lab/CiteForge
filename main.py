@@ -55,6 +55,7 @@ from src.config import (
     FUSED_COMPOUND_WORDS,
     GENERIC_SERIES_NAMES,
     INSTITUTIONAL_REPOSITORIES,
+    JOURNAL_ONLY_PREFIXES,
     JOURNALS_NAMED_PROCEEDINGS,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
@@ -245,6 +246,14 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         fields.pop("booktitle", None)
         changed = True
 
+    # Reclassify @inproceedings with journal name as booktitle → @article
+    if entry.get("type") == "inproceedings" and fields.get("booktitle"):
+        bt_lower = fields["booktitle"].strip().lower()
+        if any(bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
+            fields["journal"] = fields.pop("booktitle")
+            entry["type"] = "article"
+            changed = True
+
     # Reclassify @inproceedings with "Handbook" in booktitle → @incollection
     if (entry.get("type") == "inproceedings" and fields.get("booktitle")
             and "handbook" in fields["booktitle"].lower()):
@@ -262,14 +271,6 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
             entry["type"] = "inproceedings"
             changed = True
 
-    # Fix fused compound words in title
-    title = fields.get("title", "")
-    if isinstance(title, str) and title:
-        fixed_title = _fix_fused_compounds(title)
-        if fixed_title != title:
-            fields["title"] = fixed_title
-            changed = True
-
     # Strip [preprint] marker from title
     title = fields.get("title", "")
     if isinstance(title, str) and re.search(r'\[preprint\]', title, re.IGNORECASE):
@@ -277,12 +278,21 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         changed = True
 
     # Fix line-break hyphenation artifacts (e.g. "Optimiza-Tion" → "Optimization")
+    # MUST run BEFORE compound fix so that restored compounds are not re-broken
     title = fields.get("title", "")
     if isinstance(title, str) and re.search(r'\w-[A-Z][a-z]', title):
         fields["title"] = re.sub(
             r'(\w)-([A-Z])([a-z])', lambda m: m.group(1) + m.group(2).lower() + m.group(3), title
         )
         changed = True
+
+    # Fix fused compound words in title (runs after hyphenation fix to restore real hyphens)
+    title = fields.get("title", "")
+    if isinstance(title, str) and title:
+        fixed_title = _fix_fused_compounds(title)
+        if fixed_title != title:
+            fields["title"] = fixed_title
+            changed = True
 
     # Strip URLs embedded in booktitle/journal
     for url_field in ("booktitle", "journal"):
@@ -800,6 +810,19 @@ def process_article(
             baseline_entry["type"] = "misc"
             _bl_fields.pop("booktitle", None)
             _fixup_written = True
+
+        # Reclassify @inproceedings with journal name as booktitle → @article
+        if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
+            _jp_bt_lower = _bl_fields["booktitle"].strip().lower()
+            if any(_jp_bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
+                logger.debug(
+                    f"EXISTING_FIXUP | inproceedings_journal_booktitle->article | "
+                    f"booktitle={_bl_fields['booktitle'][:60]}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields["journal"] = _bl_fields.pop("booktitle")
+                baseline_entry["type"] = "article"
+                _fixup_written = True
 
         # Reclassify @inproceedings with "Handbook" in booktitle → @incollection
         if (baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle")
@@ -1792,6 +1815,18 @@ def process_article(
             logger.debug("TYPE_CORRECT | inproceedings_preprint->misc", category=LogCategory.AUDIT)
             merged["type"] = "misc"
             merged_fields.pop("booktitle", None)
+
+        # Reclassify @inproceedings with journal name as booktitle → @article
+        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
+            _jp_bt_lower = merged_fields["booktitle"].strip().lower()
+            if any(_jp_bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
+                logger.debug(
+                    f"TYPE_CORRECT | inproceedings_journal_booktitle->article | "
+                    f"booktitle={merged_fields['booktitle'][:60]}",
+                    category=LogCategory.AUDIT,
+                )
+                merged["type"] = "article"
+                merged_fields["journal"] = merged_fields.pop("booktitle")
 
         # Reclassify @inproceedings with "Handbook" in booktitle → @incollection
         if (merged.get("type") == "inproceedings" and merged_fields.get("booktitle")
