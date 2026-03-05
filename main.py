@@ -327,6 +327,18 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         fields["booktitle"] = ABBREVIATED_VENUE_MAP[bt.lower()]
         changed = True
 
+    # Strip trailing " -" or en-dash from booktitle (truncation artifact)
+    bt = (fields.get("booktitle") or "").strip()
+    if bt and re.search(r'\s[-\u2013]\s*$', bt):
+        fields["booktitle"] = re.sub(r'\s[-\u2013]\s*$', '', bt)
+        changed = True
+
+    # Remove pages field that contains no digits (location strings, not page numbers)
+    pg = (fields.get("pages") or "").strip()
+    if pg and not re.search(r'\d', pg):
+        del fields["pages"]
+        changed = True
+
     return changed
 
 

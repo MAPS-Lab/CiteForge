@@ -2411,7 +2411,40 @@ class TestVenuelessTypeDowngrade:
 class TestArticlePreprintDoiDowngrade:
     """@article with preprint DOI should be downgraded to @misc."""
     def test_article_with_arxiv_doi_becomes_misc(self) -> None:
-        """@article with arXiv DOI and conference acronym -> @misc."""
+        """@article with arXiv DOI and journal-like venue -> @misc."""
+        baseline: dict[str, Any] = {
+            "type": "article",
+            "key": "Smith2023:SomeWork",
+            "fields": {
+                "title": "Some Research Work",
+                "author": "Jane Smith and John Doe",
+                "year": "2023",
+                "journal": "Neural Computing and Applications",
+                "doi": "10.48550/arxiv.2302.02792",
+                "eprint": "2302.02792",
+                "archiveprefix": "arXiv",
+            },
+        }
+        csl: dict[str, Any] = {
+            "type": "article",
+            "fields": {"doi": "10.48550/arxiv.2302.02792", "title": "Some Research Work"},
+        }
+        result = merge_utils.merge_with_policy(baseline, [("csl", csl)])
+        fields = result.get("fields", {})
+        doi = (fields.get("doi") or "").strip()
+        if result["type"] == "article" and doi and id_utils.is_secondary_doi(doi):
+            result["type"] = "misc"
+            if fields.get("journal"):
+                fields["howpublished"] = fields.pop("journal")
+        assert result["type"] == "misc", \
+            "@article with arXiv DOI must be @misc"
+        assert fields.get("howpublished") == "Neural Computing and Applications", \
+            "Venue should be preserved in howpublished"
+        assert "journal" not in fields, \
+            "journal field should be removed"
+
+    def test_conference_acronym_with_arxiv_doi_becomes_inproceedings(self) -> None:
+        """Conference acronym in ABBREVIATED_VENUE_MAP with arXiv DOI -> @inproceedings."""
         baseline: dict[str, Any] = {
             "type": "article",
             "key": "Nekoei2023:DealingNon",
@@ -2431,17 +2464,13 @@ class TestArticlePreprintDoiDowngrade:
         }
         result = merge_utils.merge_with_policy(baseline, [("csl", csl)])
         fields = result.get("fields", {})
-        doi = (fields.get("doi") or "").strip()
-        if result["type"] == "article" and doi and id_utils.is_secondary_doi(doi):
-            result["type"] = "misc"
-            if fields.get("journal"):
-                fields["howpublished"] = fields.pop("journal")
-        assert result["type"] == "misc", \
-            "@article with arXiv DOI must be @misc"
-        assert fields.get("howpublished") == "CoLLAs", \
-            "Venue should be preserved in howpublished"
+        # CoLLAs is in ABBREVIATED_VENUE_MAP: merge expands to full conference name
+        assert result["type"] == "inproceedings", \
+            "Conference acronym in venue map should become @inproceedings"
+        assert fields.get("booktitle") == "Conference on Lifelong Learning Agents", \
+            "CoLLAs should be expanded to full conference name"
         assert "journal" not in fields, \
-            "journal field should be removed"
+            "journal field should be moved to booktitle"
 
     def test_article_with_published_doi_stays_article(self) -> None:
         """@article with published DOI stays @article (no false downgrade)."""

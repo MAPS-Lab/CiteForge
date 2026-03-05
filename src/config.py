@@ -269,6 +269,15 @@ ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "aimc": "AI Music Creativity Conference",
     "wnut": "Workshop on Noisy User-generated Text",
     "nlp4musa": "NLP for Music and Audio Workshop",
+    # --- Session 26, Iteration 1: New venue expansions ---
+    "collas": "Conference on Lifelong Learning Agents",
+    "ahfe international": "Applied Human Factors and Ergonomics International",
+    "bcss@persuasive": "Behavior Change Support Systems Workshop",
+    "iberlef@sepln": "Iberian Languages Evaluation Forum",
+    "master@pkdd/ecml": "MASTER Workshop on Multiple-Aspect Analysis of Semantic Trajectories",
+    "interaccion": "Interacción",
+    "robocup 2022:": "RoboCup 2022: Robot World Cup XXVI",
+    "cvpr workshop": "CVPR Workshop on Generative Models for Computer Vision",
 }
 
 # Reject digit-only pages longer than this (SAGE/Wiley article IDs)
@@ -682,6 +691,50 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "resumejob": "Resume-Job",
     # --- Session 25, Iteration 3: Em-dash loss ---
     "chatgptis": "ChatGPT---Is",
+    # --- Session 26, Iteration 1: Space-loss fix ---
+    "eventdata": "Event Data",
+    # --- Session 26, Iteration 2: Fused compounds ---
+    "postprocessing": "Post-Processing",
+    "welfareintegrating": "Welfare---Integrating",
+    "wellbeing": "Well-Being",
+    # --- Session 26, Iteration 3: Fused compound adjectives ---
+    "climatesmart": "Climate-Smart",
+    "convergencerate": "Convergence-Rate",
+    "earlywarning": "Early-Warning",
+    "errorbounded": "Error-Bounded",
+    "factcheckers": "Fact-Checkers",
+    "factchecks": "Fact-Checks",
+    "faulttolerance": "Fault-Tolerance",
+    "fixedparameter": "Fixed-Parameter",
+    "groundtruth": "Ground-Truth",
+    "hyperconnected": "Hyper-Connected",
+    "largedisplay": "Large-Display",
+    "machinereadable": "Machine-Readable",
+    "machinetype": "Machine-Type",
+    "mixedmethods": "Mixed-Methods",
+    "motioncaptured": "Motion-Captured",
+    "oneclass": "One-Class",
+    "partiallyobservable": "Partially-Observable",
+    "pointline": "Point-Line",
+    "quasicomponent": "Quasi-Component",
+    "ridehailing": "Ride-Hailing",
+    "sharedencoder": "Shared-Encoder",
+    "statevector": "State-Vector",
+    "terabytesized": "Terabyte-Sized",
+    "transhierarchy": "Trans-Hierarchy",
+    "treechild": "Tree-Child",
+    "variancegated": "Variance-Gated",
+    "weightloss": "Weight-Loss",
+    # --- Session 26, Iteration 3: Space-loss / name compounds ---
+    "wolffacial": "Wolf Facial",
+    "eulertour": "Euler-Tour",
+    "glyphfield": "Glyph-Field",
+    # --- Session 26, Iteration 3: Em-dash loss ---
+    "emotionssensor": "Emotions---Sensor",
+    "farmingadvancing": "Farming---Advancing",
+    "livestockartificial": "Livestock---Artificial",
+    "managementpart": "Management---Part",
+    "servicespart": "Services---Part",
 }
 
 # Multi-signal dedup thresholds
