@@ -227,6 +227,7 @@ VENUE_CASE_CORRECTIONS: dict[str, str] = {
     "DIGITAL HEALTH": "Digital Health",
     "CEUR WORKSHOP PROCEEDINGS": "CEUR Workshop Proceedings",
     "AI \\& SOCIETY": "AI \\& Society",
+    "Genome biology and evolution": "Genome Biology and Evolution",
 }
 
 # Conference venues that lack standard keywords (proceedings, conference, etc.)
@@ -743,6 +744,16 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "livestockartificial": "Livestock---Artificial",
     "managementpart": "Management---Part",
     "servicespart": "Services---Part",
+    # --- Session 30, Iteration 1: Colon/slash/hyphen loss ---
+    "recognitionthe": "recognition: The",
+    "methanethe": "Methane: The",
+    "frequencylow": "Frequency/Low",
+    "spacetime": "Space-Time",
+    "elearning": "E-Learning",
+    "eprescription": "e-Prescription",
+    # --- Session 30, Iteration 2: Fused compounds ---
+    "runlength": "Run-Length",
+    "incontext": "In-Context",
 }
 
 # Multi-signal dedup thresholds

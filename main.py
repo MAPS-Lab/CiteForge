@@ -175,7 +175,7 @@ def _fix_fused_compounds(title: str) -> str:
     result = title
     # Pass 1: Dictionary-based fixes (highest priority, handles acronyms & irregulars)
     for fused_lower, replacement in FUSED_COMPOUND_WORDS.items():
-        pattern = re.compile(re.escape(fused_lower), re.IGNORECASE)
+        pattern = re.compile(r'\b' + re.escape(fused_lower) + r'\b', re.IGNORECASE)
         result = pattern.sub(replacement, result)
     # Pass 2: Suffix-based detection for remaining fused compounds.
     # Matches title-cased words: [A-Z][a-z]{2,} prefix + known compound suffix.
@@ -292,6 +292,8 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
     title = fields.get("title", "")
     if isinstance(title, str) and title:
         fixed_title = _fix_fused_compounds(title)
+        # Fix missing space after colon in titles (e.g., "Word:Word" → "Word: Word")
+        fixed_title = re.sub(r'(\S):([A-Z])', r'\1: \2', fixed_title)
         if fixed_title != title:
             fields["title"] = fixed_title
             changed = True
@@ -349,6 +351,32 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         if cleaned != title:
             fields["title"] = cleaned
             changed = True
+
+    # Fix venue typos in booktitle (e.g., "NeuriPS" → "NeurIPS")
+    bt_fix = (fields.get("booktitle") or "").strip()
+    if "NeuriPS" in bt_fix:
+        fields["booktitle"] = bt_fix.replace("NeuriPS", "NeurIPS")
+        changed = True
+
+    # Strip SPIRE-style proceedings garbage suffix from booktitle
+    bt_spire = (fields.get("booktitle") or "").strip()
+    if bt_spire:
+        bt_cleaned = re.sub(r'\s*:\s*SPIRE\b.*$', '', bt_spire)
+        if bt_cleaned != bt_spire:
+            fields["booktitle"] = bt_cleaned
+            changed = True
+
+    # Strip _v[N] version suffix from OSF/PsyArXiv DOIs
+    doi_val = (fields.get("doi") or "").strip()
+    if doi_val and re.match(r'10\.31(219|234)/', doi_val):
+        doi_stripped = re.sub(r'_v\d+$', '', doi_val)
+        if doi_stripped != doi_val:
+            fields["doi"] = doi_stripped
+            changed = True
+            # Also fix the URL if it contains the versioned DOI
+            url_val = (fields.get("url") or "").strip()
+            if url_val and doi_val in url_val:
+                fields["url"] = url_val.replace(doi_val, doi_stripped)
 
     # Remove pages field that contains no digits (location strings, not page numbers)
     pg = (fields.get("pages") or "").strip()
@@ -742,6 +770,31 @@ def process_article(
                 _bl_fields["title"] = _cleaned_sw
                 _fixup_written = True
 
+        # Fix venue typos in booktitle (e.g., "NeuriPS" → "NeurIPS")
+        _ex_bt_fix = (_bl_fields.get("booktitle") or "").strip()
+        if "NeuriPS" in _ex_bt_fix:
+            _bl_fields["booktitle"] = _ex_bt_fix.replace("NeuriPS", "NeurIPS")
+            _fixup_written = True
+
+        # Strip SPIRE-style proceedings garbage suffix from booktitle
+        _ex_bt_spire = (_bl_fields.get("booktitle") or "").strip()
+        if _ex_bt_spire:
+            _ex_bt_cleaned = re.sub(r'\s*:\s*SPIRE\b.*$', '', _ex_bt_spire)
+            if _ex_bt_cleaned != _ex_bt_spire:
+                _bl_fields["booktitle"] = _ex_bt_cleaned
+                _fixup_written = True
+
+        # Strip _v[N] version suffix from OSF/PsyArXiv DOIs
+        _ex_doi_val = (_bl_fields.get("doi") or "").strip()
+        if _ex_doi_val and re.match(r'10\.31(219|234)/', _ex_doi_val):
+            _ex_doi_stripped = re.sub(r'_v\d+$', '', _ex_doi_val)
+            if _ex_doi_stripped != _ex_doi_val:
+                _bl_fields["doi"] = _ex_doi_stripped
+                _fixup_written = True
+                _ex_url_val = (_bl_fields.get("url") or "").strip()
+                if _ex_url_val and _ex_doi_val in _ex_url_val:
+                    _bl_fields["url"] = _ex_url_val.replace(_ex_doi_val, _ex_doi_stripped)
+
         # Fix ALL-CAPS titles
         _bl_title2 = _bl_fields.get("title", "")
         if isinstance(_bl_title2, str) and _bl_title2:
@@ -921,6 +974,7 @@ def process_article(
         _bl_title_fused = _bl_fields.get("title", "")
         if isinstance(_bl_title_fused, str) and _bl_title_fused:
             _bl_title_fixed = _fix_fused_compounds(_bl_title_fused)
+            _bl_title_fixed = re.sub(r'(\S):([A-Z])', r'\1: \2', _bl_title_fixed)
             if _bl_title_fixed != _bl_title_fused:
                 _bl_fields["title"] = _bl_title_fixed
                 _fixup_written = True
@@ -1985,6 +2039,8 @@ def process_article(
             )
             # Fix fused compound words (hyphens stripped by Scholar)
             _p4_fixed = _fix_fused_compounds(_p4_fixed)
+            # Fix missing space after colon in titles (e.g., "Word:Word" → "Word: Word")
+            _p4_fixed = re.sub(r'(\S):([A-Z])', r'\1: \2', _p4_fixed)
             # Strip trailing dash/en-dash (truncation artifact)
             _p4_fixed = re.sub(r'[\s][-\u2013]\s*$', '', _p4_fixed)
             # Strip ": -...-" subtitle wrapper artifact
@@ -1997,6 +2053,28 @@ def process_article(
             _p4_vc_val = (merged_fields.get(_p4_vcf) or "").strip()
             if _p4_vc_val and _p4_vc_val in VENUE_CASE_CORRECTIONS:
                 merged_fields[_p4_vcf] = VENUE_CASE_CORRECTIONS[_p4_vc_val]
+
+        # Fix venue typos in booktitle (e.g., "NeuriPS" → "NeurIPS")
+        _p4_bt_fix = (merged_fields.get("booktitle") or "").strip()
+        if "NeuriPS" in _p4_bt_fix:
+            merged_fields["booktitle"] = _p4_bt_fix.replace("NeuriPS", "NeurIPS")
+
+        # Strip SPIRE-style proceedings garbage suffix from booktitle
+        _p4_bt_spire = (merged_fields.get("booktitle") or "").strip()
+        if _p4_bt_spire:
+            _p4_bt_cleaned = re.sub(r'\s*:\s*SPIRE\b.*$', '', _p4_bt_spire)
+            if _p4_bt_cleaned != _p4_bt_spire:
+                merged_fields["booktitle"] = _p4_bt_cleaned
+
+        # Strip _v[N] version suffix from OSF/PsyArXiv DOIs
+        _p4_doi_val = (merged_fields.get("doi") or "").strip()
+        if _p4_doi_val and re.match(r'10\.31(219|234)/', _p4_doi_val):
+            _p4_doi_stripped = re.sub(r'_v\d+$', '', _p4_doi_val)
+            if _p4_doi_stripped != _p4_doi_val:
+                merged_fields["doi"] = _p4_doi_stripped
+                _p4_url_val = (merged_fields.get("url") or "").strip()
+                if _p4_url_val and _p4_doi_val in _p4_url_val:
+                    merged_fields["url"] = _p4_url_val.replace(_p4_doi_val, _p4_doi_stripped)
 
         # Strip URLs embedded in booktitle/journal (keep text before URL)
         for _url_field in ("booktitle", "journal"):
