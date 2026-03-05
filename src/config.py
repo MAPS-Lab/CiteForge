@@ -199,6 +199,7 @@ PROCEEDINGS_SERIES_AS_JOURNAL: frozenset[str] = frozenset({
     "procedia engineering",
     "ifac-papersonline",
     "ifac papersonline",
+    "frontiers in artificial intelligence and applications",
 })
 
 # ACM PACM journals: named "Proceedings of the ACM" but are real journals.
@@ -754,6 +755,11 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     # --- Session 30, Iteration 2: Fused compounds ---
     "runlength": "Run-Length",
     "incontext": "In-Context",
+    # --- Session 30, Iteration 3 (deep agent scan): Fused compounds ---
+    "sexdifferentiated": "Sex-Differentiated",
+    "sizefractionated": "Size-Fractionated",
+    "frontohippocampal": "Fronto-Hippocampal",
+    "tradeoff": "Trade-Off",
 }
 
 # Multi-signal dedup thresholds

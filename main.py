@@ -294,6 +294,9 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         fixed_title = _fix_fused_compounds(title)
         # Fix missing space after colon in titles (e.g., "Word:Word" → "Word: Word")
         fixed_title = re.sub(r'(\S):([A-Z])', r'\1: \2', fixed_title)
+        # Fix spurious space after hyphen (e.g., "Three- Phase" → "Three-Phase")
+        # but preserve suspended hyphens (e.g., "Short- and Long-Term")
+        fixed_title = re.sub(r'(\w)- (?!and |or |to )', r'\1-', fixed_title)
         if fixed_title != title:
             fields["title"] = fixed_title
             changed = True
@@ -382,6 +385,31 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
     pg = (fields.get("pages") or "").strip()
     if pg and not re.search(r'\d', pg):
         del fields["pages"]
+        changed = True
+
+    # Fix Schloss Dagstuhl missing umlaut ("fur" → "f{\"u}r")
+    pub = (fields.get("publisher") or "").strip()
+    if "Zentrum fur Informatik" in pub:
+        fields["publisher"] = pub.replace("Zentrum fur Informatik", 'Zentrum f{\\"u}r Informatik')
+        changed = True
+
+    # Strip page numbers embedded in booktitle (e.g., ", 17: 1-17: 18" from LIPIcs)
+    bt_pages = (fields.get("booktitle") or "").strip()
+    if bt_pages:
+        bt_clean = re.sub(r',\s*\d+:\s*\d+-\d+:\s*\d+\s*$', '', bt_pages)
+        if bt_clean != bt_pages:
+            fields["booktitle"] = bt_clean
+            if not fields.get("pages"):
+                # Extract the pages portion
+                pages_match = re.search(r',\s*(\d+:\s*\d+-\d+:\s*\d+)\s*$', bt_pages)
+                if pages_match:
+                    fields["pages"] = pages_match.group(1).replace(' ', '')
+            changed = True
+
+    # Strip duplicate "Proceedings of the" wrapper from booktitle
+    bt_dup = (fields.get("booktitle") or "").strip()
+    if bt_dup.startswith("Proceedings of the Extended Abstracts"):
+        fields["booktitle"] = bt_dup.removeprefix("Proceedings of the ")
         changed = True
 
     return changed
@@ -795,6 +823,30 @@ def process_article(
                 if _ex_url_val and _ex_doi_val in _ex_url_val:
                     _bl_fields["url"] = _ex_url_val.replace(_ex_doi_val, _ex_doi_stripped)
 
+        # Fix Schloss Dagstuhl missing umlaut
+        _ex_pub = (_bl_fields.get("publisher") or "").strip()
+        if "Zentrum fur Informatik" in _ex_pub:
+            _bl_fields["publisher"] = _ex_pub.replace("Zentrum fur Informatik", 'Zentrum f{\\"u}r Informatik')
+            _fixup_written = True
+
+        # Strip page numbers embedded in booktitle (LIPIcs style)
+        _ex_bt_pg = (_bl_fields.get("booktitle") or "").strip()
+        if _ex_bt_pg:
+            _ex_bt_pg_clean = re.sub(r',\s*\d+:\s*\d+-\d+:\s*\d+\s*$', '', _ex_bt_pg)
+            if _ex_bt_pg_clean != _ex_bt_pg:
+                _bl_fields["booktitle"] = _ex_bt_pg_clean
+                if not _bl_fields.get("pages"):
+                    _pg_m = re.search(r',\s*(\d+:\s*\d+-\d+:\s*\d+)\s*$', _ex_bt_pg)
+                    if _pg_m:
+                        _bl_fields["pages"] = _pg_m.group(1).replace(' ', '')
+                _fixup_written = True
+
+        # Strip duplicate "Proceedings of the" wrapper
+        _ex_bt_dup = (_bl_fields.get("booktitle") or "").strip()
+        if _ex_bt_dup.startswith("Proceedings of the Extended Abstracts"):
+            _bl_fields["booktitle"] = _ex_bt_dup.removeprefix("Proceedings of the ")
+            _fixup_written = True
+
         # Fix ALL-CAPS titles
         _bl_title2 = _bl_fields.get("title", "")
         if isinstance(_bl_title2, str) and _bl_title2:
@@ -975,6 +1027,7 @@ def process_article(
         if isinstance(_bl_title_fused, str) and _bl_title_fused:
             _bl_title_fixed = _fix_fused_compounds(_bl_title_fused)
             _bl_title_fixed = re.sub(r'(\S):([A-Z])', r'\1: \2', _bl_title_fixed)
+            _bl_title_fixed = re.sub(r'(\w)- (?!and |or |to )', r'\1-', _bl_title_fixed)
             if _bl_title_fixed != _bl_title_fused:
                 _bl_fields["title"] = _bl_title_fixed
                 _fixup_written = True
@@ -2041,6 +2094,8 @@ def process_article(
             _p4_fixed = _fix_fused_compounds(_p4_fixed)
             # Fix missing space after colon in titles (e.g., "Word:Word" → "Word: Word")
             _p4_fixed = re.sub(r'(\S):([A-Z])', r'\1: \2', _p4_fixed)
+            # Fix spurious space after hyphen (preserve suspended hyphens)
+            _p4_fixed = re.sub(r'(\w)- (?!and |or |to )', r'\1-', _p4_fixed)
             # Strip trailing dash/en-dash (truncation artifact)
             _p4_fixed = re.sub(r'[\s][-\u2013]\s*$', '', _p4_fixed)
             # Strip ": -...-" subtitle wrapper artifact
@@ -2075,6 +2130,27 @@ def process_article(
                 _p4_url_val = (merged_fields.get("url") or "").strip()
                 if _p4_url_val and _p4_doi_val in _p4_url_val:
                     merged_fields["url"] = _p4_url_val.replace(_p4_doi_val, _p4_doi_stripped)
+
+        # Fix Schloss Dagstuhl missing umlaut
+        _p4_pub = (merged_fields.get("publisher") or "").strip()
+        if "Zentrum fur Informatik" in _p4_pub:
+            merged_fields["publisher"] = _p4_pub.replace("Zentrum fur Informatik", 'Zentrum f{\\"u}r Informatik')
+
+        # Strip page numbers embedded in booktitle (LIPIcs style)
+        _p4_bt_pg = (merged_fields.get("booktitle") or "").strip()
+        if _p4_bt_pg:
+            _p4_bt_pg_clean = re.sub(r',\s*\d+:\s*\d+-\d+:\s*\d+\s*$', '', _p4_bt_pg)
+            if _p4_bt_pg_clean != _p4_bt_pg:
+                merged_fields["booktitle"] = _p4_bt_pg_clean
+                if not merged_fields.get("pages"):
+                    _p4_pg_m = re.search(r',\s*(\d+:\s*\d+-\d+:\s*\d+)\s*$', _p4_bt_pg)
+                    if _p4_pg_m:
+                        merged_fields["pages"] = _p4_pg_m.group(1).replace(' ', '')
+
+        # Strip duplicate "Proceedings of the" wrapper
+        _p4_bt_dup = (merged_fields.get("booktitle") or "").strip()
+        if _p4_bt_dup.startswith("Proceedings of the Extended Abstracts"):
+            merged_fields["booktitle"] = _p4_bt_dup.removeprefix("Proceedings of the ")
 
         # Strip URLs embedded in booktitle/journal (keep text before URL)
         for _url_field in ("booktitle", "journal"):
