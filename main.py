@@ -73,6 +73,7 @@ from src.config import (
     SIM_MERGE_DUPLICATE_THRESHOLD,
     SIM_PREPRINT_TITLE_THRESHOLD,
     SKIP_SCHOLAR_FOR_EXISTING_FILES,
+    VENUE_CASE_CORRECTIONS,
 )
 from src.doi_utils import process_validated_doi
 from src.exceptions import (
@@ -327,11 +328,27 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         fields["booktitle"] = ABBREVIATED_VENUE_MAP[bt.lower()]
         changed = True
 
-    # Strip trailing " -" or en-dash from booktitle (truncation artifact)
-    bt = (fields.get("booktitle") or "").strip()
-    if bt and re.search(r'\s[-\u2013]\s*$', bt):
-        fields["booktitle"] = re.sub(r'\s[-\u2013]\s*$', '', bt)
-        changed = True
+    # Correct ALL-CAPS venue names to proper case
+    for _vcf in ("journal", "booktitle"):
+        _vc_val = (fields.get(_vcf) or "").strip()
+        if _vc_val and _vc_val in VENUE_CASE_CORRECTIONS:
+            fields[_vcf] = VENUE_CASE_CORRECTIONS[_vc_val]
+            changed = True
+
+    # Strip trailing " -" or en-dash from booktitle/title (truncation artifact)
+    for _td_field in ("booktitle", "title"):
+        _td_val = (fields.get(_td_field) or "").strip()
+        if _td_val and re.search(r'[\s][-\u2013]\s*$', _td_val):
+            fields[_td_field] = re.sub(r'[\s][-\u2013]\s*$', '', _td_val)
+            changed = True
+
+    # Strip ": -...-" subtitle wrapper artifact from title
+    title = fields.get("title", "")
+    if isinstance(title, str) and ": -" in title:
+        cleaned = re.sub(r':\s*-([^-]+)-\s*$', r': \1', title)
+        if cleaned != title:
+            fields["title"] = cleaned
+            changed = True
 
     # Remove pages field that contains no digits (location strings, not page numbers)
     pg = (fields.get("pages") or "").strip()
@@ -699,6 +716,31 @@ def process_article(
                     )
                     _bl_fields[_ell_field] = _ell_clean
                     _fixup_written = True
+
+        # Correct ALL-CAPS venue names to proper case
+        for _ex_vcf in ("journal", "booktitle"):
+            _ex_vc_val = (_bl_fields.get(_ex_vcf) or "").strip()
+            if _ex_vc_val and _ex_vc_val in VENUE_CASE_CORRECTIONS:
+                logger.debug(
+                    f"EXISTING_FIXUP | venue_case_corrected | {_ex_vcf}={_ex_vc_val}",
+                    category=LogCategory.CLEANUP,
+                )
+                _bl_fields[_ex_vcf] = VENUE_CASE_CORRECTIONS[_ex_vc_val]
+                _fixup_written = True
+
+        # Strip trailing dash/en-dash from title (truncation artifact)
+        _bl_title_td = (_bl_fields.get("title") or "").strip()
+        if _bl_title_td and re.search(r'[\s][-\u2013]\s*$', _bl_title_td):
+            _bl_fields["title"] = re.sub(r'[\s][-\u2013]\s*$', '', _bl_title_td)
+            _fixup_written = True
+
+        # Strip ": -...-" subtitle wrapper artifact from title
+        _bl_title_sw = (_bl_fields.get("title") or "").strip()
+        if isinstance(_bl_title_sw, str) and ": -" in _bl_title_sw:
+            _cleaned_sw = re.sub(r':\s*-([^-]+)-\s*$', r': \1', _bl_title_sw)
+            if _cleaned_sw != _bl_title_sw:
+                _bl_fields["title"] = _cleaned_sw
+                _fixup_written = True
 
         # Fix ALL-CAPS titles
         _bl_title2 = _bl_fields.get("title", "")
@@ -1943,8 +1985,18 @@ def process_article(
             )
             # Fix fused compound words (hyphens stripped by Scholar)
             _p4_fixed = _fix_fused_compounds(_p4_fixed)
+            # Strip trailing dash/en-dash (truncation artifact)
+            _p4_fixed = re.sub(r'[\s][-\u2013]\s*$', '', _p4_fixed)
+            # Strip ": -...-" subtitle wrapper artifact
+            _p4_fixed = re.sub(r':\s*-([^-]+)-\s*$', r': \1', _p4_fixed)
             if _p4_fixed != _p4_title:
                 merged_fields["title"] = _p4_fixed
+
+        # Correct ALL-CAPS venue names to proper case
+        for _p4_vcf in ("journal", "booktitle"):
+            _p4_vc_val = (merged_fields.get(_p4_vcf) or "").strip()
+            if _p4_vc_val and _p4_vc_val in VENUE_CASE_CORRECTIONS:
+                merged_fields[_p4_vcf] = VENUE_CASE_CORRECTIONS[_p4_vc_val]
 
         # Strip URLs embedded in booktitle/journal (keep text before URL)
         for _url_field in ("booktitle", "journal"):

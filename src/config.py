@@ -222,6 +222,13 @@ PUBLISHER_CORRECTIONS: dict[str, str] = {
     "computational and structural biotechnology journal": "Elsevier",
 }
 
+# ALL-CAPS venue names → proper case (API sources sometimes return ALL-CAPS)
+VENUE_CASE_CORRECTIONS: dict[str, str] = {
+    "DIGITAL HEALTH": "Digital Health",
+    "CEUR WORKSHOP PROCEEDINGS": "CEUR Workshop Proceedings",
+    "AI \\& SOCIETY": "AI \\& Society",
+}
+
 # Conference venues that lack standard keywords (proceedings, conference, etc.)
 KNOWN_CONFERENCE_VENUES = frozenset({
     "neural information processing systems",
