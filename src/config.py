@@ -358,6 +358,7 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "iotbased": "IoT-Based",
     "gnntransformerbased": "GNN-Transformer-Based",
     "chatgptbased": "ChatGPT-Based",
+    "rnaitractable": "RNAi-Tractable",
     # --- Short prefixes (< 3 lowercase chars after initial capital) ---
     "innetwork": "In-Network",
     "ecommerce": "E-Commerce",
