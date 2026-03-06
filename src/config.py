@@ -674,6 +674,8 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "driftaligned": "Drift-Aligned",
     "safetycritical": "Safety-Critical",
     "doubleedge": "Double-Edge",
+    "grammarbased": "Grammar-Based",
+    "ehealth": "eHealth",
     "satelliteterrestrial": "Satellite-Terrestrial",
     "twotier": "Two-Tier",
     "stackelbergbargaining": "Stackelberg-Bargaining",

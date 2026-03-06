@@ -165,10 +165,13 @@ def _is_corrupted_title(title: str) -> bool:
 def _fix_fused_compounds(title: str) -> str:
     """Fix fused compound words in titles (hyphens stripped by Google Scholar).
 
-    Two-pass approach:
+    Three-pass approach:
     1. Dictionary lookup for special cases (acronyms, irregular patterns).
     2. Suffix-based detection for common compound adjective suffixes
        (e.g. "Knowledgedriven" → "Knowledge-Driven").
+    3. Dictionary lookup again — catches entries newly exposed by the suffix
+       pass (e.g. "Doubleedgeassisted" → suffix splits to "Doubleedge-Assisted"
+       → dict converts "Doubleedge" to "Double-Edge").
     """
     if not title:
         return title
@@ -182,6 +185,10 @@ def _fix_fused_compounds(title: str) -> str:
     for suffix in COMPOUND_SUFFIXES:
         sfx_pat = re.compile(r'\b([A-Z][a-z]{2,})(' + re.escape(suffix) + r')\b')
         result = sfx_pat.sub(lambda m: m.group(1) + '-' + m.group(2).capitalize(), result)
+    # Pass 3: Dictionary again (suffix pass may expose new \b boundaries)
+    for fused_lower, replacement in FUSED_COMPOUND_WORDS.items():
+        pattern = re.compile(r'\b' + re.escape(fused_lower) + r'\b', re.IGNORECASE)
+        result = pattern.sub(replacement, result)
     return result
 
 
@@ -249,9 +256,11 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         changed = True
 
     # Reclassify @inproceedings with journal name as booktitle → @article
+    # (but NOT for PROCEEDINGS_SERIES_AS_JOURNAL which are genuinely proceedings)
     if entry.get("type") == "inproceedings" and fields.get("booktitle"):
         bt_lower = fields["booktitle"].strip().lower()
-        if any(bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
+        is_proc_series = any(bt_lower.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL)
+        if not is_proc_series and any(bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
             fields["journal"] = fields.pop("booktitle")
             entry["type"] = "article"
             changed = True
@@ -339,6 +348,16 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         if _vc_val and _vc_val in VENUE_CASE_CORRECTIONS:
             fields[_vcf] = VENUE_CASE_CORRECTIONS[_vc_val]
             changed = True
+        # Fix lowercase "genetic and evolutionary computation conference" in GECCO booktitles
+        elif _vc_val and "genetic and evolutionary computation conference" in _vc_val.lower():
+            _vc_fixed = re.sub(
+                r'(?i)\bgenetic and evolutionary computation conference\b',
+                'Genetic and Evolutionary Computation Conference',
+                _vc_val,
+            )
+            if _vc_fixed != _vc_val:
+                fields[_vcf] = _vc_fixed
+                changed = True
 
     # Strip trailing " -" or en-dash from booktitle/title (truncation artifact)
     for _td_field in ("booktitle", "title"):
@@ -783,6 +802,15 @@ def process_article(
                 )
                 _bl_fields[_ex_vcf] = VENUE_CASE_CORRECTIONS[_ex_vc_val]
                 _fixup_written = True
+            elif _ex_vc_val and "genetic and evolutionary computation conference" in _ex_vc_val.lower():
+                _ex_vc_fixed = re.sub(
+                    r'(?i)\bgenetic and evolutionary computation conference\b',
+                    'Genetic and Evolutionary Computation Conference',
+                    _ex_vc_val,
+                )
+                if _ex_vc_fixed != _ex_vc_val:
+                    _bl_fields[_ex_vcf] = _ex_vc_fixed
+                    _fixup_written = True
 
         # Strip trailing dash/en-dash from title (truncation artifact)
         _bl_title_td = (_bl_fields.get("title") or "").strip()
@@ -985,9 +1013,11 @@ def process_article(
             _fixup_written = True
 
         # Reclassify @inproceedings with journal name as booktitle → @article
+        # (but NOT for PROCEEDINGS_SERIES_AS_JOURNAL which are genuinely proceedings)
         if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
             _jp_bt_lower = _bl_fields["booktitle"].strip().lower()
-            if any(_jp_bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
+            _is_proc_series = any(_jp_bt_lower.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL)
+            if not _is_proc_series and any(_jp_bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
                 logger.debug(
                     f"EXISTING_FIXUP | inproceedings_journal_booktitle->article | "
                     f"booktitle={_bl_fields['booktitle'][:60]}",
@@ -1992,9 +2022,11 @@ def process_article(
             merged_fields.pop("booktitle", None)
 
         # Reclassify @inproceedings with journal name as booktitle → @article
+        # (but NOT for PROCEEDINGS_SERIES_AS_JOURNAL which are genuinely proceedings)
         if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
             _jp_bt_lower = merged_fields["booktitle"].strip().lower()
-            if any(_jp_bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
+            _is_proc_series = any(_jp_bt_lower.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL)
+            if not _is_proc_series and any(_jp_bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
                 logger.debug(
                     f"TYPE_CORRECT | inproceedings_journal_booktitle->article | "
                     f"booktitle={merged_fields['booktitle'][:60]}",
@@ -2108,6 +2140,14 @@ def process_article(
             _p4_vc_val = (merged_fields.get(_p4_vcf) or "").strip()
             if _p4_vc_val and _p4_vc_val in VENUE_CASE_CORRECTIONS:
                 merged_fields[_p4_vcf] = VENUE_CASE_CORRECTIONS[_p4_vc_val]
+            elif _p4_vc_val and "genetic and evolutionary computation conference" in _p4_vc_val.lower():
+                _p4_vc_fixed = re.sub(
+                    r'(?i)\bgenetic and evolutionary computation conference\b',
+                    'Genetic and Evolutionary Computation Conference',
+                    _p4_vc_val,
+                )
+                if _p4_vc_fixed != _p4_vc_val:
+                    merged_fields[_p4_vcf] = _p4_vc_fixed
 
         # Fix venue typos in booktitle (e.g., "NeuriPS" → "NeurIPS")
         _p4_bt_fix = (merged_fields.get("booktitle") or "").strip()
