@@ -6,7 +6,6 @@ from typing import Any
 
 from .config import ABBREVIATED_VENUE_MAP, KNOWN_CONFERENCE_VENUES, SIM_TITLE_SIM_MIN
 from .log_utils import LogCategory, logger
-from .text_utils import extract_year_from_any
 
 _ARTICLE_TYPES = {"journal-article", "journal_article", "article"}
 _CONFERENCE_TYPES = {"proceedings-article", "paper-conference", "inproceedings", "conference"}
@@ -49,14 +48,6 @@ def format_author_field(authors: list[str]) -> str | None:
     between names, or return None when the list is empty.
     """
     return " and ".join(authors) if authors else None
-
-
-def normalize_year(year: Any) -> int:
-    """
-    Try to extract a four-digit publication year from different input formats
-    and return 0 when no valid year can be found.
-    """
-    return extract_year_from_any(year, fallback=0) or 0
 
 
 def build_bibtex_entry(

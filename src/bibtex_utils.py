@@ -23,13 +23,17 @@ from .text_utils import (
     authors_overlap,
     compute_dedup_score,
     extract_year_from_any,
-    has_placeholder,
     normalize_title,
     parse_authors_any,
     strip_accents,
     title_is_truncated_match,
     title_similarity,
 )
+
+_TITLE_STOP_WORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "on", "for", "of", "and", "to", "in",
+    "with", "using", "via", "from", "by", "at", "into", "through",
+})
 
 
 def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entry") -> str:
@@ -390,17 +394,6 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def sanitize_bibtex_remove_placeholders(bibtex: str) -> str:
-    """
-    Remove BibTeX fields that still contain obvious placeholder values while keeping the rest of the entry unchanged.
-    """
-    entry = parse_bibtex_to_dict(bibtex)
-    if not entry:
-        return bibtex
-    entry["fields"] = {k: v for k, v in entry["fields"].items() if not has_placeholder(v)}
-    return bibtex_from_dict(entry)
-
-
 def _short_title_for_key(
     title: str,
     max_words: int = BIBTEX_KEY_MAX_WORDS,
@@ -450,14 +443,10 @@ def _short_title_for_key(
                 ttl_days=CACHE_TTL_GEMINI_DAYS,
             )
 
-    stop = frozenset({
-        "a", "an", "the", "on", "for", "of", "and", "to", "in",
-        "with", "using", "via", "from", "by", "at", "into", "through",
-    })
     words = [w for w in re.split(r"[^A-Za-z0-9]+", title) if w]
     picks: list[str] = []
     for w in words:
-        if w.lower() not in stop:
+        if w.lower() not in _TITLE_STOP_WORDS:
             picks.append(w)
             if len(picks) >= max_words:
                 break

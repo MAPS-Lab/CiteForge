@@ -357,6 +357,7 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "eegdriven": "EEG-Driven",
     "dnsbased": "DNS-Based",
     "fmindex": "FM-Index",
+    "solariasensor": "SOLARIA-SensOr",
     "d2dassisted": "D2D-Assisted",
     "6gempowered": "6G-Empowered",
     "llmbased": "LLM-Based",

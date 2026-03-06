@@ -24,8 +24,6 @@ from ..config import (
     PUBMED_BASE,
     SIM_BEST_ITEM_THRESHOLD,
     SIM_EXACT_PICK_THRESHOLD,
-    SIM_MERGE_DUPLICATE_THRESHOLD,
-    SIM_TITLE_SIM_MIN,
 )
 from ..exceptions import (
     ALL_API_ERRORS,
@@ -54,10 +52,9 @@ from ..text_utils import (
     extract_year_from_any,
     normalize_title,
     safe_get_nested,
-    title_similarity,
     trim_title_default,
 )
-from .helpers import _best_item_by_score, _sanitize_dblp_author, _score_candidate_generic
+from .helpers import _best_item_by_score, _sanitize_dblp_author
 
 _DBLP_ALLOWED_TAGS = frozenset({"article", "inproceedings", "incollection", "phdthesis", "mastersthesis"})
 _DBLP_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
@@ -745,76 +742,6 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     return articles
 
 
-def build_synthetic_article_from_dblp(item: dict[str, Any]) -> dict[str, Any]:
-    return dict(item)
-
-
-def enhance_scholar_article_with_dblp(
-    scholar_art: dict[str, Any], dblp_items: list[dict[str, Any]], target_author: str | None = None,
-) -> bool:
-    """Enhance a Scholar article with complete data from DBLP if a match is found."""
-    from ..text_utils import is_truncated
-    if not dblp_items:
-        return False
-    scholar_title = scholar_art.get("title", "")
-    if not scholar_title:
-        return False
-    best_score = 0.0
-    best_match = None
-    for dblp_item in dblp_items:
-        dblp_title = dblp_item.get("title", "")
-        if not dblp_title:
-            continue
-        tsim = title_similarity(scholar_title, dblp_title)
-        if tsim < SIM_TITLE_SIM_MIN:
-            continue
-        score = _score_candidate_generic(
-            target_title=scholar_title, target_author=target_author, target_year=scholar_art.get("year"),
-            cand_title=dblp_title, cand_authors=dblp_item.get("authors", []), cand_year=dblp_item.get("year"),
-            title_sim=title_similarity,
-            author_match=authors_overlap,
-        )
-        if score > best_score:
-            best_score = score
-            best_match = dblp_item
-    enhanced = False
-    fields_updated: list[str] = []
-    if best_score >= SIM_MERGE_DUPLICATE_THRESHOLD and best_match:
-        if is_truncated(scholar_title) and best_match.get("title") and not is_truncated(best_match["title"]):
-            scholar_art["title"] = best_match["title"]
-            enhanced = True
-            fields_updated.append("title")
-        scholar_authors = scholar_art.get("author_info", [])
-        if is_truncated(str(scholar_authors)) and best_match.get("authors"):
-            dblp_authors = best_match["authors"]
-            if not is_truncated(str(dblp_authors)):
-                if isinstance(dblp_authors, list):
-                    scholar_art["author_info"] = [{"name": a} for a in dblp_authors]
-                else:
-                    scholar_art["author_info"] = dblp_authors
-                enhanced = True
-                fields_updated.append("author_info")
-        scholar_pub = scholar_art.get("publication_info", "")
-        if best_match.get("publication") and (not scholar_pub or is_truncated(scholar_pub)):
-            scholar_art["publication_info"] = best_match["publication"]
-            enhanced = True
-            fields_updated.append("publication_info")
-        if not scholar_art.get("year") and best_match.get("year"):
-            scholar_art["year"] = best_match["year"]
-            enhanced = True
-            fields_updated.append("year")
-
-    logger.debug(
-        f"dblp | ENHANCE | scholar_title={scholar_title[:50]}"
-        f" | best_match_score={best_score:.3f} | enhanced={enhanced}"
-        f" | fields_updated={fields_updated}",
-        category=LogCategory.SCORE,
-    )
-    if enhanced:
-        scholar_art["_dblp_enhanced"] = True
-    return enhanced
-
-
 def dblp_fetch_for_author(name: str, dblp_hint: str | None, min_year: int | None) -> list[dict[str, Any]]:
     """Fetch DBLP publications for an author."""
     pid = dblp_extract_pid(dblp_hint) if dblp_hint else None
@@ -1089,8 +1016,6 @@ def crossref_search_by_venue(
     title: str,
     author_name: str | None,
     container_title: str,
-    volume: str | None = None,
-    pages: str | None = None,
     max_results: int = 5,
 ) -> list[dict[str, Any]]:
     """Search Crossref using venue metadata from a SerpAPI publication string.

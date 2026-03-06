@@ -157,7 +157,6 @@ def _normalize_howpublished(fields: dict[str, Any]) -> None:
 
 
 _AUTHOR_SEPARATOR = " and "
-_AUTHOR_SEPARATOR_CAPITAL = " And "
 
 
 def _fix_author_casing(author_val: str) -> tuple[str, bool]:
@@ -169,7 +168,7 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
     """
     # Fix capital "And" separator first (e.g. "and And Duncan" → "and Duncan")
     val = re.sub(r'\band\s+And\b', 'and', author_val)
-    val = val.replace(_AUTHOR_SEPARATOR_CAPITAL, _AUTHOR_SEPARATOR)
+    val = val.replace(" And ", _AUTHOR_SEPARATOR)
     and_was_fixed = val != author_val
     parts = [p.strip() for p in val.split(_AUTHOR_SEPARATOR)]
     fixed_parts: list[str] = []

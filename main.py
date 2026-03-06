@@ -117,6 +117,16 @@ FORCE_ENRICH = "--force" in sys.argv[1:]
 _BRACKET_J_RE = re.compile(r'\s*\[J\]\s*$')
 _ARXIV_ABS_RE = re.compile(r'arxiv\.org/abs/(\d{4}\.\d{4,5})', re.IGNORECASE)
 
+# Pre-compiled patterns for _fix_fused_compounds (avoids ~800 re.compile() calls per invocation)
+_FUSED_DICT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'\b' + re.escape(fused) + r'\b', re.IGNORECASE), repl)
+    for fused, repl in FUSED_COMPOUND_WORDS.items()
+]
+_COMPOUND_SUFFIX_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r'\b([A-Z][a-z]{2,})(' + re.escape(suffix) + r')\b')
+    for suffix in COMPOUND_SUFFIXES
+]
+
 # Pre-compiled patterns for garbage title detection
 _GARBAGE_EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
 _GARBAGE_POSTAL_RE = re.compile(r'\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b')
@@ -177,17 +187,14 @@ def _fix_fused_compounds(title: str) -> str:
         return title
     result = title
     # Pass 1: Dictionary-based fixes (highest priority, handles acronyms & irregulars)
-    for fused_lower, replacement in FUSED_COMPOUND_WORDS.items():
-        pattern = re.compile(r'\b' + re.escape(fused_lower) + r'\b', re.IGNORECASE)
+    for pattern, replacement in _FUSED_DICT_PATTERNS:
         result = pattern.sub(replacement, result)
     # Pass 2: Suffix-based detection for remaining fused compounds.
     # Matches title-cased words: [A-Z][a-z]{2,} prefix + known compound suffix.
-    for suffix in COMPOUND_SUFFIXES:
-        sfx_pat = re.compile(r'\b([A-Z][a-z]{2,})(' + re.escape(suffix) + r')\b')
+    for sfx_pat in _COMPOUND_SUFFIX_PATTERNS:
         result = sfx_pat.sub(lambda m: m.group(1) + '-' + m.group(2).capitalize(), result)
     # Pass 3: Dictionary again (suffix pass may expose new \b boundaries)
-    for fused_lower, replacement in FUSED_COMPOUND_WORDS.items():
-        pattern = re.compile(r'\b' + re.escape(fused_lower) + r'\b', re.IGNORECASE)
+    for pattern, replacement in _FUSED_DICT_PATTERNS:
         result = pattern.sub(replacement, result)
     return result
 
@@ -666,7 +673,7 @@ def process_article(
     idx_prefix = f"[{idx}/{total}] " if idx is not None and total is not None else ""
     art_source = (art.get("source") or "scholar").strip()
 
-    logger.substep(f"{idx_prefix}Processing Article", category=LogCategory.ARTICLE)
+    logger.step(f"{idx_prefix}Processing Article", category=LogCategory.ARTICLE)
     logger.info(f"Title: {title}", category=LogCategory.ARTICLE)
     if year_hint:
         logger.info(f"Year: {year_hint}", category=LogCategory.ARTICLE)
@@ -1604,8 +1611,6 @@ def process_article(
                         cr_venue_items = crossref_search_by_venue(
                             title, rec.name,
                             container_title=parsed_pub.venue_name,
-                            volume=parsed_pub.volume or None,
-                            pages=parsed_pub.pages or None,
                             max_results=5,
                         )
                         if cr_venue_items:

@@ -271,10 +271,6 @@ class Logger:
     def step(self, msg: str, *, source: str | None = None, category: str | None = None) -> None:
         self._adapter.log(STEP_LEVEL, msg, source=source, category=category)
 
-    def substep(self, msg: str, *, source: str | None = None, category: str | None = None) -> None:
-        """Log a substep at STEP level (used for article-level progress headers)."""
-        self._adapter.log(STEP_LEVEL, msg, source=source, category=category)
-
     def info(self, msg: str, *, source: str | None = None, category: str | None = None) -> None:
         self._adapter.info(msg, source=source, category=category)
 
