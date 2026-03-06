@@ -190,7 +190,7 @@ pip install -e .[dev]
 pytest tests/ -v --tb=short
 ```
 
-398 tests across 15 modules. Integration tests requiring API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
+369 tests across 15 modules. Integration tests requiring API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
 All three quality gates must pass before merge:
 
