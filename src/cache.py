@@ -68,8 +68,6 @@ class ResponseCache:
                 return None
             ts = entry.get("timestamp", 0)
             if ts < self._month_boundary:
-                with contextlib.suppress(OSError):
-                    os.remove(path)
                 return None
             return dict(entry.get("data", {}))
 

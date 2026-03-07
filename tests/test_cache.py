@@ -45,7 +45,7 @@ def test_invalidate_missing_key(tmp_path: Path) -> None:
 
 
 def test_monthly_expiry(tmp_path: Path) -> None:
-    """Test that entries from before the 1st of the current month are expired."""
+    """Test that stale entries return None but the file is preserved on disk."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     cache.put("test_ns", "key1", {"v": 1})
 
@@ -56,7 +56,22 @@ def test_monthly_expiry(tmp_path: Path) -> None:
 
     result = cache.get("test_ns", "key1")
     assert result is None
-    assert not path.exists(), "Expired entry file should be removed"
+    assert path.exists(), "Stale entry file should be preserved until overwritten by put()"
+
+
+def test_stale_entry_refreshed_by_put(tmp_path: Path) -> None:
+    """Test that put() overwrites a stale entry with fresh data."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("test_ns", "key1", {"v": "old"})
+
+    path = Path(cache._entry_path("test_ns", "key1"))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    entry["timestamp"] = cache._month_boundary - 1
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    assert cache.get("test_ns", "key1") is None
+    cache.put("test_ns", "key1", {"v": "fresh"})
+    assert cache.get("test_ns", "key1") == {"v": "fresh"}
 
 
 def test_namespace_isolation(tmp_path: Path) -> None:

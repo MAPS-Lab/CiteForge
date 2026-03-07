@@ -1,0 +1,112 @@
+name: Monthly Pipeline Refresh
+
+on:
+  schedule:
+    - cron: '0 4 1 * *'  # 4 AM UTC on the 1st of each month (midnight AST)
+  workflow_dispatch:       # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Write API keys from secrets
+        env:
+          S2_KEY: ${{ secrets.SEMANTICSCHOLAR }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI }}
+          SERPLY_KEY: ${{ secrets.SERPLY }}
+          GEMINI_KEY: ${{ secrets.GEMINI }}
+          OPENREVIEW_KEY: ${{ secrets.OPENREVIEW }}
+        run: |
+          mkdir -p keys
+          echo "$S2_KEY"        > keys/Semantic.key
+          echo "$SERPAPI_KEY"   > keys/SerpAPI.key
+          echo "$SERPLY_KEY"    > keys/Serply.key
+          echo "$GEMINI_KEY"    > keys/Gemini.key
+          echo "$OPENREVIEW_KEY" > keys/OpenReview.key
+
+      - name: Restore cache from data-cache branch
+        run: |
+          if git ls-remote --heads origin data-cache | grep -q data-cache; then
+            git fetch origin data-cache
+            if git show origin/data-cache:api_cache.tar.gz > /tmp/api_cache.tar.gz 2>/dev/null; then
+              mkdir -p data
+              tar xzf /tmp/api_cache.tar.gz -C data/
+              echo "Restored $(find data/api_cache -type f | wc -l) cache entries"
+            fi
+          else
+            echo "No data-cache branch — starting fresh"
+          fi
+
+      - name: Run pipeline loop
+        env:
+          CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
+        run: |
+          max_runs=50
+          for i in $(seq 1 $max_runs); do
+            echo "::group::Pipeline run $i/$max_runs"
+            python3 main.py || true
+            echo "::endgroup::"
+
+            # Parse total API calls from the run log
+            total=$(grep -oP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
+            echo "Run $i — API calls: $total"
+
+            if [ "$total" -eq 0 ]; then
+              echo "Zero API calls — cache is complete"
+              break
+            fi
+
+            if [ "$i" -eq "$max_runs" ]; then
+              echo "Reached $max_runs runs without full convergence"
+            fi
+          done
+
+      - name: Commit output to main
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/
+          if ! git diff --cached --quiet; then
+            git commit -m "data: monthly pipeline refresh $(date +%Y-%m)"
+            git push origin main
+          else
+            echo "No output changes to commit"
+          fi
+
+      - name: Save cache to data-cache branch
+        run: |
+          if [ -d data/api_cache ] && [ "$(ls -A data/api_cache 2>/dev/null)" ]; then
+            entries=$(find data/api_cache -type f -name '*.json' | wc -l)
+            tar czf /tmp/api_cache.tar.gz -C data api_cache
+            size=$(du -h /tmp/api_cache.tar.gz | cut -f1)
+            echo "Saving $entries cache entries ($size compressed)"
+
+            tmp_branch="data-cache-push-$$"
+            git checkout --orphan "$tmp_branch"
+            git rm -rf . > /dev/null 2>&1 || true
+            cp /tmp/api_cache.tar.gz .
+            git add api_cache.tar.gz
+            git commit -m "cache: $(date +%Y-%m-%d) — $entries entries ($size)"
+            git push origin "$tmp_branch":data-cache --force
+
+            git checkout main
+          fi
