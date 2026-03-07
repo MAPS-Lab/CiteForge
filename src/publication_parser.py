@@ -50,7 +50,7 @@ _ARXIV_RE = re.compile(
 # Pattern 4: bioRxiv / medRxiv / chemRxiv with DOI fragment
 #   e.g. "BioRxiv, 10.1101/2025.05.22.655348, 2025"
 _BIORXIV_DOI_RE = re.compile(
-    r"^((?:bio|med|chem)[Rr]xiv)\s*,\s*(10\.\d{4,9}/[\w./-]+)\s*,\s*(\d{4})\s*$",
+    r"^((?:bio|med|chem)rxiv)\s*,\s*(10\.\d{4,9}/[\w./\-]+)\s*,\s*(\d{4})\s*$",
     re.IGNORECASE,
 )
 

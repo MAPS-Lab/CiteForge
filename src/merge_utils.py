@@ -64,6 +64,8 @@ _JOURNAL_URL_MAP: dict[str, str] = {
 
 # Canonical casing for howpublished preprint server names.
 # Used by merge_with_policy, save_entry_to_file fixup, and Phase 4 post-merge.
+_OSF_PREPRINTS = "OSF Preprints"
+
 _HOWPUB_CANONICAL: dict[str, str] = {
     "arxiv": "arXiv",
     "biorxiv": "bioRxiv",
@@ -72,7 +74,7 @@ _HOWPUB_CANONICAL: dict[str, str] = {
     "techrxiv": "TechRxiv",
     "research square": "Research Square",
     "ssrn": "SSRN",
-    "osf preprints": "OSF Preprints",
+    "osf preprints": _OSF_PREPRINTS,
     "preprints.org": "Preprints.org",
     "openrxiv": "openRxiv",
 }
@@ -83,8 +85,8 @@ _DOI_PREFIX_TO_HOWPUB: tuple[tuple[str, str], ...] = (
     ("10.48550/arxiv", "arXiv"),
     ("10.1101/", "bioRxiv"),
     ("10.21203/rs.", "Research Square"),
-    ("10.31234/osf.io", "OSF Preprints"),
-    ("10.31219/osf.io", "OSF Preprints"),
+    ("10.31234/osf.io", _OSF_PREPRINTS),
+    ("10.31219/osf.io", _OSF_PREPRINTS),
     ("10.26434/chemrxiv", "ChemRxiv"),
     ("10.20944/preprints", "Preprints.org"),
     ("10.2139/ssrn", "SSRN"),
@@ -181,16 +183,15 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
             for t in tokens:
                 if not t or not t[0].isalpha():
                     new_tokens.append(t)
-                elif len(t) > 2 and t.isupper():
+                elif (
                     # 3+ letter ALL-CAPS → always fix (e.g. "SMITH" → "Smith")
-                    new_tokens.append(t.capitalize())
-                    any_fixed = True
-                elif len(t) == 2 and t.isupper() and has_mixed_case and t == tokens[-1]:
-                    # 2-letter ALL-CAPS as LAST token with a mixed-case sibling → surname
+                    (len(t) > 2 and t.isupper())
+                    # 2-letter ALL-CAPS as LAST token with mixed-case sibling → surname
                     # e.g. "Shu FU" → "Shu Fu", but "JI Munro" keeps "JI" as initials
-                    new_tokens.append(t.capitalize())
-                    any_fixed = True
-                elif len(t) > 1 and t[0].islower():
+                    or (len(t) == 2 and t.isupper() and has_mixed_case and t == tokens[-1])
+                    # Lowercase start → capitalize
+                    or (len(t) > 1 and t[0].islower())
+                ):
                     new_tokens.append(t.capitalize())
                     any_fixed = True
                 else:

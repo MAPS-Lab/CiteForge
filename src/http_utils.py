@@ -397,7 +397,8 @@ def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
     short preview of invalid data in error messages.
     """
     try:
-        return json.loads(raw.decode("utf-8"))
+        result: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        return result
     except json.JSONDecodeError as ex:
         # include a preview for debugging
         preview = raw[:256].decode("utf-8", errors="replace")

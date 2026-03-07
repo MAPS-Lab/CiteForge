@@ -175,6 +175,14 @@ _URL_IN_VENUE_STRIP_RE = re.compile(r',?\s*https?://\S+')
 _US_PATENT_RE = re.compile(r'(?i)^US\s+Patent')
 _BOOK_CHAPTER_DOI_RE = re.compile(r'\.ch\d+$')
 
+# Repeated string literals used in the three-way fix pattern
+_GECCO_LOWER = "genetic and evolutionary computation conference"
+_GECCO_PROPER = "Genetic and Evolutionary Computation Conference"
+_ZENTRUM_FUR = "Zentrum fur Informatik"
+_ZENTRUM_FUER = 'Zentrum f{\\"u}r Informatik'
+_PROC_EXT_ABSTRACTS = "Proceedings of the Extended Abstracts"
+_PROC_OF_THE = "Proceedings of the "
+
 # Pre-compiled booktitle cleanup patterns (venue abbreviations, typos, spacing)
 _BOOKTITLE_FIXUPS: list[tuple[re.Pattern[str], str]] = [
     # "on on " → "on " (duplicate preposition from ACM metadata)
@@ -369,6 +377,14 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         fields.pop("booktitle", None)
         changed = True
 
+    # Reclassify @article with university name as journal → @phdthesis
+    if entry.get("type") == "article" and fields.get("journal"):
+        _jnl_lower = fields["journal"].strip().lower()
+        if "university" in _jnl_lower or "institut" in _jnl_lower:
+            fields["school"] = fields.pop("journal")
+            entry["type"] = "phdthesis"
+            changed = True
+
     # Reclassify @inproceedings with journal name as booktitle → @article
     # (but NOT for PROCEEDINGS_SERIES_AS_JOURNAL which are genuinely proceedings)
     if entry.get("type") == "inproceedings" and fields.get("booktitle"):
@@ -467,9 +483,9 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
             if _corrected_vc != _vc_val:
                 fields[_vcf] = _corrected_vc
                 changed = True
-        # Fix lowercase "genetic and evolutionary computation conference" in GECCO booktitles
-        elif _vc_val and "genetic and evolutionary computation conference" in _vc_val.lower():
-            _vc_fixed = _GECCO_RE.sub('Genetic and Evolutionary Computation Conference', _vc_val)
+        # Fix lowercase _GECCO_LOWER in GECCO booktitles
+        elif _vc_val and _GECCO_LOWER in _vc_val.lower():
+            _vc_fixed = _GECCO_RE.sub(_GECCO_PROPER, _vc_val)
             if _vc_fixed != _vc_val:
                 fields[_vcf] = _vc_fixed
                 changed = True
@@ -517,8 +533,8 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
 
     # Fix Schloss Dagstuhl missing umlaut ("fur" → "f{\"u}r")
     pub = (fields.get("publisher") or "").strip()
-    if "Zentrum fur Informatik" in pub:
-        fields["publisher"] = pub.replace("Zentrum fur Informatik", 'Zentrum f{\\"u}r Informatik')
+    if _ZENTRUM_FUR in pub:
+        fields["publisher"] = pub.replace(_ZENTRUM_FUR, _ZENTRUM_FUER)
         changed = True
 
     # Strip page numbers embedded in booktitle (e.g., ", 17: 1-17: 18" from LIPIcs)
@@ -535,8 +551,8 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
 
     # Strip duplicate "Proceedings of the" wrapper from booktitle
     bt_dup = (fields.get("booktitle") or "").strip()
-    if bt_dup.startswith("Proceedings of the Extended Abstracts"):
-        fields["booktitle"] = bt_dup.removeprefix("Proceedings of the ")
+    if bt_dup.startswith(_PROC_EXT_ABSTRACTS):
+        fields["booktitle"] = bt_dup.removeprefix(_PROC_OF_THE)
         changed = True
 
     # Add URL from DOI when missing
@@ -906,6 +922,14 @@ def process_article(
                     _bl_fields[_ell_field] = _ell_clean
                     _fixup_written = True
 
+        # Expand abbreviated venue names in booktitle
+        _ex_bt_abbr = (_bl_fields.get("booktitle") or "").strip()
+        if _ex_bt_abbr and _ex_bt_abbr.lower() in ABBREVIATED_VENUE_MAP:
+            _ex_expanded = ABBREVIATED_VENUE_MAP[_ex_bt_abbr.lower()]
+            if _ex_expanded != _ex_bt_abbr:
+                _bl_fields["booktitle"] = _ex_expanded
+                _fixup_written = True
+
         # Correct ALL-CAPS venue names to proper case
         for _ex_vcf in ("journal", "booktitle"):
             _ex_vc_val = (_bl_fields.get(_ex_vcf) or "").strip()
@@ -916,11 +940,18 @@ def process_article(
                 )
                 _bl_fields[_ex_vcf] = VENUE_CASE_CORRECTIONS[_ex_vc_val]
                 _fixup_written = True
-            elif _ex_vc_val and "genetic and evolutionary computation conference" in _ex_vc_val.lower():
-                _ex_vc_fixed = _GECCO_RE.sub('Genetic and Evolutionary Computation Conference', _ex_vc_val)
+            elif _ex_vc_val and _GECCO_LOWER in _ex_vc_val.lower():
+                _ex_vc_fixed = _GECCO_RE.sub(_GECCO_PROPER, _ex_vc_val)
                 if _ex_vc_fixed != _ex_vc_val:
                     _bl_fields[_ex_vcf] = _ex_vc_fixed
                     _fixup_written = True
+
+        # Strip publisher when it duplicates the journal/booktitle name
+        _ex_pub = (_bl_fields.get("publisher") or "").strip()
+        _ex_container = (_bl_fields.get("journal") or _bl_fields.get("booktitle") or "").strip()
+        if _ex_pub and _ex_container and _ex_pub.lower() == _ex_container.lower():
+            del _bl_fields["publisher"]
+            _fixup_written = True
 
         # Strip trailing dash/en-dash from title (truncation artifact)
         _bl_title_td = (_bl_fields.get("title") or "").strip()
@@ -957,8 +988,8 @@ def process_article(
 
         # Fix Schloss Dagstuhl missing umlaut
         _ex_pub = (_bl_fields.get("publisher") or "").strip()
-        if "Zentrum fur Informatik" in _ex_pub:
-            _bl_fields["publisher"] = _ex_pub.replace("Zentrum fur Informatik", 'Zentrum f{\\"u}r Informatik')
+        if _ZENTRUM_FUR in _ex_pub:
+            _bl_fields["publisher"] = _ex_pub.replace(_ZENTRUM_FUR, _ZENTRUM_FUER)
             _fixup_written = True
 
         # Strip page numbers embedded in booktitle (LIPIcs style)
@@ -975,8 +1006,8 @@ def process_article(
 
         # Strip duplicate "Proceedings of the" wrapper
         _ex_bt_dup = (_bl_fields.get("booktitle") or "").strip()
-        if _ex_bt_dup.startswith("Proceedings of the Extended Abstracts"):
-            _bl_fields["booktitle"] = _ex_bt_dup.removeprefix("Proceedings of the ")
+        if _ex_bt_dup.startswith(_PROC_EXT_ABSTRACTS):
+            _bl_fields["booktitle"] = _ex_bt_dup.removeprefix(_PROC_OF_THE)
             _fixup_written = True
 
         # Fix ALL-CAPS titles
@@ -992,9 +1023,12 @@ def process_article(
                 _fixup_written = True
 
         # Fix conference proceedings misclassified as @article with journal
+        # (but NOT for ACM PACM journals which are legitimately named "Proceedings of...")
         if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
             _conf_jnl = _bl_fields["journal"].strip()
-            if mu._is_conference_journal(_conf_jnl) and not _bl_fields.get("booktitle"):
+            _conf_jnl_lower = _conf_jnl.lower()
+            _is_pacm = any(_conf_jnl_lower.startswith(pj) or _conf_jnl_lower == pj for pj in ACM_JOURNAL_PROCEEDINGS)
+            if mu._is_conference_journal(_conf_jnl) and not _bl_fields.get("booktitle") and not _is_pacm:
                 logger.debug(
                     f"EXISTING_FIXUP | conference_as_journal | journal={_conf_jnl[:60]}",
                     category=LogCategory.CLEANUP,
@@ -1074,16 +1108,20 @@ def process_article(
                 _fixup_written = True
 
         # Reclassify @inproceedings with PNAS/PVLDB journal → @article
+        # Guard: skip if the booktitle extends the journal name with conference keywords
         if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
             _jnp_bt = _bl_fields["booktitle"].strip().lower()
-            if any(_jnp_bt.startswith(j) for j in JOURNALS_NAMED_PROCEEDINGS):
-                logger.debug(
-                    f"EXISTING_FIXUP | inproceedings_journal_proceedings->article | booktitle={_jnp_bt[:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["journal"] = _bl_fields.pop("booktitle")
-                baseline_entry["type"] = "article"
-                _fixup_written = True
+            _jnp_match = next((j for j in JOURNALS_NAMED_PROCEEDINGS if _jnp_bt.startswith(j)), None)
+            if _jnp_match:
+                _jnp_suffix = _jnp_bt[len(_jnp_match):].lstrip(" /,")
+                if not any(kw in _jnp_suffix for kw in ("conference", "workshop", "symposium")):
+                    logger.debug(
+                        f"EXISTING_FIXUP | inproceedings_journal_proceedings->article | booktitle={_jnp_bt[:60]}",
+                        category=LogCategory.CLEANUP,
+                    )
+                    _bl_fields["journal"] = _bl_fields.pop("booktitle")
+                    baseline_entry["type"] = "article"
+                    _fixup_written = True
 
         # Reclassify @inproceedings with institutional repository → @phdthesis
         if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
@@ -2031,9 +2069,12 @@ def process_article(
                     merged_fields[_ell_field_p4] = _ell_clean_p4
 
         # Reclassify @article with conference proceedings as journal -> @inproceedings
+        # (but NOT for ACM PACM journals which are legitimately named "Proceedings of...")
         if merged.get("type") == "article" and merged_fields.get("journal"):
             _p4_jnl = merged_fields["journal"].strip()
-            if mu._is_conference_journal(_p4_jnl) and not merged_fields.get("booktitle"):
+            _p4_jnl_lower = _p4_jnl.lower()
+            _is_pacm_p4 = any(_p4_jnl_lower.startswith(pj) or _p4_jnl_lower == pj for pj in ACM_JOURNAL_PROCEEDINGS)
+            if mu._is_conference_journal(_p4_jnl) and not merged_fields.get("booktitle") and not _is_pacm_p4:
                 logger.debug(
                     f"TYPE_CORRECT | article_conference_journal->inproceedings | journal={_p4_jnl[:60]}",
                     category=LogCategory.AUDIT,
@@ -2064,15 +2105,19 @@ def process_article(
                 merged_fields["journal"] = merged_fields.pop("booktitle")
 
         # Reclassify @inproceedings with PNAS/PVLDB journal as booktitle → @article
+        # Guard: skip if the booktitle extends the journal name with conference keywords
         if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
             _jnp_bt_lower = merged_fields["booktitle"].strip().lower()
-            if any(_jnp_bt_lower.startswith(j) for j in JOURNALS_NAMED_PROCEEDINGS):
-                logger.debug(
-                    f"TYPE_CORRECT | inproceedings_journal_proceedings->article | booktitle={_jnp_bt_lower[:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "article"
-                merged_fields["journal"] = merged_fields.pop("booktitle")
+            _jnp_match_p4 = next((j for j in JOURNALS_NAMED_PROCEEDINGS if _jnp_bt_lower.startswith(j)), None)
+            if _jnp_match_p4:
+                _jnp_suffix_p4 = _jnp_bt_lower[len(_jnp_match_p4):].lstrip(" /,")
+                if not any(kw in _jnp_suffix_p4 for kw in ("conference", "workshop", "symposium")):
+                    logger.debug(
+                        f"TYPE_CORRECT | inproceedings_journal_proceedings->article | booktitle={_jnp_bt_lower[:60]}",
+                        category=LogCategory.AUDIT,
+                    )
+                    merged["type"] = "article"
+                    merged_fields["journal"] = merged_fields.pop("booktitle")
 
         # Reclassify @inproceedings with institutional repository → @phdthesis
         if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
@@ -2103,17 +2148,6 @@ def process_article(
             logger.debug("TYPE_CORRECT | article_unpublished->misc", category=LogCategory.AUDIT)
             merged["type"] = "misc"
             merged_fields.pop("journal", None)
-
-        # Journals named "Proceedings of ..." (PNAS, PVLDB, etc.) are journals
-        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _bt_lower = merged_fields["booktitle"].lower()
-            if mu._matches_journal_named_proceedings(_bt_lower):
-                logger.debug(
-                    f"TYPE_CORRECT | inproceedings_journal_proceedings->article | booktitle={_bt_lower[:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "article"
-                merged_fields["journal"] = merged_fields.pop("booktitle")
 
         # Strip URL fragments from booktitle (e.g., "proceedings.mlr.press")
         if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
@@ -2256,15 +2290,28 @@ def process_article(
             if _p4_bt_fixed != _p4_bt_fix:
                 merged_fields["booktitle"] = _p4_bt_fixed
 
+        # Expand abbreviated venue names in booktitle
+        _p4_bt_abbr = (merged_fields.get("booktitle") or "").strip()
+        if _p4_bt_abbr and _p4_bt_abbr.lower() in ABBREVIATED_VENUE_MAP:
+            _p4_expanded = ABBREVIATED_VENUE_MAP[_p4_bt_abbr.lower()]
+            if _p4_expanded != _p4_bt_abbr:
+                merged_fields["booktitle"] = _p4_expanded
+
         # Correct ALL-CAPS venue names to proper case
         for _p4_vcf in ("journal", "booktitle"):
             _p4_vc_val = (merged_fields.get(_p4_vcf) or "").strip()
             if _p4_vc_val and _p4_vc_val in VENUE_CASE_CORRECTIONS:
                 merged_fields[_p4_vcf] = VENUE_CASE_CORRECTIONS[_p4_vc_val]
-            elif _p4_vc_val and "genetic and evolutionary computation conference" in _p4_vc_val.lower():
-                _p4_vc_fixed = _GECCO_RE.sub('Genetic and Evolutionary Computation Conference', _p4_vc_val)
+            elif _p4_vc_val and _GECCO_LOWER in _p4_vc_val.lower():
+                _p4_vc_fixed = _GECCO_RE.sub(_GECCO_PROPER, _p4_vc_val)
                 if _p4_vc_fixed != _p4_vc_val:
                     merged_fields[_p4_vcf] = _p4_vc_fixed
+
+        # Strip publisher when it duplicates the journal/booktitle name
+        _p4_pub = (merged_fields.get("publisher") or "").strip()
+        _p4_container = (merged_fields.get("journal") or merged_fields.get("booktitle") or "").strip()
+        if _p4_pub and _p4_container and _p4_pub.lower() == _p4_container.lower():
+            del merged_fields["publisher"]
 
         # Strip SPIRE-style proceedings garbage suffix from booktitle
         _p4_bt_spire = (merged_fields.get("booktitle") or "").strip()
@@ -2285,8 +2332,8 @@ def process_article(
 
         # Fix Schloss Dagstuhl missing umlaut
         _p4_pub = (merged_fields.get("publisher") or "").strip()
-        if "Zentrum fur Informatik" in _p4_pub:
-            merged_fields["publisher"] = _p4_pub.replace("Zentrum fur Informatik", 'Zentrum f{\\"u}r Informatik')
+        if _ZENTRUM_FUR in _p4_pub:
+            merged_fields["publisher"] = _p4_pub.replace(_ZENTRUM_FUR, _ZENTRUM_FUER)
 
         # Strip page numbers embedded in booktitle (LIPIcs style)
         _p4_bt_pg = (merged_fields.get("booktitle") or "").strip()
@@ -2301,8 +2348,8 @@ def process_article(
 
         # Strip duplicate "Proceedings of the" wrapper
         _p4_bt_dup = (merged_fields.get("booktitle") or "").strip()
-        if _p4_bt_dup.startswith("Proceedings of the Extended Abstracts"):
-            merged_fields["booktitle"] = _p4_bt_dup.removeprefix("Proceedings of the ")
+        if _p4_bt_dup.startswith(_PROC_EXT_ABSTRACTS):
+            merged_fields["booktitle"] = _p4_bt_dup.removeprefix(_PROC_OF_THE)
 
         # Strip URLs embedded in booktitle/journal (keep text before URL)
         for _url_field in ("booktitle", "journal"):
@@ -3075,6 +3122,10 @@ def main() -> int:
                     m = _FILENAME_YEAR_RE.search(f"/{fname}")
                     if m:
                         if int(m.group(1)) < window_min:
+                            logger.debug(
+                                f"YEAR_WINDOW | removing {fname} (year={m.group(1)} < {window_min})",
+                                category=LogCategory.CLEANUP,
+                            )
                             os.remove(fpath)
                             window_removed += 1
                         continue
@@ -3086,6 +3137,10 @@ def main() -> int:
                             (parsed or {}).get("fields", {}).get("year"), fallback=0
                         ) or 0
                         if 0 < bib_year < window_min:
+                            logger.debug(
+                                f"YEAR_WINDOW | removing {fname} (bib_year={bib_year} < {window_min})",
+                                category=LogCategory.CLEANUP,
+                            )
                             os.remove(fpath)
                             window_removed += 1
                     except (OSError, ValueError):

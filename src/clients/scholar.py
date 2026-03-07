@@ -63,6 +63,8 @@ def _cache_covers_window(cached: dict[str, Any], min_year: int) -> bool:
     above *min_year*).
     """
     articles = cached.get("articles") or []
+    if not articles:
+        return False
     years = [a.get("year") for a in articles
              if isinstance(a.get("year"), int) and a["year"] > 0]
     if not years or min(years) <= min_year:

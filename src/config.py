@@ -36,9 +36,6 @@ MAX_PUBLICATIONS_PER_AUTHOR = PUBLICATIONS_PER_YEAR * CONTRIBUTION_WINDOW_YEARS
 # Skip Scholar citation fetch if BibTeX file already exists
 SKIP_SCHOLAR_FOR_EXISTING_FILES = True
 
-# Courtesy delay between articles to avoid hitting rate limits
-REQUEST_DELAY_BETWEEN_ARTICLES = 0.5
-
 # Trust hierarchy for merging metadata from different sources.
 # Sources earlier in the list are more reliable than those later.
 # This ordering reflects data quality, completeness, and standardization.
@@ -260,6 +257,8 @@ CONFERENCE_KEYWORDS: tuple[str, ...] = (
     "studies in health technology and informatics",  # IOS Press (SHTI)
 )
 
+_NIME_FULL = "New Interfaces for Musical Expression"
+
 # Abbreviated venue names → full conference names (for S2/DBLP expansion)
 ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "spire": "String Processing and Information Retrieval",
@@ -293,9 +292,9 @@ ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "ubicomp": "Ubiquitous Computing",
     "iui": "Intelligent User Interfaces",
     "dis": "Designing Interactive Systems",
-    "nime": "New Interfaces for Musical Expression",
-    "nime 2021": "New Interfaces for Musical Expression",
-    "nime 2022": "New Interfaces for Musical Expression",
+    "nime": _NIME_FULL,
+    "nime 2021": _NIME_FULL,
+    "nime 2022": _NIME_FULL,
     "egu": "EGU General Assembly",
     "aimc": "AI Music Creativity Conference",
     "wnut": "Workshop on Noisy User-generated Text",

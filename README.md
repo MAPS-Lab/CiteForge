@@ -87,10 +87,17 @@ Each article passes through five phases:
 | 1 | DOI Validation | Resolve DOIs via CSL-JSON with BibTeX fallback |
 | 2 | API Enrichment | Query S2, Crossref, arXiv, OpenAlex, PubMed, Europe PMC, DBLP, and OpenReview |
 | 2.5 | Venue Enrichment | Parse SerpAPI publication strings for venue-based API search (fallback) |
-| 3 | Late DOI Discovery | Collect DOI candidates; prefer published over preprint |
-| 4 | Trust-Based Merge | Combine fields by source rank, then deduplicate on disk |
+| 3 | Late DOI Discovery | Collect DOI candidates from arXiv eprints, bioRxiv strings, URLs; prefer published over preprint |
+| 4 | Trust-Based Merge | Combine fields by source rank, apply type corrections, deduplicate on disk |
 
 Authors are processed in parallel with 12 workers. Per-API token-bucket rate limiting and session rotation prevent throttling.
+
+After all articles are processed, the post-run sequence runs:
+
+```
+flush CSV → reconcile phantoms → remove orphans →
+year-window cleanup → post-run fixup → build a2i2 folder → rebuild baseline.json
+```
 
 ### Trust Hierarchy
 
@@ -109,7 +116,18 @@ Special rules override raw rank for specific fields:
 | DOI | Published DOIs always beat preprint/data repository DOIs |
 | Journal | Never downgraded from published journal to preprint server |
 | Title | Prefer longer unless new source is 3+ ranks higher |
+| Pages | Reject non-numeric, dot-containing, or oversized page ranges |
 | Booktitle | Generic series names (LNCS, etc.) replaced with conference names |
+
+### Three-Way Fix Pattern
+
+To prevent oscillation between consecutive runs, all text and type corrections are applied in three synchronized locations:
+
+1. `_fixup_bib_entry()` — initial fixup on load
+2. Existing-file fixup — inline in `process_article()` before enrichment
+3. Phase 4 post-merge — after trust-based merge
+
+Consolidated helpers (`_fix_title_text()`, `_apply_booktitle_fixups()`) are called from all three, ensuring byte-identical output. A content comparison guard in the post-run fixup prevents phantom writes.
 
 ### Deduplication
 
@@ -126,6 +144,16 @@ Multi-level deduplication prevents duplicate entries:
 
 Candidate DOIs discovered during enrichment are verified against existing files via title similarity before acceptance. Mis-attributed DOIs are reverted to the Phase-1-validated DOI.
 
+### Year-Window Enforcement
+
+`CONTRIBUTION_WINDOW_YEARS=7` (2020-2026). Enforced at three layers:
+
+| Layer | Location | Mechanism |
+|-------|----------|-----------|
+| 1 | Scholar filter | `get_article_year(a) >= min_year` |
+| 2 | Phase 4 save | Reject if enriched year < min_year |
+| 3 | Post-run cleanup | Filename regex scan + BibTeX year fallback |
+
 ### Data Quality
 
 The merge engine enforces additional rules:
@@ -139,8 +167,14 @@ The merge engine enforces additional rules:
 | Type reclassification | Fix conference-as-journal entries from Crossref |
 | Casing normalization | Fix ALL-CAPS titles and lowercase author names |
 | DOI reversion | Undo mis-attributed DOIs when title similarity check fails |
+| Fused compound repair | Fix ~376 Scholar-broken compounds (e.g., "DeepLearning" → "Deep Learning") |
+| Acronym case correction | Fix IoT, NIMS, AI casing in titles |
+| Booktitle cleanup | Fix duplicate prepositions, expand abbreviations, correct NeurIPS spelling |
+| Repository guard | Prevent Zenodo/OSTI/Figshare entries from upgrading to @inproceedings |
+| Thesis detection | Reclassify @article with university name as journal → @phdthesis |
+| Publisher dedup | Strip publisher field when it duplicates the journal/booktitle name |
 
-On cache-hit runs, CiteForge produces byte-identical output across consecutive runs.
+On cache-hit runs, CiteForge produces byte-identical output across consecutive runs (SHA256-verified determinism).
 
 ---
 
@@ -180,6 +214,9 @@ All parameters live in [`src/config.py`](src/config.py):
 | `REQUEST_DELAY_MIN` / `_MAX` | 0.3 / 1.0s | Courtesy delay between API requests |
 | `CACHE_ENABLED` | True | Local API response caching |
 | `TRUST_ORDER` | 13 levels | Source priority for field-by-field merge |
+| `FUSED_COMPOUND_WORDS` | 376 entries | Dictionary-based compound word repair |
+| `COMPOUND_SUFFIXES` | 37 entries | Regex-based compound suffix repair |
+| `ABBREVIATED_VENUE_MAP` | 46 entries | Venue abbreviation → full name expansion |
 
 ---
 
@@ -190,7 +227,7 @@ pip install -e .[dev]
 pytest tests/ -v --tb=short
 ```
 
-369 tests across 15 modules. Integration tests requiring API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
+384 tests across 12 modules. Integration tests requiring API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
 All three quality gates must pass before merge:
 
@@ -207,8 +244,8 @@ pytest tests/ -v --tb=short          # Tests
 
 | Module | Purpose |
 |--------|---------|
-| `main.py` | Orchestrator: thread pool, 5-phase pipeline, CLI entry |
-| `src/config.py` | Thresholds, trust order, HTTP params, API URLs |
+| `main.py` | Orchestrator: thread pool, 5-phase pipeline, CLI entry (~3,200 LOC) |
+| `src/config.py` | Thresholds, trust order, HTTP params, API URLs, compound words, venue maps |
 | `src/merge_utils.py` | Trust hierarchy merge, file save, multi-level dedup |
 | `src/bibtex_utils.py` | BibTeX parsing, serialization, entry matching |
 | `src/bibtex_build.py` | Entry building, scoring factory, type determination |
@@ -220,17 +257,86 @@ pytest tests/ -v --tb=short          # Tests
 | `src/publication_parser.py` | SerpAPI publication string parsing, venue/type inference |
 | `src/cache.py` | Disk-based API response cache with monthly expiry |
 | `src/http_utils.py` | HTTP session, retry, backoff, token bucket rate limiting |
-| `src/io_utils.py` | CSV I/O, key loading, phantom/orphan reconciliation |
+| `src/io_utils.py` | CSV I/O, key loading, phantom/orphan reconciliation, a2i2 build |
 | `src/log_utils.py` | Thread-local logging, per-author log files |
 | `src/models.py` | Record dataclass, EnrichmentSource enum |
 | `src/exceptions.py` | Error hierarchy tuples |
-| `src/clients/scholar.py` | Google Scholar facade (SerpAPI + Serply) |
+| `src/clients/scholar.py` | Google Scholar facade (SerpAPI + Serply + stale cache detection) |
 | `src/clients/serpapi_scholar.py` | SerpAPI author publication retrieval |
 | `src/clients/serply_scholar.py` | Serply citation detail lookups |
 | `src/clients/scholarly_scholar.py` | Google Scholar web-scraping fallback |
 | `src/clients/search_apis.py` | S2, Crossref, arXiv, OpenReview, OpenAlex, PubMed, Europe PMC |
 | `src/clients/utility_apis.py` | DataCite, ORCID, DOI resolvers |
 | `src/clients/helpers.py` | Shared scoring and deduplication helpers |
+
+</details>
+
+<details>
+<summary><strong>Architecture Diagram</strong></summary>
+
+```
+                     ┌─────────────────────┐
+                     │   data/input.csv     │
+                     │   (68 authors)       │
+                     └─────────┬───────────┘
+                               │
+                     ┌─────────▼───────────┐
+                     │      main.py         │
+                     │  (orchestrator)      │
+                     └─────────┬───────────┘
+                               │
+           ┌───────────────────┼───────────────────┐
+           │                   │                   │
+ ┌─────────▼──────┐  ┌────────▼────────┐  ┌──────▼──────────┐
+ │  Fixup Pass    │  │  Completeness   │  │  ThreadPool(12) │
+ │ _fixup_bib_    │  │  _entry_is_     │  │  per-article    │
+ │  entry()       │  │  complete()     │  │  processing     │
+ └────────────────┘  └─────────────────┘  └──────┬──────────┘
+                                                  │
+       ┌──────────────────────────────────────────┤
+       │              5-PHASE PIPELINE             │
+ ┌─────▼─────┐  ┌──────────┐  ┌────────┐  ┌─────▼─────────┐
+ │  Phase 1  │  │ Phase 2  │  │Ph. 2.5 │  │   Phase 3     │
+ │ DOI Valid.│→ │ Multi-API│→ │SerpAPI  │→ │ Late DOI      │
+ │ CSL+BibTeX│  │ Enrich   │  │Pub.Str. │  │ Inference     │
+ └───────────┘  └──────────┘  └────────┘  └───────────────┘
+                                                  │
+                                           ┌──────▼──────────┐
+                                           │    Phase 4      │
+                                           │ Trust Merge     │
+                                           │ + Type Fixups   │
+                                           │ + DOI Dedup     │
+                                           │ + Year Guard    │
+                                           └──────┬──────────┘
+                                                  │
+ ┌────────────────────────────────────────────────┤
+ │              POST-RUN SEQUENCE                  │
+ ▼              ▼            ▼          ▼          ▼
+flush_csv → phantoms → orphans → year_cleanup → a2i2_build
+                                                  │
+                                           ┌──────▼──────────┐
+                                           │  output/        │
+                                           │  per-author/    │
+                                           │  a2i2/ (977)    │
+                                           │  baseline.json  │
+                                           │  summary.csv    │
+                                           └─────────────────┘
+
+ ┌─────────────────────────────────────────────────────────┐
+ │                  SUPPORT LAYER                          │
+ │                                                         │
+ │  src/config.py ─── thresholds, trust order, venues      │
+ │  src/merge_utils.py ─── merge_with_policy() (13 ranks)  │
+ │  src/bibtex_build.py ─── determine_entry_type()         │
+ │  src/bibtex_utils.py ─── parse/serialize BibTeX         │
+ │  src/id_utils.py ─── DOI/arXiv normalization            │
+ │  src/io_utils.py ─── a2i2 build, file ops              │
+ │  src/http_utils.py ─── HTTP pool, rate limiter          │
+ │  src/cache.py ─── file-based JSON, monthly TTL          │
+ │  src/publication_parser.py ─── 8-pattern regex cascade  │
+ │  src/clients/ ─── 8 API client modules                  │
+ └─────────────────────────────────────────────────────────┘
+```
 
 </details>
 

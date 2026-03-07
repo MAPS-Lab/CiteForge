@@ -60,6 +60,9 @@ _DBLP_ALLOWED_TAGS = frozenset({"article", "inproceedings", "incollection", "phd
 _DBLP_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
 _NON_WORD_RE = re.compile(r"\W+")
 
+_QP_AUTHOR = "query.author"
+_QP_BIBLIOGRAPHIC = "query.bibliographic"
+
 # ============ Semantic Scholar ============
 
 def s2_search_paper(title: str, author_name: str | None, api_key: str | None) -> dict[str, Any] | None:
@@ -127,9 +130,9 @@ def crossref_search(title: str, author_name: str | None) -> dict[str, Any] | Non
     additional_params = dict(config.additional_params)
     if author_name:
         additional_params["query.title"] = title
-        additional_params["query.author"] = author_name
+        additional_params[_QP_AUTHOR] = author_name
     else:
-        additional_params["query.bibliographic"] = title
+        additional_params[_QP_BIBLIOGRAPHIC] = title
     mailto = os.getenv("CROSSREF_MAILTO")
     if mailto:
         additional_params["mailto"] = mailto
@@ -154,9 +157,9 @@ def crossref_search_multiple(title: str, author_name: str | None, max_results: i
     additional_params = dict(config.additional_params)
     if author_name:
         additional_params["query.title"] = title
-        additional_params["query.author"] = author_name
+        additional_params[_QP_AUTHOR] = author_name
     else:
-        additional_params["query.bibliographic"] = title
+        additional_params[_QP_BIBLIOGRAPHIC] = title
     mailto = os.getenv("CROSSREF_MAILTO")
     if mailto:
         additional_params["mailto"] = mailto
@@ -1046,9 +1049,9 @@ def crossref_search_by_venue(
     config = copy.copy(CROSSREF_SEARCH_CONFIG)
     params: dict[str, Any] = dict(config.additional_params)
     params["query.container-title"] = container_title
-    params["query.bibliographic"] = title
+    params[_QP_BIBLIOGRAPHIC] = title
     if author_name:
-        params["query.author"] = author_name
+        params[_QP_AUTHOR] = author_name
     mailto = os.getenv("CROSSREF_MAILTO")
     if mailto:
         params["mailto"] = mailto

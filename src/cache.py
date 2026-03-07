@@ -71,7 +71,7 @@ class ResponseCache:
                 with contextlib.suppress(OSError):
                     os.remove(path)
                 return None
-            return entry.get("data", {})
+            return dict(entry.get("data", {}))
 
     def put(self, namespace: str, key: str, value: dict[str, Any], ttl_days: int = 30) -> None:
         if not CACHE_ENABLED:
@@ -97,8 +97,11 @@ class ResponseCache:
                     with contextlib.suppress(OSError):
                         os.remove(tmp_path)
                     raise
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warn(
+                    f"CACHE_WRITE_FAILED | namespace={namespace} | key_hash={khash} | error={exc}",
+                    category=LogCategory.CACHE,
+                )
 
     def has(self, namespace: str, key: str) -> bool:
         return self.get(namespace, key) is not None

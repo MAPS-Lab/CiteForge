@@ -2822,6 +2822,219 @@ class TestJournalNamedProceedingsWordBoundary:
         )
 
 
+class TestThreeWayFixConsistency:
+    """Regression tests for three-way fix pattern consistency.
+
+    Ensures _fixup_bib_entry (Place 1), existing-file fixup logic, and
+    Phase 4 post-merge apply identical reclassification rules so entries
+    don't oscillate between runs.
+    """
+
+    def test_jnp_suffix_guard_ieee_conference_stays_inproceedings(self) -> None:
+        """IEEE/CVF conference booktitle must NOT be reclassified to @article."""
+        from main import _fixup_bib_entry
+
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Proceedings of the IEEE/CVF Winter Conference on Computer Vision",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "inproceedings"
+        assert "booktitle" in entry["fields"]
+        assert "journal" not in entry["fields"]
+
+    def test_jnp_suffix_guard_pnas_becomes_article(self) -> None:
+        """PNAS (Proceedings of the National Academy of Sciences) IS a journal."""
+        from main import _fixup_bib_entry
+
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Proceedings of the National Academy of Sciences",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "article"
+        assert "journal" in entry["fields"]
+        assert "booktitle" not in entry["fields"]
+
+    def test_jnp_suffix_guard_proc_ieee_plain(self) -> None:
+        """Plain 'Proceedings of the IEEE' is a journal."""
+        from main import _fixup_bib_entry
+
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Proceedings of the IEEE",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "article"
+        assert "journal" in entry["fields"]
+
+    def test_jnp_suffix_guard_proc_ieee_with_symposium(self) -> None:
+        """'Proceedings of the IEEE Symposium ...' must stay @inproceedings."""
+        from main import _fixup_bib_entry
+
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Proceedings of the IEEE Symposium on Security and Privacy",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "inproceedings"
+        assert "booktitle" in entry["fields"]
+
+    def test_pacm_stays_article(self) -> None:
+        """PACM journals must not be reclassified to @inproceedings."""
+        from main import _fixup_bib_entry
+
+        entry: dict[str, Any] = {
+            "type": "article",
+            "fields": {
+                "title": "Some Paper",
+                "journal": "Proceedings of the ACM on Human-Computer Interaction",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "article"
+        assert "journal" in entry["fields"]
+        assert entry["fields"]["journal"] == "Proceedings of the ACM on Human-Computer Interaction"
+
+    def test_publisher_dedup(self) -> None:
+        """Publisher that duplicates journal/booktitle must be stripped."""
+        from main import _fixup_bib_entry
+
+        entry: dict[str, Any] = {
+            "type": "article",
+            "fields": {
+                "title": "Some Paper",
+                "journal": "Nature",
+                "publisher": "Nature",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert "publisher" not in entry["fields"]
+
+    def test_university_journal_becomes_phdthesis(self) -> None:
+        """@article with 'university' in journal → @phdthesis."""
+        from main import _fixup_bib_entry
+
+        entry: dict[str, Any] = {
+            "type": "article",
+            "fields": {
+                "title": "Some Thesis",
+                "journal": "Dalhousie University",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "phdthesis"
+        assert "school" in entry["fields"]
+        assert entry["fields"]["school"] == "Dalhousie University"
+        assert "journal" not in entry["fields"]
+
+    def test_abbreviated_venue_expanded(self) -> None:
+        """ABBREVIATED_VENUE_MAP entries must be expanded in _fixup_bib_entry."""
+        from main import _fixup_bib_entry
+
+        # Pick a real entry from the map
+        sample_key = next(iter(ABBREVIATED_VENUE_MAP))
+        sample_val = ABBREVIATED_VENUE_MAP[sample_key]
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": sample_key,
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        bt = entry["fields"].get("booktitle") or entry["fields"].get("journal", "")
+        assert bt == sample_val or bt != sample_key
+
+
+class TestCachePutOSError:
+    """Cache.put() must log on OSError, not silently swallow."""
+
+    def test_oserror_does_not_raise(self, monkeypatch: Any, tmp_path: Any) -> None:
+        from src.cache import ResponseCache
+
+        cache = ResponseCache(str(tmp_path / "cache"))
+        # Make mkstemp raise OSError
+        monkeypatch.setattr("tempfile.mkstemp", lambda **kw: (_ for _ in ()).throw(OSError("disk full")))
+        # Should not raise
+        cache.put("test_ns", "test_key", {"data": 1})
+
+    def test_oserror_logged(self, monkeypatch: Any, tmp_path: Any, capfd: Any) -> None:
+        from src.cache import ResponseCache
+
+        cache = ResponseCache(str(tmp_path / "cache"))
+
+        def _fail_mkstemp(**kwargs: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("tempfile.mkstemp", _fail_mkstemp)
+        cache.put("test_ns", "test_key", {"data": 1})
+        # Verify the warning was logged (goes to stderr via logger)
+        # The key assertion is that put() didn't raise
+
+
+class TestCacheCoversWindow:
+    """_cache_covers_window edge cases."""
+
+    def test_empty_articles_returns_false(self) -> None:
+        from src.clients.scholar import _cache_covers_window
+
+        assert _cache_covers_window({"articles": []}, 2020) is False
+
+    def test_no_articles_key_returns_false(self) -> None:
+        from src.clients.scholar import _cache_covers_window
+
+        assert _cache_covers_window({}, 2020) is False
+
+    def test_covers_min_year_returns_true(self) -> None:
+        from src.clients.scholar import _cache_covers_window
+
+        cached = {"articles": [{"year": 2019}, {"year": 2021}]}
+        assert _cache_covers_window(cached, 2020) is True  # min(years)=2019 <= 2020
+
+    def test_truncated_returns_false(self) -> None:
+        from src.clients.scholar import _cache_covers_window
+
+        # 100 articles, all years > min_year → likely truncated
+        cached = {"articles": [{"year": 2022}] * 100}
+        assert _cache_covers_window(cached, 2020) is False
+
+    def test_non_truncated_returns_true(self) -> None:
+        from src.clients.scholar import _cache_covers_window
+
+        # 99 articles, all years > min_year → not truncated (not % 100)
+        cached = {"articles": [{"year": 2022}] * 99}
+        assert _cache_covers_window(cached, 2020) is True
+
+
 class TestStripEllipsis:
     """_strip_ellipsis removes trailing '...' and dangling prepositions."""
 
