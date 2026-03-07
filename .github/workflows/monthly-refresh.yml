@@ -62,6 +62,29 @@ jobs:
           CITEFORGE_MAX_WORKERS: "16"
           CITEFORGE_CONCURRENCY: "20"
         run: |
+          save_cache() {
+            if [ -d data/api_cache ] && [ "$(ls -A data/api_cache 2>/dev/null)" ]; then
+              entries=$(find data/api_cache -type f -name '*.json' | wc -l)
+              tar czf /tmp/api_cache.tar.gz -C data api_cache
+              size=$(du -h /tmp/api_cache.tar.gz | cut -f1)
+              echo "Saving $entries cache entries ($size compressed)"
+
+              git stash --include-untracked -q 2>/dev/null || true
+              tmp_branch="data-cache-push-$$-$1"
+              git checkout --orphan "$tmp_branch" 2>/dev/null
+              git rm -rf . > /dev/null 2>&1 || true
+              cp /tmp/api_cache.tar.gz .
+              git add api_cache.tar.gz
+              git commit -q -m "cache: $(date +%Y-%m-%d) — $entries entries ($size)"
+              git push origin "$tmp_branch":data-cache --force -q
+              git checkout main -q
+              git stash pop -q 2>/dev/null || true
+            fi
+          }
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
           max_runs=50
           consecutive_zero=0
           for i in $(seq 1 $max_runs); do
@@ -72,12 +95,17 @@ jobs:
 
             if [ "$rc" -ne 0 ]; then
               echo "::error::Pipeline run $i failed with exit code $rc"
+              echo "Saving cache before exit..."
+              save_cache "$i"
               exit 1
             fi
 
             # Parse total API calls from the run log
             total=$(grep -oP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
             echo "Run $i — API calls: $total"
+
+            # Save cache after every iteration
+            save_cache "$i"
 
             if [ "$total" -eq 0 ]; then
               consecutive_zero=$((consecutive_zero + 1))
@@ -105,23 +133,4 @@ jobs:
             git push origin main
           else
             echo "No output changes to commit"
-          fi
-
-      - name: Save cache to data-cache branch
-        run: |
-          if [ -d data/api_cache ] && [ "$(ls -A data/api_cache 2>/dev/null)" ]; then
-            entries=$(find data/api_cache -type f -name '*.json' | wc -l)
-            tar czf /tmp/api_cache.tar.gz -C data api_cache
-            size=$(du -h /tmp/api_cache.tar.gz | cut -f1)
-            echo "Saving $entries cache entries ($size compressed)"
-
-            tmp_branch="data-cache-push-$$"
-            git checkout --orphan "$tmp_branch"
-            git rm -rf . > /dev/null 2>&1 || true
-            cp /tmp/api_cache.tar.gz .
-            git add api_cache.tar.gz
-            git commit -m "cache: $(date +%Y-%m-%d) — $entries entries ($size)"
-            git push origin "$tmp_branch":data-cache --force
-
-            git checkout main
           fi
