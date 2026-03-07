@@ -5,10 +5,6 @@ on:
     - cron: '0 4 1 * *'  # 4 AM UTC on the 1st of each month (midnight AST)
   workflow_dispatch:       # Allow manual trigger
 
-concurrency:
-  group: monthly-refresh
-  cancel-in-progress: false
-
 permissions:
   contents: write
   actions: write
