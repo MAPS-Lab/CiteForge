@@ -43,7 +43,7 @@ from ..http_utils import (
     http_get_text,
     s2_http_get_json,
 )
-from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text
+from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text, is_secondary_doi
 from ..log_utils import LogCategory, logger
 from ..text_utils import (
     author_in_text,
@@ -189,7 +189,8 @@ def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
     try:
         raw = http_fetch_bytes(url, headers, timeout)
         result: dict[str, Any] = json.loads(raw.decode("utf-8"))
-        response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
+        is_published = not is_secondary_doi(doi_norm)
+        response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS, permanent=is_published)
         logger.debug(f"doi_csl | PUT | doi={doi_norm}", category=LogCategory.CACHE)
         return result
     except ALL_FETCH_ERRORS:
@@ -215,7 +216,11 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
     try:
         raw = http_fetch_bytes(url, headers, timeout)
         result = raw.decode("utf-8", errors="replace")
-        response_cache.put("doi_bibtex", doi_norm, {"bibtex": result}, ttl_days=CACHE_TTL_DOI_DAYS)
+        is_published = not is_secondary_doi(doi_norm)
+        response_cache.put(
+            "doi_bibtex", doi_norm, {"bibtex": result},
+            ttl_days=CACHE_TTL_DOI_DAYS, permanent=is_published,
+        )
         logger.debug(f"doi_bibtex | PUT | doi={doi_norm}", category=LogCategory.CACHE)
         return result
     except NETWORK_ERRORS:

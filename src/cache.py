@@ -66,24 +66,32 @@ class ResponseCache:
                     entry = json.load(f)
             except (json.JSONDecodeError, OSError):
                 return None
-            ts = entry.get("timestamp", 0)
-            if ts < self._month_boundary:
-                return None
+            # Permanent entries (published papers) survive the monthly boundary
+            if not entry.get("permanent"):
+                ts = entry.get("timestamp", 0)
+                if ts < self._month_boundary:
+                    return None
             return dict(entry.get("data", {}))
 
-    def put(self, namespace: str, key: str, value: dict[str, Any], ttl_days: int = 30) -> None:
+    def put(
+        self, namespace: str, key: str, value: dict[str, Any],
+        ttl_days: int = 30, *, permanent: bool = False,
+    ) -> None:
         if not CACHE_ENABLED:
             return
         khash = self._key_hash(key)[:12]
         logger.debug(
-            f"PUT | namespace={namespace} | key_hash={khash} | ttl_days={ttl_days}",
+            f"PUT | namespace={namespace} | key_hash={khash} | ttl_days={ttl_days}"
+            f"{' | permanent' if permanent else ''}",
             category=LogCategory.CACHE,
         )
         lock = self._lock_for(namespace)
         with lock:
             ns_dir = self._ns_dir(namespace)
             os.makedirs(ns_dir, exist_ok=True)
-            entry = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
+            entry: dict[str, Any] = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
+            if permanent:
+                entry["permanent"] = True
             path = self._entry_path(namespace, key)
             try:
                 fd, tmp_path = tempfile.mkstemp(dir=ns_dir, suffix=".tmp")

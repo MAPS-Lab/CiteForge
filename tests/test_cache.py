@@ -108,3 +108,32 @@ def test_corrupted_cache_file(tmp_path: Path) -> None:
     path = Path(cache._entry_path("test_ns", "key1"))
     path.write_text("not valid json{{{", encoding="utf-8")
     assert cache.get("test_ns", "key1") is None
+
+
+def test_permanent_entry_survives_monthly_boundary(tmp_path: Path) -> None:
+    """Test that permanent=True entries survive the monthly boundary."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("test_ns", "key1", {"v": "published"}, permanent=True)
+
+    # Backdate timestamp to before the monthly boundary
+    path = Path(cache._entry_path("test_ns", "key1"))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    entry["timestamp"] = cache._month_boundary - 1
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    # Permanent entry should still be returned
+    result = cache.get("test_ns", "key1")
+    assert result == {"v": "published"}
+
+
+def test_non_permanent_entry_expires_at_boundary(tmp_path: Path) -> None:
+    """Test that non-permanent entries expire at the monthly boundary."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("test_ns", "key1", {"v": "preprint"}, permanent=False)
+
+    path = Path(cache._entry_path("test_ns", "key1"))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    entry["timestamp"] = cache._month_boundary - 1
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    assert cache.get("test_ns", "key1") is None
