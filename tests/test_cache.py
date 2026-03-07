@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from src.cache import ResponseCache
@@ -110,30 +111,37 @@ def test_corrupted_cache_file(tmp_path: Path) -> None:
     assert cache.get("test_ns", "key1") is None
 
 
-def test_permanent_entry_survives_monthly_boundary(tmp_path: Path) -> None:
-    """Test that permanent=True entries survive the monthly boundary."""
+def test_negative_cache_ttl_expires(tmp_path: Path) -> None:
+    """Test that negative cache entries expire after their TTL."""
     cache = ResponseCache(cache_dir=str(tmp_path))
-    cache.put("test_ns", "key1", {"v": "published"}, permanent=True)
+    cache.put("test_ns", "key1", {"_negative": True}, ttl_days=1)
 
-    # Backdate timestamp to before the monthly boundary
-    path = Path(cache._entry_path("test_ns", "key1"))
-    entry = json.loads(path.read_text(encoding="utf-8"))
-    entry["timestamp"] = cache._month_boundary - 1
-    path.write_text(json.dumps(entry), encoding="utf-8")
-
-    # Permanent entry should still be returned
+    # Entry exists and is served
     result = cache.get("test_ns", "key1")
-    assert result == {"v": "published"}
+    assert result == {"_negative": True}
 
-
-def test_non_permanent_entry_expires_at_boundary(tmp_path: Path) -> None:
-    """Test that non-permanent entries expire at the monthly boundary."""
-    cache = ResponseCache(cache_dir=str(tmp_path))
-    cache.put("test_ns", "key1", {"v": "preprint"}, permanent=False)
-
+    # Backdate the timestamp to make it older than 1 day
     path = Path(cache._entry_path("test_ns", "key1"))
     entry = json.loads(path.read_text(encoding="utf-8"))
-    entry["timestamp"] = cache._month_boundary - 1
+    entry["timestamp"] = time.time() - 2 * 86400  # 2 days ago
     path.write_text(json.dumps(entry), encoding="utf-8")
 
+    # Now it should be expired
     assert cache.get("test_ns", "key1") is None
+
+
+def test_positive_cache_survives_past_ttl(tmp_path: Path) -> None:
+    """Test that positive cache entries are NOT expired by TTL (only monthly boundary expires them)."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("test_ns", "key1", {"v": "hello"}, ttl_days=30)
+
+    # Backdate to 31 days ago — past the ttl_days=30 window
+    path = Path(cache._entry_path("test_ns", "key1"))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    entry["timestamp"] = time.time() - 31 * 86400
+    # Keep it within the monthly boundary so only TTL could expire it
+    entry["timestamp"] = max(entry["timestamp"], cache._month_boundary + 1)
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    result = cache.get("test_ns", "key1")
+    assert result == {"v": "hello"}, "Positive entries must survive past their ttl_days"

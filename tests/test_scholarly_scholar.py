@@ -638,10 +638,9 @@ class TestFacadeCacheBehavior:
 
         result = fetch_scholar_citation("key", "Unknown Title", "Author")
         assert result is None
-        mock_cache.put.assert_called_once()
-        put_args = mock_cache.put.call_args[0]
+        mock_cache.put_negative.assert_called_once()
+        put_args = mock_cache.put_negative.call_args[0]
         assert put_args[0] == "serply_citation"
-        assert put_args[2] == {"_negative": True}
 
     def test_citation_empty_title(self) -> None:
         """Empty title should return None without calling Serply."""

@@ -8,7 +8,7 @@ from typing import Any
 
 from ..cache import response_cache
 from ..config import CACHE_TTL_DOI_DAYS, CACHE_TTL_SEARCH_DAYS, DATACITE_BASE, GEMINI_BASE, ORCID_BASE
-from ..exceptions import ALL_API_ERRORS
+from ..exceptions import ALL_API_ERRORS, NETWORK_ERRORS
 from ..http_utils import handle_api_errors, http_get_json, http_post_json
 from ..id_utils import _norm_doi
 from ..log_utils import LogCategory, LogSource, logger
@@ -140,6 +140,9 @@ def datacite_search_doi(doi: str) -> dict[str, Any] | None:
 
     cached = response_cache.get("datacite", doi_norm)
     if cached is not None:
+        if cached.get("_negative"):
+            logger.debug(f"datacite | NEG_HIT | doi={doi_norm}", category=LogCategory.CACHE)
+            return None
         logger.debug(f"datacite | HIT | doi={doi_norm}", category=LogCategory.CACHE)
         return cached
     logger.debug(f"datacite | MISS | doi={doi_norm}", category=LogCategory.CACHE)
@@ -147,11 +150,17 @@ def datacite_search_doi(doi: str) -> dict[str, Any] | None:
     encoded_doi = urllib.parse.quote(doi_norm, safe="")
     url = f"{DATACITE_BASE}/{encoded_doi}"
 
-    data = http_get_json(url, timeout=15.0)
+    try:
+        data = http_get_json(url, timeout=15.0)
+    except NETWORK_ERRORS:
+        response_cache.put_negative("datacite", doi_norm)
+        return None
 
     result = data.get("data")
     if result is not None:
         response_cache.put("datacite", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
+    else:
+        response_cache.put_negative("datacite", doi_norm)
     logger.debug(
         f"datacite | RESULT | doi={doi_norm} | found={result is not None}",
         category=LogCategory.SCORE,
@@ -221,13 +230,20 @@ def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
     cache_key = f"orcid_works|{orcid_id}"
     cached = response_cache.get("orcid", cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            logger.debug(f"orcid | NEG_HIT | id={orcid_id}", category=LogCategory.CACHE)
+            return []
         logger.debug(f"orcid | HIT | id={orcid_id}", category=LogCategory.CACHE)
         return list(cached.get("works", []))
     logger.debug(f"orcid | MISS | id={orcid_id}", category=LogCategory.CACHE)
 
     url = f"{ORCID_BASE}/{orcid_id}/works"
 
-    data = http_get_json(url, timeout=15.0)
+    try:
+        data = http_get_json(url, timeout=15.0)
+    except NETWORK_ERRORS:
+        response_cache.put_negative("orcid", cache_key)
+        return []
 
     works = []
     for work_group in (data.get("group") or []):
@@ -259,6 +275,8 @@ def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
     )
     if works:
         response_cache.put("orcid", cache_key, {"works": works}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put_negative("orcid", cache_key)
     return works
 
 

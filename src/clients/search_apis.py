@@ -43,7 +43,7 @@ from ..http_utils import (
     http_get_text,
     s2_http_get_json,
 )
-from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text, is_secondary_doi
+from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text
 from ..log_utils import LogCategory, logger
 from ..text_utils import (
     author_in_text,
@@ -97,6 +97,7 @@ def s2_search_papers_multiple(
     cached = response_cache.get("semantic_scholar", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"s2_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return []
         logger.debug(f"s2_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("results", []))
@@ -111,11 +112,14 @@ def s2_search_papers_multiple(
     try:
         data = s2_http_get_json(url, api_key, timeout=config.timeout)
     except ALL_API_ERRORS:
+        response_cache.put_negative("semantic_scholar", cache_key)
         return []
     results = safe_get_nested(data, *config.result_path, default=[])
     top = list(results[:max_results]) if results else []
-    cache_value: dict[str, Any] = {"results": top} if top else {"_negative": True}
-    response_cache.put("semantic_scholar", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    if top:
+        response_cache.put("semantic_scholar", cache_key, {"results": top}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put_negative("semantic_scholar", cache_key)
     return top
 
 
@@ -179,6 +183,7 @@ def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
     cached = response_cache.get("doi_csl", doi_norm)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"doi_csl | NEG_HIT | doi={doi_norm}", category=LogCategory.CACHE)
             return None
         logger.debug(f"doi_csl | HIT | doi={doi_norm}", category=LogCategory.CACHE)
         return cached
@@ -189,12 +194,11 @@ def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
     try:
         raw = http_fetch_bytes(url, headers, timeout)
         result: dict[str, Any] = json.loads(raw.decode("utf-8"))
-        is_published = not is_secondary_doi(doi_norm)
-        response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS, permanent=is_published)
+        response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
         logger.debug(f"doi_csl | PUT | doi={doi_norm}", category=LogCategory.CACHE)
         return result
     except ALL_FETCH_ERRORS:
-        response_cache.put("doi_csl", doi_norm, {"_negative": True}, ttl_days=CACHE_TTL_DOI_DAYS)
+        response_cache.put_negative("doi_csl", doi_norm)
         return None
 
 
@@ -206,6 +210,7 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
     cached = response_cache.get("doi_bibtex", doi_norm)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"doi_bibtex | NEG_HIT | doi={doi_norm}", category=LogCategory.CACHE)
             return None
         logger.debug(f"doi_bibtex | HIT | doi={doi_norm}", category=LogCategory.CACHE)
         return cached.get("bibtex")
@@ -216,15 +221,11 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
     try:
         raw = http_fetch_bytes(url, headers, timeout)
         result = raw.decode("utf-8", errors="replace")
-        is_published = not is_secondary_doi(doi_norm)
-        response_cache.put(
-            "doi_bibtex", doi_norm, {"bibtex": result},
-            ttl_days=CACHE_TTL_DOI_DAYS, permanent=is_published,
-        )
+        response_cache.put("doi_bibtex", doi_norm, {"bibtex": result}, ttl_days=CACHE_TTL_DOI_DAYS)
         logger.debug(f"doi_bibtex | PUT | doi={doi_norm}", category=LogCategory.CACHE)
         return result
     except NETWORK_ERRORS:
-        response_cache.put("doi_bibtex", doi_norm, {"_negative": True}, ttl_days=CACHE_TTL_DOI_DAYS)
+        response_cache.put_negative("doi_bibtex", doi_norm)
         return None
 
 
@@ -299,6 +300,7 @@ def arxiv_search(
     cached = response_cache.get("arxiv", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"arxiv | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return []
         logger.debug(f"arxiv | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("entries", []))
@@ -314,10 +316,12 @@ def arxiv_search(
     try:
         xml = http_get_text(url)
     except NETWORK_ERRORS:
+        response_cache.put_negative("arxiv", cache_key)
         return []
     try:
         root = ElementTree.fromstring(xml)
     except XML_PARSE_ERRORS:
+        response_cache.put_negative("arxiv", cache_key)
         return []
 
     atom_ns = root.tag[1:].split("}")[0] if root.tag.startswith("{") else ""
@@ -368,7 +372,7 @@ def arxiv_search(
             "abs_url": link_abs, "doi": doi_val, "primary_class": pc, "arxiv_id": arxiv_id,
         })
     if not entries:
-        response_cache.put("arxiv", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("arxiv", cache_key)
         return []
     from ..bibtex_build import create_scoring_function
     score_fn = create_scoring_function(
@@ -543,13 +547,14 @@ def openreview_search_paper(
     cached = response_cache.get("openreview", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"openreview | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return None
         logger.debug(f"openreview | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached if cached else None
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates = _or_fetch_candidates(title, headers)
     if not candidates:
-        response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("openreview", cache_key)
         return None
 
     target_norm = normalize_title(title)
@@ -567,10 +572,11 @@ def openreview_search_paper(
         year_getter=_or_note_year,
     )
     best = _best_item_by_score(candidates, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
-    cache_value = dict(best) if best is not None else {"_negative": True}
-    cache_tag = "PUT" if best is not None else "PUT_NEGATIVE"
-    response_cache.put("openreview", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    logger.debug(f"openreview | {cache_tag} | key={cache_key[:60]}", category=LogCategory.CACHE)
+    if best is not None:
+        response_cache.put("openreview", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"openreview | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
+    else:
+        response_cache.put_negative("openreview", cache_key)
     return best
 
 
@@ -591,13 +597,14 @@ def openreview_search_papers_multiple(
     cached = response_cache.get("openreview", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"openreview_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return []
         logger.debug(f"openreview_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("results", []))
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates = _or_fetch_candidates(title, headers)
     if not candidates:
-        response_cache.put("openreview", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("openreview", cache_key)
         return []
 
     target_norm = normalize_title(title)
@@ -622,10 +629,11 @@ def openreview_search_papers_multiple(
             continue
     scored.sort(key=lambda x: x[0], reverse=True)
     top_results = [item for _, item in scored[:max_results]]
-    cache_value: dict[str, Any] = {"results": top_results} if top_results else {"_negative": True}
-    cache_tag = "PUT" if top_results else "PUT_NEGATIVE"
-    response_cache.put("openreview", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    logger.debug(f"openreview_multi | {cache_tag} | key={cache_key[:60]}", category=LogCategory.CACHE)
+    if top_results:
+        response_cache.put("openreview", cache_key, {"results": top_results}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"openreview_multi | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
+    else:
+        response_cache.put_negative("openreview", cache_key)
     return top_results
 
 
@@ -691,6 +699,9 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     cache_key = f"dblp_pubs|{pid}"
     cached = response_cache.get("dblp", cache_key)
     if cached is not None:
+        if cached.get("_negative"):
+            logger.debug(f"dblp | NEG_HIT | pid={pid}", category=LogCategory.CACHE)
+            return []
         logger.debug(f"dblp | HIT | pid={pid}", category=LogCategory.CACHE)
         return list(cached.get("articles", []))
     logger.debug(f"dblp | MISS | pid={pid}", category=LogCategory.CACHE)
@@ -698,10 +709,12 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     try:
         xml = http_get_text(url, timeout=HTTP_TIMEOUT_DEFAULT)
     except NETWORK_ERRORS:
+        response_cache.put_negative("dblp", cache_key)
         return []
     try:
         root = ElementTree.fromstring(xml)
     except XML_PARSE_ERRORS:
+        response_cache.put_negative("dblp", cache_key)
         return []
     articles: list[dict[str, Any]] = []
     for r in root.findall("r"):
@@ -757,6 +770,8 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
             f"dblp | PUT | pid={pid} | articles={len(articles)}",
             category=LogCategory.CACHE,
         )
+    else:
+        response_cache.put_negative("dblp", cache_key)
     return articles
 
 
@@ -807,6 +822,7 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
     cached = response_cache.get("pubmed", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"pubmed | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return None
         logger.debug(f"pubmed | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached if cached else None
@@ -817,20 +833,28 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
         f"{PUBMED_BASE}/esearch.fcgi",
         {"db": "pubmed", "term": search_query, "retmax": 10, "retmode": "json"},
     )
-    search_data = http_get_json(search_url, timeout=15.0)
+    try:
+        search_data = http_get_json(search_url, timeout=15.0)
+    except NETWORK_ERRORS:
+        response_cache.put_negative("pubmed", cache_key)
+        return None
     pmids = (search_data.get("esearchresult") or {}).get("idlist") or []
     if not pmids:
-        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("pubmed", cache_key)
         return None
     fetch_url = build_url(
         f"{PUBMED_BASE}/esummary.fcgi",
         {"db": "pubmed", "id": ",".join(pmids), "retmode": "json"},
     )
-    fetch_data = http_get_json(fetch_url, timeout=15.0)
+    try:
+        fetch_data = http_get_json(fetch_url, timeout=15.0)
+    except NETWORK_ERRORS:
+        response_cache.put_negative("pubmed", cache_key)
+        return None
     result = fetch_data.get("result") or {}
     articles = [result[pmid] for pmid in pmids if pmid in result and isinstance(result[pmid], dict)]
     if not articles:
-        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("pubmed", cache_key)
         return None
     target_norm = normalize_title(title)
     for article in articles:
@@ -854,10 +878,11 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
         author_match_fn=author_name_matches,
     )
     best = _best_item_by_score(articles, score_fn)
-    cache_value = dict(best) if best is not None else {"_negative": True}
-    cache_tag = "PUT" if best is not None else "PUT_NEGATIVE"
-    response_cache.put("pubmed", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    logger.debug(f"pubmed | {cache_tag} | key={cache_key[:60]} | pmids={len(pmids)}", category=LogCategory.CACHE)
+    if best is not None:
+        response_cache.put("pubmed", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
+        logger.debug(f"pubmed | PUT | key={cache_key[:60]} | pmids={len(pmids)}", category=LogCategory.CACHE)
+    else:
+        response_cache.put_negative("pubmed", cache_key)
     return best
 
 
@@ -902,6 +927,7 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
     cached = response_cache.get("pubmed", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"pubmed_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return []
         logger.debug(f"pubmed_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("results", []))
@@ -915,10 +941,11 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
     try:
         search_data = http_get_json(search_url, timeout=20.0)
     except NETWORK_ERRORS:
+        response_cache.put_negative("pubmed", cache_key)
         return []
     id_list = safe_get_nested(search_data, "esearchresult", "idlist", default=[])
     if not id_list:
-        response_cache.put("pubmed", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("pubmed", cache_key)
         return []
     summary_url = build_url(
         f"{PUBMED_BASE}/esummary.fcgi",
@@ -927,13 +954,15 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
     try:
         summary_data = http_get_json(summary_url, timeout=20.0)
     except NETWORK_ERRORS:
+        response_cache.put_negative("pubmed", cache_key)
         return []
     result = safe_get_nested(summary_data, "result", default={})
     results_list = [result[uid] for uid in id_list[:max_results] if uid in result and isinstance(result[uid], dict)]
-    cache_value: dict[str, Any] = {"results": results_list} if results_list else {"_negative": True}
-    response_cache.put("pubmed", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
     if results_list:
+        response_cache.put("pubmed", cache_key, {"results": results_list}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         logger.debug(f"pubmed_multi | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
+    else:
+        response_cache.put_negative("pubmed", cache_key)
     return results_list
 
 
@@ -1005,6 +1034,7 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
     cached = response_cache.get("europepmc", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"europepmc_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return []
         logger.debug(f"europepmc_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("results", []))
@@ -1019,11 +1049,14 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
     try:
         data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
+        response_cache.put_negative("europepmc", cache_key)
         return []
     results = safe_get_nested(data, *config.result_path, default=[])
     top = list(results[:max_results])
-    cache_value: dict[str, Any] = {"results": top} if top else {"_negative": True}
-    response_cache.put("europepmc", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    if top:
+        response_cache.put("europepmc", cache_key, {"results": top}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put_negative("europepmc", cache_key)
     return top
 
 
@@ -1056,6 +1089,7 @@ def crossref_search_by_venue(
     cached = response_cache.get("crossref_venue", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"crossref_venue | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return []
         cached_list: list[dict[str, Any]] = cached.get("results", [])
         logger.debug(f"crossref_venue | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
@@ -1078,11 +1112,12 @@ def crossref_search_by_venue(
     try:
         data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
+        response_cache.put_negative("crossref_venue", cache_key)
         return []
 
     results = safe_get_nested(data, *config.result_path, default=[])
     if not results:
-        response_cache.put("crossref_venue", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("crossref_venue", cache_key)
         return []
 
     score_fn = _build_scoring_function(title, author_name, config)
@@ -1097,8 +1132,11 @@ def crossref_search_by_venue(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top = [item for _, item in scored[:max_results]]
-    cache_value: dict[str, Any] = {"results": [dict(r) for r in top]} if top else {"_negative": True}
-    response_cache.put("crossref_venue", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    if top:
+        cv = {"results": [dict(r) for r in top]}
+        response_cache.put("crossref_venue", cache_key, cv, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put_negative("crossref_venue", cache_key)
     return top
 
 
@@ -1127,6 +1165,7 @@ def openalex_search_by_venue(
     cached = response_cache.get("openalex_venue", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"openalex_venue | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return []
         cached_list: list[dict[str, Any]] = cached.get("results", [])
         logger.debug(f"openalex_venue | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
@@ -1144,11 +1183,12 @@ def openalex_search_by_venue(
     try:
         data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
+        response_cache.put_negative("openalex_venue", cache_key)
         return []
 
     results = safe_get_nested(data, *config.result_path, default=[])
     if not results:
-        response_cache.put("openalex_venue", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("openalex_venue", cache_key)
         return []
 
     score_fn = _build_scoring_function(title, author_name, config)
@@ -1163,6 +1203,9 @@ def openalex_search_by_venue(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top = [item for _, item in scored[:max_results]]
-    cache_value: dict[str, Any] = {"results": [dict(r) for r in top]} if top else {"_negative": True}
-    response_cache.put("openalex_venue", cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    if top:
+        ov = {"results": [dict(r) for r in top]}
+        response_cache.put("openalex_venue", cache_key, ov, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put_negative("openalex_venue", cache_key)
     return top

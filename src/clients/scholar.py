@@ -121,6 +121,7 @@ def fetch_scholar_citation(
     cached = response_cache.get("serply_citation", cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            _log.debug("serply_citation | NEG_HIT | key=%s", cache_key[:60])
             return None
         return cached or None
 
@@ -129,7 +130,7 @@ def fetch_scholar_citation(
         response_cache.put("serply_citation", cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
         _log.info("Fetched citation via Serply for '%s'", title[:50])
     else:
-        response_cache.put("serply_citation", cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative("serply_citation", cache_key)
     return result
 
 

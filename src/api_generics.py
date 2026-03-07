@@ -5,10 +5,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .cache import response_cache
-from .config import CACHE_TTL_SEARCH_DAYS, GENERIC_SERIES_NAMES, SIM_EXACT_PICK_THRESHOLD, SIM_THRESHOLD_TOLERANCE
+from .config import (
+    CACHE_TTL_SEARCH_DAYS,
+    GENERIC_SERIES_NAMES,
+    SIM_EXACT_PICK_THRESHOLD,
+    SIM_THRESHOLD_TOLERANCE,
+)
 from .exceptions import ALL_API_ERRORS, FIELD_ACCESS_ERRORS
 from .http_utils import http_get_json, s2_http_get_json
-from .id_utils import find_arxiv_in_text, find_doi_in_text, is_secondary_doi
+from .id_utils import find_arxiv_in_text, find_doi_in_text
 from .log_utils import LogCategory, logger
 from .text_utils import (
     author_in_text,
@@ -21,23 +26,6 @@ from .text_utils import (
     safe_get_field,
     safe_get_nested,
 )
-
-_DOI_FIELDS = ("doi", "DOI", "externalIds.DOI")
-
-
-def _has_published_doi(item: dict[str, Any]) -> bool:
-    """Return True if *item* has a DOI that is NOT from a preprint server or data repository.
-
-    Only published-venue DOIs indicate stable metadata that won't change,
-    making the cache entry safe to persist across monthly boundaries.
-    Preprint and repository DOIs (arXiv, bioRxiv, Zenodo, Figshare, etc.)
-    return False because the paper may later be published with richer metadata.
-    """
-    for f in _DOI_FIELDS:
-        doi = _resolve_dotted(item, f)
-        if doi and isinstance(doi, str) and not is_secondary_doi(doi):
-            return True
-    return False
 
 
 def _resolve_dotted(obj: dict[str, Any], field: str) -> Any:
@@ -198,6 +186,7 @@ def search_api_generic(
     cached = response_cache.get(config.api_name, cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"{config.api_name} | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return None
         logger.debug(f"{config.api_name} | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached if cached else None
@@ -215,12 +204,12 @@ def search_api_generic(
         else:
             data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
-        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative(config.api_name, cache_key)
         return None
 
     results = safe_get_nested(data, *config.result_path, default=[])
     if not results:
-        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative(config.api_name, cache_key)
         return None
 
     logger.debug(
@@ -257,10 +246,7 @@ def search_api_generic(
             category=LogCategory.SCORE,
         )
         result = dict(item)
-        response_cache.put(
-            config.api_name, cache_key, result,
-            ttl_days=CACHE_TTL_SEARCH_DAYS, permanent=_has_published_doi(result),
-        )
+        response_cache.put(config.api_name, cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
         return result
 
     # Fuzzy match using scoring function
@@ -276,12 +262,10 @@ def search_api_generic(
         f" | threshold={SIM_EXACT_PICK_THRESHOLD} | accepted={best is not None}",
         category=LogCategory.SCORE,
     )
-    cache_value = dict(best) if best is not None else {"_negative": True}
-    is_permanent = best is not None and _has_published_doi(best)
-    response_cache.put(
-        config.api_name, cache_key, cache_value,
-        ttl_days=CACHE_TTL_SEARCH_DAYS, permanent=is_permanent,
-    )
+    if best is not None:
+        response_cache.put(config.api_name, cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put_negative(config.api_name, cache_key)
     return best
 
 
@@ -305,6 +289,7 @@ def search_api_generic_multiple(
     cached = response_cache.get(config.api_name, cache_key)
     if cached is not None:
         if cached.get("_negative"):
+            logger.debug(f"{config.api_name}_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
             return []
         cached_list: list[dict[str, Any]] = cached.get("results", [])
         logger.debug(f"{config.api_name}_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
@@ -323,12 +308,12 @@ def search_api_generic_multiple(
         else:
             data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
-        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative(config.api_name, cache_key)
         return []
 
     results = safe_get_nested(data, *config.result_path, default=[])
     if not results:
-        response_cache.put(config.api_name, cache_key, {"_negative": True}, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put_negative(config.api_name, cache_key)
         return []
 
     score_fn = _build_scoring_function(title, author_name, config)
@@ -356,14 +341,11 @@ def search_api_generic_multiple(
         f"{config.api_name}_multi | RESULT | scored={len(scored_results)}/{len(results)} | top={len(top_results)}",
         category=LogCategory.SCORE,
     )
-    cache_value: dict[str, Any] = (
-        {"results": [dict(r) for r in top_results]} if top_results else {"_negative": True}
-    )
-    is_permanent = bool(top_results) and all(_has_published_doi(r) for r in top_results)
-    response_cache.put(
-        config.api_name, cache_key, cache_value,
-        ttl_days=CACHE_TTL_SEARCH_DAYS, permanent=is_permanent,
-    )
+    if top_results:
+        cache_value: dict[str, Any] = {"results": [dict(r) for r in top_results]}
+        response_cache.put(config.api_name, cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put_negative(config.api_name, cache_key)
     return top_results
 
 

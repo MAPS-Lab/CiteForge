@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .config import CACHE_DIR, CACHE_ENABLED
+from .config import CACHE_DIR, CACHE_ENABLED, CACHE_TTL_NEGATIVE_DAYS
 from .log_utils import LogCategory, logger
 
 
@@ -64,34 +64,36 @@ class ResponseCache:
             try:
                 with open(path, encoding="utf-8") as f:
                     entry = json.load(f)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug(
+                    f"CACHE_CORRUPT | namespace={namespace} | path={path} | error={exc}",
+                    category=LogCategory.CACHE,
+                )
                 return None
-            # Permanent entries (published papers) survive the monthly boundary
-            if not entry.get("permanent"):
-                ts = entry.get("timestamp", 0)
-                if ts < self._month_boundary:
-                    return None
-            return dict(entry.get("data", {}))
+            ts = entry.get("timestamp", 0)
+            if ts < self._month_boundary:
+                return None
+            # Honour TTL for short-lived negative/error cache entries only.
+            # Positive entries expire solely at the monthly boundary above.
+            data = entry.get("data", {})
+            ttl = entry.get("ttl_days", 0)
+            if ttl > 0 and data.get("_negative") and time.time() - ts > ttl * 86400:
+                return None
+            return dict(data)
 
-    def put(
-        self, namespace: str, key: str, value: dict[str, Any],
-        ttl_days: int = 30, *, permanent: bool = False,
-    ) -> None:
+    def put(self, namespace: str, key: str, value: dict[str, Any], ttl_days: int = 30) -> None:
         if not CACHE_ENABLED:
             return
         khash = self._key_hash(key)[:12]
         logger.debug(
-            f"PUT | namespace={namespace} | key_hash={khash} | ttl_days={ttl_days}"
-            f"{' | permanent' if permanent else ''}",
+            f"PUT | namespace={namespace} | key_hash={khash} | ttl_days={ttl_days}",
             category=LogCategory.CACHE,
         )
         lock = self._lock_for(namespace)
         with lock:
             ns_dir = self._ns_dir(namespace)
             os.makedirs(ns_dir, exist_ok=True)
-            entry: dict[str, Any] = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
-            if permanent:
-                entry["permanent"] = True
+            entry = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
             path = self._entry_path(namespace, key)
             try:
                 fd, tmp_path = tempfile.mkstemp(dir=ns_dir, suffix=".tmp")
@@ -108,6 +110,10 @@ class ResponseCache:
                     f"CACHE_WRITE_FAILED | namespace={namespace} | key_hash={khash} | error={exc}",
                     category=LogCategory.CACHE,
                 )
+
+    def put_negative(self, namespace: str, key: str, ttl_days: int | None = None) -> None:
+        """Store a negative (no-result) cache entry with a short default TTL."""
+        self.put(namespace, key, {"_negative": True}, ttl_days=ttl_days or CACHE_TTL_NEGATIVE_DAYS)
 
     def has(self, namespace: str, key: str) -> bool:
         return self.get(namespace, key) is not None

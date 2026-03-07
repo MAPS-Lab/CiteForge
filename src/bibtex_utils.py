@@ -437,11 +437,7 @@ def _short_title_for_key(
                     ttl_days=CACHE_TTL_GEMINI_DAYS,
                 )
                 return gemini_result
-            response_cache.put(
-                "gemini", normalized_title,
-                {"_negative": True},
-                ttl_days=CACHE_TTL_GEMINI_DAYS,
-            )
+            response_cache.put_negative("gemini", normalized_title)
 
     words = [w for w in re.split(r"[^A-Za-z0-9]+", title) if w]
     picks: list[str] = []
