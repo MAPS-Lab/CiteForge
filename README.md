@@ -90,14 +90,7 @@ Each article passes through five phases:
 | 3 | Late DOI Discovery | Collect DOI candidates from arXiv eprints, bioRxiv strings, URLs; prefer published over preprint |
 | 4 | Trust-Based Merge | Combine fields by source rank, apply type corrections, deduplicate on disk |
 
-Authors are processed in parallel with 12 workers. Per-API token-bucket rate limiting and session rotation prevent throttling.
-
-After all articles are processed, the post-run sequence runs:
-
-```
-flush CSV → reconcile phantoms → remove orphans →
-year-window cleanup → post-run fixup → build a2i2 folder → rebuild baseline.json
-```
+Authors are processed in parallel with 12 workers. Per-API token-bucket rate limiting and session rotation prevent throttling. Publications outside a configurable year window (default: 7 years) are filtered at ingestion, enrichment, and post-run cleanup.
 
 ### Trust Hierarchy
 
@@ -119,16 +112,6 @@ Special rules override raw rank for specific fields:
 | Pages | Reject non-numeric, dot-containing, or oversized page ranges |
 | Booktitle | Generic series names (LNCS, etc.) replaced with conference names |
 
-### Three-Way Fix Pattern
-
-To prevent oscillation between consecutive runs, all text and type corrections are applied in three synchronized locations:
-
-1. `_fixup_bib_entry()` — initial fixup on load
-2. Existing-file fixup — inline in `process_article()` before enrichment
-3. Phase 4 post-merge — after trust-based merge
-
-Consolidated helpers (`_fix_title_text()`, `_apply_booktitle_fixups()`) are called from all three, ensuring byte-identical output. A content comparison guard in the post-run fixup prevents phantom writes.
-
 ### Deduplication
 
 Multi-level deduplication prevents duplicate entries:
@@ -143,16 +126,6 @@ Multi-level deduplication prevents duplicate entries:
 | Strong author overlap with moderate title match | 0.60 |
 
 Candidate DOIs discovered during enrichment are verified against existing files via title similarity before acceptance. Mis-attributed DOIs are reverted to the Phase-1-validated DOI.
-
-### Year-Window Enforcement
-
-`CONTRIBUTION_WINDOW_YEARS=7` (2020-2026). Enforced at three layers:
-
-| Layer | Location | Mechanism |
-|-------|----------|-----------|
-| 1 | Scholar filter | `get_article_year(a) >= min_year` |
-| 2 | Phase 4 save | Reject if enriched year < min_year |
-| 3 | Post-run cleanup | Filename regex scan + BibTeX year fallback |
 
 ### Data Quality
 
@@ -170,9 +143,6 @@ The merge engine enforces additional rules:
 | Fused compound repair | Fix ~376 Scholar-broken compounds (e.g., "DeepLearning" → "Deep Learning") |
 | Acronym case correction | Fix IoT, NIMS, AI casing in titles |
 | Booktitle cleanup | Fix duplicate prepositions, expand abbreviations, correct NeurIPS spelling |
-| Repository guard | Prevent Zenodo/OSTI/Figshare entries from upgrading to @inproceedings |
-| Thesis detection | Reclassify @article with university name as journal → @phdthesis |
-| Publisher dedup | Strip publisher field when it duplicates the journal/booktitle name |
 
 On cache-hit runs, CiteForge produces byte-identical output across consecutive runs (SHA256-verified determinism).
 

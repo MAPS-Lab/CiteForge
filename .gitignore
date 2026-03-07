@@ -69,3 +69,4 @@ tmp/
 # Local config
 .claude/
 CLAUDE.md
+ruff-report.json
