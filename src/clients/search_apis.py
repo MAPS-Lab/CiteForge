@@ -27,6 +27,7 @@ from ..config import (
 )
 from ..exceptions import (
     ALL_API_ERRORS,
+    ALL_FETCH_ERRORS,
     FIELD_ACCESS_ERRORS,
     NETWORK_ERRORS,
     NUMERIC_ERRORS,
@@ -177,17 +178,23 @@ def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
         return None
     cached = response_cache.get("doi_csl", doi_norm)
     if cached is not None:
+        if cached.get("_negative"):
+            return None
         logger.debug(f"doi_csl | HIT | doi={doi_norm}", category=LogCategory.CACHE)
         return cached
     logger.debug(f"doi_csl | MISS | doi={doi_norm}", category=LogCategory.CACHE)
     url = f"https://doi.org/{doi_norm}"
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["Accept"] = "application/vnd.citationstyles.csl+json"
-    raw = http_fetch_bytes(url, headers, timeout)
-    result: dict[str, Any] = json.loads(raw.decode("utf-8"))
-    response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
-    logger.debug(f"doi_csl | PUT | doi={doi_norm}", category=LogCategory.CACHE)
-    return result
+    try:
+        raw = http_fetch_bytes(url, headers, timeout)
+        result: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
+        logger.debug(f"doi_csl | PUT | doi={doi_norm}", category=LogCategory.CACHE)
+        return result
+    except ALL_FETCH_ERRORS:
+        response_cache.put("doi_csl", doi_norm, {"_negative": True}, ttl_days=CACHE_TTL_DOI_DAYS)
+        return None
 
 
 def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
@@ -197,6 +204,8 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
         return None
     cached = response_cache.get("doi_bibtex", doi_norm)
     if cached is not None:
+        if cached.get("_negative"):
+            return None
         logger.debug(f"doi_bibtex | HIT | doi={doi_norm}", category=LogCategory.CACHE)
         return cached.get("bibtex")
     logger.debug(f"doi_bibtex | MISS | doi={doi_norm}", category=LogCategory.CACHE)
@@ -210,6 +219,7 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
         logger.debug(f"doi_bibtex | PUT | doi={doi_norm}", category=LogCategory.CACHE)
         return result
     except NETWORK_ERRORS:
+        response_cache.put("doi_bibtex", doi_norm, {"_negative": True}, ttl_days=CACHE_TTL_DOI_DAYS)
         return None
 
 
