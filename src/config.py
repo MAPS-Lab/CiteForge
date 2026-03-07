@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
 CROSSREF_BASE = "https://api.crossref.org/works"
 ARXIV_BASE = "https://export.arxiv.org/api/query"
@@ -803,7 +805,8 @@ TITLE_LENGTH_KEEP_RATIO = 0.7
 TRUST_DIFF_OVERRIDE_THRESHOLD = 3
 
 # Maximum parallel workers for author processing
-MAX_WORKERS = 12
+# Override with CITEFORGE_MAX_WORKERS env var
+MAX_WORKERS = int(os.environ.get("CITEFORGE_MAX_WORKERS", "12"))
 
 # Per-API rate limits: (tokens_per_second, burst_size)
 RATE_LIMITS: dict[str, tuple[float, int]] = {
@@ -823,7 +826,8 @@ RATE_LIMITS: dict[str, tuple[float, int]] = {
 }
 
 # Global concurrency: max simultaneous in-flight API requests
-GLOBAL_CONCURRENCY_LIMIT = 16
+# Override with CITEFORGE_CONCURRENCY env var
+GLOBAL_CONCURRENCY_LIMIT = int(os.environ.get("CITEFORGE_CONCURRENCY", "16"))
 
 # Session rotation interval (requests)
 SESSION_ROTATION_THRESHOLD = 50

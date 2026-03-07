@@ -11,7 +11,7 @@ permissions:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 360
 
     steps:
       - name: Checkout main
@@ -59,20 +59,35 @@ jobs:
       - name: Run pipeline loop
         env:
           CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
+          CITEFORGE_MAX_WORKERS: "16"
+          CITEFORGE_CONCURRENCY: "20"
         run: |
           max_runs=50
+          consecutive_zero=0
           for i in $(seq 1 $max_runs); do
             echo "::group::Pipeline run $i/$max_runs"
-            python3 main.py || true
+            rc=0
+            python3 main.py || rc=$?
             echo "::endgroup::"
+
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::Pipeline run $i failed with exit code $rc"
+              exit 1
+            fi
 
             # Parse total API calls from the run log
             total=$(grep -oP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
             echo "Run $i — API calls: $total"
 
             if [ "$total" -eq 0 ]; then
-              echo "Zero API calls — cache is complete"
-              break
+              consecutive_zero=$((consecutive_zero + 1))
+              if [ "$consecutive_zero" -ge 2 ]; then
+                echo "Zero API calls confirmed over 2 consecutive runs — cache is complete"
+                break
+              fi
+              echo "Zero API calls — confirming with one more run"
+            else
+              consecutive_zero=0
             fi
 
             if [ "$i" -eq "$max_runs" ]; then
