@@ -45,6 +45,7 @@ from src.clients.search_apis import (
 from src.config import (
     ABBREVIATED_VENUE_MAP,
     ACM_JOURNAL_PROCEEDINGS,
+    ACRONYM_CASE_CORRECTIONS,
     COMPOUND_SUFFIXES,
     CONTRIBUTION_WINDOW_YEARS,
     DEFAULT_A2I2_INPUT,
@@ -140,6 +141,81 @@ _GARBAGE_PROCEEDINGS_RE = re.compile(r'^Proceedings\s+of\s+(the\s+)?\d{4}\s+', r
 _GARBAGE_CORRECTION_RE = re.compile(r'^Correction(s)?\s+(to|of)\s*:', re.IGNORECASE)
 _GARBAGE_EASYCHAIR_RE = re.compile(r'\bEasyChair\s+Preprint\b', re.IGNORECASE)
 _FILENAME_YEAR_RE = re.compile(r'/[A-Za-z]+(\d{4})-')
+
+# Pre-compiled patterns for acronym case corrections in titles
+_ACRONYM_CASE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r'\b' + re.escape(wrong) + r'\b'), correct)
+    for wrong, correct in ACRONYM_CASE_CORRECTIONS.items()
+]
+
+# Pre-compiled pattern for verbose LNCS/Springer booktitle metadata
+# Strips conference location, dates, and "Proceedings" suffix appended by Crossref
+_VERBOSE_BOOKTITLE_RE = re.compile(
+    r'\d+(st|nd|rd|th)\s+(International|Annual|European|Asian|Australasian)\s+'
+    r'(Conference|Workshop|Symposium)\b.*,\s*Proceedings\s*$',
+    re.IGNORECASE,
+)
+
+# Pre-compiled patterns for three-way title/venue fixups (used in _fixup_bib_entry,
+# existing-file fixup, and Phase 4 post-merge — each pattern appears 3 times)
+_COLON_SPACE_RE = re.compile(r'(\S):([A-Z])')
+_HYPHEN_SPACE_RE = re.compile(r'(\w)- (?!and |or |to )')
+_TRAILING_DASH_RE = re.compile(r'[\s][-\u2013]\s*$')
+_SUBTITLE_WRAPPER_RE = re.compile(r':\s*-([^-]+)-\s*$')
+_SPIRE_STRIP_RE = re.compile(r'\s*:\s*SPIRE\b.*$')
+_OSF_DOI_RE = re.compile(r'^10\.31(219|234)/')
+_DOI_VERSION_RE = re.compile(r'_v\d+$')
+_LIPICS_PAGES_STRIP_RE = re.compile(r',\s*\d+:\s*\d+-\d+:\s*\d+\s*$')
+_LIPICS_PAGES_EXTRACT_RE = re.compile(r',\s*(\d+:\s*\d+-\d+:\s*\d+)\s*$')
+_PREPRINT_MARKER_RE = re.compile(r'\s*\[preprint\]\s*$', re.IGNORECASE)
+_HYPHENATION_FIX_RE = re.compile(r'(\w)-([A-Z])([a-z])')
+_GECCO_RE = re.compile(r'\bgenetic and evolutionary computation conference\b', re.IGNORECASE)
+_URL_IN_VENUE_RE = re.compile(r'https?://')
+_URL_IN_VENUE_STRIP_RE = re.compile(r',?\s*https?://\S+')
+_US_PATENT_RE = re.compile(r'(?i)^US\s+Patent')
+
+# Pre-compiled booktitle cleanup patterns (venue abbreviations, typos, spacing)
+_BOOKTITLE_FIXUPS: list[tuple[re.Pattern[str], str]] = [
+    # "on on " → "on " (duplicate preposition from ACM metadata)
+    (re.compile(r'\bon on\b'), 'on'),
+    # "of the YYYY on ACM" → "of the YYYY ACM" (Crossref 2024 ACM metadata gap)
+    (re.compile(r'of the (\d{4}) on (ACM|IEEE)\b'), r'of the \1 \2'),
+    # "Nations of the Americas Chapter" → "North American Chapter" (NAACL 2025 Crossref error)
+    (re.compile(r'Nations of the Americas Chapter'), 'North American Chapter'),
+    # "Health(SeGAH)" → "Health (SeGAH)" (missing space before acronym)
+    (re.compile(r'Health\(SeGAH\)'), 'Health (SeGAH)'),
+    # "Intl Conf" → "International Conference"
+    (re.compile(r'\bIntl Conf\b'), 'International Conference'),
+    # "Int'l" → "International"
+    (re.compile(r"\bInt'l\b"), 'International'),
+    # "NeuriPS" → "NeurIPS" (venue typo from API sources)
+    (re.compile(r'\bNeuriPS\b'), 'NeurIPS'),
+]
+
+
+def _apply_booktitle_fixups(bt: str) -> str:
+    """Strip verbose conference metadata and apply pre-compiled booktitle cleanup patterns."""
+    if _VERBOSE_BOOKTITLE_RE.search(bt):
+        stripped = _VERBOSE_BOOKTITLE_RE.sub('', bt).rstrip(' ,')
+        if stripped:
+            bt = stripped
+    for pat, repl in _BOOKTITLE_FIXUPS:
+        bt = pat.sub(repl, bt)
+    return bt
+
+
+def _fix_title_text(title: str) -> str:
+    """Fix hyphenation artifacts, fused compounds, colon-space, hyphen-space, and acronym case."""
+    # Hyphenation fix MUST run before compound fix (see CLAUDE.md)
+    result = _HYPHENATION_FIX_RE.sub(
+        lambda m: m.group(1) + m.group(2).lower() + m.group(3), title,
+    )
+    result = _fix_fused_compounds(result)
+    result = _COLON_SPACE_RE.sub(r'\1: \2', result)
+    result = _HYPHEN_SPACE_RE.sub(r'\1-', result)
+    for acr_pat, acr_repl in _ACRONYM_CASE_PATTERNS:
+        result = acr_pat.sub(acr_repl, result)
+    return result
 
 
 def _is_garbage_title(title: str) -> bool:
@@ -291,37 +367,31 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
 
     # Strip [preprint] marker from title
     title = fields.get("title", "")
-    if isinstance(title, str) and re.search(r'\[preprint\]', title, re.IGNORECASE):
-        fields["title"] = re.sub(r'\s*\[preprint\]\s*$', '', title, flags=re.IGNORECASE).strip()
+    if isinstance(title, str) and _PREPRINT_MARKER_RE.search(title):
+        fields["title"] = _PREPRINT_MARKER_RE.sub('', title).strip()
         changed = True
 
-    # Fix line-break hyphenation artifacts (e.g. "Optimiza-Tion" → "Optimization")
-    # MUST run BEFORE compound fix so that restored compounds are not re-broken
-    title = fields.get("title", "")
-    if isinstance(title, str) and re.search(r'\w-[A-Z][a-z]', title):
-        fields["title"] = re.sub(
-            r'(\w)-([A-Z])([a-z])', lambda m: m.group(1) + m.group(2).lower() + m.group(3), title
-        )
-        changed = True
-
-    # Fix fused compound words in title (runs after hyphenation fix to restore real hyphens)
+    # Fix hyphenation artifacts, fused compounds, colon-space, hyphen-space, acronym case
     title = fields.get("title", "")
     if isinstance(title, str) and title:
-        fixed_title = _fix_fused_compounds(title)
-        # Fix missing space after colon in titles (e.g., "Word:Word" → "Word: Word")
-        fixed_title = re.sub(r'(\S):([A-Z])', r'\1: \2', fixed_title)
-        # Fix spurious space after hyphen (e.g., "Three- Phase" → "Three-Phase")
-        # but preserve suspended hyphens (e.g., "Short- and Long-Term")
-        fixed_title = re.sub(r'(\w)- (?!and |or |to )', r'\1-', fixed_title)
+        fixed_title = _fix_title_text(title)
         if fixed_title != title:
             fields["title"] = fixed_title
+            changed = True
+
+    # Apply booktitle cleanup patterns (verbose metadata strip, abbreviations, typos, spacing)
+    bt_fix = (fields.get("booktitle") or "").strip()
+    if bt_fix:
+        bt_fixed = _apply_booktitle_fixups(bt_fix)
+        if bt_fixed != bt_fix:
+            fields["booktitle"] = bt_fixed
             changed = True
 
     # Strip URLs embedded in booktitle/journal
     for url_field in ("booktitle", "journal"):
         url_val = (fields.get(url_field) or "").strip()
-        if url_val and re.search(r'https?://', url_val):
-            url_cleaned = re.sub(r',?\s*https?://\S+', '', url_val).strip().rstrip(',')
+        if url_val and _URL_IN_VENUE_RE.search(url_val):
+            url_cleaned = _URL_IN_VENUE_STRIP_RE.sub('', url_val).strip().rstrip(',')
             if url_cleaned and url_cleaned != url_val:
                 fields[url_field] = url_cleaned
                 changed = True
@@ -357,11 +427,7 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
             changed = True
         # Fix lowercase "genetic and evolutionary computation conference" in GECCO booktitles
         elif _vc_val and "genetic and evolutionary computation conference" in _vc_val.lower():
-            _vc_fixed = re.sub(
-                r'(?i)\bgenetic and evolutionary computation conference\b',
-                'Genetic and Evolutionary Computation Conference',
-                _vc_val,
-            )
+            _vc_fixed = _GECCO_RE.sub('Genetic and Evolutionary Computation Conference', _vc_val)
             if _vc_fixed != _vc_val:
                 fields[_vcf] = _vc_fixed
                 changed = True
@@ -369,36 +435,30 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
     # Strip trailing " -" or en-dash from booktitle/title (truncation artifact)
     for _td_field in ("booktitle", "title"):
         _td_val = (fields.get(_td_field) or "").strip()
-        if _td_val and re.search(r'[\s][-\u2013]\s*$', _td_val):
-            fields[_td_field] = re.sub(r'[\s][-\u2013]\s*$', '', _td_val)
+        if _td_val and _TRAILING_DASH_RE.search(_td_val):
+            fields[_td_field] = _TRAILING_DASH_RE.sub('', _td_val)
             changed = True
 
     # Strip ": -...-" subtitle wrapper artifact from title
     title = fields.get("title", "")
     if isinstance(title, str) and ": -" in title:
-        cleaned = re.sub(r':\s*-([^-]+)-\s*$', r': \1', title)
+        cleaned = _SUBTITLE_WRAPPER_RE.sub(r': \1', title)
         if cleaned != title:
             fields["title"] = cleaned
             changed = True
 
-    # Fix venue typos in booktitle (e.g., "NeuriPS" → "NeurIPS")
-    bt_fix = (fields.get("booktitle") or "").strip()
-    if "NeuriPS" in bt_fix:
-        fields["booktitle"] = bt_fix.replace("NeuriPS", "NeurIPS")
-        changed = True
-
     # Strip SPIRE-style proceedings garbage suffix from booktitle
     bt_spire = (fields.get("booktitle") or "").strip()
     if bt_spire:
-        bt_cleaned = re.sub(r'\s*:\s*SPIRE\b.*$', '', bt_spire)
+        bt_cleaned = _SPIRE_STRIP_RE.sub('', bt_spire)
         if bt_cleaned != bt_spire:
             fields["booktitle"] = bt_cleaned
             changed = True
 
     # Strip _v[N] version suffix from OSF/PsyArXiv DOIs
     doi_val = (fields.get("doi") or "").strip()
-    if doi_val and re.match(r'10\.31(219|234)/', doi_val):
-        doi_stripped = re.sub(r'_v\d+$', '', doi_val)
+    if doi_val and _OSF_DOI_RE.match(doi_val):
+        doi_stripped = _DOI_VERSION_RE.sub('', doi_val)
         if doi_stripped != doi_val:
             fields["doi"] = doi_stripped
             changed = True
@@ -422,12 +482,11 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
     # Strip page numbers embedded in booktitle (e.g., ", 17: 1-17: 18" from LIPIcs)
     bt_pages = (fields.get("booktitle") or "").strip()
     if bt_pages:
-        bt_clean = re.sub(r',\s*\d+:\s*\d+-\d+:\s*\d+\s*$', '', bt_pages)
+        bt_clean = _LIPICS_PAGES_STRIP_RE.sub('', bt_pages)
         if bt_clean != bt_pages:
             fields["booktitle"] = bt_clean
             if not fields.get("pages"):
-                # Extract the pages portion
-                pages_match = re.search(r',\s*(\d+:\s*\d+-\d+:\s*\d+)\s*$', bt_pages)
+                pages_match = _LIPICS_PAGES_EXTRACT_RE.search(bt_pages)
                 if pages_match:
                     fields["pages"] = pages_match.group(1).replace(' ', '')
             changed = True
@@ -810,47 +869,37 @@ def process_article(
                 _bl_fields[_ex_vcf] = VENUE_CASE_CORRECTIONS[_ex_vc_val]
                 _fixup_written = True
             elif _ex_vc_val and "genetic and evolutionary computation conference" in _ex_vc_val.lower():
-                _ex_vc_fixed = re.sub(
-                    r'(?i)\bgenetic and evolutionary computation conference\b',
-                    'Genetic and Evolutionary Computation Conference',
-                    _ex_vc_val,
-                )
+                _ex_vc_fixed = _GECCO_RE.sub('Genetic and Evolutionary Computation Conference', _ex_vc_val)
                 if _ex_vc_fixed != _ex_vc_val:
                     _bl_fields[_ex_vcf] = _ex_vc_fixed
                     _fixup_written = True
 
         # Strip trailing dash/en-dash from title (truncation artifact)
         _bl_title_td = (_bl_fields.get("title") or "").strip()
-        if _bl_title_td and re.search(r'[\s][-\u2013]\s*$', _bl_title_td):
-            _bl_fields["title"] = re.sub(r'[\s][-\u2013]\s*$', '', _bl_title_td)
+        if _bl_title_td and _TRAILING_DASH_RE.search(_bl_title_td):
+            _bl_fields["title"] = _TRAILING_DASH_RE.sub('', _bl_title_td)
             _fixup_written = True
 
         # Strip ": -...-" subtitle wrapper artifact from title
         _bl_title_sw = (_bl_fields.get("title") or "").strip()
         if isinstance(_bl_title_sw, str) and ": -" in _bl_title_sw:
-            _cleaned_sw = re.sub(r':\s*-([^-]+)-\s*$', r': \1', _bl_title_sw)
+            _cleaned_sw = _SUBTITLE_WRAPPER_RE.sub(r': \1', _bl_title_sw)
             if _cleaned_sw != _bl_title_sw:
                 _bl_fields["title"] = _cleaned_sw
                 _fixup_written = True
 
-        # Fix venue typos in booktitle (e.g., "NeuriPS" → "NeurIPS")
-        _ex_bt_fix = (_bl_fields.get("booktitle") or "").strip()
-        if "NeuriPS" in _ex_bt_fix:
-            _bl_fields["booktitle"] = _ex_bt_fix.replace("NeuriPS", "NeurIPS")
-            _fixup_written = True
-
         # Strip SPIRE-style proceedings garbage suffix from booktitle
         _ex_bt_spire = (_bl_fields.get("booktitle") or "").strip()
         if _ex_bt_spire:
-            _ex_bt_cleaned = re.sub(r'\s*:\s*SPIRE\b.*$', '', _ex_bt_spire)
+            _ex_bt_cleaned = _SPIRE_STRIP_RE.sub('', _ex_bt_spire)
             if _ex_bt_cleaned != _ex_bt_spire:
                 _bl_fields["booktitle"] = _ex_bt_cleaned
                 _fixup_written = True
 
         # Strip _v[N] version suffix from OSF/PsyArXiv DOIs
         _ex_doi_val = (_bl_fields.get("doi") or "").strip()
-        if _ex_doi_val and re.match(r'10\.31(219|234)/', _ex_doi_val):
-            _ex_doi_stripped = re.sub(r'_v\d+$', '', _ex_doi_val)
+        if _ex_doi_val and _OSF_DOI_RE.match(_ex_doi_val):
+            _ex_doi_stripped = _DOI_VERSION_RE.sub('', _ex_doi_val)
             if _ex_doi_stripped != _ex_doi_val:
                 _bl_fields["doi"] = _ex_doi_stripped
                 _fixup_written = True
@@ -867,11 +916,11 @@ def process_article(
         # Strip page numbers embedded in booktitle (LIPIcs style)
         _ex_bt_pg = (_bl_fields.get("booktitle") or "").strip()
         if _ex_bt_pg:
-            _ex_bt_pg_clean = re.sub(r',\s*\d+:\s*\d+-\d+:\s*\d+\s*$', '', _ex_bt_pg)
+            _ex_bt_pg_clean = _LIPICS_PAGES_STRIP_RE.sub('', _ex_bt_pg)
             if _ex_bt_pg_clean != _ex_bt_pg:
                 _bl_fields["booktitle"] = _ex_bt_pg_clean
                 if not _bl_fields.get("pages"):
-                    _pg_m = re.search(r',\s*(\d+:\s*\d+-\d+:\s*\d+)\s*$', _ex_bt_pg)
+                    _pg_m = _LIPICS_PAGES_EXTRACT_RE.search(_ex_bt_pg)
                     if _pg_m:
                         _bl_fields["pages"] = _pg_m.group(1).replace(' ', '')
                 _fixup_written = True
@@ -920,7 +969,7 @@ def process_article(
 
         # Reclassify @article with patent number as journal → @misc
         if (baseline_entry.get("type") == "article" and _bl_fields.get("journal")
-                and re.match(r'(?i)^US\s+Patent', _bl_fields["journal"].strip())):
+                and _US_PATENT_RE.match(_bl_fields["journal"].strip())):
             logger.debug(
                 f"EXISTING_FIXUP | article_patent->misc | journal={_bl_fields['journal'][:60]}",
                 category=LogCategory.CLEANUP,
@@ -1047,33 +1096,31 @@ def process_article(
 
         # Strip [preprint] marker from title
         _bl_title_pp = _bl_fields.get("title", "")
-        if isinstance(_bl_title_pp, str) and re.search(r'\[preprint\]', _bl_title_pp, re.IGNORECASE):
-            _bl_fields["title"] = re.sub(r'\s*\[preprint\]\s*$', '', _bl_title_pp, flags=re.IGNORECASE).strip()
+        if isinstance(_bl_title_pp, str) and _PREPRINT_MARKER_RE.search(_bl_title_pp):
+            _bl_fields["title"] = _PREPRINT_MARKER_RE.sub('', _bl_title_pp).strip()
             _fixup_written = True
 
-        # Fix line-break hyphenation artifacts (e.g. "Optimiza-Tion" → "Optimization")
-        _bl_title_hyph = _bl_fields.get("title", "")
-        if isinstance(_bl_title_hyph, str) and re.search(r'\w-[A-Z][a-z]', _bl_title_hyph):
-            _bl_fields["title"] = re.sub(
-                r'(\w)-([A-Z])([a-z])', lambda m: m.group(1) + m.group(2).lower() + m.group(3), _bl_title_hyph
-            )
-            _fixup_written = True
-
-        # Fix fused compound words in title (hyphens stripped by Scholar)
+        # Fix hyphenation artifacts, fused compounds, colon-space, hyphen-space, acronym case
         _bl_title_fused = _bl_fields.get("title", "")
         if isinstance(_bl_title_fused, str) and _bl_title_fused:
-            _bl_title_fixed = _fix_fused_compounds(_bl_title_fused)
-            _bl_title_fixed = re.sub(r'(\S):([A-Z])', r'\1: \2', _bl_title_fixed)
-            _bl_title_fixed = re.sub(r'(\w)- (?!and |or |to )', r'\1-', _bl_title_fixed)
+            _bl_title_fixed = _fix_title_text(_bl_title_fused)
             if _bl_title_fixed != _bl_title_fused:
                 _bl_fields["title"] = _bl_title_fixed
+                _fixup_written = True
+
+        # Apply booktitle cleanup patterns (verbose metadata strip, abbreviations, typos, spacing)
+        _ex_bt_fix = (_bl_fields.get("booktitle") or "").strip()
+        if _ex_bt_fix:
+            _ex_bt_fixed = _apply_booktitle_fixups(_ex_bt_fix)
+            if _ex_bt_fixed != _ex_bt_fix:
+                _bl_fields["booktitle"] = _ex_bt_fixed
                 _fixup_written = True
 
         # Strip URLs embedded in booktitle/journal
         for _url_field in ("booktitle", "journal"):
             _url_val = (_bl_fields.get(_url_field) or "").strip()
-            if _url_val and re.search(r'https?://', _url_val):
-                _url_cleaned = re.sub(r',?\s*https?://\S+', '', _url_val).strip().rstrip(',')
+            if _url_val and _URL_IN_VENUE_RE.search(_url_val):
+                _url_cleaned = _URL_IN_VENUE_STRIP_RE.sub('', _url_val).strip().rstrip(',')
                 if _url_cleaned and _url_cleaned != _url_val:
                     _bl_fields[_url_field] = _url_cleaned
                     _fixup_written = True
@@ -1981,7 +2028,7 @@ def process_article(
         # Reclassify @article with patent number as journal → @misc
         if merged.get("type") == "article" and merged_fields.get("journal"):
             _patent_jnl = merged_fields["journal"].strip()
-            if re.match(r'(?i)^US\s+Patent', _patent_jnl):
+            if _US_PATENT_RE.match(_patent_jnl):
                 logger.debug(
                     f"TYPE_CORRECT | article_patent->misc | journal={_patent_jnl[:60]}",
                     category=LogCategory.AUDIT,
@@ -2121,24 +2168,22 @@ def process_article(
             # Strip [J] bracket artifact (citation format leak from Scholar)
             _p4_fixed = _BRACKET_J_RE.sub('', _p4_fixed).strip()
             # Strip [preprint] marker from title text
-            _p4_fixed = re.sub(r'\s*\[preprint\]\s*$', '', _p4_fixed, flags=re.IGNORECASE).strip()
-            # Fix line-break hyphenation artifacts (e.g. "Optimiza-Tion" → "Optimization")
-            _p4_fixed = re.sub(
-                r'(\w)-([A-Z])([a-z])',
-                lambda m: m.group(1) + m.group(2).lower() + m.group(3), _p4_fixed,
-            )
-            # Fix fused compound words (hyphens stripped by Scholar)
-            _p4_fixed = _fix_fused_compounds(_p4_fixed)
-            # Fix missing space after colon in titles (e.g., "Word:Word" → "Word: Word")
-            _p4_fixed = re.sub(r'(\S):([A-Z])', r'\1: \2', _p4_fixed)
-            # Fix spurious space after hyphen (preserve suspended hyphens)
-            _p4_fixed = re.sub(r'(\w)- (?!and |or |to )', r'\1-', _p4_fixed)
+            _p4_fixed = _PREPRINT_MARKER_RE.sub('', _p4_fixed).strip()
+            # Fix hyphenation artifacts, fused compounds, colon-space, hyphen-space, acronym case
+            _p4_fixed = _fix_title_text(_p4_fixed)
             # Strip trailing dash/en-dash (truncation artifact)
-            _p4_fixed = re.sub(r'[\s][-\u2013]\s*$', '', _p4_fixed)
+            _p4_fixed = _TRAILING_DASH_RE.sub('', _p4_fixed)
             # Strip ": -...-" subtitle wrapper artifact
-            _p4_fixed = re.sub(r':\s*-([^-]+)-\s*$', r': \1', _p4_fixed)
+            _p4_fixed = _SUBTITLE_WRAPPER_RE.sub(r': \1', _p4_fixed)
             if _p4_fixed != _p4_title:
                 merged_fields["title"] = _p4_fixed
+
+        # Apply booktitle cleanup patterns (verbose metadata strip, abbreviations, typos, spacing)
+        _p4_bt_fix = (merged_fields.get("booktitle") or "").strip()
+        if _p4_bt_fix:
+            _p4_bt_fixed = _apply_booktitle_fixups(_p4_bt_fix)
+            if _p4_bt_fixed != _p4_bt_fix:
+                merged_fields["booktitle"] = _p4_bt_fixed
 
         # Correct ALL-CAPS venue names to proper case
         for _p4_vcf in ("journal", "booktitle"):
@@ -2146,30 +2191,21 @@ def process_article(
             if _p4_vc_val and _p4_vc_val in VENUE_CASE_CORRECTIONS:
                 merged_fields[_p4_vcf] = VENUE_CASE_CORRECTIONS[_p4_vc_val]
             elif _p4_vc_val and "genetic and evolutionary computation conference" in _p4_vc_val.lower():
-                _p4_vc_fixed = re.sub(
-                    r'(?i)\bgenetic and evolutionary computation conference\b',
-                    'Genetic and Evolutionary Computation Conference',
-                    _p4_vc_val,
-                )
+                _p4_vc_fixed = _GECCO_RE.sub('Genetic and Evolutionary Computation Conference', _p4_vc_val)
                 if _p4_vc_fixed != _p4_vc_val:
                     merged_fields[_p4_vcf] = _p4_vc_fixed
-
-        # Fix venue typos in booktitle (e.g., "NeuriPS" → "NeurIPS")
-        _p4_bt_fix = (merged_fields.get("booktitle") or "").strip()
-        if "NeuriPS" in _p4_bt_fix:
-            merged_fields["booktitle"] = _p4_bt_fix.replace("NeuriPS", "NeurIPS")
 
         # Strip SPIRE-style proceedings garbage suffix from booktitle
         _p4_bt_spire = (merged_fields.get("booktitle") or "").strip()
         if _p4_bt_spire:
-            _p4_bt_cleaned = re.sub(r'\s*:\s*SPIRE\b.*$', '', _p4_bt_spire)
+            _p4_bt_cleaned = _SPIRE_STRIP_RE.sub('', _p4_bt_spire)
             if _p4_bt_cleaned != _p4_bt_spire:
                 merged_fields["booktitle"] = _p4_bt_cleaned
 
         # Strip _v[N] version suffix from OSF/PsyArXiv DOIs
         _p4_doi_val = (merged_fields.get("doi") or "").strip()
-        if _p4_doi_val and re.match(r'10\.31(219|234)/', _p4_doi_val):
-            _p4_doi_stripped = re.sub(r'_v\d+$', '', _p4_doi_val)
+        if _p4_doi_val and _OSF_DOI_RE.match(_p4_doi_val):
+            _p4_doi_stripped = _DOI_VERSION_RE.sub('', _p4_doi_val)
             if _p4_doi_stripped != _p4_doi_val:
                 merged_fields["doi"] = _p4_doi_stripped
                 _p4_url_val = (merged_fields.get("url") or "").strip()
@@ -2184,11 +2220,11 @@ def process_article(
         # Strip page numbers embedded in booktitle (LIPIcs style)
         _p4_bt_pg = (merged_fields.get("booktitle") or "").strip()
         if _p4_bt_pg:
-            _p4_bt_pg_clean = re.sub(r',\s*\d+:\s*\d+-\d+:\s*\d+\s*$', '', _p4_bt_pg)
+            _p4_bt_pg_clean = _LIPICS_PAGES_STRIP_RE.sub('', _p4_bt_pg)
             if _p4_bt_pg_clean != _p4_bt_pg:
                 merged_fields["booktitle"] = _p4_bt_pg_clean
                 if not merged_fields.get("pages"):
-                    _p4_pg_m = re.search(r',\s*(\d+:\s*\d+-\d+:\s*\d+)\s*$', _p4_bt_pg)
+                    _p4_pg_m = _LIPICS_PAGES_EXTRACT_RE.search(_p4_bt_pg)
                     if _p4_pg_m:
                         merged_fields["pages"] = _p4_pg_m.group(1).replace(' ', '')
 
@@ -2200,8 +2236,8 @@ def process_article(
         # Strip URLs embedded in booktitle/journal (keep text before URL)
         for _url_field in ("booktitle", "journal"):
             _url_val = (merged_fields.get(_url_field) or "").strip()
-            if _url_val and re.search(r'https?://', _url_val):
-                _url_cleaned = re.sub(r',?\s*https?://\S+', '', _url_val).strip().rstrip(',')
+            if _url_val and _URL_IN_VENUE_RE.search(_url_val):
+                _url_cleaned = _URL_IN_VENUE_STRIP_RE.sub('', _url_val).strip().rstrip(',')
                 if _url_cleaned and _url_cleaned != _url_val:
                     merged_fields[_url_field] = _url_cleaned
 
@@ -2236,7 +2272,8 @@ def process_article(
                 "preprints.org", "authorea", "osf preprints", "openrxiv",
                 "psyarxiv", "socarxiv", "edarxiv",
             )
-            if not _is_preprint_hp and _hp_val:
+            _is_repository_hp = any(rj in _hp_lower for rj in REPOSITORY_AS_JOURNAL)
+            if not _is_preprint_hp and not _is_repository_hp and _hp_val:
                 logger.debug(
                     f"TYPE_CORRECT | misc_workshop->inproceedings | howpublished={_hp_val}",
                     category=LogCategory.AUDIT,

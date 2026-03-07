@@ -221,6 +221,7 @@ ACM_JOURNAL_PROCEEDINGS: frozenset[str] = frozenset({
 PUBLISHER_CORRECTIONS: dict[str, str] = {
     "journal of computational biology": "Mary Ann Liebert",
     "computational and structural biotechnology journal": "Elsevier",
+    "veterinary sciences": "MDPI AG",
 }
 
 # ALL-CAPS venue names → proper case (API sources sometimes return ALL-CAPS)
@@ -231,12 +232,33 @@ VENUE_CASE_CORRECTIONS: dict[str, str] = {
     "Genome biology and evolution": "Genome Biology and Evolution",
 }
 
+# Acronym case corrections for title fields (API sources sometimes return
+# incorrect casing for well-known acronyms). Keys are the wrong form, values
+# are the correct form.  Applied via word-boundary regex on title fields.
+ACRONYM_CASE_CORRECTIONS: dict[str, str] = {
+    "Iot": "IoT",
+    "Nims": "NIMS",
+    "Ai": "AI",
+}
+
 # Conference venues that lack standard keywords (proceedings, conference, etc.)
 KNOWN_CONFERENCE_VENUES = frozenset({
     "neural information processing systems",
     "advances in neural information processing systems",
     "graphics interface",
 })
+
+# Keywords in venue strings that indicate conference proceedings (shared by
+# bibtex_build.determine_entry_type and publication_parser pattern matching).
+CONFERENCE_KEYWORDS: tuple[str, ...] = (
+    "proceedings", "conference", "symposium", "workshop",
+    "meeting", "summit", "congress", "colloquium",
+    "chapter of the association",  # NAACL, EACL, AACL, etc.
+    "findings of",  # ACL/EMNLP workshop findings
+    "lecture notes in computer science",  # LNCS is a conference proceedings series
+    "medinfo",  # Medical informatics (IOS Press SHTI series)
+    "studies in health technology and informatics",  # IOS Press (SHTI)
+)
 
 # Abbreviated venue names → full conference names (for S2/DBLP expansion)
 ABBREVIATED_VENUE_MAP: dict[str, str] = {
@@ -763,6 +785,10 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "sizefractionated": "Size-Fractionated",
     "frontohippocampal": "Fronto-Hippocampal",
     "tradeoff": "Trade-Off",
+    # --- Session 33, Iteration 1: Fused compounds ---
+    "nbody": "N-Body",
+    # --- Session 33, Iteration 1: Space-loss fix ---
+    "ofthe": "of the",
 }
 
 # Multi-signal dedup thresholds

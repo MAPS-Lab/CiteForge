@@ -4,23 +4,18 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from .config import ABBREVIATED_VENUE_MAP, KNOWN_CONFERENCE_VENUES, SIM_TITLE_SIM_MIN
+from .config import (
+    ABBREVIATED_VENUE_MAP,
+    CONFERENCE_KEYWORDS,
+    KNOWN_CONFERENCE_VENUES,
+    SIM_TITLE_SIM_MIN,
+)
 from .log_utils import LogCategory, logger
 
 _ARTICLE_TYPES = {"journal-article", "journal_article", "article"}
 _CONFERENCE_TYPES = {"proceedings-article", "paper-conference", "inproceedings", "conference"}
 _CHAPTER_TYPES = {"book-chapter", "book_chapter", "incollection"}
 _BOOK_TYPES = {"book", "edited-book", "monograph", "reference-book"}
-
-_CONFERENCE_KEYWORDS = (
-    "proceedings", "conference", "symposium", "workshop",
-    "meeting", "summit", "congress", "colloquium",
-    "chapter of the association",  # NAACL, EACL, AACL, etc.
-    "findings of",  # ACL/EMNLP workshop findings
-    "lecture notes in computer science",  # LNCS is a conference proceedings series
-    "medinfo",  # Medical informatics (IOS Press SHTI series)
-    "studies in health technology and informatics",  # IOS Press (SHTI)
-)
 
 _BOOK_SERIES_KEYWORDS = (
     "lecture notes", "series", "handbook", "advances in", "studies in", "chapter",
@@ -171,7 +166,7 @@ def _is_conference_venue(venue: str) -> bool:
     """Check whether a venue string indicates a conference or workshop."""
     venue_lower = venue.lower().strip()
     return (
-        any(kw in venue_lower for kw in _CONFERENCE_KEYWORDS)
+        any(kw in venue_lower for kw in CONFERENCE_KEYWORDS)
         or any(known in venue_lower for known in KNOWN_CONFERENCE_VENUES)
         or venue_lower in ABBREVIATED_VENUE_MAP
         or any(venue_lower == full.lower() for full in ABBREVIATED_VENUE_MAP.values())

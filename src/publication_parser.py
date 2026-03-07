@@ -14,27 +14,9 @@ from dataclasses import dataclass
 
 from .config import (
     CONFERENCE_AS_JOURNAL,
+    CONFERENCE_KEYWORDS,
     KNOWN_CONFERENCE_VENUES,
     PREPRINT_SERVERS,
-)
-
-# ---------------------------------------------------------------------------
-# Conference keyword list (mirrors bibtex_build._CONFERENCE_KEYWORDS)
-# ---------------------------------------------------------------------------
-_CONFERENCE_KW: tuple[str, ...] = (
-    "proceedings",
-    "conference",
-    "symposium",
-    "workshop",
-    "meeting",
-    "summit",
-    "congress",
-    "colloquium",
-    "chapter of the association",
-    "findings of",
-    "lecture notes in computer science",
-    "medinfo",
-    "studies in health technology and informatics",
 )
 
 _CONFERENCE_AS_JOURNAL_LOWER: frozenset[str] = frozenset(
@@ -121,7 +103,7 @@ def _classify_venue_type(venue: str) -> str:
         return "preprint"
 
     if (
-        any(kw in low for kw in _CONFERENCE_KW)
+        any(kw in low for kw in CONFERENCE_KEYWORDS)
         or any(known in low for known in KNOWN_CONFERENCE_VENUES)
         or low in _CONFERENCE_AS_JOURNAL_LOWER
     ):
