@@ -18,24 +18,32 @@
 
 ---
 
-## Overview
+## Why CiteForge?
 
-Google Scholar entries are often incomplete, missing DOIs, or formatted inconsistently. Manually cross-referencing Crossref, Semantic Scholar, arXiv, PubMed, and other databases is tedious and error-prone, especially for authors with large publication records across multiple venues.
+If you've ever tried to build a comprehensive publication list for a research group, you know the pain. Google Scholar entries are often incomplete — missing DOIs, inconsistent formatting, broken author names. Manually cross-referencing Crossref, Semantic Scholar, arXiv, PubMed, and a handful of other databases gets tedious fast, especially when you're dealing with dozens of authors and hundreds of papers.
 
-CiteForge automates this process. It retrieves author publications via [SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/), queries 13 academic APIs for metadata, deduplicates results through fuzzy title and author matching, and merges fields using a 13-level trust hierarchy that prefers authoritative sources over less reliable ones.
+CiteForge takes care of this. Point it at a list of authors with their Google Scholar profiles, and it will:
+
+- Pull every publication from Scholar via [SerpAPI](https://serpapi.com/) (with [Serply](https://serply.io/) as backup)
+- Query **13 academic APIs** for richer metadata on each paper
+- Deduplicate results using fuzzy title matching, DOI normalization, and author overlap
+- Merge fields using a **13-level trust hierarchy** that prefers authoritative sources
+- Output clean, LaTeX-ready `.bib` files organized by author
+
+The result is deterministic — on cache-hit runs, CiteForge produces **byte-identical output** across consecutive runs, verified by SHA-256 checksums.
 
 ---
 
 ## Getting Started
 
-**Requirements:** Python 3.10+ and a [SerpAPI](https://serpapi.com/) key.
+You'll need **Python 3.10+** and a [SerpAPI](https://serpapi.com/) key (free tier works for small runs).
 
 ```bash
 git clone https://github.com/gabrielspadon/CiteForge.git && cd CiteForge
 pip install -e .
 ```
 
-Place API keys in the `keys/` directory:
+Drop your API keys into the `keys/` directory:
 
 ```bash
 mkdir -p keys
@@ -46,7 +54,7 @@ echo "your_gemini_key" > keys/Gemini.key          # Optional
 printf "user\npass" > keys/OpenReview.key          # Optional
 ```
 
-Create an input CSV and run the pipeline:
+Then create an input CSV and run:
 
 ```bash
 python3 main.py                     # Default: data/input.csv
@@ -54,14 +62,14 @@ python3 main.py data/custom.csv     # Custom input
 python3 main.py --force             # Force re-enrichment
 ```
 
-The input CSV has three columns:
+The input CSV has three columns — name, Scholar link, and an optional DBLP link:
 
 ```csv
 Name,Scholar Link,DBLP Link
 John Smith,https://scholar.google.com/citations?user=ABC123,https://dblp.org/pid/smith/john
 ```
 
-Output is organized per author:
+Output is organized per author, with a shared summary and deduplication log:
 
 ```
 output/
@@ -74,27 +82,27 @@ output/
     └── ...
 ```
 
-API responses are cached under `data/api_cache/` with monthly expiry. Subsequent runs reuse cached responses for deterministic output.
+API responses are cached under `data/api_cache/` with monthly expiry, so subsequent runs are fast and deterministic.
 
 ---
 
-## Pipeline
+## How It Works
 
-Each article passes through five phases:
+Each article passes through five enrichment phases:
 
-| Phase | Name | Description |
-|:-----:|------|-------------|
-| 1 | DOI Validation | Resolve DOIs via CSL-JSON with BibTeX fallback |
-| 2 | API Enrichment | Query S2, Crossref, arXiv, OpenAlex, PubMed, Europe PMC, DBLP, and OpenReview |
-| 2.5 | Venue Enrichment | Parse SerpAPI publication strings for venue-based API search (fallback) |
-| 3 | Late DOI Discovery | Collect DOI candidates from arXiv eprints, bioRxiv strings, URLs; prefer published over preprint |
-| 4 | Trust-Based Merge | Combine fields by source rank, apply type corrections, deduplicate on disk |
+| Phase | What happens |
+|:-----:|--------------|
+| 1 | **DOI Validation** — resolve DOIs via CSL-JSON, fall back to BibTeX |
+| 2 | **API Enrichment** — query Semantic Scholar, Crossref, arXiv, OpenAlex, PubMed, Europe PMC, DBLP, and OpenReview |
+| 2.5 | **Venue Enrichment** — parse Scholar publication strings to search by venue name (fallback when Phase 2 finds nothing) |
+| 3 | **Late DOI Discovery** — collect DOI candidates from arXiv eprints, bioRxiv strings, and URLs; prefer published over preprint |
+| 4 | **Trust-Based Merge** — combine fields by source rank, apply type corrections, deduplicate on disk |
 
-Authors are processed in parallel with 12 workers. Per-API token-bucket rate limiting and session rotation prevent throttling. Publications outside a configurable year window (default: 7 years) are filtered at ingestion, enrichment, and post-run cleanup.
+Authors are processed in parallel (12 workers by default), with per-API rate limiting and session rotation to avoid throttling. Publications outside a configurable year window (default: last 7 years) are filtered out automatically.
 
 ### Trust Hierarchy
 
-Fields from higher-ranked sources override lower ones:
+Not all metadata sources are created equal. When two sources disagree on a field, CiteForge picks the more trustworthy one:
 
 ```
 CSL > DOI BibTeX > DataCite > PubMed > Europe PMC > Crossref >
@@ -102,19 +110,19 @@ OpenAlex > Semantic Scholar > ORCID > OpenReview > arXiv >
 Scholar Page > Scholar Minimal
 ```
 
-Special rules override raw rank for specific fields:
+A few field-specific rules sit on top of this ranking:
 
 | Field | Rule |
 |-------|------|
-| DOI | Published DOIs always beat preprint/data repository DOIs |
-| Journal | Never downgraded from published journal to preprint server |
-| Title | Prefer longer unless new source is 3+ ranks higher |
-| Pages | Reject non-numeric, dot-containing, or oversized page ranges |
-| Booktitle | Generic series names (LNCS, etc.) replaced with conference names |
+| DOI | A published DOI always wins over a preprint or data-repository DOI |
+| Journal | Never downgrade from a published journal to a preprint server name |
+| Title | Prefer the longer version unless the new source is 3+ ranks higher |
+| Pages | Reject non-numeric values, dot-containing strings, and oversized ranges |
+| Booktitle | Replace generic series names (like LNCS) with the actual conference name |
 
 ### Deduplication
 
-Multi-level deduplication prevents duplicate entries:
+Duplicate entries are caught at multiple levels before they reach your `.bib` files:
 
 | Signal | Threshold |
 |--------|:---------:|
@@ -125,36 +133,36 @@ Multi-level deduplication prevents duplicate entries:
 | Preprint/published pair with title match | 0.55 |
 | Strong author overlap with moderate title match | 0.60 |
 
-Candidate DOIs discovered during enrichment are verified against existing files via title similarity before acceptance. Mis-attributed DOIs are reverted to the Phase-1-validated DOI.
+When a candidate DOI is discovered during enrichment, it's verified against existing files by title similarity before acceptance. If the match is poor, CiteForge reverts to the DOI validated in Phase 1.
 
 ### Data Quality
 
-The merge engine enforces additional rules:
+Beyond merging and deduplication, CiteForge cleans up common metadata problems:
 
-| Rule | Purpose |
-|------|---------|
-| Page number validation | Reject article IDs masquerading as pages (> 8 digits) |
-| Series name expansion | Replace generic names with actual conference names |
-| Artifact stripping | Remove "Check for updates" prefixes, decode HTML entities |
-| Title filtering | Reject single-word and garbage titles from Scholar scraping |
-| Type reclassification | Fix conference-as-journal entries from Crossref |
-| Casing normalization | Fix ALL-CAPS titles and lowercase author names |
-| DOI reversion | Undo mis-attributed DOIs when title similarity check fails |
-| Fused compound repair | Fix ~376 Scholar-broken compounds (e.g., "DeepLearning" → "Deep Learning") |
-| Acronym case correction | Fix IoT, NIMS, AI casing in titles |
-| Booktitle cleanup | Fix duplicate prepositions, expand abbreviations, correct NeurIPS spelling |
-
-On cache-hit runs, CiteForge produces byte-identical output across consecutive runs (SHA256-verified determinism).
+| What it fixes | Why it matters |
+|---------------|----------------|
+| Page number validation | Rejects article IDs pretending to be page ranges |
+| Series name expansion | Replaces generic names with real conference names |
+| Artifact stripping | Removes "Check for updates" prefixes and HTML entities |
+| Title filtering | Drops single-word and garbage titles from Scholar scraping |
+| Type reclassification | Fixes conference papers incorrectly labeled as journal articles by Crossref |
+| Casing normalization | Fixes ALL-CAPS titles and lowercase author names |
+| DOI reversion | Undoes mis-attributed DOIs when title similarity fails |
+| Fused compound repair | Splits ~376 Scholar-broken compounds like "DeepLearning" back to "Deep Learning" |
+| Acronym case correction | Restores proper casing for IoT, NIMS, AI, and similar terms |
+| Booktitle cleanup | Fixes duplicate prepositions, expands abbreviations, corrects NeurIPS spelling |
 
 ---
 
 ## Data Sources
 
-| Source | Key | Purpose |
-|--------|:---:|---------|
+CiteForge queries the following APIs. Only SerpAPI requires a key — everything else either needs no authentication or is optional:
+
+| Source | Key | What it provides |
+|--------|:---:|------------------|
 | Google Scholar via [SerpAPI](https://serpapi.com/) | Required | Author publication lists |
 | [Serply](https://serply.io/) | Optional | Citation detail lookups |
-| [Semantic Scholar](https://www.semanticscholar.org/) | Recommended | Paper metadata |
+| [Semantic Scholar](https://www.semanticscholar.org/) | Recommended | Paper metadata and abstracts |
 | [Crossref](https://www.crossref.org/) | No | DOI metadata, container titles |
 | [OpenAlex](https://openalex.org/) | No | Open scholarly metadata |
 | [arXiv](https://arxiv.org/) | No | Preprint metadata, eprint IDs |
@@ -166,27 +174,27 @@ On cache-hit runs, CiteForge produces byte-identical output across consecutive r
 | [OpenReview](https://openreview.net/) | Optional | Conference paper metadata |
 | [Google Gemini](https://ai.google.dev/) | Optional | Citation key generation |
 
-Set the `CROSSREF_MAILTO` environment variable for Crossref polite pool access.
+Set the `CROSSREF_MAILTO` environment variable to get into Crossref's polite pool (faster responses).
 
 ---
 
 ## Configuration
 
-All parameters live in [`src/config.py`](src/config.py):
+All tunable parameters live in [`src/config.py`](src/config.py). Here are the most important ones:
 
-| Parameter | Default | Description |
-|-----------|:-------:|-------------|
+| Parameter | Default | What it controls |
+|-----------|:-------:|------------------|
 | `MAX_WORKERS` | 12 | Parallel author processing threads |
-| `CONTRIBUTION_WINDOW_YEARS` | 7 | Years of publications to fetch |
-| `PUBLICATIONS_PER_YEAR` | 50 | Target publications per year |
-| `SIM_MERGE_DUPLICATE_THRESHOLD` | 0.95 | Title similarity for file-level dedup |
+| `CONTRIBUTION_WINDOW_YEARS` | 7 | How many years of publications to fetch |
+| `PUBLICATIONS_PER_YEAR` | 50 | Target publications per year per author |
+| `SIM_MERGE_DUPLICATE_THRESHOLD` | 0.95 | Title similarity needed for file-level dedup |
 | `SIM_PREPRINT_TITLE_THRESHOLD` | 0.55 | Relaxed threshold for preprint/published pairs |
 | `REQUEST_DELAY_MIN` / `_MAX` | 0.3 / 1.0s | Courtesy delay between API requests |
-| `CACHE_ENABLED` | True | Local API response caching |
-| `TRUST_ORDER` | 13 levels | Source priority for field-by-field merge |
-| `FUSED_COMPOUND_WORDS` | 376 entries | Dictionary-based compound word repair |
-| `COMPOUND_SUFFIXES` | 37 entries | Regex-based compound suffix repair |
-| `ABBREVIATED_VENUE_MAP` | 46 entries | Venue abbreviation → full name expansion |
+| `CACHE_ENABLED` | True | Whether to cache API responses locally |
+| `TRUST_ORDER` | 13 levels | Source priority for the field-by-field merge |
+| `FUSED_COMPOUND_WORDS` | 376 entries | Dictionary for compound word repair |
+| `COMPOUND_SUFFIXES` | 37 entries | Regex patterns for compound suffix repair |
+| `ABBREVIATED_VENUE_MAP` | 46 entries | Venue abbreviation to full name expansion |
 
 ---
 
@@ -197,7 +205,7 @@ pip install -e .[dev]
 pytest tests/ -v --tb=short
 ```
 
-384 tests across 12 modules. Integration tests requiring API keys are automatically skipped when keys are unavailable. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
+The test suite has 384 tests across 12 modules. Integration tests that need API keys are automatically skipped when keys aren't available. CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
 All three quality gates must pass before merge:
 
@@ -332,12 +340,16 @@ Every pipeline decision is logged at DEBUG level in per-author log files (`outpu
 
 ## Contributing
 
+Contributions are welcome! Here's the quick version:
+
 1. Fork the repository
 2. Create a feature branch
-3. Pass all quality gates
+3. Make sure all three quality gates pass (lint, type check, tests)
 4. Submit a pull request
 
 ## Citation
+
+If you use CiteForge in your research or find it useful, please consider citing it:
 
 ```bibtex
 @software{spadon_citeforge,
@@ -350,4 +362,4 @@ Every pipeline decision is logged at DEBUG level in per-author log files (`outpu
 
 ## License
 
-[MIT](LICENSE)
+This project is licensed under the **MIT License** — you're free to use, modify, and distribute it for any purpose. See the [LICENSE](LICENSE) file for the full text.
