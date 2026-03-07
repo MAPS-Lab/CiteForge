@@ -160,6 +160,7 @@ _VERBOSE_BOOKTITLE_RE = re.compile(
 # existing-file fixup, and Phase 4 post-merge — each pattern appears 3 times)
 _COLON_SPACE_RE = re.compile(r'(\S):([A-Z])')
 _HYPHEN_SPACE_RE = re.compile(r'(\w)- (?!and |or |to )')
+_SPACE_HYPHEN_RE = re.compile(r'(\w) -(\w)')
 _TRAILING_DASH_RE = re.compile(r'[\s][-\u2013]\s*$')
 _SUBTITLE_WRAPPER_RE = re.compile(r':\s*-([^-]+)-\s*$')
 _SPIRE_STRIP_RE = re.compile(r'\s*:\s*SPIRE\b.*$')
@@ -168,11 +169,11 @@ _DOI_VERSION_RE = re.compile(r'_v\d+$')
 _LIPICS_PAGES_STRIP_RE = re.compile(r',\s*\d+:\s*\d+-\d+:\s*\d+\s*$')
 _LIPICS_PAGES_EXTRACT_RE = re.compile(r',\s*(\d+:\s*\d+-\d+:\s*\d+)\s*$')
 _PREPRINT_MARKER_RE = re.compile(r'\s*\[preprint\]\s*$', re.IGNORECASE)
-_HYPHENATION_FIX_RE = re.compile(r'(\w)-([A-Z])([a-z])')
 _GECCO_RE = re.compile(r'\bgenetic and evolutionary computation conference\b', re.IGNORECASE)
 _URL_IN_VENUE_RE = re.compile(r'https?://')
 _URL_IN_VENUE_STRIP_RE = re.compile(r',?\s*https?://\S+')
 _US_PATENT_RE = re.compile(r'(?i)^US\s+Patent')
+_BOOK_CHAPTER_DOI_RE = re.compile(r'\.ch\d+$')
 
 # Pre-compiled booktitle cleanup patterns (venue abbreviations, typos, spacing)
 _BOOKTITLE_FIXUPS: list[tuple[re.Pattern[str], str]] = [
@@ -190,6 +191,35 @@ _BOOKTITLE_FIXUPS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bInt'l\b"), 'International'),
     # "NeuriPS" → "NeurIPS" (venue typo from API sources)
     (re.compile(r'\bNeuriPS\b'), 'NeurIPS'),
+    # CHCCS publisher name used as venue → Graphics Interface conference
+    (re.compile(r'^Canada Human-Computer Communications Society$'), 'Graphics Interface'),
+    # "Conference On" → "Conference on" (lowercase preposition; must run before truncation completions)
+    (re.compile(r'\bConference On\b'), 'Conference on'),
+    # "YYYY ACM on Conference" → "YYYY ACM Conference" (Crossref spurious "on")
+    (re.compile(r'(\d{4}) ACM on ([A-Z])'), r'\1 ACM \2'),
+    # "of the YYYY on Innovation" → "of the YYYY ACM Conference on Innovation" (ITiCSE gap)
+    (re.compile(r'of the (\d{4}) on Innovation'), r'of the \1 ACM Conference on Innovation'),
+    # "ITiCSE'NN: Proceedings..." prefix → strip non-standard prefix
+    (re.compile(r"ITiCSE'\d{2}:\s*"), ''),
+    # "SEET-Software" → "SEET - Software" (missing spaces around dash)
+    (re.compile(r'^SEET-Software'), 'SEET - Software'),
+    # Truncated SerpAPI booktitles — complete known conference name suffixes
+    (re.compile(r'Conference on Innovation$'), 'Conference on Innovation and Technology in Computer Science Education'),
+    (re.compile(r'Applications of Computer$'), 'Applications of Computer Vision'),
+    (re.compile(r'Analyzing and Interpreting$'), 'Analyzing and Interpreting Neural Networks for NLP'),
+    (re.compile(r'Conference on Persuasive$'), 'Conference on Persuasive Technology'),
+    # FAccT: "Fairness Accountability and Transparency" → commas
+    (re.compile(r'Fairness Accountability and Transparency'), 'Fairness, Accountability, and Transparency'),
+    # "Conference Information" → "Conference on Information" (missing "on")
+    (re.compile(r'Conference Information Visualisation'), 'Conference on Information Visualisation'),
+    # "YYYY the Nth" → "YYYY The Nth" (capitalize after year)
+    (re.compile(r'(\d{4}) the (\d)'), r'\1 The \2'),
+    # "Conference: (VTC" → "Conference (VTC" (stray colon before acronym)
+    (re.compile(r'Conference: \('), 'Conference ('),
+    # "Persuasive Technology PERSUASIVE YYYY" → strip redundant acronym
+    (re.compile(r'(Persuasive Technology(?:\s+Adjunct)?),?\s+PERSUASIVE(?:\s+\d{4})?$'), r'\1'),
+    # Truncated "\& International..." suffix → strip
+    (re.compile(r'\s*\\?&\s*International$'), ''),
 ]
 
 
@@ -205,14 +235,11 @@ def _apply_booktitle_fixups(bt: str) -> str:
 
 
 def _fix_title_text(title: str) -> str:
-    """Fix hyphenation artifacts, fused compounds, colon-space, hyphen-space, and acronym case."""
-    # Hyphenation fix MUST run before compound fix (see CLAUDE.md)
-    result = _HYPHENATION_FIX_RE.sub(
-        lambda m: m.group(1) + m.group(2).lower() + m.group(3), title,
-    )
-    result = _fix_fused_compounds(result)
+    """Fix fused compounds, colon-space, hyphen-space, and acronym case."""
+    result = _fix_fused_compounds(title)
     result = _COLON_SPACE_RE.sub(r'\1: \2', result)
     result = _HYPHEN_SPACE_RE.sub(r'\1-', result)
+    result = _SPACE_HYPHEN_RE.sub(r'\1-\2', result)
     for acr_pat, acr_repl in _ACRONYM_CASE_PATTERNS:
         result = acr_pat.sub(acr_repl, result)
     return result
@@ -302,12 +329,16 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
             changed = True
 
     # Reclassify @inproceedings with PNAS/PVLDB journal → @article
+    # Guard: skip if the booktitle extends the journal name with conference keywords
     if entry.get("type") == "inproceedings" and fields.get("booktitle"):
         bt_lower = fields["booktitle"].strip().lower()
-        if any(bt_lower.startswith(j) for j in JOURNALS_NAMED_PROCEEDINGS):
-            fields["journal"] = fields.pop("booktitle")
-            entry["type"] = "article"
-            changed = True
+        jnp_match = next((j for j in JOURNALS_NAMED_PROCEEDINGS if bt_lower.startswith(j)), None)
+        if jnp_match:
+            suffix = bt_lower[len(jnp_match):].lstrip(" /,")
+            if not any(kw in suffix for kw in ("conference", "workshop", "symposium")):
+                fields["journal"] = fields.pop("booktitle")
+                entry["type"] = "article"
+                changed = True
 
     # Reclassify @inproceedings with institutional repository → @phdthesis
     if entry.get("type") == "inproceedings" and fields.get("booktitle"):
@@ -354,6 +385,13 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         entry["type"] = "incollection"
         changed = True
 
+    # Reclassify @article with book-chapter DOI pattern → @incollection
+    if (entry.get("type") == "article" and fields.get("journal") and fields.get("doi")
+            and _BOOK_CHAPTER_DOI_RE.search(fields["doi"].strip())):
+        fields["booktitle"] = fields.pop("journal")
+        entry["type"] = "incollection"
+        changed = True
+
     # Reclassify @article with conference proceedings in journal → @inproceedings
     # (but NOT for ACM PACM journals which are legitimately named "Proceedings of...")
     if entry.get("type") == "article" and fields.get("journal"):
@@ -371,7 +409,7 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
         fields["title"] = _PREPRINT_MARKER_RE.sub('', title).strip()
         changed = True
 
-    # Fix hyphenation artifacts, fused compounds, colon-space, hyphen-space, acronym case
+    # Fix fused compounds, colon-space, hyphen-space, and acronym case
     title = fields.get("title", "")
     if isinstance(title, str) and title:
         fixed_title = _fix_title_text(title)
@@ -416,15 +454,19 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
     # Expand abbreviated venue names in booktitle (e.g., "NIME 2021" → full name)
     bt = (fields.get("booktitle") or "").strip()
     if bt and bt.lower() in ABBREVIATED_VENUE_MAP:
-        fields["booktitle"] = ABBREVIATED_VENUE_MAP[bt.lower()]
-        changed = True
+        _expanded_bt = ABBREVIATED_VENUE_MAP[bt.lower()]
+        if _expanded_bt != bt:
+            fields["booktitle"] = _expanded_bt
+            changed = True
 
     # Correct ALL-CAPS venue names to proper case
     for _vcf in ("journal", "booktitle"):
         _vc_val = (fields.get(_vcf) or "").strip()
         if _vc_val and _vc_val in VENUE_CASE_CORRECTIONS:
-            fields[_vcf] = VENUE_CASE_CORRECTIONS[_vc_val]
-            changed = True
+            _corrected_vc = VENUE_CASE_CORRECTIONS[_vc_val]
+            if _corrected_vc != _vc_val:
+                fields[_vcf] = _corrected_vc
+                changed = True
         # Fix lowercase "genetic and evolutionary computation conference" in GECCO booktitles
         elif _vc_val and "genetic and evolutionary computation conference" in _vc_val.lower():
             _vc_fixed = _GECCO_RE.sub('Genetic and Evolutionary Computation Conference', _vc_val)
@@ -495,6 +537,12 @@ def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
     bt_dup = (fields.get("booktitle") or "").strip()
     if bt_dup.startswith("Proceedings of the Extended Abstracts"):
         fields["booktitle"] = bt_dup.removeprefix("Proceedings of the ")
+        changed = True
+
+    # Add URL from DOI when missing
+    doi = (fields.get("doi") or "").strip()
+    if doi and not fields.get("url"):
+        fields["url"] = f"https://doi.org/{doi}"
         changed = True
 
     return changed
@@ -1094,13 +1142,25 @@ def process_article(
             baseline_entry["type"] = "incollection"
             _fixup_written = True
 
+        # Reclassify @article with book-chapter DOI pattern → @incollection
+        _bl_doi_ch = (_bl_fields.get("doi") or "").strip()
+        if (baseline_entry.get("type") == "article" and _bl_fields.get("journal")
+                and _bl_doi_ch and _BOOK_CHAPTER_DOI_RE.search(_bl_doi_ch)):
+            logger.debug(
+                f"EXISTING_FIXUP | article_book_chapter->incollection | doi={_bl_doi_ch}",
+                category=LogCategory.CLEANUP,
+            )
+            _bl_fields["booktitle"] = _bl_fields.pop("journal")
+            baseline_entry["type"] = "incollection"
+            _fixup_written = True
+
         # Strip [preprint] marker from title
         _bl_title_pp = _bl_fields.get("title", "")
         if isinstance(_bl_title_pp, str) and _PREPRINT_MARKER_RE.search(_bl_title_pp):
             _bl_fields["title"] = _PREPRINT_MARKER_RE.sub('', _bl_title_pp).strip()
             _fixup_written = True
 
-        # Fix hyphenation artifacts, fused compounds, colon-space, hyphen-space, acronym case
+        # Fix fused compounds, colon-space, hyphen-space, and acronym case
         _bl_title_fused = _bl_fields.get("title", "")
         if isinstance(_bl_title_fused, str) and _bl_title_fused:
             _bl_title_fixed = _fix_title_text(_bl_title_fused)
@@ -2097,6 +2157,17 @@ def process_article(
             )
             merged["type"] = "incollection"
 
+        # Reclassify @article with book-chapter DOI pattern → @incollection
+        _p4_doi_ch = (merged_fields.get("doi") or "").strip()
+        if (merged.get("type") == "article" and merged_fields.get("journal")
+                and _p4_doi_ch and _BOOK_CHAPTER_DOI_RE.search(_p4_doi_ch)):
+            logger.debug(
+                f"TYPE_CORRECT | article_book_chapter->incollection | doi={_p4_doi_ch}",
+                category=LogCategory.AUDIT,
+            )
+            merged_fields["booktitle"] = merged_fields.pop("journal")
+            merged["type"] = "incollection"
+
         # Downgrade @article with repository/portal as journal → @misc
         if (merged.get("type") == "article" and merged_fields.get("journal")
                 and any(rj in merged_fields["journal"].lower() for rj in REPOSITORY_AS_JOURNAL)):
@@ -2169,7 +2240,7 @@ def process_article(
             _p4_fixed = _BRACKET_J_RE.sub('', _p4_fixed).strip()
             # Strip [preprint] marker from title text
             _p4_fixed = _PREPRINT_MARKER_RE.sub('', _p4_fixed).strip()
-            # Fix hyphenation artifacts, fused compounds, colon-space, hyphen-space, acronym case
+            # Fix fused compounds, colon-space, hyphen-space, and acronym case
             _p4_fixed = _fix_title_text(_p4_fixed)
             # Strip trailing dash/en-dash (truncation artifact)
             _p4_fixed = _TRAILING_DASH_RE.sub('', _p4_fixed)
@@ -3039,11 +3110,13 @@ def main() -> int:
                     pr_fpath = os.path.join(pr_dir, pr_fname)
                     try:
                         with open(pr_fpath, encoding="utf-8") as prf:
-                            pr_parsed = bt.parse_bibtex_to_dict(prf.read())
+                            pr_content = prf.read()
+                        pr_parsed = bt.parse_bibtex_to_dict(pr_content)
                         if pr_parsed and _fixup_bib_entry(pr_parsed):
                             bib_str = bt.bibtex_from_dict(pr_parsed)
-                            safe_write_file(pr_fpath, bib_str)
-                            postrun_fixed += 1
+                            if bib_str != pr_content:
+                                safe_write_file(pr_fpath, bib_str)
+                                postrun_fixed += 1
                     except (OSError, ValueError):
                         pass
             if postrun_fixed:

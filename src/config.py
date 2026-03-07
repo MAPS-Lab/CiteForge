@@ -306,7 +306,7 @@ ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "bcss@persuasive": "Behavior Change Support Systems Workshop",
     "iberlef@sepln": "Iberian Languages Evaluation Forum",
     "master@pkdd/ecml": "MASTER Workshop on Multiple-Aspect Analysis of Semantic Trajectories",
-    "interaccion": "Interacción",
+    "interaccion": "Interaccion",
     "robocup 2022:": "RoboCup 2022: Robot World Cup XXVI",
     "cvpr workshop": "CVPR Workshop on Generative Models for Computer Vision",
 }
@@ -724,13 +724,10 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     # --- Session 25, Iteration 3: Fused words at word boundaries ---
     "emotionsemantic": "Emotion-Semantic",
     "resumejob": "Resume-Job",
-    # --- Session 25, Iteration 3: Em-dash loss ---
-    "chatgptis": "ChatGPT---Is",
     # --- Session 26, Iteration 1: Space-loss fix ---
     "eventdata": "Event Data",
     # --- Session 26, Iteration 2: Fused compounds ---
     "postprocessing": "Post-Processing",
-    "welfareintegrating": "Welfare---Integrating",
     "wellbeing": "Well-Being",
     # --- Session 26, Iteration 3: Fused compound adjectives ---
     "climatesmart": "Climate-Smart",
@@ -764,12 +761,6 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "wolffacial": "Wolf Facial",
     "eulertour": "Euler-Tour",
     "glyphfield": "Glyph-Field",
-    # --- Session 26, Iteration 3: Em-dash loss ---
-    "emotionssensor": "Emotions---Sensor",
-    "farmingadvancing": "Farming---Advancing",
-    "livestockartificial": "Livestock---Artificial",
-    "managementpart": "Management---Part",
-    "servicespart": "Services---Part",
     # --- Session 30, Iteration 1: Colon/slash/hyphen loss ---
     "recognitionthe": "recognition: The",
     "methanethe": "Methane: The",
