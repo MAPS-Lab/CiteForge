@@ -7,11 +7,16 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    outputs:
+      converged: ${{ steps.loop.outputs.converged }}
+      runs_completed: ${{ steps.loop.outputs.runs_completed }}
+      last_api_calls: ${{ steps.loop.outputs.last_api_calls }}
 
     steps:
       - name: Checkout main
@@ -57,6 +62,7 @@ jobs:
           fi
 
       - name: Run pipeline loop
+        id: loop
         env:
           CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
           CITEFORGE_MAX_WORKERS: "16"
@@ -87,6 +93,9 @@ jobs:
 
           max_runs=50
           consecutive_zero=0
+          converged=false
+          last_total=-1
+
           for i in $(seq 1 $max_runs); do
             echo "::group::Pipeline run $i/$max_runs"
             rc=0
@@ -97,11 +106,15 @@ jobs:
               echo "::error::Pipeline run $i failed with exit code $rc"
               echo "Saving cache before exit..."
               save_cache "$i"
+              echo "converged=false" >> "$GITHUB_OUTPUT"
+              echo "runs_completed=$i" >> "$GITHUB_OUTPUT"
+              echo "last_api_calls=-1" >> "$GITHUB_OUTPUT"
               exit 1
             fi
 
             # Parse total API calls from the run log
             total=$(grep -oP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
+            last_total=$total
             echo "Run $i — API calls: $total"
 
             # Save cache after every iteration
@@ -111,6 +124,7 @@ jobs:
               consecutive_zero=$((consecutive_zero + 1))
               if [ "$consecutive_zero" -ge 2 ]; then
                 echo "Zero API calls confirmed over 2 consecutive runs — cache is complete"
+                converged=true
                 break
               fi
               echo "Zero API calls — confirming with one more run"
@@ -123,6 +137,10 @@ jobs:
             fi
           done
 
+          echo "converged=$converged" >> "$GITHUB_OUTPUT"
+          echo "runs_completed=$i" >> "$GITHUB_OUTPUT"
+          echo "last_api_calls=$last_total" >> "$GITHUB_OUTPUT"
+
       - name: Commit output to main
         run: |
           git config user.name  "github-actions[bot]"
@@ -134,3 +152,34 @@ jobs:
           else
             echo "No output changes to commit"
           fi
+
+  verify:
+    needs: refresh
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Report status
+        run: |
+          echo "## Pipeline Results"
+          echo "Converged: ${{ needs.refresh.outputs.converged }}"
+          echo "Runs completed: ${{ needs.refresh.outputs.runs_completed }}"
+          echo "Last API calls: ${{ needs.refresh.outputs.last_api_calls }}"
+          echo "Job result: ${{ needs.refresh.result }}"
+
+      - name: Re-trigger if not converged
+        if: needs.refresh.outputs.converged != 'true' && needs.refresh.result != 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Pipeline did not converge — re-triggering with saved cache"
+          gh workflow run "Monthly Pipeline Refresh" --repo "${{ github.repository }}"
+          echo "::notice::Re-triggered workflow. Cache was saved incrementally — next run resumes from where this one stopped."
+
+      - name: Fail if pipeline errored
+        if: needs.refresh.result == 'failure'
+        run: |
+          echo "::error::Pipeline failed with errors. Check the refresh job logs."
+          echo "Cache was saved before failure — manual re-trigger will resume from last good state."
+          exit 1
