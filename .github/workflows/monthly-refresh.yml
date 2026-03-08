@@ -67,6 +67,7 @@ jobs:
           CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
           CITEFORGE_MAX_WORKERS: "16"
           CITEFORGE_CONCURRENCY: "20"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           save_cache() {
             if [ -d data/api_cache ] && [ "$(ls -A data/api_cache 2>/dev/null)" ]; then
@@ -75,16 +76,20 @@ jobs:
               size=$(du -h /tmp/api_cache.tar.gz | cut -f1)
               echo "Saving $entries cache entries ($size compressed)"
 
-              git stash --include-untracked -q 2>/dev/null || true
-              tmp_branch="data-cache-push-$$-$1"
-              git checkout --orphan "$tmp_branch" 2>/dev/null
-              git rm -rf . > /dev/null 2>&1 || true
-              cp /tmp/api_cache.tar.gz .
+              # Push cache without disturbing the working tree
+              cache_dir=$(mktemp -d)
+              cp /tmp/api_cache.tar.gz "$cache_dir/"
+              cd "$cache_dir"
+              git init -q
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git checkout --orphan data-cache
               git add api_cache.tar.gz
               git commit -q -m "cache: $(date +%Y-%m-%d) — $entries entries ($size)"
-              git push origin "$tmp_branch":data-cache --force -q
-              git checkout main -q
-              git stash pop -q 2>/dev/null || true
+              git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+              git push origin data-cache --force -q
+              cd -
+              rm -rf "$cache_dir"
             fi
           }
 
