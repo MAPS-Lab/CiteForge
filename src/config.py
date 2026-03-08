@@ -27,11 +27,12 @@ DEFAULT_GEMINI_KEY_FILE = "keys/Gemini.key"
 DEFAULT_OUT_DIR = "output"
 DEFAULT_A2I2_INPUT = "data/a2i2.csv"
 A2I2_OUTPUT_DIR = "a2i2"
-CONTRIBUTION_WINDOW_YEARS = 7
-
 # Fixed minimum publication year. When set, overrides the rolling window.
 # Override via CITEFORGE_MIN_YEAR env var (set to empty string to use rolling window).
 MIN_YEAR: int | None = int(v) if (v := os.environ.get("CITEFORGE_MIN_YEAR")) else 2020
+
+# Rolling window fallback (only used when MIN_YEAR is None).
+_CONTRIBUTION_WINDOW_FALLBACK = 7
 
 
 def get_min_year() -> int:
@@ -39,7 +40,16 @@ def get_min_year() -> int:
     if MIN_YEAR is not None:
         return MIN_YEAR
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).year - (CONTRIBUTION_WINDOW_YEARS - 1)
+    return datetime.now(timezone.utc).year - (_CONTRIBUTION_WINDOW_FALLBACK - 1)
+
+
+def _current_year() -> int:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).year
+
+
+# Derived from effective min_year so it scales automatically.
+CONTRIBUTION_WINDOW_YEARS: int = _current_year() - get_min_year() + 1
 
 # Publications per year to fetch from Scholar
 PUBLICATIONS_PER_YEAR = 50

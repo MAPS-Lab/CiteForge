@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from src import config
 from src.config import (
+    _CONTRIBUTION_WINDOW_FALLBACK,
     CONTRIBUTION_WINDOW_YEARS,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MIN_YEAR,
@@ -70,11 +73,18 @@ def test_get_min_year_fixed(monkeypatch: object) -> None:
 
 def test_get_min_year_rolling(monkeypatch: object) -> None:
     """Test that get_min_year falls back to rolling window when MIN_YEAR is None."""
-    from datetime import datetime, timezone
-
     import pytest
     mp = pytest.MonkeyPatch()
     mp.setattr(config, "MIN_YEAR", None)
-    expected = datetime.now(timezone.utc).year - (CONTRIBUTION_WINDOW_YEARS - 1)
+    expected = datetime.now(timezone.utc).year - (_CONTRIBUTION_WINDOW_FALLBACK - 1)
     assert get_min_year() == expected
     mp.undo()
+
+
+def test_contribution_window_derived_from_min_year() -> None:
+    """Test that CONTRIBUTION_WINDOW_YEARS is derived from MIN_YEAR and current year."""
+    if MIN_YEAR is not None:
+        expected = datetime.now(timezone.utc).year - MIN_YEAR + 1
+        assert expected == CONTRIBUTION_WINDOW_YEARS, (
+            f"Expected {expected} years (current_year - MIN_YEAR + 1), got {CONTRIBUTION_WINDOW_YEARS}"
+        )
