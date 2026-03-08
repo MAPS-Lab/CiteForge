@@ -56,6 +56,7 @@ _DAGSTUHL_DOI_RE = re.compile(
 _AUTHOR_DIGIT_SUFFIX_RE = re.compile(r"\s+\d{1,4}\s*$")
 _AUTHOR_PAREN_SUFFIX_RE = re.compile(r"\s*\(\d{1,4}\)\s*$")
 _AUTHOR_GLUED_DIGIT_RE = re.compile(r"(?<=[A-Za-z]{2})\d{1,4}$")
+_AUTHOR_INITIAL_RE = re.compile(r"^[A-Z]\.$")
 
 _JOURNAL_URL_MAP: dict[str, str] = {
     "techrxiv.org": "TechRxiv",
@@ -351,6 +352,25 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                         category=LogCategory.MERGE,
                     )
                     continue
+
+            # special handling for author field: prefer more complete (less abbreviated) names
+            if k == "author":
+                cur_parts = parse_authors_any(str(cur))
+                new_parts = parse_authors_any(str(v))
+                if cur_parts and new_parts and len(cur_parts) == len(new_parts):
+                    cur_inits = sum(
+                        1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok)
+                    )
+                    new_inits = sum(
+                        1 for name in new_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok)
+                    )
+                    if new_inits > cur_inits:
+                        logger.debug(
+                            f"AUTHOR_KEEP_COMPLETE | cur_initials={cur_inits} new_initials={new_inits} "
+                            f"| src={src} | keeping more complete names",
+                            category=LogCategory.MERGE,
+                        )
+                        continue
 
             # special handling for title field: prefer longer, more descriptive titles
             if k == "title":

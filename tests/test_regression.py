@@ -3063,3 +3063,57 @@ class TestStripEllipsis:
         )
         assert result is not None
         assert not result.venue_name.endswith("...")
+
+
+class TestAuthorMergeCompleteness:
+    """Author merge rule: prefer more complete (less abbreviated) names."""
+
+    def test_keep_full_names_over_initials(self) -> None:
+        """S2 abbreviated 'J. Ian Munro' -> 'J. Munro'; merge should keep the full version."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test Paper", "author": "Meng He and J. Ian Munro and Yakov Nekrich", "year": "2020"},
+        }
+        enrichers = [
+            ("semantic_scholar", {"type": "misc", "fields": {"author": "Meng He and J. Munro and Yakov Nekrich"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        assert "J. Ian Munro" in result["fields"]["author"]
+
+    def test_accept_full_names_from_higher_trust(self) -> None:
+        """When higher-trust source has MORE complete names, accept them."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test", "author": "A. Smith and B. Jones", "year": "2020"},
+        }
+        enrichers = [
+            ("crossref", {"type": "article", "fields": {"author": "Alice Smith and Bob Jones"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        assert "Alice Smith" in result["fields"]["author"]
+
+    def test_allow_replacement_when_equal_initials(self) -> None:
+        """When both have same number of initials, normal trust order applies."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test", "author": "A. Smith and B. Jones", "year": "2020"},
+        }
+        enrichers = [
+            ("crossref", {"type": "article", "fields": {"author": "C. Smith and D. Jones"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        # Crossref is higher trust than scholar_min, so it should replace
+        assert "C. Smith" in result["fields"]["author"]
+
+    def test_different_author_count_skips_rule(self) -> None:
+        """When author counts differ, skip the initials check (different paper versions)."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test", "author": "Alice Smith and Bob Jones", "year": "2020"},
+        }
+        enrichers = [
+            ("crossref", {"type": "article", "fields": {"author": "A. Smith and B. Jones and C. Doe"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        # Different count — normal trust applies, crossref wins
+        assert "A. Smith" in result["fields"]["author"]
