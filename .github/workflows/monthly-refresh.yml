@@ -224,3 +224,20 @@ jobs:
           echo "::error::Pipeline failed with errors. Check the refresh job logs."
           echo "Cache was saved before failure — manual re-trigger will resume from last good state."
           exit 1
+
+  sync-website:
+    needs: [refresh, verify]
+    if: needs.refresh.result == 'success' && needs.refresh.outputs.converged == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger mapslab-website publication sync
+        env:
+          GH_TOKEN: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+        run: |
+          echo "Triggering mapslab-website import-publications workflow..."
+          gh api repos/gabrielspadon/mapslab-website/dispatches \
+            --method POST \
+            -f event_type=citeforge-refresh
+          echo "::notice::Dispatched citeforge-refresh event to mapslab-website"
