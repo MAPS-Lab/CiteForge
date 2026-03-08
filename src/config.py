@@ -324,7 +324,7 @@ ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "aimc": "AI Music Creativity Conference",
     "wnut": "Workshop on Noisy User-generated Text",
     "nlp4musa": "NLP for Music and Audio Workshop",
-    # --- Session 26, Iteration 1: New venue expansions ---
+
     "collas": "Conference on Lifelong Learning Agents",
     "ahfe international": "Applied Human Factors and Ergonomics International",
     "bcss@persuasive": "Behavior Change Support Systems Workshop",
@@ -567,7 +567,7 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "datainformed": "Data-Informed",
     "datadriven": "Data-Driven",
     "delaysensitive": "Delay-Sensitive",
-    # --- Iteration 3: Multi-* compounds ---
+    # --- Multi-* compounds ---
     "multisource": "Multi-Source",
     "multisensor": "Multi-Sensor",
     "multiclass": "Multi-Class",
@@ -588,17 +588,17 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "multiattribute": "Multi-Attribute",
     "multilabel": "Multi-Label",
     "multiphase": "Multi-Phase",
-    # --- Iteration 3: Cross-* compounds ---
+    # --- Cross-* compounds ---
     "crossencoder": "Cross-Encoder",
     "crosstier": "Cross-Tier",
     "crossplatform": "Cross-Platform",
-    # --- Iteration 3: Self-* compounds ---
+    # --- Self-* compounds ---
     "selfefficacy": "Self-Efficacy",
     "selfsampled": "Self-Sampled",
     "selfregulated": "Self-Regulated",
     "selfimproving": "Self-Improving",
     "selfimprovement": "Self-Improvement",
-    # --- Iteration 3: Non-* compounds ---
+    # --- Non-* compounds ---
     "nonvisual": "Non-Visual",
     "nonuniform": "Non-Uniform",
     "nonresponsive": "Non-Responsive",
@@ -606,19 +606,19 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "nonindigenous": "Non-Indigenous",
     "nondifferentiable": "Non-Differentiable",
     "noncardiac": "Non-Cardiac",
-    # --- Iteration 3: Post-/Pre-/Semi- compounds ---
+    # --- Post-/Pre-/Semi- compounds ---
     "postquantum": "Post-Quantum",
     "postketamine": "Post-Ketamine",
     "preservice": "Pre-Service",
     "semistructured": "Semi-Structured",
     "semishuffling": "Semi-Shuffling",
-    # --- Iteration 3: Co-* compounds ---
+    # --- Co-* compounds ---
     "codesigning": "Co-Designing",
     "comonitoring": "Co-Monitoring",
     "coembeddings": "Co-Embeddings",
     "copresence": "Co-Presence",
     "colourblending": "Colour-Blending",
-    # --- Iteration 3: Suffix compounds not caught by COMPOUND_SUFFIXES ---
+    # --- Suffix compounds not caught by COMPOUND_SUFFIXES ---
     "highfidelity": "High-Fidelity",
     "highresolution": "High-Resolution",
     "quantumsafe": "Quantum-Safe",
@@ -628,14 +628,14 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "genderaffirming": "Gender-Affirming",
     "traderelated": "Trade-Related",
     "opioidrelated": "Opioid-Related",
-    # --- Iteration 3: Acronym-prefix compounds ---
+    # --- Acronym-prefix compounds ---
     "irbased": "IR-Based",
     "itbased": "IT-Based",
     "dagbased": "DAG-Based",
     "arbased": "AR-Based",
     "risassisted": "RIS-Assisted",
     "ailiteracy": "AI-Literacy",
-    # --- Iteration 3: Miscellaneous compounds ---
+    # --- Miscellaneous compounds ---
     "twoway": "Two-Way",
     "ultradense": "Ultra-Dense",
     "polynomialtime": "Polynomial-Time",
@@ -661,7 +661,7 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "graphevolution": "Graph-Evolution",
     "keyphraseitem": "Keyphrase-Item",
     "overdisclosure": "Over-Disclosure",
-    # --- Iteration 3: Partially-fused multi-word compounds ---
+    # --- Partially-fused multi-word compounds ---
     "over-theair": "Over-the-Air",
     "out-ofdistribution": "Out-of-Distribution",
     "internet-ofthingsenabled": "Internet-of-Things-Enabled",
@@ -670,7 +670,7 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "digitaltwinenabled": "Digital-Twin-Enabled",
     "spaceairmarine": "Space-Air-Marine",
     "aerialmarine": "Aerial-Marine",
-    # --- Session 25, Iteration 1: Partially-fused multi-word compounds ---
+
     "state-of-theart": "State-of-the-Art",
     "out-ofview": "Out-of-View",
     "out-ofdomain": "Out-of-Domain",
@@ -683,7 +683,7 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "modelintheloop": "Model-in-the-Loop",
     "learntorecommend": "Learn-to-Recommend",
     "delaytrajectoryaccuracy": "Delay-Trajectory-Accuracy",
-    # --- Session 25, Iteration 1: Acronym-prefix compounds ---
+
     "iotenabled": "IoT-Enabled",
     "aienabled": "AI-Enabled",
     "aiassisted": "AI-Assisted",
@@ -698,7 +698,7 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "krakenlike": "KRAKEN-Like",
     "smemfinding": "SMEM-Finding",
     "enigmaataxia": "ENIGMA-Ataxia",
-    # --- Session 25, Iteration 1: Regular compound adjectives ---
+
     "whitebox": "White-Box",
     "communityacquired": "Community-Acquired",
     "allcause": "All-Cause",
@@ -714,7 +714,7 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "metaaugmentation": "Meta-Augmentation",
     "metadimensionality": "Meta-Dimensionality",
     "minimumlength": "Minimum-Length",
-    # --- Session 25, Iteration 2: Fused words at word boundaries ---
+
     "burrowswheeler": "Burrows-Wheeler",
     "populationscale": "Population-Scale",
     "visionlanguage": "Vision-Language",
@@ -731,11 +731,11 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "scalesecond": "Scale-Second",
     "zerotargetassumption": "Zero-Target-Assumption",
     "multipsych": "MULTI-PSYCH",
-    # --- Session 25, Iteration 2: Partially-fused multi-word compounds ---
+
     "model-in-theloop": "Model-in-the-Loop",
     "learn-torecommend": "Learn-to-Recommend",
     "diffuse-anddenoise": "Diffuse-and-Denoise",
-    # --- Session 25, Iteration 3: Acronym-prefix compounds ---
+
     "sdiot": "SD-IoT",
     "gaoptimized": "GA-Optimized",
     "gptwritingprompts": "GPT-WritingPrompts",
@@ -745,15 +745,15 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "tsdetector": "TS-Detector",
     "oodprobe": "OOD-Probe",
     "veremiextension": "VeReMi-Extension",
-    # --- Session 25, Iteration 3: Fused words at word boundaries ---
+
     "emotionsemantic": "Emotion-Semantic",
     "resumejob": "Resume-Job",
-    # --- Session 26, Iteration 1: Space-loss fix ---
+
     "eventdata": "Event Data",
-    # --- Session 26, Iteration 2: Fused compounds ---
+
     "postprocessing": "Post-Processing",
     "wellbeing": "Well-Being",
-    # --- Session 26, Iteration 3: Fused compound adjectives ---
+
     "climatesmart": "Climate-Smart",
     "convergencerate": "Convergence-Rate",
     "earlywarning": "Early-Warning",
@@ -781,28 +781,28 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "treechild": "Tree-Child",
     "variancegated": "Variance-Gated",
     "weightloss": "Weight-Loss",
-    # --- Session 26, Iteration 3: Space-loss / name compounds ---
+
     "wolffacial": "Wolf Facial",
     "eulertour": "Euler-Tour",
     "glyphfield": "Glyph-Field",
-    # --- Session 30, Iteration 1: Colon/slash/hyphen loss ---
+
     "recognitionthe": "recognition: The",
     "methanethe": "Methane: The",
     "frequencylow": "Frequency/Low",
     "spacetime": "Space-Time",
     "elearning": "E-Learning",
     "eprescription": "e-Prescription",
-    # --- Session 30, Iteration 2: Fused compounds ---
+
     "runlength": "Run-Length",
     "incontext": "In-Context",
-    # --- Session 30, Iteration 3 (deep agent scan): Fused compounds ---
+
     "sexdifferentiated": "Sex-Differentiated",
     "sizefractionated": "Size-Fractionated",
     "frontohippocampal": "Fronto-Hippocampal",
     "tradeoff": "Trade-Off",
-    # --- Session 33, Iteration 1: Fused compounds ---
+
     "nbody": "N-Body",
-    # --- Session 33, Iteration 1: Space-loss fix ---
+
     "ofthe": "of the",
 }
 
