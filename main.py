@@ -3058,7 +3058,7 @@ def main() -> int:
         logger.info(f"BibTeX files saved: {total_saved}", category=LogCategory.PLAN)
         if counts:
             logger.info(f"API calls: {counts}", category=LogCategory.PLAN)
-            logger.info(f"Total API calls: {sum(counts.values())}", category=LogCategory.PLAN)
+        logger.info(f"Total API calls: {sum(counts.values()) if counts else 0}", category=LogCategory.PLAN)
         logger.info(f"Log file: {logger.log_file_path or 'n/a'}", category=LogCategory.PLAN)
 
         if summary_csv_path and os.path.exists(summary_csv_path):
