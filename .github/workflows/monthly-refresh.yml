@@ -61,6 +61,19 @@ jobs:
             echo "No data-cache branch — starting fresh"
           fi
 
+      - name: Clear non-SerpAPI caches for fresh enrichment
+        run: |
+          if [ -d data/api_cache ]; then
+            for ns in data/api_cache/*/; do
+              name=$(basename "$ns")
+              if [ "$name" != "serpapi_publications" ]; then
+                rm -rf "$ns"
+                echo "Cleared cache namespace: $name"
+              fi
+            done
+            echo "Kept serpapi_publications ($(find data/api_cache/serpapi_publications -type f 2>/dev/null | wc -l) entries)"
+          fi
+
       - name: Run pipeline loop
         id: loop
         env:
