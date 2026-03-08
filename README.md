@@ -48,7 +48,7 @@ Drop your API keys into the `keys/` directory:
 ```bash
 mkdir -p keys
 echo "your_serpapi_key" > keys/SerpAPI.key        # Required
-echo "your_serply_key" > keys/Serply.key          # Optional
+echo "your_serply_key" > keys/Serply.key          # Required
 echo "your_semantic_key" > keys/Semantic.key      # Recommended
 echo "your_gemini_key" > keys/Gemini.key          # Optional
 printf "user\npass" > keys/OpenReview.key          # Optional
@@ -96,12 +96,12 @@ Authors are processed in parallel (12 workers by default) with per-API rate limi
 
 ## Data Sources
 
-CiteForge queries 13 scholarly APIs. Only [SerpAPI](https://serpapi.com/) requires a key — everything else is free or optional:
+CiteForge queries 13 scholarly APIs. [SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/) require keys — everything else is free or optional:
 
-- **Required:** [SerpAPI](https://serpapi.com/) (Google Scholar)
+- **Required:** [SerpAPI](https://serpapi.com/) (Google Scholar), [Serply](https://serply.io/) (citation details)
 - **Recommended:** [Semantic Scholar](https://www.semanticscholar.org/)
 - **Free (no key):** [Crossref](https://www.crossref.org/), [OpenAlex](https://openalex.org/), [arXiv](https://arxiv.org/), [PubMed](https://pubmed.ncbi.nlm.nih.gov/), [Europe PMC](https://europepmc.org/), [DataCite](https://datacite.org/), [ORCID](https://orcid.org/), [DBLP](https://dblp.org/)
-- **Optional (key needed):** [Serply](https://serply.io/), [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/)
+- **Optional (key needed):** [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/)
 
 Set `CROSSREF_MAILTO` to get into Crossref's polite pool (faster responses).
 
