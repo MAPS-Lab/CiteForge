@@ -358,6 +358,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 cur_parts = parse_authors_any(str(cur))
                 new_parts = parse_authors_any(str(v))
                 if cur_parts and new_parts and len(cur_parts) == len(new_parts):
+                    # Count initials-only tokens (e.g. "J." but not "Jr.")
                     cur_inits = sum(
                         1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok)
                     )
@@ -371,6 +372,18 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                             category=LogCategory.MERGE,
                         )
                         continue
+                    # Also prefer the version with longer total author text
+                    # (catches "Samuel" vs "Sam", middle initials dropped, etc.)
+                    if new_inits == cur_inits:
+                        cur_len = sum(len(n) for n in cur_parts)
+                        new_len = sum(len(n) for n in new_parts)
+                        if new_len < cur_len:
+                            logger.debug(
+                                f"AUTHOR_KEEP_LONGER | cur_len={cur_len} new_len={new_len} "
+                                f"| src={src} | keeping longer author names",
+                                category=LogCategory.MERGE,
+                            )
+                            continue
 
             # special handling for title field: prefer longer, more descriptive titles
             if k == "title":

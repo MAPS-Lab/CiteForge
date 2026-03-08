@@ -3117,3 +3117,34 @@ class TestAuthorMergeCompleteness:
         result = merge_utils.merge_with_policy(primary, enrichers)
         # Different count — normal trust applies, crossref wins
         assert "A. Smith" in result["fields"]["author"]
+
+    def test_keep_longer_name_forms(self) -> None:
+        """S2 shortened 'Samuel Acquaviva' -> 'Sam Acquaviva'; merge should keep longer form."""
+        primary = {
+            "type": "misc",
+            "fields": {
+                "title": "Test",
+                "author": "Gabrielle Ecanow and Catherine Wong and Samuel Acquaviva",
+                "year": "2021",
+            },
+        }
+        enrichers = [
+            ("semantic_scholar", {
+                "type": "misc",
+                "fields": {"author": "Gabrielle Ecanow and Catherine Wong and Sam Acquaviva"},
+            }),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        assert "Samuel Acquaviva" in result["fields"]["author"]
+
+    def test_keep_middle_initials(self) -> None:
+        """Keep 'Anielle S. L. Andrade' over 'Anielle Andrade'."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test", "author": "Anielle S. L. Andrade and Bob Smith", "year": "2025"},
+        }
+        enrichers = [
+            ("semantic_scholar", {"type": "misc", "fields": {"author": "Anielle Andrade and Bob Smith"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        assert "Anielle S. L. Andrade" in result["fields"]["author"]
