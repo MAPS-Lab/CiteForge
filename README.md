@@ -21,7 +21,7 @@ If you've ever tried to build a comprehensive publication list for a research gr
 
 CiteForge takes care of this. Point it at a list of authors with their Google Scholar profiles, and it will:
 
-- Pull every publication from Scholar via [SerpAPI](https://serpapi.com/) (with [Serply](https://serply.io/) as backup);
+- Pull every publication from Scholar via [SerpAPI](https://serpapi.com/) and enrich citation details with [Serply](https://serply.io/);
 - Query **multiple academic APIs** for richer metadata on each paper;
 - Deduplicate results using fuzzy title matching, DOI normalization, and author overlap;
 - Merge fields using a **multi-level trust hierarchy** that prefers authoritative sources; and,
