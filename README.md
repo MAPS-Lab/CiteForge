@@ -17,21 +17,21 @@
 
 ## Why CiteForge?
 
-If you've ever tried to build a comprehensive publication list for a research group, you know the pain. Google Scholar entries are often incomplete — missing DOIs, inconsistent formatting, broken author names. Manually cross-referencing Crossref, Semantic Scholar, arXiv, PubMed, and a handful of other databases gets tedious fast, especially when you're dealing with dozens of authors and hundreds of papers.
+If you've ever tried to build a comprehensive publication list for a research group, you know the pain. Google Scholar entries are often incomplete, missing DOIs, and have inconsistent formatting and broken author names. Manually cross-referencing Crossref, Semantic Scholar, arXiv, PubMed, and a handful of other databases gets tedious fast, especially when you're dealing with dozens of authors and hundreds of papers.
 
 CiteForge takes care of this. Point it at a list of authors with their Google Scholar profiles, and it will:
 
-- Pull every publication from Scholar via [SerpAPI](https://serpapi.com/) (with [Serply](https://serply.io/) as backup)
-- Query **13 academic APIs** for richer metadata on each paper
-- Deduplicate results using fuzzy title matching, DOI normalization, and author overlap
-- Merge fields using a **13-level trust hierarchy** that prefers authoritative sources
-- Output clean, LaTeX-ready `.bib` files organized by author
+- Pull every publication from Scholar via [SerpAPI](https://serpapi.com/) (with [Serply](https://serply.io/) as backup);
+- Query **multiple academic APIs** for richer metadata on each paper;
+- Deduplicate results using fuzzy title matching, DOI normalization, and author overlap;
+- Merge fields using a **multi-level trust hierarchy** that prefers authoritative sources; and,
+- Output clean, LaTeX-ready `.bib` files organized by author.
 
 The result is deterministic — on cache-hit runs, CiteForge produces **byte-identical output** across consecutive runs, verified by SHA-256 checksums.
 
 ## Getting Started
 
-You'll need **Python 3.10+** and a [SerpAPI](https://serpapi.com/) key (free tier works for small runs).
+You'll need **Python 3.10+** and a [SerpAPI](https://serpapi.com/) key (the free tier is sufficient for small runs).
 
 ```bash
 git clone https://github.com/gabrielspadon/CiteForge.git && cd CiteForge
@@ -81,13 +81,17 @@ API responses are cached under `data/api_cache/` with monthly expiry, so subsequ
 
 ## How It Works
 
-CiteForge starts by pulling every publication from Google Scholar via SerpAPI, then queries 13 scholarly APIs — Semantic Scholar, Crossref, arXiv, OpenAlex, PubMed, and others — for richer metadata on each paper. A trust-based merge combines fields by source reliability, always preferring authoritative sources over scraped data. Duplicates are caught through DOI normalization, external ID matching, and fuzzy title similarity. The pipeline also fixes common metadata problems: broken compound words, miscategorized entry types, invalid page numbers, and ALL-CAPS titles. On cache-hit runs, CiteForge produces byte-identical output, verified by SHA-256 checksums.
+CiteForge begins by retrieving the complete list of publications from Google Scholar through SerpAPI. Each entry is then enriched by querying multiple scholarly services, including Semantic Scholar, Crossref, arXiv, OpenAlex, and PubMed, to gather complementary metadata.
 
-Authors are processed in parallel (12 workers by default) with per-API rate limiting. All tunable parameters — trust order, thresholds, rate limits, venue maps — live in [`src/config.py`](src/config.py).
+A trust-based consolidation stage merges the collected records according to source reliability, consistently prioritizing authoritative registries over scraped content. Duplicate detection combines DOI normalization, external identifier matching, and fuzzy title similarity to identify overlapping entries across sources.
+
+The pipeline further corrects recurrent metadata issues, such as fragmented compound words, misclassified publication types, invalid page ranges, and titles written entirely in capital letters. Deterministic caching ensures that cache-hit executions produce byte-identical outputs, verified through SHA-256 checksums.
+
+To maintain efficiency and stability, author queries run in parallel while respecting per-API rate limits. All configurable parameters, including source trust order, similarity thresholds, rate limits, and venue mappings, are centralized in [`src/config.py`](src/config.py).
 
 ## Data Sources
 
-CiteForge queries 13 scholarly APIs. [SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/) require keys — everything else is free or optional:
+[SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/) require keys — everything else is free or optional:
 
 - **Required:** [SerpAPI](https://serpapi.com/) (Google Scholar), [Serply](https://serply.io/) (citation details)
 - **Recommended:** [Semantic Scholar](https://www.semanticscholar.org/)
