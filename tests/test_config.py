@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from src import config
 from src.config import (
     CONTRIBUTION_WINDOW_YEARS,
     MAX_PUBLICATIONS_PER_AUTHOR,
+    MIN_YEAR,
     PUBLICATIONS_PER_YEAR,
+    get_min_year,
 )
 
 
@@ -49,3 +52,29 @@ def test_config_types() -> None:
     assert isinstance(MAX_PUBLICATIONS_PER_AUTHOR, int), (
         f"MAX_PUBLICATIONS_PER_AUTHOR should be int, got {type(MAX_PUBLICATIONS_PER_AUTHOR)}"
     )
+
+
+def test_min_year_valid() -> None:
+    """Test that MIN_YEAR is either None or a sensible year."""
+    assert MIN_YEAR is None or 1900 <= MIN_YEAR <= 2100
+
+
+def test_get_min_year_fixed(monkeypatch: object) -> None:
+    """Test that get_min_year returns the fixed MIN_YEAR when set."""
+    import pytest
+    mp = pytest.MonkeyPatch()
+    mp.setattr(config, "MIN_YEAR", 2020)
+    assert get_min_year() == 2020
+    mp.undo()
+
+
+def test_get_min_year_rolling(monkeypatch: object) -> None:
+    """Test that get_min_year falls back to rolling window when MIN_YEAR is None."""
+    from datetime import datetime, timezone
+
+    import pytest
+    mp = pytest.MonkeyPatch()
+    mp.setattr(config, "MIN_YEAR", None)
+    expected = datetime.now(timezone.utc).year - (CONTRIBUTION_WINDOW_YEARS - 1)
+    assert get_min_year() == expected
+    mp.undo()

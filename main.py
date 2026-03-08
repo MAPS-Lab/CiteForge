@@ -15,7 +15,8 @@ from typing import Any
 from src import bibtex_utils as bt
 from src import id_utils as idu
 from src import merge_utils as mu
-from src.clients.helpers import extract_authors_from_article, get_article_year, get_current_year, strip_html_tags
+from src.cache import get_cache_hit_counts
+from src.clients.helpers import extract_authors_from_article, get_article_year, strip_html_tags
 from src.clients.scholar import (
     build_bibtex_from_scholar_fields,
     fetch_author_publications,
@@ -47,7 +48,6 @@ from src.config import (
     ACM_JOURNAL_PROCEEDINGS,
     ACRONYM_CASE_CORRECTIONS,
     COMPOUND_SUFFIXES,
-    CONTRIBUTION_WINDOW_YEARS,
     DEFAULT_A2I2_INPUT,
     DEFAULT_INPUT,
     DEFAULT_OUT_DIR,
@@ -75,6 +75,7 @@ from src.config import (
     SIM_PREPRINT_TITLE_THRESHOLD,
     SKIP_SCHOLAR_FOR_EXISTING_FILES,
     VENUE_CASE_CORRECTIONS,
+    get_min_year,
 )
 from src.doi_utils import process_validated_doi
 from src.exceptions import (
@@ -2713,8 +2714,7 @@ def process_record(
             category=LogCategory.AUTHOR, source=LogSource.SYSTEM,
         )
 
-        current_year = get_current_year()
-        min_year = current_year - (CONTRIBUTION_WINDOW_YEARS - 1)
+        min_year = get_min_year()
 
         scholar_windowed = []
         if rec.scholar_id:
@@ -2780,7 +2780,7 @@ def process_record(
             )
             logger.info(
                 f"{len(scholar_windowed)}/{len(scholar_articles)} within "
-                f"{CONTRIBUTION_WINDOW_YEARS}y window (>= {min_year})",
+                f"year window (>= {min_year})",
                 category=LogCategory.FETCH,
                 source=LogSource.SCHOLAR
             )
@@ -2801,7 +2801,7 @@ def process_record(
             logger.info("Skipped (no ID)", category=LogCategory.SKIP, source=LogSource.DBLP)
 
         if not scholar_windowed and not dblp_items:
-            logger.info(f"No articles within last {CONTRIBUTION_WINDOW_YEARS} years", category=LogCategory.SKIP)
+            logger.info(f"No articles within year window (>= {min_year})", category=LogCategory.SKIP)
             return 0
 
         # merge Scholar and DBLP with full deduplication (within and across sources)
@@ -3059,6 +3059,12 @@ def main() -> int:
         if counts:
             logger.info(f"API calls: {counts}", category=LogCategory.PLAN)
         logger.info(f"Total API calls: {sum(counts.values()) if counts else 0}", category=LogCategory.PLAN)
+        cache_counts = get_cache_hit_counts()
+        logger.info(
+            f"Cache: {cache_counts['positive']} positive, "
+            f"{cache_counts['negative']} negative, {cache_counts['miss']} miss",
+            category=LogCategory.PLAN,
+        )
         logger.info(f"Log file: {logger.log_file_path or 'n/a'}", category=LogCategory.PLAN)
 
         if summary_csv_path and os.path.exists(summary_csv_path):
@@ -3108,7 +3114,7 @@ def main() -> int:
                     )
 
             # Remove .bib files outside the contribution window
-            window_min = get_current_year() - (CONTRIBUTION_WINDOW_YEARS - 1)
+            window_min = get_min_year()
             window_removed = 0
             for entry in os.listdir(out_dir):
                 d = os.path.join(out_dir, entry)
@@ -3198,6 +3204,18 @@ def main() -> int:
             try:
                 with open(baseline_path, "w", encoding="utf-8") as bf:
                     json.dump({"total": sum(baseline.values()), "authors": baseline}, bf, indent=2)
+            except OSError:
+                pass
+
+            # Write badge data for README workflow updates
+            badges_path = os.path.join(out_dir, "badges.json")
+            try:
+                with open(badges_path, "w", encoding="utf-8") as bf:
+                    json.dump({
+                        "last_updated": time.strftime("%Y-%m"),
+                        "cache_positive_hits": cache_counts["positive"],
+                        "cache_negative_hits": cache_counts["negative"],
+                    }, bf, indent=2)
             except OSError:
                 pass
 

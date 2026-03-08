@@ -457,7 +457,7 @@ def build_a2i2_folder(
     """
     from . import bibtex_utils as bt
     from .clients.helpers import get_current_year
-    from .config import A2I2_OUTPUT_DIR, CONTRIBUTION_WINDOW_YEARS, SIM_MERGE_DUPLICATE_THRESHOLD
+    from .config import A2I2_OUTPUT_DIR, SIM_MERGE_DUPLICATE_THRESHOLD, get_min_year
     from .id_utils import doi_bases_match, normalize_doi
     from .text_utils import format_author_dirname, normalize_person_name, title_similarity
 
@@ -491,7 +491,7 @@ def build_a2i2_folder(
 
     # --- Step 3: collect .bib files from member directories -----------------
     current_year = get_current_year()
-    min_year = current_year - (CONTRIBUTION_WINDOW_YEARS - 1)
+    min_year = get_min_year()
 
     all_entries: list[tuple[dict[str, Any], str]] = []  # (parsed_entry, source_path)
 

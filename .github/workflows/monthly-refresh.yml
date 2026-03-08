@@ -150,7 +150,19 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/
+
+          # Update README badges from badges.json
+          if [ -f output/badges.json ]; then
+            LAST_UPDATED=$(python3 -c "import json; print(json.load(open('output/badges.json'))['last_updated'])")
+            POS_HITS=$(python3 -c "import json; print(json.load(open('output/badges.json'))['cache_positive_hits'])")
+            NEG_HITS=$(python3 -c "import json; print(json.load(open('output/badges.json'))['cache_negative_hits'])")
+            LAST_UPDATED_ESC=$(echo "$LAST_UPDATED" | sed 's/-/--/g')
+            sed -i "s|Updated-[0-9]*--[0-9]*-blue|Updated-${LAST_UPDATED_ESC}-blue|" README.md
+            sed -i "s|Cache_Hits-[0-9]*_positive-brightgreen|Cache_Hits-${POS_HITS}_positive-brightgreen|" README.md
+            sed -i "s|Cache_Misses-[0-9]*_negative-orange|Cache_Misses-${NEG_HITS}_negative-orange|" README.md
+          fi
+
+          git add output/ README.md
           if ! git diff --cached --quiet; then
             git commit -m "data: monthly pipeline refresh $(date +%Y-%m)"
             git push origin main

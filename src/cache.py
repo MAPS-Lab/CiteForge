@@ -13,6 +13,11 @@ from typing import Any
 from .config import CACHE_DIR, CACHE_ENABLED, CACHE_TTL_NEGATIVE_DAYS
 from .log_utils import LogCategory, logger
 
+_CACHE_POS_HITS: int = 0
+_CACHE_NEG_HITS: int = 0
+_CACHE_MISSES: int = 0
+_CACHE_COUNTER_LOCK = threading.Lock()
+
 
 def _month_boundary() -> float:
     """Return the timestamp of midnight on the 1st of the current month (AST).
@@ -54,12 +59,15 @@ class ResponseCache:
         return os.path.join(self._ns_dir(namespace), f"{self._key_hash(key)}.json")
 
     def get(self, namespace: str, key: str) -> dict[str, Any] | None:
+        global _CACHE_POS_HITS, _CACHE_NEG_HITS, _CACHE_MISSES
         if not CACHE_ENABLED:
             return None
         lock = self._lock_for(namespace)
         with lock:
             path = self._entry_path(namespace, key)
             if not os.path.isfile(path):
+                with _CACHE_COUNTER_LOCK:
+                    _CACHE_MISSES += 1
                 return None
             try:
                 with open(path, encoding="utf-8") as f:
@@ -69,16 +77,28 @@ class ResponseCache:
                     f"CACHE_CORRUPT | namespace={namespace} | path={path} | error={exc}",
                     category=LogCategory.CACHE,
                 )
+                with _CACHE_COUNTER_LOCK:
+                    _CACHE_MISSES += 1
                 return None
             ts = entry.get("timestamp", 0)
             if ts < self._month_boundary:
+                with _CACHE_COUNTER_LOCK:
+                    _CACHE_MISSES += 1
                 return None
             # Honour TTL for short-lived negative/error cache entries only.
             # Positive entries expire solely at the monthly boundary above.
             data = entry.get("data", {})
             ttl = entry.get("ttl_days", 0)
             if ttl > 0 and data.get("_negative") and time.time() - ts > ttl * 86400:
+                with _CACHE_COUNTER_LOCK:
+                    _CACHE_MISSES += 1
                 return None
+            if data.get("_negative"):
+                with _CACHE_COUNTER_LOCK:
+                    _CACHE_NEG_HITS += 1
+            else:
+                with _CACHE_COUNTER_LOCK:
+                    _CACHE_POS_HITS += 1
             return dict(data)
 
     def put(self, namespace: str, key: str, value: dict[str, Any], ttl_days: int = 30) -> None:
@@ -129,6 +149,21 @@ class ResponseCache:
             path = self._entry_path(namespace, key)
             with contextlib.suppress(OSError):
                 os.remove(path)
+
+
+def get_cache_hit_counts() -> dict[str, int]:
+    """Return current cache hit/miss counters."""
+    with _CACHE_COUNTER_LOCK:
+        return {"positive": _CACHE_POS_HITS, "negative": _CACHE_NEG_HITS, "miss": _CACHE_MISSES}
+
+
+def reset_cache_hit_counts() -> None:
+    """Reset all cache counters to zero."""
+    global _CACHE_POS_HITS, _CACHE_NEG_HITS, _CACHE_MISSES
+    with _CACHE_COUNTER_LOCK:
+        _CACHE_POS_HITS = 0
+        _CACHE_NEG_HITS = 0
+        _CACHE_MISSES = 0
 
 
 # Module-level singleton

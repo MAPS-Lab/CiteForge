@@ -29,6 +29,18 @@ DEFAULT_A2I2_INPUT = "data/a2i2.csv"
 A2I2_OUTPUT_DIR = "a2i2"
 CONTRIBUTION_WINDOW_YEARS = 7
 
+# Fixed minimum publication year. When set, overrides the rolling window.
+# Override via CITEFORGE_MIN_YEAR env var (set to empty string to use rolling window).
+MIN_YEAR: int | None = int(v) if (v := os.environ.get("CITEFORGE_MIN_YEAR")) else 2020
+
+
+def get_min_year() -> int:
+    """Effective minimum publication year (fixed MIN_YEAR or rolling window)."""
+    if MIN_YEAR is not None:
+        return MIN_YEAR
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).year - (CONTRIBUTION_WINDOW_YEARS - 1)
+
 # Publications per year to fetch from Scholar
 PUBLICATIONS_PER_YEAR = 50
 

@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 
-from src.cache import ResponseCache
+from src.cache import ResponseCache, get_cache_hit_counts, reset_cache_hit_counts
 
 
 def test_put_and_get(tmp_path: Path) -> None:
@@ -145,3 +145,45 @@ def test_positive_cache_survives_past_ttl(tmp_path: Path) -> None:
 
     result = cache.get("test_ns", "key1")
     assert result == {"v": "hello"}, "Positive entries must survive past their ttl_days"
+
+
+def test_cache_counter_positive_hit(tmp_path: Path) -> None:
+    """Test that a positive cache hit increments the positive counter."""
+    reset_cache_hit_counts()
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("test_ns", "key1", {"v": 1})
+    cache.get("test_ns", "key1")
+    counts = get_cache_hit_counts()
+    assert counts["positive"] == 1
+    assert counts["negative"] == 0
+
+
+def test_cache_counter_negative_hit(tmp_path: Path) -> None:
+    """Test that a negative cache hit increments the negative counter."""
+    reset_cache_hit_counts()
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("test_ns", "key1", {"_negative": True}, ttl_days=7)
+    cache.get("test_ns", "key1")
+    counts = get_cache_hit_counts()
+    assert counts["negative"] == 1
+    assert counts["positive"] == 0
+
+
+def test_cache_counter_miss(tmp_path: Path) -> None:
+    """Test that a cache miss increments the miss counter."""
+    reset_cache_hit_counts()
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.get("test_ns", "nonexistent")
+    counts = get_cache_hit_counts()
+    assert counts["miss"] == 1
+    assert counts["positive"] == 0
+
+
+def test_cache_counter_reset(tmp_path: Path) -> None:
+    """Test that reset_cache_hit_counts zeroes all counters."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("test_ns", "key1", {"v": 1})
+    cache.get("test_ns", "key1")
+    reset_cache_hit_counts()
+    counts = get_cache_hit_counts()
+    assert counts == {"positive": 0, "negative": 0, "miss": 0}

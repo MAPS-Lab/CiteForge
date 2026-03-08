@@ -11,8 +11,7 @@ import pytest
 
 from src import bibtex_utils, merge_utils
 from src.clients import scholar, search_apis
-from src.clients.helpers import get_current_year
-from src.config import CONTRIBUTION_WINDOW_YEARS
+from src.config import get_min_year
 from src.models import Record
 from tests.fixtures import load_api_keys
 from tests.test_data import KNOWN_PAPERS, REQUIRED_FIELDS, TEST_AUTHOR
@@ -49,8 +48,7 @@ def test_fetch_and_merge(api_keys: dict[str, Any]) -> None:
 
     dblp_pubs: list[dict[str, Any]] = []
     try:
-        current_year = get_current_year()
-        min_year = current_year - CONTRIBUTION_WINDOW_YEARS
+        min_year = get_min_year()
         dblp_pubs = search_apis.dblp_fetch_for_author(
             rec.name,
             rec.dblp,
