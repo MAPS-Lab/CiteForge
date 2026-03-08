@@ -1,19 +1,16 @@
 <h1 align="center">CiteForge</h1>
 
 <p align="center">
-  <strong>Automated academic citation enrichment from 13 scholarly APIs.</strong>
-</p>
-
-<p align="center">
   <a href="https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml"><img src="https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python 3.10+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
 </p>
 
 <p align="center">
-  CiteForge fetches, validates, deduplicates, and merges bibliographic metadata<br>
-  so you don't have to. Given a list of authors, it produces clean BibTeX files<br>
-  ready for LaTeX.
+  <strong>Automated academic citation enrichment from multiple scholarly APIs.</strong><br>
+  CiteForge fetches, validates, deduplicates, and merges bibliographic<br>
+  metadata so you don't have to. Given a list of authors, it<br>
+  produces clean BibTeX files ready for LaTeX.
 </p>
 
 ---
@@ -31,8 +28,6 @@ CiteForge takes care of this. Point it at a list of authors with their Google Sc
 - Output clean, LaTeX-ready `.bib` files organized by author
 
 The result is deterministic — on cache-hit runs, CiteForge produces **byte-identical output** across consecutive runs, verified by SHA-256 checksums.
-
----
 
 ## Getting Started
 
@@ -84,15 +79,11 @@ output/
 
 API responses are cached under `data/api_cache/` with monthly expiry, so subsequent runs are fast and deterministic.
 
----
-
 ## How It Works
 
 CiteForge starts by pulling every publication from Google Scholar via SerpAPI, then queries 13 scholarly APIs — Semantic Scholar, Crossref, arXiv, OpenAlex, PubMed, and others — for richer metadata on each paper. A trust-based merge combines fields by source reliability, always preferring authoritative sources over scraped data. Duplicates are caught through DOI normalization, external ID matching, and fuzzy title similarity. The pipeline also fixes common metadata problems: broken compound words, miscategorized entry types, invalid page numbers, and ALL-CAPS titles. On cache-hit runs, CiteForge produces byte-identical output, verified by SHA-256 checksums.
 
 Authors are processed in parallel (12 workers by default) with per-API rate limiting. All tunable parameters — trust order, thresholds, rate limits, venue maps — live in [`src/config.py`](src/config.py).
-
----
 
 ## Data Sources
 
@@ -104,8 +95,6 @@ CiteForge queries 13 scholarly APIs. [SerpAPI](https://serpapi.com/) and [Serply
 - **Optional (key needed):** [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/)
 
 Set `CROSSREF_MAILTO` to get into Crossref's polite pool (faster responses).
-
----
 
 ## Citation
 
@@ -122,4 +111,4 @@ If you use CiteForge in your research or find it useful, please consider citing 
 
 ## License
 
-This project is licensed under the **MIT License** — you're free to use, modify, and distribute it for any purpose. See the [LICENSE](LICENSE) file for the full text.
+This project is licensed under the **MIT [License](LICENSE)** — you're free to use, modify, and distribute it for any purpose.
