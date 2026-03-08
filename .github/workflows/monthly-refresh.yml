@@ -110,8 +110,9 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           max_runs=50
-          consecutive_zero=0
+          consecutive_stable=0
           converged=false
+          prev_total=-1
           last_total=-1
 
           for i in $(seq 1 $max_runs); do
@@ -133,21 +134,31 @@ jobs:
             # Parse total API calls from the run log
             total=$(grep -aoP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
             last_total=$total
-            echo "Run $i — API calls: $total"
+            echo "Run $i — API calls: $total (prev: $prev_total)"
 
             # Save cache after every iteration
             save_cache "$i"
 
-            if [ "$total" -eq 0 ]; then
-              consecutive_zero=$((consecutive_zero + 1))
-              if [ "$consecutive_zero" -ge 2 ]; then
-                echo "Zero API calls confirmed over 2 consecutive runs — cache is complete"
+            # Converge when API call count is stable across 2 consecutive runs
+            if [ "$total" -eq "$prev_total" ]; then
+              consecutive_stable=$((consecutive_stable + 1))
+              if [ "$consecutive_stable" -ge 2 ]; then
+                echo "API calls stable at $total over 3 consecutive runs — converged"
                 converged=true
                 break
               fi
-              echo "Zero API calls — confirming with one more run"
+              echo "API calls stable ($total) — confirming with one more run"
             else
-              consecutive_zero=0
+              consecutive_stable=0
+            fi
+            prev_total=$total
+
+            # Clear negative cache entries between iterations so rate-limited
+            # lookups get retried. Only truly missing data persists as negative.
+            if [ -d data/api_cache ]; then
+              neg_cleared=$(find data/api_cache -name '*.json' -exec grep -l '"_negative": true' {} + 2>/dev/null | wc -l)
+              find data/api_cache -name '*.json' -exec grep -l '"_negative": true' {} + 2>/dev/null | xargs rm -f
+              echo "Cleared $neg_cleared negative cache entries before next run"
             fi
 
             if [ "$i" -eq "$max_runs" ]; then
