@@ -113,7 +113,7 @@ jobs:
             fi
 
             # Parse total API calls from the run log
-            total=$(grep -oP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
+            total=$(grep -aoP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
             last_total=$total
             echo "Run $i — API calls: $total"
 
@@ -155,7 +155,7 @@ jobs:
 
   verify:
     needs: refresh
-    if: always()
+    if: needs.refresh.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
