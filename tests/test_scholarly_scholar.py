@@ -629,18 +629,16 @@ class TestFacadeCacheBehavior:
 
     @patch("src.clients.scholar.response_cache")
     @patch("src.clients.scholar.serply_fetch_citation")
-    def test_citation_negative_caching(
+    def test_citation_negative_not_cached(
         self, mock_serply: MagicMock, mock_cache: MagicMock,
     ) -> None:
-        """When Serply returns None, a negative sentinel must be stored in cache."""
+        """When Serply returns None, no negative is cached (Serply conflates errors and empty)."""
         mock_cache.get.return_value = None
         mock_serply.return_value = None
 
         result = fetch_scholar_citation("key", "Unknown Title", "Author")
         assert result is None
-        mock_cache.put_negative.assert_called_once()
-        put_args = mock_cache.put_negative.call_args[0]
-        assert put_args[0] == "serply_citation"
+        mock_cache.put_negative.assert_not_called()
 
     def test_citation_empty_title(self) -> None:
         """Empty title should return None without calling Serply."""

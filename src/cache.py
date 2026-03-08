@@ -10,13 +10,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .config import CACHE_DIR, CACHE_ENABLED, CACHE_TTL_NEGATIVE_DAYS
+from .config import CACHE_DIR, CACHE_ENABLED, CACHE_NEGATIVE_CONFIRM_RUNS, CACHE_TTL_NEGATIVE_DAYS
 from .log_utils import LogCategory, logger
 
 _CACHE_POS_HITS: int = 0
 _CACHE_NEG_HITS: int = 0
 _CACHE_MISSES: int = 0
 _CACHE_COUNTER_LOCK = threading.Lock()
+
+_AST = timezone(timedelta(hours=-4))
 
 
 def _month_boundary() -> float:
@@ -26,8 +28,7 @@ def _month_boundary() -> float:
     forcing a fresh API request at the start of each month.
     Atlantic Standard Time (UTC-4) is used as the reference timezone.
     """
-    ast = timezone(timedelta(hours=-4))
-    now = datetime.now(tz=ast)
+    now = datetime.now(tz=_AST)
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
@@ -36,6 +37,14 @@ class ResponseCache:
 
     All entries expire on the 1st of each calendar month (AST/UTC-4),
     ensuring a full refresh of every API source at least once per month.
+
+    Negative cache entries use a three-tier confirmation system:
+    - Transient errors are never cached (callers simply skip the cache write).
+    - Empty API results are stored as unconfirmed negatives (_confirmations < 3)
+      and are NOT served from get() — forcing a retry on the next pipeline run.
+    - After 3 consecutive empty results (CACHE_NEGATIVE_CONFIRM_RUNS), the entry
+      is promoted to a safe negative (_safe=True) and served until the next Monday
+      or 1st of the following month, whichever comes first.
     """
 
     def __init__(self, cache_dir: str = CACHE_DIR) -> None:
@@ -57,6 +66,35 @@ class ResponseCache:
 
     def _entry_path(self, namespace: str, key: str) -> str:
         return os.path.join(self._ns_dir(namespace), f"{self._key_hash(key)}.json")
+
+    @staticmethod
+    def _safe_negative_expired(entry_ts: float) -> bool:
+        """Check if a safe negative has expired.
+
+        Safe negatives expire at the earlier of:
+        - Next Monday 00:00 AST after the entry was created
+        - 1st of the next month 00:00 AST after the entry was created
+        """
+        created = datetime.fromtimestamp(entry_ts, tz=_AST)
+        now = datetime.now(tz=_AST)
+        # Next Monday after creation (weekday(): Mon=0 .. Sun=6).
+        # Created on Monday → 7 days (expires next Monday, not same day).
+        days_to_monday = (7 - created.weekday()) % 7 or 7
+        next_monday = (created + timedelta(days=days_to_monday)).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        # 1st of the next month after creation
+        if created.month == 12:
+            next_first = created.replace(
+                year=created.year + 1, month=1, day=1,
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+        else:
+            next_first = created.replace(
+                month=created.month + 1, day=1,
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+        return now >= min(next_monday, next_first)
 
     def get(self, namespace: str, key: str) -> dict[str, Any] | None:
         global _CACHE_POS_HITS, _CACHE_NEG_HITS, _CACHE_MISSES
@@ -81,24 +119,29 @@ class ResponseCache:
                     _CACHE_MISSES += 1
                 return None
             ts = entry.get("timestamp", 0)
+            # Monthly boundary: all entries older than the 1st of this month are stale.
             if ts < self._month_boundary:
                 with _CACHE_COUNTER_LOCK:
                     _CACHE_MISSES += 1
                 return None
-            # Honour TTL for short-lived negative/error cache entries only.
-            # Positive entries expire solely at the monthly boundary above.
             data = entry.get("data", {})
-            ttl = entry.get("ttl_days", 0)
-            if ttl > 0 and data.get("_negative") and time.time() - ts > ttl * 86400:
-                with _CACHE_COUNTER_LOCK:
-                    _CACHE_MISSES += 1
-                return None
             if data.get("_negative"):
+                if not data.get("_safe"):
+                    # Unconfirmed negative — force API retry.
+                    with _CACHE_COUNTER_LOCK:
+                        _CACHE_MISSES += 1
+                    return None
+                # Safe negative — check Monday / month-boundary expiry.
+                if self._safe_negative_expired(ts):
+                    with _CACHE_COUNTER_LOCK:
+                        _CACHE_MISSES += 1
+                    return None
                 with _CACHE_COUNTER_LOCK:
                     _CACHE_NEG_HITS += 1
-            else:
-                with _CACHE_COUNTER_LOCK:
-                    _CACHE_POS_HITS += 1
+                return dict(data)
+            # Positive entry.
+            with _CACHE_COUNTER_LOCK:
+                _CACHE_POS_HITS += 1
             return dict(data)
 
     def put(self, namespace: str, key: str, value: dict[str, Any], ttl_days: int = 30) -> None:
@@ -111,29 +154,73 @@ class ResponseCache:
         )
         lock = self._lock_for(namespace)
         with lock:
-            ns_dir = self._ns_dir(namespace)
-            os.makedirs(ns_dir, exist_ok=True)
-            entry = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
-            path = self._entry_path(namespace, key)
-            try:
-                fd, tmp_path = tempfile.mkstemp(dir=ns_dir, suffix=".tmp")
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump(entry, f)
-                    os.replace(tmp_path, path)
-                except BaseException:
-                    with contextlib.suppress(OSError):
-                        os.remove(tmp_path)
-                    raise
-            except OSError as exc:
-                logger.warn(
-                    f"CACHE_WRITE_FAILED | namespace={namespace} | key_hash={khash} | error={exc}",
-                    category=LogCategory.CACHE,
-                )
+            self._write_entry(namespace, key, value, ttl_days)
 
-    def put_negative(self, namespace: str, key: str, ttl_days: int | None = None) -> None:
-        """Store a negative (no-result) cache entry with a short default TTL."""
-        self.put(namespace, key, {"_negative": True}, ttl_days=ttl_days or CACHE_TTL_NEGATIVE_DAYS)
+    def _write_entry(
+        self, namespace: str, key: str, value: dict[str, Any], ttl_days: int,
+    ) -> None:
+        """Atomic file write — must be called under the namespace lock."""
+        ns_dir = self._ns_dir(namespace)
+        os.makedirs(ns_dir, exist_ok=True)
+        entry = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
+        path = self._entry_path(namespace, key)
+        try:
+            fd, tmp_path = tempfile.mkstemp(dir=ns_dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(entry, f)
+                os.replace(tmp_path, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+                raise
+        except OSError as exc:
+            khash = self._key_hash(key)[:12]
+            logger.warn(
+                f"CACHE_WRITE_FAILED | namespace={namespace} | key_hash={khash} | error={exc}",
+                category=LogCategory.CACHE,
+            )
+
+    def put_negative(self, namespace: str, key: str) -> None:
+        """Store a negative (no-result) cache entry with confirmation counting.
+
+        Reads any existing negative entry to increment ``_confirmations``.
+        After ``CACHE_NEGATIVE_CONFIRM_RUNS`` consecutive empty results the
+        entry is promoted to a *safe* negative that is served from ``get()``
+        with a Monday-synchronised TTL.
+        """
+        if not CACHE_ENABLED:
+            return
+        khash = self._key_hash(key)[:12]
+        lock = self._lock_for(namespace)
+        with lock:
+            # Read existing confirmation count (if any).
+            path = self._entry_path(namespace, key)
+            confirmations = 0
+            try:
+                with open(path, encoding="utf-8") as f:
+                    existing = json.load(f)
+                edata = existing.get("data", {})
+                if edata.get("_negative"):
+                    confirmations = min(
+                        edata.get("_confirmations", 0),
+                        CACHE_NEGATIVE_CONFIRM_RUNS,
+                    )
+            except (json.JSONDecodeError, OSError):
+                pass
+            confirmations += 1
+            safe = confirmations >= CACHE_NEGATIVE_CONFIRM_RUNS
+            data: dict[str, Any] = {
+                "_negative": True,
+                "_confirmations": confirmations,
+                "_safe": safe,
+            }
+            logger.debug(
+                f"PUT_NEGATIVE | namespace={namespace} | key_hash={khash}"
+                f" | confirmations={confirmations} | safe={safe}",
+                category=LogCategory.CACHE,
+            )
+            self._write_entry(namespace, key, data, CACHE_TTL_NEGATIVE_DAYS)
 
     def has(self, namespace: str, key: str) -> bool:
         return self.get(namespace, key) is not None

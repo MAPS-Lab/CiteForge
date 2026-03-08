@@ -139,27 +139,27 @@ jobs:
             # Save cache after every iteration
             save_cache "$i"
 
-            # Converge when API call count is stable across 2 consecutive runs
-            if [ "$total" -eq "$prev_total" ]; then
-              consecutive_stable=$((consecutive_stable + 1))
-              if [ "$consecutive_stable" -ge 2 ]; then
-                echo "API calls stable at $total over 3 consecutive runs — converged"
-                converged=true
-                break
+            # Delta-based convergence: stable when API call count changes
+            # by at most CONVERGENCE_THRESHOLD across 2 consecutive runs.
+            # Unconfirmed negatives (< 3 confirmations) are retried automatically
+            # by the cache layer — no need to clear files between iterations.
+            CONVERGENCE_THRESHOLD=50
+            if [ "$prev_total" -ge 0 ]; then
+              delta=$((total - prev_total))
+              if [ "$delta" -lt 0 ]; then delta=$((-delta)); fi
+              if [ "$delta" -le "$CONVERGENCE_THRESHOLD" ]; then
+                consecutive_stable=$((consecutive_stable + 1))
+                if [ "$consecutive_stable" -ge 2 ]; then
+                  echo "API calls stable (delta=$delta, threshold=$CONVERGENCE_THRESHOLD) over 3 runs — converged"
+                  converged=true
+                  break
+                fi
+                echo "API calls within threshold (delta=$delta) — confirming with one more run"
+              else
+                consecutive_stable=0
               fi
-              echo "API calls stable ($total) — confirming with one more run"
-            else
-              consecutive_stable=0
             fi
             prev_total=$total
-
-            # Clear negative cache entries between iterations so rate-limited
-            # lookups get retried. Only truly missing data persists as negative.
-            if [ -d data/api_cache ]; then
-              neg_cleared=$(find data/api_cache -name '*.json' -exec grep -l '"_negative": true' {} + 2>/dev/null | wc -l)
-              find data/api_cache -name '*.json' -exec grep -l '"_negative": true' {} + 2>/dev/null | xargs rm -f
-              echo "Cleared $neg_cleared negative cache entries before next run"
-            fi
 
             if [ "$i" -eq "$max_runs" ]; then
               echo "Reached $max_runs runs without full convergence"

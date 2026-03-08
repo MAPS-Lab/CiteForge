@@ -112,7 +112,6 @@ def s2_search_papers_multiple(
     try:
         data = s2_http_get_json(url, api_key, timeout=config.timeout)
     except ALL_API_ERRORS:
-        response_cache.put_negative("semantic_scholar", cache_key)
         return []
     results = safe_get_nested(data, *config.result_path, default=[])
     top = list(results[:max_results]) if results else []
@@ -198,7 +197,6 @@ def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
         logger.debug(f"doi_csl | PUT | doi={doi_norm}", category=LogCategory.CACHE)
         return result
     except ALL_FETCH_ERRORS:
-        response_cache.put_negative("doi_csl", doi_norm)
         return None
 
 
@@ -225,7 +223,6 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
         logger.debug(f"doi_bibtex | PUT | doi={doi_norm}", category=LogCategory.CACHE)
         return result
     except NETWORK_ERRORS:
-        response_cache.put_negative("doi_bibtex", doi_norm)
         return None
 
 
@@ -316,12 +313,10 @@ def arxiv_search(
     try:
         xml = http_get_text(url)
     except NETWORK_ERRORS:
-        response_cache.put_negative("arxiv", cache_key)
         return []
     try:
         root = ElementTree.fromstring(xml)
     except XML_PARSE_ERRORS:
-        response_cache.put_negative("arxiv", cache_key)
         return []
 
     atom_ns = root.tag[1:].split("}")[0] if root.tag.startswith("{") else ""
@@ -554,7 +549,6 @@ def openreview_search_paper(
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates = _or_fetch_candidates(title, headers)
     if not candidates:
-        response_cache.put_negative("openreview", cache_key)
         return None
 
     target_norm = normalize_title(title)
@@ -604,7 +598,6 @@ def openreview_search_papers_multiple(
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates = _or_fetch_candidates(title, headers)
     if not candidates:
-        response_cache.put_negative("openreview", cache_key)
         return []
 
     target_norm = normalize_title(title)
@@ -709,12 +702,10 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     try:
         xml = http_get_text(url, timeout=HTTP_TIMEOUT_DEFAULT)
     except NETWORK_ERRORS:
-        response_cache.put_negative("dblp", cache_key)
         return []
     try:
         root = ElementTree.fromstring(xml)
     except XML_PARSE_ERRORS:
-        response_cache.put_negative("dblp", cache_key)
         return []
     articles: list[dict[str, Any]] = []
     for r in root.findall("r"):
@@ -836,7 +827,6 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
     try:
         search_data = http_get_json(search_url, timeout=15.0)
     except NETWORK_ERRORS:
-        response_cache.put_negative("pubmed", cache_key)
         return None
     pmids = (search_data.get("esearchresult") or {}).get("idlist") or []
     if not pmids:
@@ -849,7 +839,6 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
     try:
         fetch_data = http_get_json(fetch_url, timeout=15.0)
     except NETWORK_ERRORS:
-        response_cache.put_negative("pubmed", cache_key)
         return None
     result = fetch_data.get("result") or {}
     articles = [result[pmid] for pmid in pmids if pmid in result and isinstance(result[pmid], dict)]
@@ -941,7 +930,6 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
     try:
         search_data = http_get_json(search_url, timeout=20.0)
     except NETWORK_ERRORS:
-        response_cache.put_negative("pubmed", cache_key)
         return []
     id_list = safe_get_nested(search_data, "esearchresult", "idlist", default=[])
     if not id_list:
@@ -954,7 +942,6 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
     try:
         summary_data = http_get_json(summary_url, timeout=20.0)
     except NETWORK_ERRORS:
-        response_cache.put_negative("pubmed", cache_key)
         return []
     result = safe_get_nested(summary_data, "result", default={})
     results_list = [result[uid] for uid in id_list[:max_results] if uid in result and isinstance(result[uid], dict)]
@@ -1049,7 +1036,6 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
     try:
         data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
-        response_cache.put_negative("europepmc", cache_key)
         return []
     results = safe_get_nested(data, *config.result_path, default=[])
     top = list(results[:max_results])
@@ -1112,7 +1098,6 @@ def crossref_search_by_venue(
     try:
         data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
-        response_cache.put_negative("crossref_venue", cache_key)
         return []
 
     results = safe_get_nested(data, *config.result_path, default=[])
@@ -1183,7 +1168,6 @@ def openalex_search_by_venue(
     try:
         data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
-        response_cache.put_negative("openalex_venue", cache_key)
         return []
 
     results = safe_get_nested(data, *config.result_path, default=[])

@@ -153,7 +153,6 @@ def datacite_search_doi(doi: str) -> dict[str, Any] | None:
     try:
         data = http_get_json(url, timeout=15.0)
     except NETWORK_ERRORS:
-        response_cache.put_negative("datacite", doi_norm)
         return None
 
     result = data.get("data")
@@ -242,7 +241,6 @@ def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
     try:
         data = http_get_json(url, timeout=15.0)
     except NETWORK_ERRORS:
-        response_cache.put_negative("orcid", cache_key)
         return []
 
     works = []

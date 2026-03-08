@@ -204,7 +204,6 @@ def search_api_generic(
         else:
             data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
-        response_cache.put_negative(config.api_name, cache_key)
         return None
 
     results = safe_get_nested(data, *config.result_path, default=[])
@@ -308,7 +307,6 @@ def search_api_generic_multiple(
         else:
             data = http_get_json(url, timeout=config.timeout)
     except ALL_API_ERRORS:
-        response_cache.put_negative(config.api_name, cache_key)
         return []
 
     results = safe_get_nested(data, *config.result_path, default=[])

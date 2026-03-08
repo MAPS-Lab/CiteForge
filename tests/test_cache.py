@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
-from src.cache import ResponseCache, get_cache_hit_counts, reset_cache_hit_counts
+from src.cache import _AST, ResponseCache, get_cache_hit_counts, reset_cache_hit_counts
 
 
 def test_put_and_get(tmp_path: Path) -> None:
@@ -112,21 +114,25 @@ def test_corrupted_cache_file(tmp_path: Path) -> None:
 
 
 def test_negative_cache_ttl_expires(tmp_path: Path) -> None:
-    """Test that negative cache entries expire after their TTL."""
+    """Test that safe negative cache entries expire after their Monday/month TTL."""
     cache = ResponseCache(cache_dir=str(tmp_path))
-    cache.put("test_ns", "key1", {"_negative": True}, ttl_days=1)
+    # Build a safe negative (3 confirmations)
+    for _ in range(3):
+        cache.put_negative("test_ns", "key1")
 
-    # Entry exists and is served
+    # Entry is fresh and safe — should be served
     result = cache.get("test_ns", "key1")
-    assert result == {"_negative": True}
+    assert result is not None
+    assert result["_negative"] is True
+    assert result["_safe"] is True
 
-    # Backdate the timestamp to make it older than 1 day
+    # Backdate by 8 days — guarantees a Monday boundary has passed
     path = Path(cache._entry_path("test_ns", "key1"))
     entry = json.loads(path.read_text(encoding="utf-8"))
-    entry["timestamp"] = time.time() - 2 * 86400  # 2 days ago
+    entry["timestamp"] = max(time.time() - 8 * 86400, cache._month_boundary + 1)
     path.write_text(json.dumps(entry), encoding="utf-8")
 
-    # Now it should be expired
+    # Now it should be expired (either monthly or Monday boundary)
     assert cache.get("test_ns", "key1") is None
 
 
@@ -159,10 +165,12 @@ def test_cache_counter_positive_hit(tmp_path: Path) -> None:
 
 
 def test_cache_counter_negative_hit(tmp_path: Path) -> None:
-    """Test that a negative cache hit increments the negative counter."""
+    """Test that a safe negative cache hit increments the negative counter."""
     reset_cache_hit_counts()
     cache = ResponseCache(cache_dir=str(tmp_path))
-    cache.put("test_ns", "key1", {"_negative": True}, ttl_days=7)
+    # Build a safe negative (3 confirmations)
+    for _ in range(3):
+        cache.put_negative("test_ns", "key1")
     cache.get("test_ns", "key1")
     counts = get_cache_hit_counts()
     assert counts["negative"] == 1
@@ -187,3 +195,206 @@ def test_cache_counter_reset(tmp_path: Path) -> None:
     reset_cache_hit_counts()
     counts = get_cache_hit_counts()
     assert counts == {"positive": 0, "negative": 0, "miss": 0}
+
+
+# --- Three-tier negative cache tests ---
+
+
+def test_put_negative_confirmation_counting(tmp_path: Path) -> None:
+    """Test that put_negative increments confirmation counter across calls."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    for expected_count in range(1, 4):
+        cache.put_negative(ns, key)
+        path = Path(cache._entry_path(ns, key))
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        data = entry["data"]
+        assert data["_negative"] is True
+        assert data["_confirmations"] == expected_count
+        assert data["_safe"] == (expected_count >= 3)
+
+
+def test_unconfirmed_negative_not_served(tmp_path: Path) -> None:
+    """Test that get() returns None for unconfirmed negatives (< 3 confirmations)."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    cache.put_negative(ns, key)  # 1 confirmation
+    assert cache.get(ns, key) is None
+
+    cache.put_negative(ns, key)  # 2 confirmations
+    assert cache.get(ns, key) is None
+
+
+def test_safe_negative_served(tmp_path: Path) -> None:
+    """Test that get() returns the entry for safe negatives (>= 3 confirmations)."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    for _ in range(3):
+        cache.put_negative(ns, key)
+
+    result = cache.get(ns, key)
+    assert result is not None
+    assert result["_negative"] is True
+    assert result["_safe"] is True
+    assert result["_confirmations"] == 3
+
+
+def test_confirmation_counter_capped(tmp_path: Path) -> None:
+    """Test that confirmation counter stabilizes and doesn't grow unbounded."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    for _ in range(10):
+        cache.put_negative(ns, key)
+
+    path = Path(cache._entry_path(ns, key))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    # Counter caps at CACHE_NEGATIVE_CONFIRM_RUNS (3) then +1 = 4, stabilizes there
+    assert entry["data"]["_confirmations"] == 4
+    assert entry["data"]["_safe"] is True
+
+
+def test_positive_overwrites_negative(tmp_path: Path) -> None:
+    """Test that put() replaces a negative entry with positive data."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    for _ in range(3):
+        cache.put_negative(ns, key)
+
+    result = cache.get(ns, key)
+    assert result is not None
+    assert result["_negative"] is True
+
+    # Overwrite with positive data
+    cache.put(ns, key, {"title": "Real Paper"})
+    result = cache.get(ns, key)
+    assert result == {"title": "Real Paper"}
+
+
+def test_safe_negative_monday_expiry(tmp_path: Path) -> None:
+    """Test that a safe negative expires after the next Monday boundary."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    for _ in range(3):
+        cache.put_negative(ns, key)
+
+    # Backdate by 8 days — guarantees a Monday has passed
+    path = Path(cache._entry_path(ns, key))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    entry["timestamp"] = max(time.time() - 8 * 86400, cache._month_boundary + 1)
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    assert cache.get(ns, key) is None
+
+
+def test_safe_negative_month_boundary_expiry(tmp_path: Path) -> None:
+    """Test that a safe negative before the monthly boundary is expired."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    for _ in range(3):
+        cache.put_negative(ns, key)
+
+    # Backdate to before the monthly boundary
+    path = Path(cache._entry_path(ns, key))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    entry["timestamp"] = cache._month_boundary - 1
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    assert cache.get(ns, key) is None
+
+
+def test_counter_unconfirmed_increments_miss(tmp_path: Path) -> None:
+    """Test that unconfirmed negative increments miss counter, not negative counter."""
+    reset_cache_hit_counts()
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    cache.put_negative(ns, key)  # 1 confirmation — unconfirmed
+    cache.get(ns, key)  # Should be a miss
+
+    counts = get_cache_hit_counts()
+    assert counts["miss"] == 1
+    assert counts["negative"] == 0
+
+
+def test_error_preserves_count(tmp_path: Path) -> None:
+    """Test that skipping put_negative preserves existing count on disk."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    ns, key = "test_ns", "neg_key"
+
+    cache.put_negative(ns, key)
+    cache.put_negative(ns, key)
+
+    path = Path(cache._entry_path(ns, key))
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    assert entry["data"]["_confirmations"] == 2
+
+    # Simulate error iteration — no put_negative call → count unchanged
+    entry2 = json.loads(path.read_text(encoding="utf-8"))
+    assert entry2["data"]["_confirmations"] == 2
+
+    # Next successful empty call increments from 2 to 3
+    cache.put_negative(ns, key)
+    entry3 = json.loads(path.read_text(encoding="utf-8"))
+    assert entry3["data"]["_confirmations"] == 3
+    assert entry3["data"]["_safe"] is True
+
+
+def test_safe_negative_expired_created_on_monday() -> None:
+    """Entry created on Monday expires next Monday (7 days), not same day."""
+    # March 2, 2026 is a Monday
+    created_ts = datetime(2026, 3, 2, 12, 0, 0, tzinfo=_AST).timestamp()
+
+    # March 8 (Saturday) — NOT expired (next Monday is March 9)
+    with patch("src.cache.datetime") as mock_dt:
+        mock_dt.fromtimestamp = datetime.fromtimestamp
+        mock_dt.now.return_value = datetime(2026, 3, 8, 23, 59, 0, tzinfo=_AST)
+        assert not ResponseCache._safe_negative_expired(created_ts)
+
+    # March 9 (Monday) — expired
+    with patch("src.cache.datetime") as mock_dt:
+        mock_dt.fromtimestamp = datetime.fromtimestamp
+        mock_dt.now.return_value = datetime(2026, 3, 9, 0, 0, 0, tzinfo=_AST)
+        assert ResponseCache._safe_negative_expired(created_ts)
+
+
+def test_safe_negative_expired_month_before_monday() -> None:
+    """When 1st of month comes before next Monday, expire at 1st."""
+    # March 31, 2026 is a Tuesday — next Monday = April 6, but April 1 comes first
+    created_ts = datetime(2026, 3, 31, 12, 0, 0, tzinfo=_AST).timestamp()
+
+    # March 31 end-of-day — NOT expired
+    with patch("src.cache.datetime") as mock_dt:
+        mock_dt.fromtimestamp = datetime.fromtimestamp
+        mock_dt.now.return_value = datetime(2026, 3, 31, 23, 59, 0, tzinfo=_AST)
+        assert not ResponseCache._safe_negative_expired(created_ts)
+
+    # April 1 — expired (month boundary before Monday)
+    with patch("src.cache.datetime") as mock_dt:
+        mock_dt.fromtimestamp = datetime.fromtimestamp
+        mock_dt.now.return_value = datetime(2026, 4, 1, 0, 0, 0, tzinfo=_AST)
+        assert ResponseCache._safe_negative_expired(created_ts)
+
+
+def test_safe_negative_expired_december() -> None:
+    """December entry: next 1st = January 1 of next year."""
+    # December 28, 2026 is a Monday — next Monday = Jan 4, 2027; Jan 1 comes first
+    created_ts = datetime(2026, 12, 28, 12, 0, 0, tzinfo=_AST).timestamp()
+
+    # December 31 — NOT expired
+    with patch("src.cache.datetime") as mock_dt:
+        mock_dt.fromtimestamp = datetime.fromtimestamp
+        mock_dt.now.return_value = datetime(2026, 12, 31, 23, 59, 0, tzinfo=_AST)
+        assert not ResponseCache._safe_negative_expired(created_ts)
+
+    # January 1, 2027 — expired
+    with patch("src.cache.datetime") as mock_dt:
+        mock_dt.fromtimestamp = datetime.fromtimestamp
+        mock_dt.now.return_value = datetime(2027, 1, 1, 0, 0, 0, tzinfo=_AST)
+        assert ResponseCache._safe_negative_expired(created_ts)
