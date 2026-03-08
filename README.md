@@ -42,19 +42,19 @@ Drop your API keys into the `keys/` directory:
 
 ```bash
 mkdir -p keys
-echo "your_serpapi_key" > keys/SerpAPI.key        # Required
-echo "your_serply_key" > keys/Serply.key          # Required
-echo "your_semantic_key" > keys/Semantic.key      # Recommended
-echo "your_gemini_key" > keys/Gemini.key          # Optional
-printf "user\npass" > keys/OpenReview.key          # Optional
+echo "your_serpapi_key" > keys/SerpAPI.key    # Required
+echo "your_serply_key" > keys/Serply.key      # Required
+echo "your_semantic_key" > keys/Semantic.key  # Recommended
+echo "your_gemini_key" > keys/Gemini.key      # Optional
+printf "user\npass" > keys/OpenReview.key     # Optional
 ```
 
 Then create an input CSV and run:
 
 ```bash
-python3 main.py                     # Default: data/input.csv
-python3 main.py data/custom.csv     # Custom input
-python3 main.py --force             # Force re-enrichment
+python3 main.py                  # Default: data/input.csv
+python3 main.py data/custom.csv  # Custom input
+python3 main.py --force          # Force re-enrichment
 ```
 
 The input CSV has three columns — name, Scholar link, and an optional DBLP link:
@@ -93,10 +93,10 @@ To maintain efficiency and stability, author queries run in parallel while respe
 
 [SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/) require keys — everything else is free or optional:
 
-- **Required:** [SerpAPI](https://serpapi.com/) (Google Scholar), [Serply](https://serply.io/) (citation details)
-- **Recommended:** [Semantic Scholar](https://www.semanticscholar.org/)
-- **Free (no key):** [Crossref](https://www.crossref.org/), [OpenAlex](https://openalex.org/), [arXiv](https://arxiv.org/), [PubMed](https://pubmed.ncbi.nlm.nih.gov/), [Europe PMC](https://europepmc.org/), [DataCite](https://datacite.org/), [ORCID](https://orcid.org/), [DBLP](https://dblp.org/)
-- **Optional (key needed):** [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/)
+- **Required:** [SerpAPI](https://serpapi.com/) (Google Scholar), [Serply](https://serply.io/) (citation details);
+- **Recommended:** [Semantic Scholar](https://www.semanticscholar.org/);
+- **Free (no key):** [Crossref](https://www.crossref.org/), [OpenAlex](https://openalex.org/), [arXiv](https://arxiv.org/), [PubMed](https://pubmed.ncbi.nlm.nih.gov/), [Europe PMC](https://europepmc.org/), [DataCite](https://datacite.org/), [ORCID](https://orcid.org/), [DBLP](https://dblp.org/); and,
+- **Optional (key needed):** [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/).
 
 Set `CROSSREF_MAILTO` to get into Crossref's polite pool (faster responses).
 
@@ -106,10 +106,13 @@ If you use CiteForge in your research or find it useful, please consider citing 
 
 ```bibtex
 @software{spadon_citeforge,
-  author  = {Spadon, Gabriel},
-  title   = {CiteForge},
-  url     = {https://github.com/gabrielspadon/CiteForge},
-  license = {MIT}
+  author    = {Spadon, Gabriel},
+  title     = {CiteForge: Trust-Based Metadata Aggregation for Scholarly Publications},
+  year      = {2026},
+  version   = {1.0.0},
+  publisher = {GitHub},
+  url       = {https://github.com/gabrielspadon/CiteForge},
+  license   = {MIT}
 }
 ```
 
