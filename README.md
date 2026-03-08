@@ -66,7 +66,7 @@ The input CSV has three columns — name, Scholar link, and an optional DBLP lin
 
 ```csv
 Name,Scholar Link,DBLP Link
-Raza Abidi,https://scholar.google.com/citations?user=fzr2PUYAAAAJ,https://dblp.org/pid/53/914
+Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659
 ```
 
 Output is organized per author, with a shared summary and deduplication log:
@@ -76,9 +76,9 @@ output/
 ├── baseline.json
 ├── run.log
 ├── summary.csv
-└── Abidi (fzr2PUYAAAAJ)/
+└── Spadon (bfdGsGUAAAAJ)/
     ├── author.log
-    ├── Abidi2024-DigitalTherapeutics.bib
+    ├── Spadon2024-MaritimeTracking.bib
     └── ...
 ```
 
