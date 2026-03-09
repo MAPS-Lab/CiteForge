@@ -549,6 +549,7 @@ def openreview_search_paper(
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates = _or_fetch_candidates(title, headers)
     if not candidates:
+        response_cache.put_negative("openreview", cache_key)
         return None
 
     target_norm = normalize_title(title)
@@ -598,6 +599,7 @@ def openreview_search_papers_multiple(
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates = _or_fetch_candidates(title, headers)
     if not candidates:
+        response_cache.put_negative("openreview", cache_key)
         return []
 
     target_norm = normalize_title(title)
