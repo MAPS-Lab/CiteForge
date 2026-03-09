@@ -203,6 +203,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Skip re-trigger if another run is already in progress (prevents cascade)
+          running=$(gh run list --workflow="Monthly Pipeline Refresh" --status=in_progress --json databaseId --jq 'length')
+          if [ "$running" -gt 0 ]; then
+            echo "::notice::Another run is already in progress — skipping re-trigger"
+            exit 0
+          fi
           echo "Pipeline did not converge (result=${{ needs.refresh.result }}) — re-triggering with saved cache"
           gh workflow run "Monthly Pipeline Refresh" --repo "${{ github.repository }}"
           echo "::notice::Re-triggered workflow. Cache was saved incrementally — next run resumes from where this one stopped."
