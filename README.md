@@ -5,9 +5,9 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python 3.10+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
   <br>
-  <img src="https://img.shields.io/badge/Updated-2026--03-blue.svg" alt="Last Updated">
-  <img src="https://img.shields.io/badge/Cache_Hits-4400_%7C_3392_negative-brightgreen.svg" alt="Cache Hits">
-  <img src="https://img.shields.io/badge/Cache_Misses-312-orange.svg" alt="Cache Misses">
+  <img src="https://img.shields.io/badge/Updated-2026--03-blue?style=flat-square" alt="Last Updated">
+  <img src="https://img.shields.io/badge/Queries-8%2C104-555?style=flat-square" alt="Total Queries">
+  <img src="https://img.shields.io/badge/Cache_Hit_Rate-96.1%25-2ea44f?style=flat-square" alt="Cache Hit Rate">
 </p>
 
 <p align="center">

@@ -3211,11 +3211,15 @@ def main() -> int:
             badges_path = os.path.join(out_dir, "badges.json")
             try:
                 with open(badges_path, "w", encoding="utf-8") as bf:
+                    total = cache_counts["positive"] + cache_counts["negative"] + cache_counts["miss"]
+                    hit_rate = ((cache_counts["positive"] + cache_counts["negative"]) / total * 100) if total else 0
                     json.dump({
                         "last_updated": time.strftime("%Y-%m"),
                         "cache_positive_hits": cache_counts["positive"],
                         "cache_negative_hits": cache_counts["negative"],
                         "cache_misses": cache_counts["miss"],
+                        "total_queries": total,
+                        "hit_rate": round(hit_rate, 1),
                     }, bf, indent=2)
             except OSError:
                 pass
