@@ -6,8 +6,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
   <br>
   <img src="https://img.shields.io/badge/Updated-2026--03-blue.svg" alt="Last Updated">
-  <img src="https://img.shields.io/badge/Cache_Hits-4400_positive-brightgreen.svg" alt="Cache Hits">
-  <img src="https://img.shields.io/badge/Cache_Misses-3392_negative-orange.svg" alt="Cache Misses">
+  <img src="https://img.shields.io/badge/Cache_Hits-4400-brightgreen.svg" alt="Cache Hits">
+  <img src="https://img.shields.io/badge/Negative_Hits-3392-yellow.svg" alt="Negative Hits">
+  <img src="https://img.shields.io/badge/Cache_Misses-312-orange.svg" alt="Cache Misses">
 </p>
 
 <p align="center">

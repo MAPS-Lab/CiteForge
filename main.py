@@ -3215,6 +3215,7 @@ def main() -> int:
                         "last_updated": time.strftime("%Y-%m"),
                         "cache_positive_hits": cache_counts["positive"],
                         "cache_negative_hits": cache_counts["negative"],
+                        "cache_misses": cache_counts["miss"],
                     }, bf, indent=2)
             except OSError:
                 pass
