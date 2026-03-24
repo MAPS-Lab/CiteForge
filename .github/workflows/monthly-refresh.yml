@@ -87,7 +87,13 @@ jobs:
               git add api_cache.tar.gz
               git commit -q -m "cache: $(date +%Y-%m-%d) — $entries entries ($size)"
               git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
-              git push origin data-cache --force -q
+              for attempt in 1 2 3; do
+                if git push origin data-cache --force -q 2>/dev/null; then
+                  break
+                fi
+                echo "Cache push attempt $attempt failed — retrying in ${attempt}0s..."
+                sleep "${attempt}0"
+              done
               cd -
               rm -rf "$cache_dir"
             fi
