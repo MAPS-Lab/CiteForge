@@ -97,10 +97,6 @@ _ACCEPT_LANGUAGE_POOL = [
     "en;q=0.9",
 ]
 
-_ACCEPT_ENCODING_POOL = [
-    "gzip, deflate",
-]
-
 DEFAULT_BROWSER_HEADERS = {
     "User-Agent": random.choice(_USER_AGENT_POOL),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -112,11 +108,11 @@ def _randomize_headers(headers: dict[str, str]) -> dict[str, str]:
     """Apply subtle header randomization to reduce request fingerprinting."""
     h = dict(headers)
     h["User-Agent"] = random.choice(_USER_AGENT_POOL)
-    # Randomly include Accept-Language/Accept-Encoding if not already set by caller
+    # Randomly include Accept-Language if not already set by caller.
+    # Accept-Encoding is intentionally left to urllib3 which adds gzip
+    # internally and handles decompression automatically.
     if "Accept-Language" not in h and random.random() < 0.7:
         h["Accept-Language"] = random.choice(_ACCEPT_LANGUAGE_POOL)
-    if "Accept-Encoding" not in h and random.random() < 0.5:
-        h["Accept-Encoding"] = random.choice(_ACCEPT_ENCODING_POOL)
     return h
 
 _API_CALL_COUNTS: dict[str, int] = {}
