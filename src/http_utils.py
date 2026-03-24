@@ -98,9 +98,7 @@ _ACCEPT_LANGUAGE_POOL = [
 ]
 
 _ACCEPT_ENCODING_POOL = [
-    "gzip, deflate, br",
     "gzip, deflate",
-    "gzip, deflate, br, zstd",
 ]
 
 DEFAULT_BROWSER_HEADERS = {
