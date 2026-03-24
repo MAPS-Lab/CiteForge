@@ -196,10 +196,8 @@ jobs:
           echo "Last API calls: ${{ needs.refresh.outputs.last_api_calls }}"
           echo "Job result: ${{ needs.refresh.result }}"
 
-      - name: Re-trigger if not converged or timed out
-        if: |
-          (needs.refresh.result == 'success' && needs.refresh.outputs.converged != 'true') ||
-          needs.refresh.result == 'cancelled'
+      - name: Re-trigger if not converged
+        if: needs.refresh.result == 'success' && needs.refresh.outputs.converged != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -209,7 +207,7 @@ jobs:
             echo "::notice::Another run is already in progress — skipping re-trigger"
             exit 0
           fi
-          echo "Pipeline did not converge (result=${{ needs.refresh.result }}) — re-triggering with saved cache"
+          echo "Pipeline did not converge — re-triggering with saved cache"
           gh workflow run "Monthly Pipeline Refresh" --repo "${{ github.repository }}"
           echo "::notice::Re-triggered workflow. Cache was saved incrementally — next run resumes from where this one stopped."
 

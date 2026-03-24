@@ -75,9 +75,13 @@ def _serpapi_get(api_key: str, author_id: str, start: int = 0, num: int = _PAGE_
 
     try:
         raw = http_fetch_bytes(url, headers, HTTP_TIMEOUT_DEFAULT)
-        return json.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
+        data: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        if "error" in data:
+            _log.warning("SerpAPI returned error for %s: %s", author_id, data["error"])
+            return {}
+        return data
     except Exception as exc:
-        _log.debug("SerpAPI request failed: %s", exc)
+        _log.warning("SerpAPI request failed for %s: %s", author_id, exc)
         return {}
 
 
