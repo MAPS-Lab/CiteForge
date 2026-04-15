@@ -1,8 +1,8 @@
 {
   "last_updated": "2026-04",
-  "cache_positive_hits": 4453,
-  "cache_negative_hits": 3168,
-  "cache_misses": 538,
-  "total_queries": 8159,
-  "hit_rate": 93.4
+  "cache_positive_hits": 4474,
+  "cache_negative_hits": 3462,
+  "cache_misses": 387,
+  "total_queries": 8323,
+  "hit_rate": 95.4
 }
