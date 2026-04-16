@@ -203,7 +203,7 @@ jobs:
           echo "Job result: ${{ needs.refresh.result }}"
 
       - name: Re-trigger if not converged
-        if: needs.refresh.result == 'success' && needs.refresh.outputs.converged != 'true'
+        if: (needs.refresh.result == 'success' || needs.refresh.result == 'cancelled') && needs.refresh.outputs.converged != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
