@@ -50,7 +50,8 @@ from .text_utils import (
 )
 
 _DAGSTUHL_DOI_RE = re.compile(
-    r"^10\.4230/(lipics|oasics)\.([a-z0-9]+)\.(\d+)(?:\.\d+)?$", re.IGNORECASE,
+    r"^10\.4230/(lipics|oasics)\.([a-z0-9]+)\.(\d+)(?:\.\d+)?$",
+    re.IGNORECASE,
 )
 
 _AUTHOR_DIGIT_SUFFIX_RE = re.compile(r"\s+\d{1,4}\s*$")
@@ -170,7 +171,7 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
     Returns (fixed_string, was_modified).
     """
     # Fix capital "And" separator first (e.g. "and And Duncan" → "and Duncan")
-    val = re.sub(r'\band\s+And\b', 'and', author_val)
+    val = re.sub(r"\band\s+And\b", "and", author_val)
     val = val.replace(" And ", _AUTHOR_SEPARATOR)
     and_was_fixed = val != author_val
     parts = [p.strip() for p in val.split(_AUTHOR_SEPARATOR)]
@@ -258,7 +259,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         rank = type_rank.get(src, 99)
         is_valid = ktype in valid_types
         is_better = rank < type_rank.get(best_type_src, 99)
-        is_same_src_update = (rank == type_rank.get(best_type_src, 99) and ktype != etype)
+        is_same_src_update = rank == type_rank.get(best_type_src, 99) and ktype != etype
         if is_valid and (is_better or is_same_src_update):
             prev_type, prev_src = etype, best_type_src
             etype = ktype
@@ -318,19 +319,19 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             if k == "pages":
                 new_str = str(v).strip()
                 # Validate: pages must start with a digit (page numbers only)
-                if not re.match(r'^\d', new_str):
+                if not re.match(r"^\d", new_str):
                     logger.debug(f"PAGES_REJECT | val={v} | reason=no_leading_digit", category=LogCategory.MERGE)
                     continue
                 # Reject manuscript IDs containing dots (e.g., "2025.11.07.685935")
-                if '.' in new_str:
+                if "." in new_str:
                     logger.debug(f"PAGES_REJECT | val={v} | reason=contains_dot", category=LogCategory.MERGE)
                     continue
                 # Reject article IDs masquerading as pages (SAGE/Wiley use long numeric IDs)
                 # Check each page component individually so ranges like "13905-13917" pass
-                parts = re.split(r'[-\u2013\u2014,\s]+', new_str)
-                overflow = [p for p in parts if p.strip() and len(re.sub(r'\D', '', p)) > PAGES_MAX_DIGITS]
+                parts = re.split(r"[-\u2013\u2014,\s]+", new_str)
+                overflow = [p for p in parts if p.strip() and len(re.sub(r"\D", "", p)) > PAGES_MAX_DIGITS]
                 if overflow:
-                    digits = len(re.sub(r'\D', '', overflow[0]))
+                    digits = len(re.sub(r"\D", "", overflow[0]))
                     logger.debug(
                         f"PAGES_REJECT | val={v} | reason=component_too_long({digits}digits)",
                         category=LogCategory.MERGE,
@@ -359,12 +360,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 new_parts = parse_authors_any(str(v))
                 if cur_parts and new_parts and len(cur_parts) == len(new_parts):
                     # Count initials-only tokens (e.g. "J." but not "Jr.")
-                    cur_inits = sum(
-                        1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok)
-                    )
-                    new_inits = sum(
-                        1 for name in new_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok)
-                    )
+                    cur_inits = sum(1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
+                    new_inits = sum(1 for name in new_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
                     if new_inits > cur_inits:
                         logger.debug(
                             f"AUTHOR_KEEP_COMPLETE | cur_initials={cur_inits} new_initials={new_inits} "
@@ -390,8 +387,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 # Compare content length without whitespace so OCR artifacts
                 # (e.g., "Un met" vs "Unmet") don't give the broken title a
                 # false length advantage.
-                cur_len = len(re.sub(r'\s+', '', str(cur)))
-                new_len = len(re.sub(r'\s+', '', str(v)))
+                cur_len = len(re.sub(r"\s+", "", str(cur)))
+                new_len = len(re.sub(r"\s+", "", str(v)))
 
                 # If new title is significantly shorter (< 70% of current length),
                 # only replace if it comes from a MUCH more trusted source
@@ -414,8 +411,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 # If current is a generic series name and new is more specific, always accept
                 if cur_lower in GENERIC_SERIES_NAMES and new_lower not in GENERIC_SERIES_NAMES:
                     logger.debug(
-                        f"BOOKTITLE_UPGRADE | generic->specific | old={str(cur)[:60]} "
-                        f"| new={str(v)[:60]} | src={src}",
+                        f"BOOKTITLE_UPGRADE | generic->specific | old={str(cur)[:60]} | new={str(v)[:60]} | src={src}",
                         category=LogCategory.MERGE,
                     )
                     merged[k] = v
@@ -488,24 +484,20 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             (
                 src
                 for src, e in enrichers
-                if src in trusted_doi_sources
-                and e
-                and _norm_doi((e.get("fields") or {}).get("doi")) == merged_doi_norm
+                if src in trusted_doi_sources and e and _norm_doi((e.get("fields") or {}).get("doi")) == merged_doi_norm
             ),
             None,
         )
         if not doi_trusted_src:
             doi_src = field_sources.get("doi", "unknown")
             logger.debug(
-                f"doi_untrusted | source={doi_src} | trusted_sources={sorted(trusted_doi_sources)} "
-                "| action=removed",
+                f"doi_untrusted | source={doi_src} | trusted_sources={sorted(trusted_doi_sources)} | action=removed",
                 category=LogCategory.CLEANUP,
             )
             merged.pop("doi", None)
         else:
             logger.debug(
-                f"doi_trusted | source={field_sources.get('doi', 'unknown')} "
-                f"| verified_via={doi_trusted_src}",
+                f"doi_trusted | source={field_sources.get('doi', 'unknown')} | verified_via={doi_trusted_src}",
                 category=LogCategory.CLEANUP,
             )
 
@@ -541,16 +533,16 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     pages_val = merged.get("pages", "")
     if pages_val:
         pages_str = str(pages_val).strip()
-        if not re.match(r'^\d', pages_str) or '.' in pages_str:
+        if not re.match(r"^\d", pages_str) or "." in pages_str:
             logger.debug(f"pages_remove | val={pages_str} | reason=invalid_format", category=LogCategory.CLEANUP)
             merged.pop("pages", None)
         else:
-            parts = re.split(r'[-\u2013\u2014,\s]+', pages_str)
-            if any(len(re.sub(r'\D', '', p)) > PAGES_MAX_DIGITS for p in parts if p.strip()):
+            parts = re.split(r"[-\u2013\u2014,\s]+", pages_str)
+            if any(len(re.sub(r"\D", "", p)) > PAGES_MAX_DIGITS for p in parts if p.strip()):
                 logger.debug(f"pages_remove | val={pages_str} | reason=digit_overflow", category=LogCategory.CLEANUP)
                 merged.pop("pages", None)
             else:
-                cleaned_pages = re.sub(r'\b0+(\d)', r'\1', pages_str)
+                cleaned_pages = re.sub(r"\b0+(\d)", r"\1", pages_str)
                 if cleaned_pages != pages_str:
                     logger.debug(f"pages_leading_zeros | {pages_str}->{cleaned_pages}", category=LogCategory.CLEANUP)
                     merged["pages"] = cleaned_pages
@@ -568,7 +560,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # Strip " : the preprint server for X" suffixes added by PubMed/Europe PMC
     journal_val = merged.get("journal", "")
     if journal_val:
-        journal_cleaned = re.sub(r'\s*:\s*the preprint server for [\w\s]+$', '', journal_val, flags=re.IGNORECASE)
+        journal_cleaned = re.sub(r"\s*:\s*the preprint server for [\w\s]+$", "", journal_val, flags=re.IGNORECASE)
         if journal_cleaned != journal_val:
             logger.debug(
                 f"journal_preprint_suffix | {journal_val}->{journal_cleaned.strip()}",
@@ -606,8 +598,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 _cur_pub = merged.get("publisher", "")
                 if _cur_pub and _cur_pub != _correct_pub:
                     logger.debug(
-                        f"publisher_correct | journal={journal_lower[:50]} "
-                        f"| publisher={_cur_pub}->{_correct_pub}",
+                        f"publisher_correct | journal={journal_lower[:50]} | publisher={_cur_pub}->{_correct_pub}",
                         category=LogCategory.CLEANUP,
                     )
                     merged["publisher"] = _correct_pub
@@ -634,15 +625,15 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         field_val = merged.get(field, "")
         if field_val and isinstance(field_val, str):
             cleaned = html.unescape(field_val)
-            cleaned = re.sub(r'<[^>]+>', '', cleaned)
+            cleaned = re.sub(r"<[^>]+>", "", cleaned)
             if cleaned != field_val:
                 logger.debug(f"html_decode | field={field} | changed=True", category=LogCategory.CLEANUP)
                 merged[field] = cleaned.strip()
 
     title_val = merged.get("title", "")
-    if title_val and isinstance(title_val, str) and title_val.rstrip().endswith('*'):
+    if title_val and isinstance(title_val, str) and title_val.rstrip().endswith("*"):
         logger.debug("title_asterisk | removed trailing *", category=LogCategory.CLEANUP)
-        merged["title"] = title_val.rstrip().rstrip('*').rstrip()
+        merged["title"] = title_val.rstrip().rstrip("*").rstrip()
 
     note_val = merged.get("note", "")
     if note_val and note_val.strip().startswith("PMID:"):
@@ -671,9 +662,19 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         _current_url = (merged.get("url") or "").lower()
         if _current_url and any(
             ps in _current_url
-            for ps in ("arxiv.org", "biorxiv.org", "medrxiv.org", "ssrn.com",
-                        "preprints.org", "techrxiv.org", "researchsquare.com",
-                        "10.1101/", "10.2139/", "10.20944/", "10.21203/")
+            for ps in (
+                "arxiv.org",
+                "biorxiv.org",
+                "medrxiv.org",
+                "ssrn.com",
+                "preprints.org",
+                "techrxiv.org",
+                "researchsquare.com",
+                "10.1101/",
+                "10.2139/",
+                "10.20944/",
+                "10.21203/",
+            )
         ):
             merged["url"] = f"https://doi.org/{doi_val}"
             logger.debug(
@@ -923,8 +924,14 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     return {"type": etype, "key": primary.get("key"), "fields": merged}
 
 
-def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], prefer_path: str | None = None,
-                       gemini_api_key: str | None = None, author_name: str | None = None) -> tuple[str, bool]:
+def save_entry_to_file(
+    out_dir: str,
+    author_id: str,
+    entry: dict[str, Any],
+    prefer_path: str | None = None,
+    gemini_api_key: str | None = None,
+    author_name: str | None = None,
+) -> tuple[str, bool]:
     """
     Write a BibTeX entry to disk inside an author-specific output directory,
     choosing a short descriptive filename from the entry fields. It reuses a
@@ -943,18 +950,18 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
     author_dir = os.path.join(out_dir, author_dirname)
     os.makedirs(author_dir, exist_ok=True)
 
-    all_files = sorted(f for f in os.listdir(author_dir) if f.endswith('.bib'))
-    collision_files = (
-        set(all_files) - {os.path.basename(prefer_path)} if prefer_path else set(all_files)
-    )
+    all_files = sorted(f for f in os.listdir(author_dir) if f.endswith(".bib"))
+    collision_files = set(all_files) - {os.path.basename(prefer_path)} if prefer_path else set(all_files)
 
     filename = short_filename_for_entry(
-        entry, gemini_api_key=gemini_api_key, existing_files=collision_files,
+        entry,
+        gemini_api_key=gemini_api_key,
+        existing_files=collision_files,
     )
 
     new_content = bibtex_from_dict(entry)
-    new_fields = entry.get('fields', {})
-    new_doi = _norm_doi(new_fields.get('doi')) or ''
+    new_fields = entry.get("fields", {})
+    new_doi = _norm_doi(new_fields.get("doi")) or ""
     new_title_str = new_fields.get("title", "")
     duplicate_found = False
     duplicate_path = None
@@ -980,8 +987,8 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                 existing_entry = parse_bibtex_to_dict(existing_content)
 
                 if existing_entry:
-                    existing_fields = existing_entry.get('fields', {})
-                    existing_doi = _norm_doi(existing_fields.get('doi')) or ''
+                    existing_fields = existing_entry.get("fields", {})
+                    existing_doi = _norm_doi(existing_fields.get("doi")) or ""
 
                     if existing_doi and new_doi and existing_doi == new_doi:
                         logger.debug(
@@ -1014,8 +1021,8 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             n_eprint = extract_arxiv_eprint(entry)
                             if e_eprint and n_eprint and e_eprint != n_eprint:
                                 continue
-                            e_title = existing_fields.get('title', '')
-                            n_title = new_fields.get('title', '')
+                            e_title = existing_fields.get("title", "")
+                            n_title = new_fields.get("title", "")
                             preprint_sim = title_similarity(e_title, n_title)
                             if preprint_sim >= SIM_PREPRINT_TITLE_THRESHOLD:
                                 score = compute_dedup_score(existing_fields, new_fields)
@@ -1038,8 +1045,8 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                         continue
 
                     if external_ids_match(existing_fields, new_fields):
-                        existing_title = existing_fields.get('title', '')
-                        new_title = new_fields.get('title', '')
+                        existing_title = existing_fields.get("title", "")
+                        new_title = new_fields.get("title", "")
                         sim = title_similarity(existing_title, new_title)
                         if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
                             logger.debug(
@@ -1050,21 +1057,20 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             duplicate_path = existing_path
                             break
 
-                    existing_title = existing_fields.get('title', '')
-                    new_title = new_fields.get('title', '')
+                    existing_title = existing_fields.get("title", "")
+                    new_title = new_fields.get("title", "")
 
                     # Citation key match requires title verification to avoid
                     # Gemini generating identical short titles for different papers
-                    existing_key = existing_entry.get('key', '').strip()
-                    new_key = entry.get('key', '').strip()
+                    existing_key = existing_entry.get("key", "").strip()
+                    new_key = entry.get("key", "").strip()
                     if existing_key and new_key and existing_key == new_key:
                         key_title_sim = title_similarity(existing_title, new_title)
                         # Also check if shorter title is a prefix of longer (truncated stub)
                         _e_norm = normalize_title(existing_title)
                         _n_norm = normalize_title(new_title)
-                        _is_prefix = (
-                            (_e_norm.startswith(_n_norm) and len(_n_norm) > 20)
-                            or (_n_norm.startswith(_e_norm) and len(_e_norm) > 20)
+                        _is_prefix = (_e_norm.startswith(_n_norm) and len(_n_norm) > 20) or (
+                            _n_norm.startswith(_e_norm) and len(_e_norm) > 20
                         )
                         if key_title_sim >= SIM_FILE_DUPLICATE_THRESHOLD or _is_prefix:
                             logger.debug(
@@ -1079,7 +1085,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                         # Same key + strong author overlap = same paper with
                         # title change between preprint and publication.
                         _key_author_overlap = author_overlap_ratio(
-                            existing_fields.get('author'), new_fields.get('author')
+                            existing_fields.get("author"), new_fields.get("author")
                         )
                         if _key_author_overlap >= 0.8 and key_title_sim >= 0.55:
                             logger.debug(
@@ -1105,7 +1111,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             if (
                                 (e_preprint ^ n_preprint)
                                 and key_title_sim >= SIM_PREPRINT_TITLE_THRESHOLD
-                                and authors_overlap(existing_fields.get('author'), new_fields.get('author'))
+                                and authors_overlap(existing_fields.get("author"), new_fields.get("author"))
                             ):
                                 key_preprint_score = compute_dedup_score(existing_fields, new_fields)
                                 logger.debug(
@@ -1131,7 +1137,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
 
                     # Truncated title fallback: one title is a prefix of the other
                     if title_is_truncated_match(existing_title, new_title) and authors_overlap(
-                        existing_fields.get('author'), new_fields.get('author')
+                        existing_fields.get("author"), new_fields.get("author")
                     ):
                         logger.debug(
                             f"FILE_MATCH | TRUNCATED | file={existing_filename} | authors_overlap=True",
@@ -1143,12 +1149,10 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
 
                     # Strong author overlap: multi-author team with moderate title similarity
                     if sim >= 0.6:
-                        e_authors = parse_authors_any(existing_fields.get('author', ''))
-                        n_authors = parse_authors_any(new_fields.get('author', ''))
+                        e_authors = parse_authors_any(existing_fields.get("author", ""))
+                        n_authors = parse_authors_any(new_fields.get("author", ""))
                         if len(e_authors) >= 2 and len(n_authors) >= 2:
-                            overlap = author_overlap_ratio(
-                                existing_fields.get('author'), new_fields.get('author')
-                            )
+                            overlap = author_overlap_ratio(existing_fields.get("author"), new_fields.get("author"))
                             if overlap >= 0.9:
                                 score = compute_dedup_score(existing_fields, new_fields)
                                 if score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
@@ -1165,16 +1169,15 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
 
                     # Preprint/published pair with evidence on the published side
                     if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-                        e_journal = existing_fields.get('journal', '').lower()
-                        n_journal = new_fields.get('journal', '').lower()
+                        e_journal = existing_fields.get("journal", "").lower()
+                        n_journal = new_fields.get("journal", "").lower()
                         e_preprint = _is_preprint_doi(existing_doi) or any(ps in e_journal for ps in PREPRINT_SERVERS)
                         n_preprint = _is_preprint_doi(new_doi) or any(ps in n_journal for ps in PREPRINT_SERVERS)
                         if (e_preprint ^ n_preprint) and authors_overlap(
-                            existing_fields.get('author'), new_fields.get('author')
+                            existing_fields.get("author"), new_fields.get("author")
                         ):
-                            published_has_evidence = (
-                                (e_preprint and (new_doi or n_journal))
-                                or (n_preprint and (existing_doi or e_journal))
+                            published_has_evidence = (e_preprint and (new_doi or n_journal)) or (
+                                n_preprint and (existing_doi or e_journal)
                             )
                             if published_has_evidence:
                                 logger.debug(
@@ -1206,10 +1209,10 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
             existing_entry = parse_bibtex_to_dict(existing_content)
 
             if existing_entry:
-                existing_fields = existing_entry.get('fields', {})
-                existing_year = existing_fields.get('year', '')
-                new_year = new_fields.get('year', '')
-                existing_doi = _norm_doi(existing_fields.get('doi')) or ''
+                existing_fields = existing_entry.get("fields", {})
+                existing_year = existing_fields.get("year", "")
+                new_year = new_fields.get("year", "")
+                existing_doi = _norm_doi(existing_fields.get("doi")) or ""
 
                 # Check preprint/published relationship when DOIs differ
                 existing_is_preprint = existing_doi and _is_preprint_doi(existing_doi)
@@ -1227,16 +1230,14 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                     if not existing_is_preprint and (new_is_preprint or not new_doi):
                         # Existing is published, new is preprint -> keep published
                         logger.debug(
-                            f"DECISION | KEEP_EXISTING | reason=existing_published_new_preprint "
-                            f"| file={dup_basename}",
+                            f"DECISION | KEEP_EXISTING | reason=existing_published_new_preprint | file={dup_basename}",
                             category=LogCategory.DEDUP,
                         )
                         skip_write = True
                     elif existing_is_preprint and not new_is_preprint:
                         # Existing is preprint, new is published -> replace preprint
                         logger.debug(
-                            f"DECISION | REPLACE | reason=new_published_beats_preprint "
-                            f"| file={dup_basename}",
+                            f"DECISION | REPLACE | reason=new_published_beats_preprint | file={dup_basename}",
                             category=LogCategory.DEDUP,
                         )
                         _replace_existing()
@@ -1282,13 +1283,13 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                     )
                 else:
                     # Same year, same DOI (or both missing) -> reuse existing filename
-                    existing_key = existing_entry.get('key', '')
+                    existing_key = existing_entry.get("key", "")
                     if existing_key:
                         logger.debug(
                             f"DECISION | REUSE_KEY | reason=same_pub | key={existing_key}",
                             category=LogCategory.DEDUP,
                         )
-                        entry['key'] = existing_key
+                        entry["key"] = existing_key
         except OSError:
             pass
 
@@ -1319,8 +1320,8 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
 
                 existing_entry = parse_bibtex_to_dict(existing_content)
                 if existing_entry:
-                    existing_fields = existing_entry.get('fields', {})
-                    existing_doi = _norm_doi(existing_fields.get('doi')) or ''
+                    existing_fields = existing_entry.get("fields", {})
+                    existing_doi = _norm_doi(existing_fields.get("doi")) or ""
 
                     if existing_doi and new_doi and existing_doi == new_doi:
                         logger.debug(
@@ -1346,8 +1347,8 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                         )
 
                     else:
-                        existing_key = existing_entry.get('key', '').strip()
-                        new_key = entry.get('key', '').strip()
+                        existing_key = existing_entry.get("key", "").strip()
+                        new_key = entry.get("key", "").strip()
                         if existing_key and new_key and existing_key == new_key:
                             logger.debug(
                                 f"COLLISION_CHECK | file={filename} | identical_content=False "
@@ -1356,8 +1357,8 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                             )
                             break
 
-                        existing_title = existing_fields.get('title', '')
-                        new_title = new_fields.get('title', '')
+                        existing_title = existing_fields.get("title", "")
+                        new_title = new_fields.get("title", "")
                         sim = title_similarity(existing_title, new_title)
                         logger.debug(
                             f"COLLISION_CHECK | file={filename} | identical_content=False "
@@ -1373,7 +1374,7 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
         # should be rare (short_filename_for_entry adds more words to avoid
         # collisions), but can happen for very similar titles.  Log and
         # return the existing path instead of crashing the pipeline.
-        collision_title = entry.get('fields', {}).get('title', '')
+        collision_title = entry.get("fields", {}).get("title", "")
         collision_path = os.path.join(author_dir, filename)
         logger.warn(
             f"Filename collision for '{collision_title}' -- existing file kept: {collision_path}",
@@ -1393,26 +1394,31 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
 
             if existing_entry:
                 # Reuse existing citation key to prevent filename/key mismatches
-                existing_key = existing_entry.get('key', '')
+                existing_key = existing_entry.get("key", "")
                 if existing_key:
-                    entry['key'] = existing_key
+                    entry["key"] = existing_key
 
-                existing_nonempty = {k: v for k, v in existing_entry.get('fields', {}).items() if v}
-                new_nonempty = {k: v for k, v in entry.get('fields', {}).items() if v}
+                existing_nonempty = {k: v for k, v in existing_entry.get("fields", {}).items() if v}
+                new_nonempty = {k: v for k, v in entry.get("fields", {}).items() if v}
 
-                # Keep existing if it has more fields (prevents downgrading)
-                if len(existing_nonempty) > len(new_nonempty):
+                existing_doi = _norm_doi(existing_nonempty.get("doi")) or ""
+                upgrading_from_preprint = (
+                    existing_doi and new_doi and _is_preprint_doi(existing_doi) and not _is_preprint_doi(new_doi)
+                )
+
+                # Keep existing if it has more fields (prevents downgrading),
+                # UNLESS this is a preprint→published upgrade (field count may
+                # drop because arXiv-specific fields like eprint are removed).
+                if len(existing_nonempty) > len(new_nonempty) and not upgrading_from_preprint:
                     should_write = False
 
-                existing_doi = _norm_doi(existing_nonempty.get('doi')) or ''
                 if existing_doi and new_doi and not _is_preprint_doi(existing_doi) and _is_preprint_doi(new_doi):
                     should_write = False
 
                 # Never overwrite a specific conference booktitle with a generic series name
-                existing_bt = (existing_nonempty.get('booktitle') or '').lower().strip()
-                new_bt = (new_nonempty.get('booktitle') or '').lower().strip()
-                if (existing_bt and existing_bt not in GENERIC_SERIES_NAMES
-                        and new_bt in GENERIC_SERIES_NAMES):
+                existing_bt = (existing_nonempty.get("booktitle") or "").lower().strip()
+                new_bt = (new_nonempty.get("booktitle") or "").lower().strip()
+                if existing_bt and existing_bt not in GENERIC_SERIES_NAMES and new_bt in GENERIC_SERIES_NAMES:
                     should_write = False
                 logger.debug(
                     f"PREWRITE_CHECK | file={path} | should_write={should_write} "
@@ -1471,12 +1477,11 @@ def save_entry_to_file(out_dir: str, author_id: str, entry: dict[str, Any], pref
                     # Different paper — disambiguate key
                     _old_key = new_key
                     # Use first significant title word not in the other key
-                    _title_words = re.findall(r'[A-Z][a-z]+', new_fields.get("title", ""))
+                    _title_words = re.findall(r"[A-Z][a-z]+", new_fields.get("title", ""))
                     _suffix = next((w for w in _title_words if w not in new_key), "B")
                     entry["key"] = f"{new_key}{_suffix}"
                     logger.debug(
-                        f"KEY_COLLISION_FIX | old={_old_key} | new={entry['key']} "
-                        f"| other_file={other_file}",
+                        f"KEY_COLLISION_FIX | old={_old_key} | new={entry['key']} | other_file={other_file}",
                         category=LogCategory.DEDUP,
                     )
                     break
