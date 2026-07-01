@@ -27,7 +27,7 @@ from src.io_utils import (
 )
 from src.log_utils import LogCategory, logger
 from src.pipeline.postrun import finalize_run
-from src.pipeline.scheduler import run_all
+from src.pipeline.scheduler import prioritize_records, run_all
 from src.textnorm import _is_corrupted_title, _is_garbage_title  # noqa: F401  # re-exported for test imports
 
 
@@ -88,6 +88,8 @@ def main() -> int:
         logger.close()
         return 2
 
+    records = prioritize_records(records, out_dir)
+
     csv_path = os.path.join(out_dir, "summary.csv")
     summary_csv_path: str | None = csv_path
     try:
@@ -97,7 +99,7 @@ def main() -> int:
         logger.warn(f"Could not initialize summary CSV: {e}", category=LogCategory.ERROR)
         summary_csv_path = None
 
-    total_saved, processed, records = run_all(
+    total_saved, processed = run_all(
         serpapi_key,
         serply_key,
         s2_api_key,

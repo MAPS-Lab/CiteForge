@@ -227,6 +227,30 @@ def count_existing_papers(rec: Record, out_dir: str) -> int:
         return 0
 
 
+def prioritize_records(records: list[Record], out_dir: str) -> list[Record]:
+    """Sort authors by existing paper count (descending) so authors with more
+    papers finish first; ties break on (name, id) for deterministic ordering.
+
+    Emits the PLAN log lines and returns the count-sorted list. Kept separate
+    from run_all so the caller can log/sort before initializing the summary CSV,
+    matching the original run.log line ordering.
+    """
+    logger.info(
+        "Sorting authors by existing paper count (authors with more papers will be processed first)",
+        category=LogCategory.PLAN,
+    )
+    records_with_counts = [(rec, count_existing_papers(rec, out_dir)) for rec in records]
+    records_with_counts.sort(key=lambda x: (-x[1], x[0].name.lower(), x[0].scholar_id or x[0].dblp or ""))
+
+    # Log sorting results
+    if records_with_counts:
+        max_papers = records_with_counts[0][1]
+        min_papers = records_with_counts[-1][1]
+        logger.info(f"Author range: {max_papers} papers (max) to {min_papers} papers (min)", category=LogCategory.PLAN)
+
+    return [rec for rec, _ in records_with_counts]
+
+
 def run_all(
     serpapi_key: str,
     serply_key: str | None,
@@ -237,30 +261,14 @@ def run_all(
     out_dir: str,
     summary_csv_path: str | None,
     force_enrich: bool,
-) -> tuple[int, int, list[Record]]:
-    """Sort authors, then enrich every author in parallel worker threads.
+) -> tuple[int, int]:
+    """Enrich every (already count-sorted) author in parallel worker threads.
 
-    Sorts records by existing paper count, prioritizes authors without an
-    output directory, installs a thread excepthook, and drives a
-    ThreadPoolExecutor over process_record. Returns (total_saved, processed,
-    records) where records is the count-sorted list used by finalize_run.
+    Prioritizes authors without an output directory, installs a thread
+    excepthook, and drives a ThreadPoolExecutor over process_record. Expects
+    ``records`` to be the count-sorted list from prioritize_records. Returns
+    (total_saved, processed).
     """
-    # Sort authors by existing paper count (descending) so authors with more papers finish first
-    # Use (count desc, name, id) for deterministic ordering when counts are equal
-    logger.info(
-        "Sorting authors by existing paper count (authors with more papers will be processed first)",
-        category=LogCategory.PLAN,
-    )
-    records_with_counts = [(rec, count_existing_papers(rec, out_dir)) for rec in records]
-    records_with_counts.sort(key=lambda x: (-x[1], x[0].name.lower(), x[0].scholar_id or x[0].dblp or ""))
-    records = [rec for rec, _ in records_with_counts]
-
-    # Log sorting results
-    if records_with_counts:
-        max_papers = records_with_counts[0][1]
-        min_papers = records_with_counts[-1][1]
-        logger.info(f"Author range: {max_papers} papers (max) to {min_papers} papers (min)", category=LogCategory.PLAN)
-
     total_saved = 0
     processed = 0
 
@@ -344,4 +352,4 @@ def run_all(
                 f"Pipeline timed out with {len(remaining)} author(s) still pending: " + ", ".join(remaining[:5]),
                 category=LogCategory.ERROR,
             )
-    return total_saved, processed, records
+    return total_saved, processed
