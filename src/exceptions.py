@@ -25,6 +25,7 @@ __all__ = [
     "PARSE_ERRORS",
     "TIMEOUT_ERRORS",
     "XML_PARSE_ERRORS",
+    "DecodeError",
 ]
 
 # HTTP/URL request failures
@@ -36,8 +37,18 @@ TIMEOUT_ERRORS = (TimeoutError,)
 # network: HTTP + timeout + runtime
 NETWORK_ERRORS = HTTP_ERRORS + TIMEOUT_ERRORS + (RuntimeError,)
 
+
+class DecodeError(ValueError):
+    """Raised when an API returns an undecodable/non-JSON body (e.g. an HTML
+    gateway page under a 200). A ValueError subclass so existing
+    ``except ValueError`` sites keep catching it, while membership in
+    DECODE_ERRORS (hence ALL_API_ERRORS) lets every API client degrade
+    gracefully to a skipped source instead of dropping the whole article.
+    Unrelated ValueErrors are deliberately NOT caught by ALL_API_ERRORS."""
+
+
 # text encoding/decoding
-DECODE_ERRORS = (UnicodeDecodeError, UnicodeError)
+DECODE_ERRORS = (UnicodeDecodeError, UnicodeError, DecodeError)
 
 # structured data parsing
 PARSE_ERRORS = (ValueError, TypeError, KeyError)

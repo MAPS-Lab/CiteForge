@@ -28,7 +28,7 @@ from .config import (
     REDACT_QUERY_PARAM_NAMES,
     SESSION_ROTATION_THRESHOLD,
 )
-from .exceptions import ALL_API_ERRORS, DECODE_ERRORS, NUMERIC_ERRORS
+from .exceptions import ALL_API_ERRORS, DECODE_ERRORS, NUMERIC_ERRORS, DecodeError
 
 T = TypeVar("T")
 
@@ -290,7 +290,9 @@ def handle_api_errors(default_return: Any = None) -> Callable[[Callable[..., T]]
             try:
                 return func(*args, **kwargs)
             except ALL_API_ERRORS as e:
-                logging.getLogger("CiteForge.http").debug("API error in %s: %s", func.__qualname__, e)
+                logging.getLogger("CiteForge.http").debug(
+                    "API error in %s: %s", func.__qualname__, _scrub_secrets(str(e))
+                )
                 return default_return
 
         return wrapper
@@ -397,7 +399,7 @@ def _http_request(
             time.sleep((2**attempt) + random.uniform(0, 1))
 
     # Unreachable -- the loop always returns or raises -- but satisfies mypy.
-    raise requests.exceptions.RequestException(f"Failed to {method} {url}")
+    raise requests.exceptions.RequestException(f"Failed to {method} {_scrub_secrets(url)}")
 
 
 def http_fetch_bytes(
@@ -422,10 +424,11 @@ def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
         result: dict[str, Any] = json.loads(raw.decode("utf-8"))
         return result
     except json.JSONDecodeError as ex:
-        # include a preview for debugging
-        preview = raw[:256].decode("utf-8", errors="replace")
+        # include a preview for debugging (scrub the preview too — an upstream
+        # error body may echo request params carrying a key)
+        preview = _scrub_secrets(raw[:256].decode("utf-8", errors="replace"))
         safe_url = _scrub_secrets(url)
-        raise ValueError(f"Invalid JSON from {safe_url!r}: {ex.msg} at pos {ex.pos}; preview={preview!r}") from ex
+        raise DecodeError(f"Invalid JSON from {safe_url!r}: {ex.msg} at pos {ex.pos}; preview={preview!r}") from ex
 
 
 def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any]:

@@ -12,6 +12,8 @@ import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src import bibtex_utils as bt
 from src import id_utils, merge_utils, text_utils
 from src.api_generics import (
@@ -3275,28 +3277,63 @@ class TestAuthorMergeCompleteness:
 
 
 class TestDecodeValueErrorContainment:
-    """A malformed-JSON ValueError from _decode_json_bytes must not escape.
+    """A malformed-200 body (HTML gateway page) must not crash the run.
 
-    The inner catch used NETWORK_ERRORS and the @handle_api_errors decorator
-    uses ALL_API_ERRORS; neither includes ValueError, so a bad 200-response
-    body crashed the run. Fix broadens the inner catch to ALL_FETCH_ERRORS.
+    _decode_json_bytes raises DecodeError (a ValueError subclass) on a non-JSON
+    body. Root-cause fix: DecodeError is a member of DECODE_ERRORS (hence
+    ALL_API_ERRORS), so every ``except ALL_API_ERRORS`` API client -- including
+    the generic search path backing S2/Crossref/OpenAlex -- degrades to a
+    skipped source instead of dropping the whole article. Unrelated ValueErrors
+    are deliberately NOT swallowed by ALL_API_ERRORS.
     """
 
-    def test_datacite_swallows_valueerror(self) -> None:
+    def test_decode_error_is_caught_by_all_api_errors(self) -> None:
+        from src.exceptions import ALL_API_ERRORS, DecodeError
+
+        # The invariant that makes all ~11 `except ALL_API_ERRORS` sites graceful.
+        assert issubclass(DecodeError, ValueError)
+        assert issubclass(DecodeError, ALL_API_ERRORS)
+        # A bare/unrelated ValueError must still propagate (no masking).
+        assert not issubclass(ValueError, ALL_API_ERRORS)
+
+    def test_decode_json_bytes_raises_decode_error(self) -> None:
+        from src.exceptions import DecodeError
+        from src.http_utils import _decode_json_bytes
+
+        with pytest.raises(DecodeError):
+            _decode_json_bytes(b"<html>not json</html>", "https://api.openalex.org/works?q=x")
+
+    def test_generic_search_swallows_decode_error(self) -> None:
+        # The primary enrichment path (OpenAlex/Crossref/S2) must return None,
+        # not propagate, when an upstream serves an HTML 200 body.
+        from src import api_generics
+        from src.api_configs import OPENALEX_SEARCH_CONFIG
+        from src.exceptions import DecodeError
+
+        with (
+            patch.object(api_generics.response_cache, "get", return_value=None),
+            patch.object(api_generics.response_cache, "put"),
+            patch.object(api_generics, "http_get_json", side_effect=DecodeError("Invalid JSON from 'https://x'")),
+        ):
+            assert api_generics.search_api_generic("A Title", "Author", OPENALEX_SEARCH_CONFIG) is None
+
+    def test_datacite_swallows_decode_error(self) -> None:
         from src.clients import utility_apis
+        from src.exceptions import DecodeError
 
         with (
             patch.object(utility_apis.response_cache, "get", return_value=None),
-            patch.object(utility_apis, "http_get_json", side_effect=ValueError("Invalid JSON from 'https://x'")),
+            patch.object(utility_apis, "http_get_json", side_effect=DecodeError("Invalid JSON from 'https://x'")),
         ):
             assert utility_apis.datacite_search_doi("10.5281/zenodo.123") is None
 
-    def test_orcid_swallows_valueerror(self) -> None:
+    def test_orcid_swallows_decode_error(self) -> None:
         from src.clients import utility_apis
+        from src.exceptions import DecodeError
 
         with (
             patch.object(utility_apis.response_cache, "get", return_value=None),
-            patch.object(utility_apis, "http_get_json", side_effect=ValueError("Invalid JSON")),
+            patch.object(utility_apis, "http_get_json", side_effect=DecodeError("Invalid JSON")),
         ):
             assert utility_apis.orcid_fetch_works("0000-0001-2345-6789") == []
 
