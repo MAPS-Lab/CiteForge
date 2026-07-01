@@ -1,7 +1,8 @@
 """Tests for the stage-parameterized canonicalize() dispatch.
 
-Covers per-rule behavior at CanonicalStage.POST_MERGE (Site C) and proves the
-POST_MERGE rule set is a data fixpoint on the committed corpus (no oscillation).
+Covers per-rule behavior at CanonicalStage.POST_MERGE (Site C), LOAD_REPAIR
+(Site B), and COMPLETE_SKIP_FINALIZE (complete-entry skip path), and proves each
+rule set is a data fixpoint on the committed corpus (no oscillation).
 """
 
 from __future__ import annotations
@@ -39,6 +40,13 @@ def _canon(entry: dict[str, Any]) -> dict[str, Any]:
     """Run POST_MERGE canonicalize on a copy and return the mutated copy."""
     e = copy.deepcopy(entry)
     canonicalize(e, stage=CanonicalStage.POST_MERGE)
+    return e
+
+
+def _complete_finalize(entry: dict[str, Any]) -> dict[str, Any]:
+    """Run COMPLETE_SKIP_FINALIZE canonicalize on a copy and return the mutated copy."""
+    e = copy.deepcopy(entry)
+    canonicalize(e, stage=CanonicalStage.COMPLETE_SKIP_FINALIZE)
     return e
 
 
@@ -280,3 +288,63 @@ def test_load_repair_is_fixpoint_on_corpus() -> None:
         if entry["type"] != snapshot["type"] or entry["fields"] != snapshot["fields"]:
             non_fixpoint.append(bib_path)
     assert not non_fixpoint, f"LOAD_REPAIR not a data fixpoint for: {non_fixpoint[:10]}"
+
+
+# ---------------------------------------------------------------------------
+# Per-rule tests at COMPLETE_SKIP_FINALIZE (complete entry, enrichment skipped)
+# ---------------------------------------------------------------------------
+def test_complete_finalize_strips_preprint_only_publisher() -> None:
+    """The single live rule: strip a preprint-only publisher off a real-venue entry."""
+    result = _complete_finalize(_article(journal="Real Journal", publisher="Cold Spring Harbor Laboratory"))
+    assert "publisher" not in result["fields"]
+    assert result["fields"]["journal"] == "Real Journal"
+
+
+def test_complete_finalize_keeps_publisher_when_journal_is_preprint() -> None:
+    """Guard: do NOT strip when the journal is itself a preprint server."""
+    result = _complete_finalize(_article(journal="arXiv", publisher="Cold Spring Harbor Laboratory"))
+    assert result["fields"]["publisher"] == "Cold Spring Harbor Laboratory"
+
+
+def test_complete_finalize_keeps_normal_publisher() -> None:
+    """A publisher that is not preprint-exclusive is left untouched."""
+    result = _complete_finalize(_article(journal="Real Journal", publisher="Springer"))
+    assert result["fields"]["publisher"] == "Springer"
+
+
+def test_complete_finalize_dead_preprint_doi_rule_removed() -> None:
+    """The removed dead rule (@article + secondary DOI -> @misc) is gone.
+
+    _entry_is_complete() only admits NON-preprint DOIs, so that quick-fixup could
+    never fire on this path. Prove its removal is inert: a complete-shaped entry
+    carrying a preprint DOI (and no preprint-only publisher) passes through
+    COMPLETE_SKIP_FINALIZE completely unchanged (no @misc downgrade, DOI kept,
+    no howpublished manufactured).
+    """
+    entry = _article(journal="Real Journal", doi="10.48550/arXiv.2101.00003")
+    assert canonicalize(copy.deepcopy(entry), stage=CanonicalStage.COMPLETE_SKIP_FINALIZE) is False
+    result = _complete_finalize(entry)
+    assert result["type"] == "article"
+    assert result["fields"]["doi"] == "10.48550/arXiv.2101.00003"
+    assert result["fields"]["journal"] == "Real Journal"
+    assert "howpublished" not in result["fields"]
+
+
+def test_complete_finalize_is_fixpoint_on_corpus() -> None:
+    """Applying COMPLETE_SKIP_FINALIZE twice yields identical type + fields for every
+    committed output/**/*.bib (a second pass is a strict data fixpoint)."""
+    files = sorted(glob.glob("output/**/*.bib", recursive=True))
+    if not files:
+        pytest.skip("no committed output corpus present")
+    non_fixpoint: list[str] = []
+    for bib_path in files:
+        with open(bib_path, encoding="utf-8") as fh:
+            entry = parse_bibtex_to_dict(fh.read())
+        if entry is None:
+            continue
+        canonicalize(entry, stage=CanonicalStage.COMPLETE_SKIP_FINALIZE)
+        snapshot = copy.deepcopy(entry)
+        canonicalize(entry, stage=CanonicalStage.COMPLETE_SKIP_FINALIZE)
+        if entry["type"] != snapshot["type"] or entry["fields"] != snapshot["fields"]:
+            non_fixpoint.append(bib_path)
+    assert not non_fixpoint, f"COMPLETE_SKIP_FINALIZE not a data fixpoint for: {non_fixpoint[:10]}"

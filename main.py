@@ -59,7 +59,6 @@ from src.config import (
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
     MIN_TITLE_WORDS,
-    PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
     PUB_PARSE_TIER1_MIN_CONFIDENCE,
     PUB_PARSE_TIER2_MIN_CONFIDENCE,
@@ -447,34 +446,24 @@ def process_article(
 
     # Skip enrichment entirely if entry is already complete (unless --force)
     if not FORCE_ENRICH and existing_file_loaded and baseline_entry is not None and _entry_is_complete(baseline_entry):
-        # Quick fixup: strip preprint-only publishers from complete entries
+        # Quick fixup: strip preprint-only publishers from complete entries.
+        # Single-sourced in canonicalize() at the COMPLETE_SKIP_FINALIZE stage; the
+        # debug log and write-gating stay here so the skip-path I/O is unchanged.
         bl_fields = baseline_entry.get("fields") or {}
-        bl_pub = (bl_fields.get("publisher") or "").lower().strip()
-        bl_jnl = (bl_fields.get("journal") or "").lower()
-        if bl_pub in PREPRINT_ONLY_PUBLISHERS and bl_jnl and not any(ps in bl_jnl for ps in PREPRINT_SERVERS):
+        _pub_before = bl_fields.get("publisher")
+        if canonicalize(baseline_entry, stage=CanonicalStage.COMPLETE_SKIP_FINALIZE):
             logger.debug(
-                f"EXISTING_FIXUP | publisher_stripped={bl_fields['publisher']} | journal={bl_fields.get('journal')}",
+                f"EXISTING_FIXUP | publisher_stripped={_pub_before} | journal={bl_fields.get('journal')}",
                 category=LogCategory.CLEANUP,
             )
-            bl_fields.pop("publisher", None)
             if existing_file_path:
                 bib_str = bt.bibtex_from_dict(baseline_entry)
                 safe_write_file(existing_file_path, bib_str)
 
-        # Quick fixup: downgrade @article with preprint DOI -> @misc
-        bl_doi = (bl_fields.get("doi") or "").strip()
-        if baseline_entry.get("type") == "article" and bl_doi and idu.is_secondary_doi(bl_doi):
-            venue = bl_fields.get("journal", "")
-            logger.debug(
-                f"EXISTING_FIXUP | article_preprint_doi->misc | doi={bl_doi} | venue={venue}",
-                category=LogCategory.CLEANUP,
-            )
-            baseline_entry["type"] = "misc"
-            if venue:
-                bl_fields["howpublished"] = bl_fields.pop("journal")
-            if existing_file_path:
-                bib_str = bt.bibtex_from_dict(baseline_entry)
-                safe_write_file(existing_file_path, bib_str)
+        # NOTE: the former "@article with a preprint DOI -> @misc" quick-fixup was
+        # removed here as unreachable dead code: _entry_is_complete() (the guard
+        # above) only returns True for a NON-preprint DOI, so is_secondary_doi() on
+        # the same field can never be True on this skip-enrichment path.
 
         logger.info("Entry already complete; skipping enrichment", category=LogCategory.SKIP, source=LogSource.SYSTEM)
         if summary_csv_path and existing_file_path:

@@ -12,6 +12,7 @@ from src.config import (
     INSTITUTIONAL_REPOSITORIES,
     JOURNAL_ONLY_PREFIXES,
     JOURNALS_NAMED_PROCEEDINGS,
+    PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
     PROCEEDINGS_SERIES_AS_JOURNAL,
     PUBLISHER_CORRECTIONS,
@@ -702,6 +703,25 @@ def _rule_howpublished_to_inproceedings(entry: dict[str, Any], fields: dict[str,
 
 
 # ---------------------------------------------------------------------------
+# COMPLETE_SKIP_FINALIZE-only rules (complete entries that skip enrichment)
+# ---------------------------------------------------------------------------
+def _rule_strip_preprint_only_publisher(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Strip a preprint-only publisher leaked onto a complete, real-venue entry.
+
+    Fires only when the publisher is a preprint-exclusive imprint AND the journal
+    is a genuine (non-preprint-server) venue. Distinct from
+    ``_rule_strip_publisher_duplicate`` (publisher == container) and from the
+    preprint-server *journal* rules (which move the journal, not the publisher).
+    """
+    pub = (fields.get("publisher") or "").lower().strip()
+    jnl = (fields.get("journal") or "").lower()
+    if pub in PREPRINT_ONLY_PUBLISHERS and jnl and not any(ps in jnl for ps in PREPRINT_SERVERS):
+        fields.pop("publisher", None)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Per-stage ordered rule sequences
 # ---------------------------------------------------------------------------
 # Site A (orphan/terminal sweep). Reproduces _fixup_bib_entry's exact rule order.
@@ -825,8 +845,16 @@ _LOAD_REPAIR_RULES = (
     _rule_normalize_howpublished,
 )
 
+# COMPLETE_SKIP_FINALIZE (complete entry, enrichment skipped). Folds the single
+# live "quick fixup" that ran just before the skip-path write: strip a leaked
+# preprint-only publisher. The former "@article + preprint DOI -> @misc"
+# quick-fixup that sat alongside it was DEAD CODE (unreachable: _entry_is_complete
+# only admits NON-preprint DOIs) and is intentionally NOT reproduced here.
+_COMPLETE_SKIP_FINALIZE_RULES = (_rule_strip_preprint_only_publisher,)
+
 _STAGE_RULES = {
     CanonicalStage.LOAD_REPAIR: _LOAD_REPAIR_RULES,
+    CanonicalStage.COMPLETE_SKIP_FINALIZE: _COMPLETE_SKIP_FINALIZE_RULES,
     CanonicalStage.POST_MERGE: _POST_MERGE_RULES,
     CanonicalStage.POSTRUN_ORPHAN_REPAIR: _POSTRUN_ORPHAN_REPAIR_RULES,
 }
