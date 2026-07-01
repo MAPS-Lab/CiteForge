@@ -17,26 +17,6 @@ from src import id_utils as idu
 from src import merge_utils as mu
 from src.cache import get_cache_hit_counts
 from src.canonicalize import (
-    _BOOK_CHAPTER_DOI_RE,
-    _BRACKET_J_RE,
-    _DOI_VERSION_RE,
-    _GECCO_LOWER,
-    _GECCO_PROPER,
-    _GECCO_RE,
-    _LIPICS_PAGES_EXTRACT_RE,
-    _LIPICS_PAGES_STRIP_RE,
-    _OSF_DOI_RE,
-    _PREPRINT_MARKER_RE,
-    _PROC_EXT_ABSTRACTS,
-    _PROC_OF_THE,
-    _SPIRE_STRIP_RE,
-    _SUBTITLE_WRAPPER_RE,
-    _TRAILING_DASH_RE,
-    _URL_IN_VENUE_RE,
-    _URL_IN_VENUE_STRIP_RE,
-    _US_PATENT_RE,
-    _ZENTRUM_FUER,
-    _ZENTRUM_FUR,
     CanonicalStage,
     _fixup_bib_entry,
     canonicalize,
@@ -69,8 +49,6 @@ from src.clients.search_apis import (
     s2_search_papers_multiple,
 )
 from src.config import (
-    ABBREVIATED_VENUE_MAP,
-    ACM_JOURNAL_PROCEEDINGS,
     DEFAULT_A2I2_INPUT,
     DEFAULT_INPUT,
     DEFAULT_OUT_DIR,
@@ -78,25 +56,18 @@ from src.config import (
     DEFAULT_SERPAPI_KEY_FILE,
     DEFAULT_SERPLY_KEY_FILE,
     GENERIC_SERIES_NAMES,
-    INSTITUTIONAL_REPOSITORIES,
-    JOURNAL_ONLY_PREFIXES,
-    JOURNALS_NAMED_PROCEEDINGS,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
     MIN_TITLE_WORDS,
     PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
-    PROCEEDINGS_SERIES_AS_JOURNAL,
     PUB_PARSE_TIER1_MIN_CONFIDENCE,
     PUB_PARSE_TIER2_MIN_CONFIDENCE,
-    PUBLISHER_CORRECTIONS,
-    REPOSITORY_AS_JOURNAL,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
     SIM_MERGE_DUPLICATE_THRESHOLD,
     SIM_PREPRINT_TITLE_THRESHOLD,
     SKIP_SCHOLAR_FOR_EXISTING_FILES,
-    VENUE_CASE_CORRECTIONS,
     get_min_year,
 )
 from src.doi_utils import process_validated_doi
@@ -108,9 +79,7 @@ from src.exceptions import (
     PARSE_ERRORS,
 )
 from src.fixup.text import (
-    _apply_booktitle_fixups,
     _fix_fused_compounds,  # noqa: F401
-    _fix_title_text,
     _is_corrupted_title,
     _is_garbage_title,
 )
@@ -134,7 +103,7 @@ from src.io_utils import (
 )
 from src.log_utils import LogCategory, LogSource, logger
 from src.models import Record
-from src.publication_parser import _strip_ellipsis, parse_publication_string
+from src.publication_parser import parse_publication_string
 from src.text_utils import (
     author_name_matches,
     extract_year_from_any,
@@ -441,401 +410,13 @@ def process_article(
             except (OSError, ValueError, TypeError):
                 continue
 
-    # Fixup stale entries loaded from disk: strip preprint journals and
-    # downgrade @article→@misc so cached files from older pipeline runs
-    # are corrected even when FILE_SKIP_WRITE blocks the new version.
+    # Fixup stale entries loaded from disk before enrichment: the pure entry
+    # field/type rewrites are single-sourced in src/canonicalize.py at the
+    # LOAD_REPAIR stage. The destructive title==venue delete (N22) and the
+    # bare-& rewrite trigger stay here in the pipeline.
     if existing_file_loaded and baseline_entry is not None:
+        _fixup_written = canonicalize(baseline_entry, stage=CanonicalStage.LOAD_REPAIR)
         _bl_fields = baseline_entry.get("fields") or {}
-        _bl_jnl = (_bl_fields.get("journal") or "").strip().lower()
-        _bl_type = baseline_entry.get("type", "")
-        _fixup_written = False
-
-        # Strip preprint server names from journal field
-        # Use substring match to catch suffixed forms like "arXiv (Cornell University)"
-        if _bl_jnl and any(ps == _bl_jnl or ps in _bl_jnl for ps in PREPRINT_SERVERS):
-            logger.debug(
-                f"EXISTING_FIXUP | preprint_journal_stripped | journal={_bl_fields.get('journal')}",
-                category=LogCategory.CLEANUP,
-            )
-            if _bl_type == "article":
-                _bl_fields["howpublished"] = _bl_fields.pop("journal")
-                baseline_entry["type"] = "misc"
-                logger.debug(
-                    "EXISTING_FIXUP | article_preprint_journal->misc",
-                    category=LogCategory.CLEANUP,
-                )
-            else:
-                _bl_fields.pop("journal", None)
-            _fixup_written = True
-
-        # Strip email addresses from author field
-        _bl_author = _bl_fields.get("author", "")
-        if isinstance(_bl_author, str) and re.search(r"\S+@\S+\.\S+", _bl_author):
-            _bl_author_clean = re.sub(r"\s*\S+@\S+\.\S+", "", _bl_author).strip()
-            _bl_author_clean = re.sub(r"\s*and\s*$", "", _bl_author_clean).strip()
-            _bl_author_clean = re.sub(r"^\s*and\s*", "", _bl_author_clean).strip()
-            if _bl_author_clean:
-                logger.debug(
-                    f"EXISTING_FIXUP | email_stripped_from_author | old={_bl_author[:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["author"] = _bl_author_clean
-                _fixup_written = True
-
-        # Strip [J] bracket artifacts from title
-        _bl_title = _bl_fields.get("title", "")
-        if isinstance(_bl_title, str) and _BRACKET_J_RE.search(_bl_title):
-            _bl_fields["title"] = _BRACKET_J_RE.sub("", _bl_title).strip()
-            logger.debug(
-                f"EXISTING_FIXUP | bracket_artifact_stripped | title={_bl_title[:60]}",
-                category=LogCategory.CLEANUP,
-            )
-            _fixup_written = True
-
-        # Strip trailing ellipsis from truncated venue/title fields
-        for _ell_field in ("journal", "booktitle", "title"):
-            _ell_val = _bl_fields.get(_ell_field, "")
-            if isinstance(_ell_val, str) and _ell_val.rstrip().endswith(("...", "\u2026")):
-                _ell_clean = _strip_ellipsis(_ell_val)
-                if _ell_clean != _ell_val:
-                    logger.debug(
-                        f"EXISTING_FIXUP | ellipsis_stripped | {_ell_field}={_ell_val[:60]}",
-                        category=LogCategory.CLEANUP,
-                    )
-                    _bl_fields[_ell_field] = _ell_clean
-                    _fixup_written = True
-
-        # Expand abbreviated venue names in booktitle
-        _ex_bt_abbr = (_bl_fields.get("booktitle") or "").strip()
-        if _ex_bt_abbr and _ex_bt_abbr.lower() in ABBREVIATED_VENUE_MAP:
-            _ex_expanded = ABBREVIATED_VENUE_MAP[_ex_bt_abbr.lower()]
-            if _ex_expanded != _ex_bt_abbr:
-                _bl_fields["booktitle"] = _ex_expanded
-                _fixup_written = True
-
-        # Correct ALL-CAPS venue names to proper case
-        for _ex_vcf in ("journal", "booktitle"):
-            _ex_vc_val = (_bl_fields.get(_ex_vcf) or "").strip()
-            if _ex_vc_val and _ex_vc_val in VENUE_CASE_CORRECTIONS:
-                logger.debug(
-                    f"EXISTING_FIXUP | venue_case_corrected | {_ex_vcf}={_ex_vc_val}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields[_ex_vcf] = VENUE_CASE_CORRECTIONS[_ex_vc_val]
-                _fixup_written = True
-            elif _ex_vc_val and _GECCO_LOWER in _ex_vc_val.lower():
-                _ex_vc_fixed = _GECCO_RE.sub(_GECCO_PROPER, _ex_vc_val)
-                if _ex_vc_fixed != _ex_vc_val:
-                    _bl_fields[_ex_vcf] = _ex_vc_fixed
-                    _fixup_written = True
-
-        # Strip publisher when it duplicates the journal/booktitle name
-        _ex_pub = (_bl_fields.get("publisher") or "").strip()
-        _ex_container = (_bl_fields.get("journal") or _bl_fields.get("booktitle") or "").strip()
-        if _ex_pub and _ex_container and _ex_pub.lower() == _ex_container.lower():
-            del _bl_fields["publisher"]
-            _fixup_written = True
-
-        # Strip trailing dash/en-dash from title (truncation artifact)
-        _bl_title_td = (_bl_fields.get("title") or "").strip()
-        if _bl_title_td and _TRAILING_DASH_RE.search(_bl_title_td):
-            _bl_fields["title"] = _TRAILING_DASH_RE.sub("", _bl_title_td)
-            _fixup_written = True
-
-        # Strip ": -...-" subtitle wrapper artifact from title
-        _bl_title_sw = (_bl_fields.get("title") or "").strip()
-        if isinstance(_bl_title_sw, str) and ": -" in _bl_title_sw:
-            _cleaned_sw = _SUBTITLE_WRAPPER_RE.sub(r": \1", _bl_title_sw)
-            if _cleaned_sw != _bl_title_sw:
-                _bl_fields["title"] = _cleaned_sw
-                _fixup_written = True
-
-        # Strip SPIRE-style proceedings garbage suffix from booktitle
-        _ex_bt_spire = (_bl_fields.get("booktitle") or "").strip()
-        if _ex_bt_spire:
-            _ex_bt_cleaned = _SPIRE_STRIP_RE.sub("", _ex_bt_spire)
-            if _ex_bt_cleaned != _ex_bt_spire:
-                _bl_fields["booktitle"] = _ex_bt_cleaned
-                _fixup_written = True
-
-        # Strip _v[N] version suffix from OSF/PsyArXiv DOIs
-        _ex_doi_val = (_bl_fields.get("doi") or "").strip()
-        if _ex_doi_val and _OSF_DOI_RE.match(_ex_doi_val):
-            _ex_doi_stripped = _DOI_VERSION_RE.sub("", _ex_doi_val)
-            if _ex_doi_stripped != _ex_doi_val:
-                _bl_fields["doi"] = _ex_doi_stripped
-                _fixup_written = True
-                _ex_url_val = (_bl_fields.get("url") or "").strip()
-                if _ex_url_val and _ex_doi_val in _ex_url_val:
-                    _bl_fields["url"] = _ex_url_val.replace(_ex_doi_val, _ex_doi_stripped)
-
-        # Fix Schloss Dagstuhl missing umlaut
-        _ex_pub = (_bl_fields.get("publisher") or "").strip()
-        if _ZENTRUM_FUR in _ex_pub:
-            _bl_fields["publisher"] = _ex_pub.replace(_ZENTRUM_FUR, _ZENTRUM_FUER)
-            _fixup_written = True
-
-        # Strip page numbers embedded in booktitle (LIPIcs style)
-        _ex_bt_pg = (_bl_fields.get("booktitle") or "").strip()
-        if _ex_bt_pg:
-            _ex_bt_pg_clean = _LIPICS_PAGES_STRIP_RE.sub("", _ex_bt_pg)
-            if _ex_bt_pg_clean != _ex_bt_pg:
-                _bl_fields["booktitle"] = _ex_bt_pg_clean
-                if not _bl_fields.get("pages"):
-                    _pg_m = _LIPICS_PAGES_EXTRACT_RE.search(_ex_bt_pg)
-                    if _pg_m:
-                        _bl_fields["pages"] = _pg_m.group(1).replace(" ", "")
-                _fixup_written = True
-
-        # Strip duplicate "Proceedings of the" wrapper
-        _ex_bt_dup = (_bl_fields.get("booktitle") or "").strip()
-        if _ex_bt_dup.startswith(_PROC_EXT_ABSTRACTS):
-            _bl_fields["booktitle"] = _ex_bt_dup.removeprefix(_PROC_OF_THE)
-            _fixup_written = True
-
-        # Fix ALL-CAPS titles
-        _bl_title2 = _bl_fields.get("title", "")
-        if isinstance(_bl_title2, str) and _bl_title2:
-            _fixed_title = trim_title_default(_bl_title2)
-            if _fixed_title != _bl_title2:
-                logger.debug(
-                    f"EXISTING_FIXUP | title_normalized | old={_bl_title2[:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["title"] = _fixed_title
-                _fixup_written = True
-
-        # Fix conference proceedings misclassified as @article with journal
-        # (but NOT for ACM PACM journals which are legitimately named "Proceedings of...")
-        if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
-            _conf_jnl = _bl_fields["journal"].strip()
-            _conf_jnl_lower = _conf_jnl.lower()
-            _is_pacm = any(_conf_jnl_lower.startswith(pj) or _conf_jnl_lower == pj for pj in ACM_JOURNAL_PROCEEDINGS)
-            if mu._is_conference_journal(_conf_jnl) and not _bl_fields.get("booktitle") and not _is_pacm:
-                logger.debug(
-                    f"EXISTING_FIXUP | conference_as_journal | journal={_conf_jnl[:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["booktitle"] = _bl_fields.pop("journal")
-                baseline_entry["type"] = "inproceedings"
-                _fixup_written = True
-
-        # Reclassify @article with "Unpublished" journal → @misc
-        if (
-            baseline_entry.get("type") == "article"
-            and _bl_fields.get("journal")
-            and _bl_fields["journal"].strip().lower() == "unpublished"
-        ):
-            logger.debug(
-                "EXISTING_FIXUP | article_unpublished->misc",
-                category=LogCategory.CLEANUP,
-            )
-            _bl_fields.pop("journal", None)
-            _bl_fields.pop("publisher", None)
-            baseline_entry["type"] = "misc"
-            _fixup_written = True
-
-        # Reclassify @article with patent number as journal → @misc
-        if (
-            baseline_entry.get("type") == "article"
-            and _bl_fields.get("journal")
-            and _US_PATENT_RE.match(_bl_fields["journal"].strip())
-        ):
-            logger.debug(
-                f"EXISTING_FIXUP | article_patent->misc | journal={_bl_fields['journal'][:60]}",
-                category=LogCategory.CLEANUP,
-            )
-            _bl_fields["note"] = _bl_fields.pop("journal")
-            baseline_entry["type"] = "misc"
-            _fixup_written = True
-
-        # Downgrade @article with repository/portal as journal → @misc
-        if (
-            baseline_entry.get("type") == "article"
-            and _bl_fields.get("journal")
-            and any(rj in _bl_fields["journal"].lower() for rj in REPOSITORY_AS_JOURNAL)
-        ):
-            logger.debug(
-                f"EXISTING_FIXUP | article_repository->misc | journal={_bl_fields['journal'][:60]}",
-                category=LogCategory.CLEANUP,
-            )
-            baseline_entry["type"] = "misc"
-            _bl_fields.pop("journal", None)
-            _fixup_written = True
-
-        # Reclassify @article with university name as journal → @phdthesis
-        if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
-            _jnl_lower = _bl_fields["journal"].lower()
-            if "university" in _jnl_lower or "institut" in _jnl_lower:
-                logger.debug(
-                    f"EXISTING_FIXUP | article_thesis->phdthesis | journal={_bl_fields['journal'][:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["school"] = _bl_fields.pop("journal")
-                baseline_entry["type"] = "phdthesis"
-                _fixup_written = True
-
-        # Reclassify @article with Procedia/IFAC series → @inproceedings
-        if baseline_entry.get("type") == "article" and _bl_fields.get("journal"):
-            _proc_jnl = _bl_fields["journal"].strip().lower()
-            if any(_proc_jnl.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL):
-                logger.debug(
-                    f"EXISTING_FIXUP | article_procedia->inproceedings | journal={_bl_fields['journal'][:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["booktitle"] = _bl_fields.pop("journal")
-                baseline_entry["type"] = "inproceedings"
-                _fixup_written = True
-
-        # Reclassify @inproceedings with PACM journal → @article
-        if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
-            _pacm_bt = _bl_fields["booktitle"].strip().lower()
-            if any(_pacm_bt.startswith(pj) or _pacm_bt == pj for pj in ACM_JOURNAL_PROCEEDINGS):
-                logger.debug(
-                    f"EXISTING_FIXUP | inproceedings_pacm->article | booktitle={_bl_fields['booktitle'][:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["journal"] = _bl_fields.pop("booktitle")
-                baseline_entry["type"] = "article"
-                _fixup_written = True
-
-        # Reclassify @inproceedings with PNAS/PVLDB journal → @article
-        # Guard: skip if the booktitle extends the journal name with conference keywords
-        if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
-            _jnp_bt = _bl_fields["booktitle"].strip().lower()
-            _jnp_match = next((j for j in JOURNALS_NAMED_PROCEEDINGS if _jnp_bt.startswith(j)), None)
-            if _jnp_match:
-                _jnp_suffix = _jnp_bt[len(_jnp_match) :].lstrip(" /,")
-                if not any(kw in _jnp_suffix for kw in ("conference", "workshop", "symposium")):
-                    logger.debug(
-                        f"EXISTING_FIXUP | inproceedings_journal_proceedings->article | booktitle={_jnp_bt[:60]}",
-                        category=LogCategory.CLEANUP,
-                    )
-                    _bl_fields["journal"] = _bl_fields.pop("booktitle")
-                    baseline_entry["type"] = "article"
-                    _fixup_written = True
-
-        # Reclassify @inproceedings with institutional repository → @phdthesis
-        if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
-            _inst_bt = _bl_fields["booktitle"].strip().lower()
-            if any(ir in _inst_bt for ir in INSTITUTIONAL_REPOSITORIES):
-                logger.debug(
-                    f"EXISTING_FIXUP | inproceedings_repository->phdthesis | booktitle={_bl_fields['booktitle'][:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["school"] = _bl_fields.pop("booktitle")
-                baseline_entry["type"] = "phdthesis"
-                _fixup_written = True
-
-        # Downgrade @inproceedings with repository as booktitle → @misc
-        if (
-            baseline_entry.get("type") == "inproceedings"
-            and _bl_fields.get("booktitle")
-            and any(rj in _bl_fields["booktitle"].lower() for rj in REPOSITORY_AS_JOURNAL)
-        ):
-            logger.debug(
-                f"EXISTING_FIXUP | inproceedings_repository->misc | booktitle={_bl_fields['booktitle'][:60]}",
-                category=LogCategory.CLEANUP,
-            )
-            baseline_entry["type"] = "misc"
-            _bl_fields.pop("booktitle", None)
-            _fixup_written = True
-
-        # Downgrade @inproceedings with "Preprint" as booktitle → @misc
-        if (
-            baseline_entry.get("type") == "inproceedings"
-            and _bl_fields.get("booktitle")
-            and _bl_fields["booktitle"].strip().lower() == "preprint"
-        ):
-            logger.debug("EXISTING_FIXUP | inproceedings_preprint->misc", category=LogCategory.CLEANUP)
-            baseline_entry["type"] = "misc"
-            _bl_fields.pop("booktitle", None)
-            _fixup_written = True
-
-        # Reclassify @inproceedings with journal name as booktitle → @article
-        # (but NOT for PROCEEDINGS_SERIES_AS_JOURNAL which are genuinely proceedings)
-        if baseline_entry.get("type") == "inproceedings" and _bl_fields.get("booktitle"):
-            _jp_bt_lower = _bl_fields["booktitle"].strip().lower()
-            _is_proc_series = any(_jp_bt_lower.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL)
-            if not _is_proc_series and any(_jp_bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
-                logger.debug(
-                    f"EXISTING_FIXUP | inproceedings_journal_booktitle->article | "
-                    f"booktitle={_bl_fields['booktitle'][:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _bl_fields["journal"] = _bl_fields.pop("booktitle")
-                baseline_entry["type"] = "article"
-                _fixup_written = True
-
-        # Reclassify @inproceedings with "Handbook" in booktitle → @incollection
-        if (
-            baseline_entry.get("type") == "inproceedings"
-            and _bl_fields.get("booktitle")
-            and "handbook" in _bl_fields["booktitle"].lower()
-        ):
-            logger.debug(
-                f"EXISTING_FIXUP | inproceedings_handbook->incollection | booktitle={_bl_fields['booktitle'][:60]}",
-                category=LogCategory.CLEANUP,
-            )
-            baseline_entry["type"] = "incollection"
-            _fixup_written = True
-
-        # Reclassify @article with book-chapter DOI pattern → @incollection
-        _bl_doi_ch = (_bl_fields.get("doi") or "").strip()
-        if (
-            baseline_entry.get("type") == "article"
-            and _bl_fields.get("journal")
-            and _bl_doi_ch
-            and _BOOK_CHAPTER_DOI_RE.search(_bl_doi_ch)
-        ):
-            logger.debug(
-                f"EXISTING_FIXUP | article_book_chapter->incollection | doi={_bl_doi_ch}",
-                category=LogCategory.CLEANUP,
-            )
-            _bl_fields["booktitle"] = _bl_fields.pop("journal")
-            baseline_entry["type"] = "incollection"
-            _fixup_written = True
-
-        # Strip [preprint] marker from title
-        _bl_title_pp = _bl_fields.get("title", "")
-        if isinstance(_bl_title_pp, str) and _PREPRINT_MARKER_RE.search(_bl_title_pp):
-            _bl_fields["title"] = _PREPRINT_MARKER_RE.sub("", _bl_title_pp).strip()
-            _fixup_written = True
-
-        # Fix fused compounds, colon-space, hyphen-space, and acronym case
-        _bl_title_fused = _bl_fields.get("title", "")
-        if isinstance(_bl_title_fused, str) and _bl_title_fused:
-            _bl_title_fixed = _fix_title_text(_bl_title_fused)
-            if _bl_title_fixed != _bl_title_fused:
-                _bl_fields["title"] = _bl_title_fixed
-                _fixup_written = True
-
-        # Apply booktitle cleanup patterns (verbose metadata strip, abbreviations, typos, spacing)
-        _ex_bt_fix = (_bl_fields.get("booktitle") or "").strip()
-        if _ex_bt_fix:
-            _ex_bt_fixed = _apply_booktitle_fixups(_ex_bt_fix)
-            if _ex_bt_fixed != _ex_bt_fix:
-                _bl_fields["booktitle"] = _ex_bt_fixed
-                _fixup_written = True
-
-        # Strip URLs embedded in booktitle/journal
-        for _url_field in ("booktitle", "journal"):
-            _url_val = (_bl_fields.get(_url_field) or "").strip()
-            if _url_val and _URL_IN_VENUE_RE.search(_url_val):
-                _url_cleaned = _URL_IN_VENUE_STRIP_RE.sub("", _url_val).strip().rstrip(",")
-                if _url_cleaned and _url_cleaned != _url_val:
-                    _bl_fields[_url_field] = _url_cleaned
-                    _fixup_written = True
-
-        # Apply publisher corrections
-        _pub_journal_bl = (_bl_fields.get("journal") or "").lower()
-        if _pub_journal_bl:
-            for _pub_jnl_key, _pub_correct in PUBLISHER_CORRECTIONS.items():
-                if _pub_jnl_key in _pub_journal_bl:
-                    _cur_pub_bl = _bl_fields.get("publisher", "")
-                    if _cur_pub_bl and _cur_pub_bl != _pub_correct:
-                        _bl_fields["publisher"] = _pub_correct
-                        _fixup_written = True
 
         # Delete entries where title equals journal or booktitle (corrupted Scholar data)
         _bl_title_venue = (_bl_fields.get("title") or "").strip().lower()
@@ -852,56 +433,6 @@ def process_article(
                 if existing_file_path and os.path.exists(existing_file_path):
                     os.remove(existing_file_path)
                 return 0
-
-        # Remove preprint DOI from @article that has a real journal+volume/pages
-        if (
-            baseline_entry.get("type") == "article"
-            and _bl_fields.get("journal")
-            and _bl_fields.get("doi")
-            and idu.is_secondary_doi(_bl_fields["doi"])
-            and (_bl_fields.get("volume") or _bl_fields.get("pages"))
-        ):
-            logger.debug(
-                f"EXISTING_FIXUP | remove_preprint_doi_from_article"
-                f" | doi={_bl_fields['doi']} | journal={_bl_fields['journal'][:40]}",
-                category=LogCategory.CLEANUP,
-            )
-            _bl_fields.pop("doi", None)
-            _bl_fields.pop("url", None)
-            _fixup_written = True
-
-        # Backfill howpublished for @misc with preprint DOI or arXiv eprint
-        if baseline_entry.get("type") == "misc" and not _bl_fields.get("howpublished"):
-            _bl_doi_hp = (_bl_fields.get("doi") or "").strip()
-            _inferred_hp = mu.infer_howpublished_from_doi(_bl_doi_hp) if _bl_doi_hp else None
-            if _inferred_hp:
-                _bl_fields["howpublished"] = _inferred_hp
-                _fixup_written = True
-            elif (_bl_fields.get("archiveprefix") or "").lower() == "arxiv":
-                _bl_fields["howpublished"] = "arXiv"
-                _fixup_written = True
-
-        # Fix author casing (lowercase, ALL-CAPS, capital "And" separators)
-        _bl_auth2 = _bl_fields.get("author", "")
-        if isinstance(_bl_auth2, str) and _bl_auth2:
-            _auth2_fixed, _auth2_changed = mu._fix_author_casing(_bl_auth2)
-            if _auth2_changed:
-                _bl_fields["author"] = _auth2_fixed
-                logger.debug(
-                    f"EXISTING_FIXUP | author_casing_fixed | old={_bl_auth2[:60]}",
-                    category=LogCategory.CLEANUP,
-                )
-                _fixup_written = True
-
-        # Normalize howpublished casing
-        _bl_hp_before = (_bl_fields.get("howpublished") or "").strip()
-        mu._normalize_howpublished(_bl_fields)
-        if _bl_fields.get("howpublished", "") != _bl_hp_before and _bl_hp_before:
-            logger.debug(
-                f"EXISTING_FIXUP | howpublished_casing | {_bl_hp_before}->{_bl_fields['howpublished']}",
-                category=LogCategory.CLEANUP,
-            )
-            _fixup_written = True
 
         # Escape bare & in field values (bibtex_from_dict handles this on write,
         # but we need to trigger a rewrite for files that were never re-serialized)

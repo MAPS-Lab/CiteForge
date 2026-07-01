@@ -50,6 +50,11 @@ _BOOK_CHAPTER_DOI_RE = re.compile(r"\.ch\d+$")
 _US_PATENT_RE = re.compile(r"(?i)^US\s+Patent")
 _BRACKET_J_RE = re.compile(r"\s*\[J\]\s*$")
 _URL_BOOKTITLE_RE = re.compile(r"^https?://|^[\w.-]+\.(com|org|net|io|press)\b", re.IGNORECASE)
+# Site-B (load-repair) email-in-author strip patterns.
+_EMAIL_SEARCH_RE = re.compile(r"\S+@\S+\.\S+")
+_EMAIL_STRIP_RE = re.compile(r"\s*\S+@\S+\.\S+")
+_AUTHOR_AND_TRAIL_RE = re.compile(r"\s*and\s*$")
+_AUTHOR_AND_LEAD_RE = re.compile(r"^\s*and\s*")
 
 # Repeated string literals used in the shared fixups
 _GECCO_LOWER = "genetic and evolutionary computation conference"
@@ -437,6 +442,102 @@ def _rule_add_url_from_doi(entry: dict[str, Any], fields: dict[str, Any]) -> boo
 
 
 # ---------------------------------------------------------------------------
+# Site-B-only rules (load repair; existing-file fixup before enrichment)
+# ---------------------------------------------------------------------------
+def _rule_strip_preprint_journal_load(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Strip a preprint-server journal: @article -> @misc (journal -> howpublished);
+    any other type simply drops the journal."""
+    jnl = (fields.get("journal") or "").strip().lower()
+    if jnl and any(ps == jnl or ps in jnl for ps in PREPRINT_SERVERS):
+        if entry.get("type") == "article":
+            fields["howpublished"] = fields.pop("journal")
+            entry["type"] = "misc"
+        else:
+            fields.pop("journal", None)
+        return True
+    return False
+
+
+def _rule_strip_email_from_author(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Strip email addresses (and dangling "and" separators) from the author field."""
+    author = fields.get("author", "")
+    if isinstance(author, str) and _EMAIL_SEARCH_RE.search(author):
+        cleaned = _EMAIL_STRIP_RE.sub("", author).strip()
+        cleaned = _AUTHOR_AND_TRAIL_RE.sub("", cleaned).strip()
+        cleaned = _AUTHOR_AND_LEAD_RE.sub("", cleaned).strip()
+        if cleaned:
+            fields["author"] = cleaned
+            return True
+    return False
+
+
+def _rule_strip_bracket_j_title(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Strip a trailing "[J]" bracket artifact from the title."""
+    title = fields.get("title", "")
+    if isinstance(title, str) and _BRACKET_J_RE.search(title):
+        fields["title"] = _BRACKET_J_RE.sub("", title).strip()
+        return True
+    return False
+
+
+def _rule_strip_trailing_dash_title(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Strip a trailing " -"/en-dash truncation artifact from the title only."""
+    title = (fields.get("title") or "").strip()
+    if title and _TRAILING_DASH_RE.search(title):
+        fields["title"] = _TRAILING_DASH_RE.sub("", title)
+        return True
+    return False
+
+
+def _rule_trim_caps_title(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Normalize ALL-CAPS / truncated titles via the default title trimmer."""
+    title = fields.get("title", "")
+    if isinstance(title, str) and title:
+        fixed = trim_title_default(title)
+        if fixed != title:
+            fields["title"] = fixed
+            return True
+    return False
+
+
+def _rule_unpublished_to_misc_load(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """@article with "Unpublished" journal -> @misc (drops journal AND publisher)."""
+    if entry.get("type") == "article" and fields.get("journal") and fields["journal"].strip().lower() == "unpublished":
+        fields.pop("journal", None)
+        fields.pop("publisher", None)
+        entry["type"] = "misc"
+        return True
+    return False
+
+
+def _rule_strip_secondary_doi_from_article_load(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Strip a preprint (secondary) DOI/URL from an @article that already has a
+    real journal plus volume/pages (keeps the entry as @article)."""
+    if (
+        entry.get("type") == "article"
+        and fields.get("journal")
+        and fields.get("doi")
+        and idu.is_secondary_doi(fields["doi"])
+        and (fields.get("volume") or fields.get("pages"))
+    ):
+        fields.pop("doi", None)
+        fields.pop("url", None)
+        return True
+    return False
+
+
+def _rule_fix_author_casing_load(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Fix author casing, gating on the modification flag from _fix_author_casing."""
+    auth = fields.get("author", "")
+    if isinstance(auth, str) and auth:
+        auth_fixed, auth_changed = mu._fix_author_casing(auth)
+        if auth_changed:
+            fields["author"] = auth_fixed
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Site-C-only rules (Phase-4 post-merge; POST_MERGE is terminal)
 # ---------------------------------------------------------------------------
 def _rule_article_no_journal_to_misc(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
@@ -676,7 +777,56 @@ _POST_MERGE_RULES = (
     _rule_howpublished_to_inproceedings,
 )
 
+# Site B (existing-file load repair, before enrichment). Reproduces the inline
+# process_article() fixup block's exact rule subset and order. NOTE: this is Site
+# B's current subset, NOT the union with Site C: complete entries run Site B and
+# return before ever reaching Site C, so C-only terminal rules (e.g. R13
+# url-booktitle->misc, R20 misc->inproceedings, article-no-journal->misc) are
+# deliberately ABSENT here. The destructive title==venue delete (N22) and the
+# bare-& rewrite trigger stay in main.py around the canonicalize() call.
+_LOAD_REPAIR_RULES = (
+    _rule_strip_preprint_journal_load,
+    _rule_strip_email_from_author,
+    _rule_strip_bracket_j_title,
+    _rule_strip_ellipsis_venues,
+    _rule_expand_abbreviated_venue,
+    _rule_venue_case_corrections,
+    _rule_strip_publisher_duplicate,
+    _rule_strip_trailing_dash_title,
+    _rule_strip_subtitle_wrapper_title,
+    _rule_strip_spire_suffix,
+    _rule_strip_osf_doi_version,
+    _rule_fix_zentrum_umlaut,
+    _rule_strip_lipics_pages,
+    _rule_strip_proceedings_wrapper,
+    _rule_trim_caps_title,
+    _rule_conference_journal_to_inproceedings,
+    _rule_unpublished_to_misc_load,
+    _rule_patent_to_misc,
+    _rule_repo_journal_to_misc,
+    _rule_university_to_phdthesis,
+    _rule_procedia_to_inproceedings,
+    _rule_pacm_booktitle_to_article,
+    _rule_named_proceedings_to_article,
+    _rule_institutional_repo_to_phdthesis,
+    _rule_repo_booktitle_to_misc,
+    _rule_preprint_booktitle_to_misc,
+    _rule_journal_prefix_to_article,
+    _rule_handbook_to_incollection,
+    _rule_book_chapter_doi_to_incollection,
+    _rule_strip_preprint_marker_title,
+    _rule_fix_title_text,
+    _rule_booktitle_fixups,
+    _rule_strip_urls_in_venue,
+    _rule_publisher_corrections,
+    _rule_strip_secondary_doi_from_article_load,
+    _rule_backfill_howpublished,
+    _rule_fix_author_casing_load,
+    _rule_normalize_howpublished,
+)
+
 _STAGE_RULES = {
+    CanonicalStage.LOAD_REPAIR: _LOAD_REPAIR_RULES,
     CanonicalStage.POST_MERGE: _POST_MERGE_RULES,
     CanonicalStage.POSTRUN_ORPHAN_REPAIR: _POSTRUN_ORPHAN_REPAIR_RULES,
 }

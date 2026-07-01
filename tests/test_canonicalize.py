@@ -20,6 +20,13 @@ from src.canonicalize import (
 )
 
 
+def _load_repair(entry: dict[str, Any]) -> dict[str, Any]:
+    """Run LOAD_REPAIR canonicalize on a copy and return the mutated copy."""
+    e = copy.deepcopy(entry)
+    canonicalize(e, stage=CanonicalStage.LOAD_REPAIR)
+    return e
+
+
 def _article(**fields: str) -> dict[str, Any]:
     """Build a minimal @article entry with the given extra fields."""
     etype = fields.pop("type", "article")
@@ -147,3 +154,129 @@ def test_post_merge_is_fixpoint_on_corpus() -> None:
         if entry["type"] != snapshot["type"] or entry["fields"] != snapshot["fields"]:
             non_fixpoint.append(bib_path)
     assert not non_fixpoint, f"POST_MERGE not a data fixpoint for: {non_fixpoint[:10]}"
+
+
+# ---------------------------------------------------------------------------
+# Per-rule tests at LOAD_REPAIR (Site B) + proof C-only rules are ABSENT
+# ---------------------------------------------------------------------------
+def test_load_repair_unpublished_to_misc_drops_publisher() -> None:
+    """LOAD_REPAIR "Unpublished" journal -> @misc, dropping BOTH journal and publisher.
+
+    This diverges from POST_MERGE (which keeps publisher), so it must be its own rule.
+    """
+    result = _load_repair(_article(journal="Unpublished", publisher="Some Press"))
+    assert result["type"] == "misc"
+    assert "journal" not in result["fields"]
+    assert "publisher" not in result["fields"]
+
+
+def test_load_repair_patent_to_misc() -> None:
+    """LOAD_REPAIR @article with a US patent number as journal -> @misc (journal -> note)."""
+    result = _load_repair(_article(journal="US Patent 10,123,456"))
+    assert result["type"] == "misc"
+    assert result["fields"]["note"] == "US Patent 10,123,456"
+    assert "journal" not in result["fields"]
+
+
+def test_load_repair_strips_email_from_author() -> None:
+    """LOAD_REPAIR strips an email address (and a dangling separator) from the author field."""
+    result = _load_repair(_article(author="Jane Doe jane@x.org and John Roe"))
+    assert result["fields"]["author"] == "Jane Doe and John Roe"
+
+
+def test_load_repair_strips_bracket_j_title() -> None:
+    """LOAD_REPAIR strips a trailing "[J]" bracket artifact from the title."""
+    result = _load_repair(_article(title="A Study of Neural Networks [J]"))
+    assert result["fields"]["title"] == "A Study of Neural Networks"
+
+
+def test_load_repair_strip_secondary_doi_keeps_article() -> None:
+    """LOAD_REPAIR strips the preprint DOI/URL when journal + volume/pages exist,
+    keeping the entry as @article (mirrors POST_MERGE R19 keep-branch)."""
+    result = _load_repair(
+        _article(
+            journal="Real Journal",
+            doi="10.48550/arXiv.2101.00002",
+            volume="12",
+            pages="1-10",
+            url="https://arxiv.org/abs/2101.00002",
+        )
+    )
+    assert result["type"] == "article"
+    assert result["fields"]["journal"] == "Real Journal"
+    assert "doi" not in result["fields"]
+    assert "url" not in result["fields"]
+
+
+def test_load_repair_secondary_doi_misc_branch_absent() -> None:
+    """C-only R19 misc-downgrade is ABSENT at LOAD_REPAIR: an @article with a
+    preprint DOI but no volume/pages is left unchanged (still @article, DOI kept).
+
+    POST_MERGE would downgrade this to @misc; LOAD_REPAIR must not.
+    """
+    entry = _article(journal="Journal of Foo", doi="10.48550/arXiv.2101.00001")
+    result = _load_repair(entry)
+    assert result["type"] == "article"
+    assert result["fields"]["journal"] == "Journal of Foo"
+    assert result["fields"]["doi"] == "10.48550/arXiv.2101.00001"
+    # Contrast: POST_MERGE moves it out of @article (downgrade then R20 upgrade),
+    # so LOAD_REPAIR's keep-as-article behavior is genuinely distinct.
+    post = _canon(entry)
+    assert post["type"] != "article"
+    assert "journal" not in post["fields"]
+
+
+def test_load_repair_r20_misc_howpublished_absent() -> None:
+    """C-only R20 (misc howpublished -> @inproceedings) is ABSENT at LOAD_REPAIR:
+    a @misc with a conference howpublished stays @misc (POST_MERGE would upgrade it)."""
+    entry = _article(type="misc", howpublished="International Conference on Learning Representations")
+    result = _load_repair(entry)
+    assert result["type"] == "misc"
+    assert result["fields"]["howpublished"] == "International Conference on Learning Representations"
+    assert "booktitle" not in result["fields"]
+    # Contrast: POST_MERGE upgrades the same entry to @inproceedings.
+    assert _canon(entry)["type"] == "inproceedings"
+
+
+def test_load_repair_r13_url_booktitle_absent() -> None:
+    """C-only R13 (url-fragment booktitle -> @misc) is ABSENT at LOAD_REPAIR:
+    an @inproceedings with a URL booktitle stays @inproceedings (POST_MERGE -> @misc)."""
+    entry = _article(type="inproceedings", booktitle="https://foo.example/paper")
+    result = _load_repair(entry)
+    assert result["type"] == "inproceedings"
+    assert "booktitle" in result["fields"]
+    # Contrast: POST_MERGE downgrades the same entry to @misc.
+    assert _canon(entry)["type"] == "misc"
+
+
+def test_load_repair_article_no_journal_stays_article() -> None:
+    """C-only terminal (article-with-no-journal -> @misc) is ABSENT at LOAD_REPAIR:
+    a bare @article without a journal is left as @article (POST_MERGE -> @misc)."""
+    entry = _article()  # title/author/year only, no journal
+    result = _load_repair(entry)
+    assert result["type"] == "article"
+    # Contrast: POST_MERGE downgrades a journal-less @article to @misc.
+    assert _canon(entry)["type"] == "misc"
+
+
+# ---------------------------------------------------------------------------
+# Corpus idempotency: LOAD_REPAIR is a data fixpoint (second pass = no change)
+# ---------------------------------------------------------------------------
+def test_load_repair_is_fixpoint_on_corpus() -> None:
+    """Applying LOAD_REPAIR twice yields identical type + fields for every committed
+    output/**/*.bib (a second pass is a strict data fixpoint)."""
+    files = sorted(glob.glob("output/**/*.bib", recursive=True))
+    if not files:
+        pytest.skip("no committed output corpus present")
+    non_fixpoint: list[str] = []
+    for bib_path in files:
+        with open(bib_path, encoding="utf-8") as fh:
+            entry = parse_bibtex_to_dict(fh.read())
+        if entry is None:
+            continue
+        canonicalize(entry, stage=CanonicalStage.LOAD_REPAIR)
+        snapshot = copy.deepcopy(entry)
+        canonicalize(entry, stage=CanonicalStage.LOAD_REPAIR)
+        if entry["type"] != snapshot["type"] or entry["fields"] != snapshot["fields"]:
+            non_fixpoint.append(bib_path)
+    assert not non_fixpoint, f"LOAD_REPAIR not a data fixpoint for: {non_fixpoint[:10]}"
