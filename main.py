@@ -77,11 +77,6 @@ from src.exceptions import (
     FULL_OPERATION_ERRORS,
     PARSE_ERRORS,
 )
-from src.fixup.text import (
-    _fix_fused_compounds,  # noqa: F401
-    _is_corrupted_title,
-    _is_garbage_title,
-)
 from src.fsscan import iter_author_bibs, iter_output_dirs
 from src.http_utils import get_api_call_counts, http_get_text, reset_api_call_counts
 from src.io_utils import (
@@ -110,6 +105,11 @@ from src.text_utils import (
     has_placeholder,
     title_similarity,
     trim_title_default,
+)
+from src.textnorm import (
+    _fix_fused_compounds,  # noqa: F401
+    _is_corrupted_title,
+    _is_garbage_title,
 )
 
 FORCE_ENRICH = "--force" in sys.argv[1:]

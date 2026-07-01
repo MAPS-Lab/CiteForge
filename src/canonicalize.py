@@ -19,9 +19,9 @@ from src.config import (
     REPOSITORY_AS_JOURNAL,
     VENUE_CASE_CORRECTIONS,
 )
-from src.fixup.text import _apply_booktitle_fixups, _fix_title_text
 from src.publication_parser import _strip_ellipsis
 from src.text_utils import trim_title_default
+from src.textnorm import _apply_booktitle_fixups, _fix_title_text
 
 
 class CanonicalStage(Enum):
