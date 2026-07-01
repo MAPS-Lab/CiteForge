@@ -108,8 +108,6 @@ from src.text_utils import (
 )
 from src.textnorm import _is_corrupted_title, _is_garbage_title
 
-FORCE_ENRICH = "--force" in sys.argv[1:]
-
 _ARXIV_ABS_RE = re.compile(r"arxiv\.org/abs/(\d{4}\.\d{4,5})", re.IGNORECASE)
 
 _FILENAME_YEAR_RE = re.compile(r"/[A-Za-z]+(\d{4})-")
@@ -274,6 +272,7 @@ def process_article(
     gemini_api_key: str | None = None,
     summary_csv_path: str | None = None,
     min_year: int = 0,
+    force_enrich: bool = False,
 ) -> int:
     """Enrich a single publication from baseline through 4-phase pipeline and save to disk.
 
@@ -441,7 +440,7 @@ def process_article(
             safe_write_file(existing_file_path, bib_str)
 
     # Skip enrichment entirely if entry is already complete (unless --force)
-    if not FORCE_ENRICH and existing_file_loaded and baseline_entry is not None and _entry_is_complete(baseline_entry):
+    if not force_enrich and existing_file_loaded and baseline_entry is not None and _entry_is_complete(baseline_entry):
         # Quick fixup: strip preprint-only publishers from complete entries.
         # Single-sourced in canonicalize() at the COMPLETE_SKIP_FINALIZE stage; the
         # debug log and write-gating stay here so the skip-path I/O is unchanged.
@@ -1441,6 +1440,7 @@ def process_record(
     delay: float = 0.0,
     gemini_api_key: str | None = None,
     summary_csv_path: str | None = None,
+    force_enrich: bool = False,
 ) -> int:
     """Fetch, deduplicate, and enrich recent publications for one author.
 
@@ -1594,6 +1594,7 @@ def process_record(
                     gemini_api_key=gemini_api_key,
                     summary_csv_path=summary_csv_path,
                     min_year=min_year,
+                    force_enrich=force_enrich,
                 )
             except FULL_OPERATION_ERRORS as e:
                 logger.error(f"Article error: {e}", category=LogCategory.ERROR)
@@ -1645,6 +1646,7 @@ def main() -> int:
 
     Returns an exit code suitable for use as a command-line entry point.
     """
+    force_enrich = "--force" in sys.argv[1:]
     out_dir = os.path.join(os.path.dirname(__file__), DEFAULT_OUT_DIR)
     try:
         os.makedirs(out_dir, exist_ok=True)
@@ -1769,6 +1771,7 @@ def main() -> int:
                 delay=REQUEST_DELAY_MIN,
                 gemini_api_key=gemini_api_key,
                 summary_csv_path=summary_csv_path,
+                force_enrich=force_enrich,
             )
             future_to_author[future] = rec
 
