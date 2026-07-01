@@ -18,6 +18,7 @@ from src import merge_utils as mu
 from src.cache import get_cache_hit_counts
 from src.canonicalize import (
     _BOOK_CHAPTER_DOI_RE,
+    _BRACKET_J_RE,
     _DOI_VERSION_RE,
     _GECCO_LOWER,
     _GECCO_PROPER,
@@ -33,9 +34,12 @@ from src.canonicalize import (
     _TRAILING_DASH_RE,
     _URL_IN_VENUE_RE,
     _URL_IN_VENUE_STRIP_RE,
+    _US_PATENT_RE,
     _ZENTRUM_FUER,
     _ZENTRUM_FUR,
+    CanonicalStage,
     _fixup_bib_entry,
+    canonicalize,
 )
 from src.clients.helpers import extract_authors_from_article, get_article_year, strip_html_tags
 from src.clients.scholar import (
@@ -142,13 +146,9 @@ from src.text_utils import (
 
 FORCE_ENRICH = "--force" in sys.argv[1:]
 
-_BRACKET_J_RE = re.compile(r"\s*\[J\]\s*$")
 _ARXIV_ABS_RE = re.compile(r"arxiv\.org/abs/(\d{4}\.\d{4,5})", re.IGNORECASE)
 
 _FILENAME_YEAR_RE = re.compile(r"/[A-Za-z]+(\d{4})-")
-
-# US Patent detection (used in existing-file fixup and Phase 4 post-merge)
-_US_PATENT_RE = re.compile(r"(?i)^US\s+Patent")
 
 
 def _entry_is_complete(entry: dict[str, Any]) -> bool:
@@ -1627,409 +1627,13 @@ def process_article(
     logger.info("Applying trust policy and merging enrichments", category=LogCategory.SAVE, source=LogSource.SYSTEM)
     try:
         merged = mu.merge_with_policy(baseline_entry, enr_list)
-
-        # Downgrade @article to @misc when journal is missing (by Phase 4 all
-        # enrichment is done, so a missing journal means no source could provide one)
         merged_fields = merged.get("fields") or {}
-        if merged.get("type") == "article" and not merged_fields.get("journal"):
-            logger.debug(
-                "TYPE_CORRECT | article_no_journal->misc",
-                category=LogCategory.AUDIT,
-            )
-            merged["type"] = "misc"
 
-        # Downgrade @inproceedings without booktitle -> @misc (same rationale:
-        # by Phase 4 enrichment is complete; @inproceedings without booktitle
-        # is invalid BibTeX)
-        if merged.get("type") == "inproceedings" and not merged_fields.get("booktitle"):
-            logger.debug(
-                "TYPE_CORRECT | inproceedings_no_booktitle->misc",
-                category=LogCategory.AUDIT,
-            )
-            merged["type"] = "misc"
-
-        # Downgrade @article with preprint server as journal -> @misc
-        # Use substring match to catch suffixed forms like "arXiv (Cornell University)"
-        if merged.get("type") == "article":
-            j_lower = (merged_fields.get("journal") or "").lower().strip()
-            if j_lower and any(ps == j_lower or ps in j_lower for ps in PREPRINT_SERVERS):
-                logger.debug(
-                    f"TYPE_CORRECT | article_preprint_journal->misc | journal={j_lower}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "misc"
-                merged_fields["howpublished"] = merged_fields.pop("journal")
-
-        # Strip trailing ellipsis from truncated venue/title fields
-        for _ell_field_p4 in ("journal", "booktitle", "title"):
-            _ell_val_p4 = merged_fields.get(_ell_field_p4) or ""
-            if _ell_val_p4.rstrip().endswith(("...", "\u2026")):
-                _ell_clean_p4 = _strip_ellipsis(_ell_val_p4)
-                if _ell_clean_p4 != _ell_val_p4:
-                    logger.debug(
-                        f"TYPE_CORRECT | ellipsis_stripped | {_ell_field_p4}={_ell_val_p4[:60]}",
-                        category=LogCategory.AUDIT,
-                    )
-                    merged_fields[_ell_field_p4] = _ell_clean_p4
-
-        # Reclassify @article with conference proceedings as journal -> @inproceedings
-        # (but NOT for ACM PACM journals which are legitimately named "Proceedings of...")
-        if merged.get("type") == "article" and merged_fields.get("journal"):
-            _p4_jnl = merged_fields["journal"].strip()
-            _p4_jnl_lower = _p4_jnl.lower()
-            _is_pacm_p4 = any(_p4_jnl_lower.startswith(pj) or _p4_jnl_lower == pj for pj in ACM_JOURNAL_PROCEEDINGS)
-            if mu._is_conference_journal(_p4_jnl) and not merged_fields.get("booktitle") and not _is_pacm_p4:
-                logger.debug(
-                    f"TYPE_CORRECT | article_conference_journal->inproceedings | journal={_p4_jnl[:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "inproceedings"
-                merged_fields["booktitle"] = merged_fields.pop("journal")
-
-        # Reclassify @article with Procedia/IFAC series journal → @inproceedings
-        if merged.get("type") == "article" and merged_fields.get("journal"):
-            _proc_jnl_lower = merged_fields["journal"].strip().lower()
-            if any(_proc_jnl_lower.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL):
-                logger.debug(
-                    f"TYPE_CORRECT | article_procedia->inproceedings | journal={merged_fields['journal'][:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "inproceedings"
-                merged_fields["booktitle"] = merged_fields.pop("journal")
-
-        # Reclassify @inproceedings with PACM journal as booktitle → @article
-        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _pacm_bt_lower = merged_fields["booktitle"].strip().lower()
-            if any(_pacm_bt_lower.startswith(pj) or _pacm_bt_lower == pj for pj in ACM_JOURNAL_PROCEEDINGS):
-                logger.debug(
-                    f"TYPE_CORRECT | inproceedings_pacm->article | booktitle={merged_fields['booktitle'][:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "article"
-                merged_fields["journal"] = merged_fields.pop("booktitle")
-
-        # Reclassify @inproceedings with PNAS/PVLDB journal as booktitle → @article
-        # Guard: skip if the booktitle extends the journal name with conference keywords
-        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _jnp_bt_lower = merged_fields["booktitle"].strip().lower()
-            _jnp_match_p4 = next((j for j in JOURNALS_NAMED_PROCEEDINGS if _jnp_bt_lower.startswith(j)), None)
-            if _jnp_match_p4:
-                _jnp_suffix_p4 = _jnp_bt_lower[len(_jnp_match_p4) :].lstrip(" /,")
-                if not any(kw in _jnp_suffix_p4 for kw in ("conference", "workshop", "symposium")):
-                    logger.debug(
-                        f"TYPE_CORRECT | inproceedings_journal_proceedings->article | booktitle={_jnp_bt_lower[:60]}",
-                        category=LogCategory.AUDIT,
-                    )
-                    merged["type"] = "article"
-                    merged_fields["journal"] = merged_fields.pop("booktitle")
-
-        # Reclassify @inproceedings with institutional repository → @phdthesis
-        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _inst_bt_lower = merged_fields["booktitle"].strip().lower()
-            if any(ir in _inst_bt_lower for ir in INSTITUTIONAL_REPOSITORIES):
-                logger.debug(
-                    f"TYPE_CORRECT | inproceedings_repository->phdthesis | booktitle={merged_fields['booktitle'][:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "phdthesis"
-                merged_fields["school"] = merged_fields.pop("booktitle")
-
-        # Reclassify @article with patent number as journal → @misc
-        if merged.get("type") == "article" and merged_fields.get("journal"):
-            _patent_jnl = merged_fields["journal"].strip()
-            if _US_PATENT_RE.match(_patent_jnl):
-                logger.debug(
-                    f"TYPE_CORRECT | article_patent->misc | journal={_patent_jnl[:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "misc"
-                merged_fields["note"] = _patent_jnl
-                merged_fields.pop("journal", None)
-
-        # Reclassify @article with "Unpublished" journal → @misc
-        if (
-            merged.get("type") == "article"
-            and merged_fields.get("journal")
-            and merged_fields["journal"].strip().lower() == "unpublished"
-        ):
-            logger.debug("TYPE_CORRECT | article_unpublished->misc", category=LogCategory.AUDIT)
-            merged["type"] = "misc"
-            merged_fields.pop("journal", None)
-
-        # Strip URL fragments from booktitle (e.g., "proceedings.mlr.press")
-        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _bt_val = merged_fields["booktitle"].strip()
-            if re.match(r"^https?://|^[\w.-]+\.(com|org|net|io|press)\b", _bt_val, re.IGNORECASE):
-                logger.debug(
-                    f"TYPE_CORRECT | inproceedings_url_booktitle->misc | booktitle={_bt_val[:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "misc"
-                merged_fields.pop("booktitle", None)
-
-        # Downgrade @inproceedings with "Preprint" as booktitle → @misc
-        if (
-            merged.get("type") == "inproceedings"
-            and merged_fields.get("booktitle")
-            and merged_fields["booktitle"].strip().lower() == "preprint"
-        ):
-            logger.debug("TYPE_CORRECT | inproceedings_preprint->misc", category=LogCategory.AUDIT)
-            merged["type"] = "misc"
-            merged_fields.pop("booktitle", None)
-
-        # Reclassify @inproceedings with journal name as booktitle → @article
-        # (but NOT for PROCEEDINGS_SERIES_AS_JOURNAL which are genuinely proceedings)
-        if merged.get("type") == "inproceedings" and merged_fields.get("booktitle"):
-            _jp_bt_lower = merged_fields["booktitle"].strip().lower()
-            _is_proc_series = any(_jp_bt_lower.startswith(ps) for ps in PROCEEDINGS_SERIES_AS_JOURNAL)
-            if not _is_proc_series and any(_jp_bt_lower.startswith(jp) for jp in JOURNAL_ONLY_PREFIXES):
-                logger.debug(
-                    f"TYPE_CORRECT | inproceedings_journal_booktitle->article | "
-                    f"booktitle={merged_fields['booktitle'][:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "article"
-                merged_fields["journal"] = merged_fields.pop("booktitle")
-
-        # Reclassify @inproceedings with "Handbook" in booktitle → @incollection
-        if (
-            merged.get("type") == "inproceedings"
-            and merged_fields.get("booktitle")
-            and "handbook" in merged_fields["booktitle"].lower()
-        ):
-            logger.debug(
-                f"TYPE_CORRECT | inproceedings_handbook->incollection | booktitle={merged_fields['booktitle'][:60]}",
-                category=LogCategory.AUDIT,
-            )
-            merged["type"] = "incollection"
-
-        # Reclassify @article with book-chapter DOI pattern → @incollection
-        _p4_doi_ch = (merged_fields.get("doi") or "").strip()
-        if (
-            merged.get("type") == "article"
-            and merged_fields.get("journal")
-            and _p4_doi_ch
-            and _BOOK_CHAPTER_DOI_RE.search(_p4_doi_ch)
-        ):
-            logger.debug(
-                f"TYPE_CORRECT | article_book_chapter->incollection | doi={_p4_doi_ch}",
-                category=LogCategory.AUDIT,
-            )
-            merged_fields["booktitle"] = merged_fields.pop("journal")
-            merged["type"] = "incollection"
-
-        # Downgrade @article with repository/portal as journal → @misc
-        if (
-            merged.get("type") == "article"
-            and merged_fields.get("journal")
-            and any(rj in merged_fields["journal"].lower() for rj in REPOSITORY_AS_JOURNAL)
-        ):
-            logger.debug(
-                f"TYPE_CORRECT | article_repository->misc | journal={merged_fields['journal'][:60]}",
-                category=LogCategory.AUDIT,
-            )
-            merged["type"] = "misc"
-            merged_fields.pop("journal", None)
-
-        # Downgrade @inproceedings with repository as booktitle → @misc
-        if (
-            merged.get("type") == "inproceedings"
-            and merged_fields.get("booktitle")
-            and any(rj in merged_fields["booktitle"].lower() for rj in REPOSITORY_AS_JOURNAL)
-        ):
-            logger.debug(
-                f"TYPE_CORRECT | inproceedings_repository->misc | booktitle={merged_fields['booktitle'][:60]}",
-                category=LogCategory.AUDIT,
-            )
-            merged["type"] = "misc"
-            merged_fields.pop("booktitle", None)
-
-        # Reclassify @article with university name as journal → @phdthesis
-        # (Crossref sometimes returns thesis DOIs with the university as journal)
-        if merged.get("type") == "article" and merged_fields.get("journal"):
-            _jnl_lower = merged_fields["journal"].lower()
-            if "university" in _jnl_lower or "institut" in _jnl_lower:
-                logger.debug(
-                    f"TYPE_CORRECT | article_thesis->phdthesis | journal={merged_fields['journal'][:60]}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "phdthesis"
-                merged_fields["school"] = merged_fields.pop("journal")
-
-        # Handle @article with preprint DOI
-        if merged.get("type") == "article":
-            _merged_doi = (merged_fields.get("doi") or "").strip()
-            if _merged_doi and idu.is_secondary_doi(_merged_doi):
-                venue = merged_fields.get("journal", "")
-                # If article has real journal+volume/pages, keep as article but strip preprint DOI
-                if venue and (merged_fields.get("volume") or merged_fields.get("pages")):
-                    logger.debug(
-                        f"TYPE_CORRECT | remove_preprint_doi_from_article | doi={_merged_doi} | journal={venue[:40]}",
-                        category=LogCategory.AUDIT,
-                    )
-                    merged_fields.pop("doi", None)
-                    merged_fields.pop("url", None)
-                else:
-                    logger.debug(
-                        f"TYPE_CORRECT | article_preprint_doi->misc | doi={_merged_doi} | venue={venue}",
-                        category=LogCategory.AUDIT,
-                    )
-                    merged["type"] = "misc"
-                    if venue:
-                        merged_fields["howpublished"] = merged_fields.pop("journal")
-
-        # Backfill howpublished for @misc entries with preprint DOI or arXiv eprint
-        if merged.get("type") == "misc" and not merged_fields.get("howpublished"):
-            _misc_doi = (merged_fields.get("doi") or "").strip()
-            _inferred_hp = mu.infer_howpublished_from_doi(_misc_doi) if _misc_doi else None
-            if _inferred_hp:
-                merged_fields["howpublished"] = _inferred_hp
-            elif (merged_fields.get("archiveprefix") or "").lower() == "arxiv":
-                merged_fields["howpublished"] = "arXiv"
-
-        # Fix ALL-CAPS titles and strip [J]/[preprint] artifacts from enrichment sources
-        _p4_title = merged_fields.get("title", "")
-        if isinstance(_p4_title, str) and _p4_title:
-            _p4_fixed = trim_title_default(_p4_title)
-            # Strip [J] bracket artifact (citation format leak from Scholar)
-            _p4_fixed = _BRACKET_J_RE.sub("", _p4_fixed).strip()
-            # Strip [preprint] marker from title text
-            _p4_fixed = _PREPRINT_MARKER_RE.sub("", _p4_fixed).strip()
-            # Fix fused compounds, colon-space, hyphen-space, and acronym case
-            _p4_fixed = _fix_title_text(_p4_fixed)
-            # Strip trailing dash/en-dash (truncation artifact)
-            _p4_fixed = _TRAILING_DASH_RE.sub("", _p4_fixed)
-            # Strip ": -...-" subtitle wrapper artifact
-            _p4_fixed = _SUBTITLE_WRAPPER_RE.sub(r": \1", _p4_fixed)
-            if _p4_fixed != _p4_title:
-                merged_fields["title"] = _p4_fixed
-
-        # Apply booktitle cleanup patterns (verbose metadata strip, abbreviations, typos, spacing)
-        _p4_bt_fix = (merged_fields.get("booktitle") or "").strip()
-        if _p4_bt_fix:
-            _p4_bt_fixed = _apply_booktitle_fixups(_p4_bt_fix)
-            if _p4_bt_fixed != _p4_bt_fix:
-                merged_fields["booktitle"] = _p4_bt_fixed
-
-        # Expand abbreviated venue names in booktitle
-        _p4_bt_abbr = (merged_fields.get("booktitle") or "").strip()
-        if _p4_bt_abbr and _p4_bt_abbr.lower() in ABBREVIATED_VENUE_MAP:
-            _p4_expanded = ABBREVIATED_VENUE_MAP[_p4_bt_abbr.lower()]
-            if _p4_expanded != _p4_bt_abbr:
-                merged_fields["booktitle"] = _p4_expanded
-
-        # Correct ALL-CAPS venue names to proper case
-        for _p4_vcf in ("journal", "booktitle"):
-            _p4_vc_val = (merged_fields.get(_p4_vcf) or "").strip()
-            if _p4_vc_val and _p4_vc_val in VENUE_CASE_CORRECTIONS:
-                merged_fields[_p4_vcf] = VENUE_CASE_CORRECTIONS[_p4_vc_val]
-            elif _p4_vc_val and _GECCO_LOWER in _p4_vc_val.lower():
-                _p4_vc_fixed = _GECCO_RE.sub(_GECCO_PROPER, _p4_vc_val)
-                if _p4_vc_fixed != _p4_vc_val:
-                    merged_fields[_p4_vcf] = _p4_vc_fixed
-
-        # Strip publisher when it duplicates the journal/booktitle name
-        _p4_pub = (merged_fields.get("publisher") or "").strip()
-        _p4_container = (merged_fields.get("journal") or merged_fields.get("booktitle") or "").strip()
-        if _p4_pub and _p4_container and _p4_pub.lower() == _p4_container.lower():
-            del merged_fields["publisher"]
-
-        # Strip SPIRE-style proceedings garbage suffix from booktitle
-        _p4_bt_spire = (merged_fields.get("booktitle") or "").strip()
-        if _p4_bt_spire:
-            _p4_bt_cleaned = _SPIRE_STRIP_RE.sub("", _p4_bt_spire)
-            if _p4_bt_cleaned != _p4_bt_spire:
-                merged_fields["booktitle"] = _p4_bt_cleaned
-
-        # Strip _v[N] version suffix from OSF/PsyArXiv DOIs
-        _p4_doi_val = (merged_fields.get("doi") or "").strip()
-        if _p4_doi_val and _OSF_DOI_RE.match(_p4_doi_val):
-            _p4_doi_stripped = _DOI_VERSION_RE.sub("", _p4_doi_val)
-            if _p4_doi_stripped != _p4_doi_val:
-                merged_fields["doi"] = _p4_doi_stripped
-                _p4_url_val = (merged_fields.get("url") or "").strip()
-                if _p4_url_val and _p4_doi_val in _p4_url_val:
-                    merged_fields["url"] = _p4_url_val.replace(_p4_doi_val, _p4_doi_stripped)
-
-        # Fix Schloss Dagstuhl missing umlaut
-        _p4_pub = (merged_fields.get("publisher") or "").strip()
-        if _ZENTRUM_FUR in _p4_pub:
-            merged_fields["publisher"] = _p4_pub.replace(_ZENTRUM_FUR, _ZENTRUM_FUER)
-
-        # Strip page numbers embedded in booktitle (LIPIcs style)
-        _p4_bt_pg = (merged_fields.get("booktitle") or "").strip()
-        if _p4_bt_pg:
-            _p4_bt_pg_clean = _LIPICS_PAGES_STRIP_RE.sub("", _p4_bt_pg)
-            if _p4_bt_pg_clean != _p4_bt_pg:
-                merged_fields["booktitle"] = _p4_bt_pg_clean
-                if not merged_fields.get("pages"):
-                    _p4_pg_m = _LIPICS_PAGES_EXTRACT_RE.search(_p4_bt_pg)
-                    if _p4_pg_m:
-                        merged_fields["pages"] = _p4_pg_m.group(1).replace(" ", "")
-
-        # Strip duplicate "Proceedings of the" wrapper
-        _p4_bt_dup = (merged_fields.get("booktitle") or "").strip()
-        if _p4_bt_dup.startswith(_PROC_EXT_ABSTRACTS):
-            merged_fields["booktitle"] = _p4_bt_dup.removeprefix(_PROC_OF_THE)
-
-        # Strip URLs embedded in booktitle/journal (keep text before URL)
-        for _url_field in ("booktitle", "journal"):
-            _url_val = (merged_fields.get(_url_field) or "").strip()
-            if _url_val and _URL_IN_VENUE_RE.search(_url_val):
-                _url_cleaned = _URL_IN_VENUE_STRIP_RE.sub("", _url_val).strip().rstrip(",")
-                if _url_cleaned and _url_cleaned != _url_val:
-                    merged_fields[_url_field] = _url_cleaned
-
-        # Apply publisher corrections (e.g. SAGE → Mary Ann Liebert for JCB)
-        _pub_journal = (merged_fields.get("journal") or "").lower()
-        if _pub_journal:
-            for _pub_jnl_key, _pub_correct in PUBLISHER_CORRECTIONS.items():
-                if _pub_jnl_key in _pub_journal:
-                    _cur_pub = merged_fields.get("publisher", "")
-                    if _cur_pub and _cur_pub != _pub_correct:
-                        merged_fields["publisher"] = _pub_correct
-
-        # Fix author casing + capital "And" separators from API sources
-        _p4_auth = merged_fields.get("author", "")
-        if isinstance(_p4_auth, str) and _p4_auth:
-            _p4_auth_fixed, _ = mu._fix_author_casing(_p4_auth)
-            if _p4_auth_fixed != _p4_auth:
-                merged_fields["author"] = _p4_auth_fixed
-
-        # Normalize howpublished casing after all journal→howpublished moves
-        mu._normalize_howpublished(merged_fields)
-
-        # Upgrade @misc with conference/workshop howpublished → @inproceedings
-        # When howpublished is a venue name (not a preprint server), the entry
-        # is a conference/workshop paper that should be @inproceedings.
-        if merged.get("type") == "misc" and merged_fields.get("howpublished"):
-            _hp_val = (merged_fields.get("howpublished") or "").strip()
-            _hp_lower = _hp_val.lower()
-            _is_preprint_hp = any(ps == _hp_lower or ps in _hp_lower for ps in PREPRINT_SERVERS) or _hp_lower in (
-                "arxiv",
-                "biorxiv",
-                "medrxiv",
-                "chemrxiv",
-                "techrxiv",
-                "ssrn",
-                "ssrn electronic journal",
-                "research square",
-                "preprints.org",
-                "authorea",
-                "osf preprints",
-                "openrxiv",
-                "psyarxiv",
-                "socarxiv",
-                "edarxiv",
-            )
-            _is_repository_hp = any(rj in _hp_lower for rj in REPOSITORY_AS_JOURNAL)
-            if not _is_preprint_hp and not _is_repository_hp and _hp_val:
-                logger.debug(
-                    f"TYPE_CORRECT | misc_workshop->inproceedings | howpublished={_hp_val}",
-                    category=LogCategory.AUDIT,
-                )
-                merged["type"] = "inproceedings"
-                merged_fields["booktitle"] = merged_fields.pop("howpublished")
+        # Phase-4 post-merge canonicalization: entry-type reclassification and
+        # text/venue normalization, single-sourced in src/canonicalize.py.
+        # POST_MERGE is the terminal stage; absence rules (article/inproceedings
+        # missing venue, preprint-DOI downgrade) fire here after enrichment.
+        canonicalize(merged, stage=CanonicalStage.POST_MERGE)
 
         # Annotate bare stubs: no enrichers, no DOI, no venue
         is_bare_stub = (
