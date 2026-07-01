@@ -3378,3 +3378,53 @@ class TestOpenReviewSessionThreadSafety:
         finally:
             sa._OPENREVIEW_SESSION = prev_session
             sa._OPENREVIEW_SESSION_CREATED_AT = prev_created
+
+
+class TestDoiBackfilledPreprintNotFabricatedConference:
+    """A DOI-inferred preprint/repository label must never become a fabricated
+    @inproceedings venue (I1). infer_howpublished_from_doi returns labels like
+    "EGU", "Preprint", "Institutional Repository" that are not conference names;
+    R20 must not upgrade them, and any already-upgraded entry must self-heal.
+    A REAL venue that merely carries a preprint-prefix DOI stays @inproceedings.
+    """
+
+    def test_backfilled_label_not_upgraded_to_inproceedings(self) -> None:
+        from src.canonicalize import CanonicalStage, canonicalize
+
+        # @misc whose howpublished is the bare DOI-inferred label -> stays @misc.
+        entry = {
+            "type": "misc",
+            "key": "X2024:Y",
+            "fields": {"title": "T", "howpublished": "EGU", "doi": "10.5194/egusphere-2024-1"},
+        }
+        canonicalize(entry, stage=CanonicalStage.POST_MERGE)
+        assert entry["type"] == "misc"
+        assert "booktitle" not in entry["fields"]
+        assert entry["fields"].get("howpublished") == "EGU"
+
+    def test_bare_infer_label_booktitle_downgraded_to_misc(self) -> None:
+        from src.canonicalize import CanonicalStage, canonicalize
+
+        # Already-fabricated @inproceedings with the bare label as booktitle -> @misc.
+        entry = {
+            "type": "inproceedings",
+            "key": "R2025:IP",
+            "fields": {"title": "T", "booktitle": "Institutional Repository", "doi": "10.32920/30695723"},
+        }
+        canonicalize(entry, stage=CanonicalStage.POST_MERGE)
+        assert entry["type"] == "misc"
+        assert "booktitle" not in entry["fields"]
+        assert entry["fields"].get("howpublished") == "Institutional Repository"
+
+    def test_real_conference_with_preprint_doi_preserved(self) -> None:
+        from src.canonicalize import CanonicalStage, canonicalize
+
+        # A genuine venue name that happens to carry an egusphere DOI stays @inproceedings.
+        entry = {
+            "type": "inproceedings",
+            "key": "C2022:Beirut",
+            "fields": {"title": "T", "booktitle": "EGU General Assembly", "doi": "10.5194/egusphere-egu22-7164"},
+        }
+        canonicalize(entry, stage=CanonicalStage.POST_MERGE)
+        assert entry["type"] == "inproceedings"
+        assert entry["fields"].get("booktitle") == "EGU General Assembly"

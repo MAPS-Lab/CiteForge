@@ -176,6 +176,25 @@ def _rule_preprint_booktitle_to_misc(entry: dict[str, Any], fields: dict[str, An
     return False
 
 
+def _rule_doi_backfilled_booktitle_to_misc(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """@inproceedings whose booktitle is a DOI-inferred preprint/repository label
+    -> @misc (booktitle -> howpublished).
+
+    Inverse of _rule_howpublished_to_inproceedings' DOI-backfill guard: corrects
+    entries mis-upgraded into a fabricated conference (e.g. booktitle "EGU" for
+    10.5194/egusphere, "Institutional Repository" for 10.32920) before that guard
+    existed. Once downgraded, the gated upgrade leaves them @misc.
+    """
+    if entry.get("type") == "inproceedings" and fields.get("booktitle"):
+        doi = (fields.get("doi") or "").strip()
+        inferred = mu.infer_howpublished_from_doi(doi) if doi else None
+        if inferred is not None and fields["booktitle"].strip().lower() == inferred.lower():
+            entry["type"] = "misc"
+            fields["howpublished"] = fields.pop("booktitle")
+            return True
+    return False
+
+
 def _rule_university_to_phdthesis(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
     """@article with a university/institute name as journal -> @phdthesis."""
     if entry.get("type") == "article" and fields.get("journal"):
@@ -686,6 +705,11 @@ def _rule_howpublished_to_inproceedings(entry: dict[str, Any], fields: dict[str,
 
     When howpublished is a venue name (not a preprint server or repository),
     the entry is a conference/workshop paper that should be @inproceedings.
+    A howpublished that was backfilled from the DOI (i.e. equals
+    infer_howpublished_from_doi) is a preprint/repository label, never a
+    conference venue -- e.g. "EGU" (10.5194/egusphere), "Preprint" (Cambridge
+    Open Engage), "Institutional Repository" (10.32920) -- so it must NOT be
+    upgraded into a fabricated @inproceedings.
     """
     if entry.get("type") == "misc" and fields.get("howpublished"):
         hp_val = (fields.get("howpublished") or "").strip()
@@ -694,7 +718,10 @@ def _rule_howpublished_to_inproceedings(entry: dict[str, Any], fields: dict[str,
             any(ps == hp_lower or ps in hp_lower for ps in PREPRINT_SERVERS) or hp_lower in _R20_PREPRINT_HOWPUBLISHED
         )
         is_repository_hp = any(rj in hp_lower for rj in REPOSITORY_AS_JOURNAL)
-        if not is_preprint_hp and not is_repository_hp and hp_val:
+        doi = (fields.get("doi") or "").strip()
+        inferred = mu.infer_howpublished_from_doi(doi) if doi else None
+        is_doi_backfilled = inferred is not None and hp_lower == inferred.lower()
+        if not is_preprint_hp and not is_repository_hp and not is_doi_backfilled and hp_val:
             entry["type"] = "inproceedings"
             fields["booktitle"] = fields.pop("howpublished")
             return True
@@ -732,6 +759,7 @@ _POSTRUN_ORPHAN_REPAIR_RULES = (
     _rule_repo_booktitle_to_misc,
     _rule_repo_journal_to_misc,
     _rule_preprint_booktitle_to_misc,
+    _rule_doi_backfilled_booktitle_to_misc,
     _rule_university_to_phdthesis,
     _rule_journal_prefix_to_article,
     _rule_handbook_to_incollection,
@@ -771,6 +799,7 @@ _POST_MERGE_RULES = (
     _rule_unpublished_to_misc,
     _rule_url_booktitle_to_misc,
     _rule_preprint_booktitle_to_misc,
+    _rule_doi_backfilled_booktitle_to_misc,
     _rule_journal_prefix_to_article,
     _rule_handbook_to_incollection,
     _rule_book_chapter_doi_to_incollection,
@@ -830,6 +859,7 @@ _LOAD_REPAIR_RULES = (
     _rule_institutional_repo_to_phdthesis,
     _rule_repo_booktitle_to_misc,
     _rule_preprint_booktitle_to_misc,
+    _rule_doi_backfilled_booktitle_to_misc,
     _rule_journal_prefix_to_article,
     _rule_handbook_to_incollection,
     _rule_book_chapter_doi_to_incollection,
