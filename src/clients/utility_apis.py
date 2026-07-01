@@ -8,7 +8,7 @@ from typing import Any
 
 from ..cache import response_cache
 from ..config import CACHE_TTL_DOI_DAYS, CACHE_TTL_SEARCH_DAYS, DATACITE_BASE, GEMINI_BASE, ORCID_BASE
-from ..exceptions import ALL_API_ERRORS, NETWORK_ERRORS
+from ..exceptions import ALL_API_ERRORS, ALL_FETCH_ERRORS
 from ..http_utils import _scrub_secrets, handle_api_errors, http_get_json, http_post_json
 from ..id_utils import _norm_doi
 from ..log_utils import LogCategory, LogSource, logger
@@ -159,7 +159,7 @@ def datacite_search_doi(doi: str) -> dict[str, Any] | None:
 
     try:
         data = http_get_json(url, timeout=15.0)
-    except NETWORK_ERRORS:
+    except ALL_FETCH_ERRORS:
         return None
 
     result = data.get("data")
@@ -256,7 +256,7 @@ def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
 
     try:
         data = http_get_json(url, timeout=15.0)
-    except NETWORK_ERRORS:
+    except ALL_FETCH_ERRORS:
         return []
 
     works = []
