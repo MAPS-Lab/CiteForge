@@ -28,7 +28,6 @@ class CanonicalStage(Enum):
     LOAD_REPAIR = "load_repair"
     COMPLETE_SKIP_FINALIZE = "complete_skip_finalize"
     POST_MERGE = "post_merge"
-    POST_TIER2_VALIDATE = "post_tier2_validate"
     POSTRUN_ORPHAN_REPAIR = "postrun_orphan_repair"
 
 
