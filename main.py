@@ -46,15 +46,12 @@ from src.clients.search_apis import (
 from src.config import (
     ABBREVIATED_VENUE_MAP,
     ACM_JOURNAL_PROCEEDINGS,
-    ACRONYM_CASE_CORRECTIONS,
-    COMPOUND_SUFFIXES,
     DEFAULT_A2I2_INPUT,
     DEFAULT_INPUT,
     DEFAULT_OUT_DIR,
     DEFAULT_S2_KEY_FILE,
     DEFAULT_SERPAPI_KEY_FILE,
     DEFAULT_SERPLY_KEY_FILE,
-    FUSED_COMPOUND_WORDS,
     GENERIC_SERIES_NAMES,
     INSTITUTIONAL_REPOSITORIES,
     JOURNAL_ONLY_PREFIXES,
@@ -84,6 +81,13 @@ from src.exceptions import (
     FILE_READ_ERRORS,
     FULL_OPERATION_ERRORS,
     PARSE_ERRORS,
+)
+from src.fixup.text import (
+    _apply_booktitle_fixups,
+    _fix_fused_compounds,  # noqa: F401
+    _fix_title_text,
+    _is_corrupted_title,
+    _is_garbage_title,
 )
 from src.fsscan import iter_author_bibs, iter_output_dirs
 from src.http_utils import get_api_call_counts, http_get_text, reset_api_call_counts
@@ -120,46 +124,10 @@ FORCE_ENRICH = "--force" in sys.argv[1:]
 _BRACKET_J_RE = re.compile(r"\s*\[J\]\s*$")
 _ARXIV_ABS_RE = re.compile(r"arxiv\.org/abs/(\d{4}\.\d{4,5})", re.IGNORECASE)
 
-# Pre-compiled patterns for _fix_fused_compounds (avoids ~800 re.compile() calls per invocation)
-_FUSED_DICT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b" + re.escape(fused) + r"\b", re.IGNORECASE), repl) for fused, repl in FUSED_COMPOUND_WORDS.items()
-]
-_COMPOUND_SUFFIX_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\b([A-Z][a-z]{2,})(" + re.escape(suffix) + r")\b") for suffix in COMPOUND_SUFFIXES
-]
-
-# Pre-compiled patterns for garbage title detection
-_GARBAGE_EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-_GARBAGE_POSTAL_RE = re.compile(r"\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b")
-_GARBAGE_DEPT_RE = re.compile(r"^\s*(Department|Faculty|School|Institute)\s+of\b", re.IGNORECASE)
-_GARBAGE_PHONE_RE = re.compile(r"\+?\d{1,4}[\.\-]\d{2,4}[\.\-]\d{2,}")
-_GARBAGE_VOLUME_RE = re.compile(r"\bComplete\s+Volume\b", re.IGNORECASE)
-_GARBAGE_SERIES_VOL_RE = re.compile(r"^(OASIcs|LIPIcs|LNI|LNCS|Dagstuhl)\b.*\bVolume\s+\d+\b", re.IGNORECASE)
-_GARBAGE_FESTSCHRIFT_RE = re.compile(r"\bFestschrift\b", re.IGNORECASE)
-_GARBAGE_FESTSCHRIFT_META_RE = re.compile(r",\s+[A-Z][a-z]+,\s+[A-Z][a-z]+\b.*\d{4}")
-_GARBAGE_PROCEEDINGS_RE = re.compile(r"^Proceedings\s+of\s+(the\s+)?\d{4}\s+", re.IGNORECASE)
-_GARBAGE_CORRECTION_RE = re.compile(r"^Correction(s)?\s+(to|of)\s*:", re.IGNORECASE)
-_GARBAGE_EASYCHAIR_RE = re.compile(r"\bEasyChair\s+Preprint\b", re.IGNORECASE)
 _FILENAME_YEAR_RE = re.compile(r"/[A-Za-z]+(\d{4})-")
-
-# Pre-compiled patterns for acronym case corrections in titles
-_ACRONYM_CASE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b" + re.escape(wrong) + r"\b"), correct) for wrong, correct in ACRONYM_CASE_CORRECTIONS.items()
-]
-
-# Pre-compiled pattern for verbose LNCS/Springer booktitle metadata
-# Strips conference location, dates, and "Proceedings" suffix appended by Crossref
-_VERBOSE_BOOKTITLE_RE = re.compile(
-    r"\d+(st|nd|rd|th)\s+(International|Annual|European|Asian|Australasian)\s+"
-    r"(Conference|Workshop|Symposium)\b.*,\s*Proceedings\s*$",
-    re.IGNORECASE,
-)
 
 # Pre-compiled patterns for three-way title/venue fixups (used in _fixup_bib_entry,
 # existing-file fixup, and Phase 4 post-merge — each pattern appears 3 times)
-_COLON_SPACE_RE = re.compile(r"(\S):([A-Z])")
-_HYPHEN_SPACE_RE = re.compile(r"(\w)- (?!and |or |to )")
-_SPACE_HYPHEN_RE = re.compile(r"(\w) -(\w)")
 _TRAILING_DASH_RE = re.compile(r"[\s][-\u2013]\s*$")
 _SUBTITLE_WRAPPER_RE = re.compile(r":\s*-([^-]+)-\s*$")
 _SPIRE_STRIP_RE = re.compile(r"\s*:\s*SPIRE\b.*$")
@@ -181,132 +149,6 @@ _ZENTRUM_FUR = "Zentrum fur Informatik"
 _ZENTRUM_FUER = 'Zentrum f{\\"u}r Informatik'
 _PROC_EXT_ABSTRACTS = "Proceedings of the Extended Abstracts"
 _PROC_OF_THE = "Proceedings of the "
-
-# Pre-compiled booktitle cleanup patterns (venue abbreviations, typos, spacing)
-_BOOKTITLE_FIXUPS: list[tuple[re.Pattern[str], str]] = [
-    # "on on " → "on " (duplicate preposition from ACM metadata)
-    (re.compile(r"\bon on\b"), "on"),
-    # "of the YYYY on ACM" → "of the YYYY ACM" (Crossref 2024 ACM metadata gap)
-    (re.compile(r"of the (\d{4}) on (ACM|IEEE)\b"), r"of the \1 \2"),
-    # "Nations of the Americas Chapter" → "North American Chapter" (NAACL 2025 Crossref error)
-    (re.compile(r"Nations of the Americas Chapter"), "North American Chapter"),
-    # "Health(SeGAH)" → "Health (SeGAH)" (missing space before acronym)
-    (re.compile(r"Health\(SeGAH\)"), "Health (SeGAH)"),
-    # "Intl Conf" → "International Conference"
-    (re.compile(r"\bIntl Conf\b"), "International Conference"),
-    # "Int'l" → "International"
-    (re.compile(r"\bInt'l\b"), "International"),
-    # "NeuriPS" → "NeurIPS" (venue typo from API sources)
-    (re.compile(r"\bNeuriPS\b"), "NeurIPS"),
-    # CHCCS publisher name used as venue → Graphics Interface conference
-    (re.compile(r"^Canada Human-Computer Communications Society$"), "Graphics Interface"),
-    # "Conference On" → "Conference on" (lowercase preposition; must run before truncation completions)
-    (re.compile(r"\bConference On\b"), "Conference on"),
-    # "YYYY ACM on Conference" → "YYYY ACM Conference" (Crossref spurious "on")
-    (re.compile(r"(\d{4}) ACM on ([A-Z])"), r"\1 ACM \2"),
-    # "of the YYYY on Innovation" → "of the YYYY ACM Conference on Innovation" (ITiCSE gap)
-    (re.compile(r"of the (\d{4}) on Innovation"), r"of the \1 ACM Conference on Innovation"),
-    # "ITiCSE'NN: Proceedings..." prefix → strip non-standard prefix
-    (re.compile(r"ITiCSE'\d{2}:\s*"), ""),
-    # "SEET-Software" → "SEET - Software" (missing spaces around dash)
-    (re.compile(r"^SEET-Software"), "SEET - Software"),
-    # Truncated SerpAPI booktitles — complete known conference name suffixes
-    (re.compile(r"Conference on Innovation$"), "Conference on Innovation and Technology in Computer Science Education"),
-    (re.compile(r"Applications of Computer$"), "Applications of Computer Vision"),
-    (re.compile(r"Analyzing and Interpreting$"), "Analyzing and Interpreting Neural Networks for NLP"),
-    (re.compile(r"Conference on Persuasive$"), "Conference on Persuasive Technology"),
-    # FAccT: "Fairness Accountability and Transparency" → commas
-    (re.compile(r"Fairness Accountability and Transparency"), "Fairness, Accountability, and Transparency"),
-    # "Conference Information" → "Conference on Information" (missing "on")
-    (re.compile(r"Conference Information Visualisation"), "Conference on Information Visualisation"),
-    # "YYYY the Nth" → "YYYY The Nth" (capitalize after year)
-    (re.compile(r"(\d{4}) the (\d)"), r"\1 The \2"),
-    # "Conference: (VTC" → "Conference (VTC" (stray colon before acronym)
-    (re.compile(r"Conference: \("), "Conference ("),
-    # "Persuasive Technology PERSUASIVE YYYY" → strip redundant acronym
-    (re.compile(r"(Persuasive Technology(?:\s+Adjunct)?),?\s+PERSUASIVE(?:\s+\d{4})?$"), r"\1"),
-    # Truncated "\& International..." suffix → strip
-    (re.compile(r"\s*\\?&\s*International$"), ""),
-]
-
-
-def _apply_booktitle_fixups(bt: str) -> str:
-    """Strip verbose conference metadata and apply pre-compiled booktitle cleanup patterns."""
-    if _VERBOSE_BOOKTITLE_RE.search(bt):
-        stripped = _VERBOSE_BOOKTITLE_RE.sub("", bt).rstrip(" ,")
-        if stripped:
-            bt = stripped
-    for pat, repl in _BOOKTITLE_FIXUPS:
-        bt = pat.sub(repl, bt)
-    return bt
-
-
-def _fix_title_text(title: str) -> str:
-    """Fix fused compounds, colon-space, hyphen-space, and acronym case."""
-    result = _fix_fused_compounds(title)
-    result = _COLON_SPACE_RE.sub(r"\1: \2", result)
-    result = _HYPHEN_SPACE_RE.sub(r"\1-", result)
-    result = _SPACE_HYPHEN_RE.sub(r"\1-\2", result)
-    for acr_pat, acr_repl in _ACRONYM_CASE_PATTERNS:
-        result = acr_pat.sub(acr_repl, result)
-    return result
-
-
-def _is_garbage_title(title: str) -> bool:
-    """Detect non-bibliographic titles from Scholar/DBLP artifacts.
-
-    Catches institutional addresses, contact info, and other metadata
-    that occasionally appear as "paper titles" in Scholar results.
-    """
-    if not title:
-        return False
-    return bool(
-        _GARBAGE_EMAIL_RE.search(title)
-        or _GARBAGE_POSTAL_RE.search(title)
-        or _GARBAGE_DEPT_RE.search(title)
-        or _GARBAGE_PHONE_RE.search(title)
-        or _GARBAGE_VOLUME_RE.search(title)
-        or _GARBAGE_SERIES_VOL_RE.search(title)
-        or (_GARBAGE_FESTSCHRIFT_RE.search(title) and _GARBAGE_FESTSCHRIFT_META_RE.search(title))
-        or _GARBAGE_PROCEEDINGS_RE.match(title)
-        or _GARBAGE_CORRECTION_RE.match(title)
-        or _GARBAGE_EASYCHAIR_RE.search(title)
-    )
-
-
-def _is_corrupted_title(title: str) -> bool:
-    """Detect DBLP-corrupted titles containing author names instead of real titles.
-
-    Matches patterns like "Li2 ()" -- author name + numeric affiliation + empty parens.
-    """
-    return len(re.findall(r"\b[A-Z][a-z]+\d+\s*\(\)", title)) >= 2
-
-
-def _fix_fused_compounds(title: str) -> str:
-    """Fix fused compound words in titles (hyphens stripped by Google Scholar).
-
-    Three-pass approach:
-    1. Dictionary lookup for special cases (acronyms, irregular patterns).
-    2. Suffix-based detection for common compound adjective suffixes
-       (e.g. "Knowledgedriven" → "Knowledge-Driven").
-    3. Dictionary lookup again — catches entries newly exposed by the suffix
-       pass (e.g. "Doubleedgeassisted" → suffix splits to "Doubleedge-Assisted"
-       → dict converts "Doubleedge" to "Double-Edge").
-    """
-    if not title:
-        return title
-    result = title
-    # Pass 1: Dictionary-based fixes (highest priority, handles acronyms & irregulars)
-    for pattern, replacement in _FUSED_DICT_PATTERNS:
-        result = pattern.sub(replacement, result)
-    # Pass 2: Suffix-based detection for remaining fused compounds.
-    # Matches title-cased words: [A-Z][a-z]{2,} prefix + known compound suffix.
-    for sfx_pat in _COMPOUND_SUFFIX_PATTERNS:
-        result = sfx_pat.sub(lambda m: m.group(1) + "-" + m.group(2).capitalize(), result)
-    # Pass 3: Dictionary again (suffix pass may expose new \b boundaries)
-    for pattern, replacement in _FUSED_DICT_PATTERNS:
-        result = pattern.sub(replacement, result)
-    return result
 
 
 def _fixup_bib_entry(entry: dict[str, Any]) -> bool:
