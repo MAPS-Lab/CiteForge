@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import pytest
+import requests
 
+from src import http_utils
 from src.http_utils import _decode_json_bytes, _scrub_secrets
 
 
@@ -44,3 +46,53 @@ class TestSecretRedaction:
 
     def test_decode_json_valid_passthrough(self) -> None:
         assert _decode_json_bytes(b'{"a": 1}', "https://x?key=S") == {"a": 1}
+
+
+class TestRetryBounding:
+    """Persistent 5xx must not compound urllib3 x manual retries into ~9 requests,
+    and non-idempotent POST must not be auto-retried by urllib3 (defect C1).
+    429/503 stays single-layer (excluded from urllib3, handled by the manual loop).
+    """
+
+    def test_post_excluded_from_urllib3_retry(self) -> None:
+        assert "POST" not in http_utils._RETRY_STRATEGY.allowed_methods
+        assert "GET" in http_utils._RETRY_STRATEGY.allowed_methods
+
+    def test_retry_error_not_redriven(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = {"n": 0}
+
+        class _Sess:
+            def get(self, *args: object, **kwargs: object) -> object:
+                calls["n"] += 1
+                raise requests.exceptions.RetryError("urllib3 exhausted 500s")
+
+        monkeypatch.setattr(http_utils, "_get_session", lambda: _Sess())
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        with pytest.raises(requests.exceptions.RetryError):
+            http_utils._http_request("GET", "https://example.com/x", {"Accept": "*/*"}, 1.0)
+        # One session.get call, not 3 manual iterations (which were 3 urllib3 each = 9).
+        assert calls["n"] == 1
+
+    def test_429_still_retried_by_manual_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        attempts = {"n": 0}
+
+        class _Resp:
+            def __init__(self, status: int) -> None:
+                self.status_code = status
+                self.headers: dict[str, str] = {}
+                self.content = b"ok"
+
+            def raise_for_status(self) -> None:
+                return None
+
+        class _Sess:
+            def get(self, *args: object, **kwargs: object) -> _Resp:
+                attempts["n"] += 1
+                return _Resp(429 if attempts["n"] < 3 else 200)
+
+        monkeypatch.setattr(http_utils, "_get_session", lambda: _Sess())
+        monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        out = http_utils._http_request("GET", "https://example.com/x", {"Accept": "*/*"}, 1.0)
+        assert out == b"ok"
+        assert attempts["n"] == 3

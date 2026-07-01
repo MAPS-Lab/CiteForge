@@ -183,7 +183,10 @@ _RETRY_STRATEGY = Retry(
     # Exclude 429/503 from urllib3 status_forcelist to avoid double-backoff
     # with our manual Retry-After handling in _http_request
     status_forcelist=tuple(c for c in HTTP_RETRY_STATUS_CODES if c not in (429, 503)),
-    allowed_methods=["GET", "POST"],
+    # Only auto-retry idempotent GET. POST is intentionally excluded so urllib3
+    # never silently re-sends a non-idempotent request body (C1). POSTs still
+    # get manual 429/503 handling in _http_request.
+    allowed_methods=["GET"],
     # Disable urllib3's own Retry-After handling so it doesn't sleep for
     # minutes when a server sends a long Retry-After header.  CiteForge's
     # _http_request already handles Retry-After with a capped backoff.
@@ -370,6 +373,11 @@ def _http_request(
                         headers=headers,
                         timeout=(connect_timeout, timeout),
                     )
+            except requests.exceptions.RetryError:
+                # urllib3 already exhausted its own retries for a forced status
+                # (persistent 500/502/504). Do not re-drive it through the manual
+                # loop, which would compound to ~9 requests for one failure (C1).
+                raise
             except requests.exceptions.RequestException:
                 if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
                     raise
