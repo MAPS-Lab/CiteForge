@@ -51,7 +51,14 @@ class ResponseCache:
         self._cache_dir = cache_dir
         self._locks: dict[str, threading.Lock] = {}
         self._meta_lock = threading.Lock()
-        self._month_boundary = _month_boundary()
+
+    @property
+    def _month_boundary(self) -> float:
+        """Timestamp of the 1st of the CURRENT month (AST), recomputed on every
+        access. A long-lived process that spans a month rollover then starts
+        serving fresh data at the boundary instead of a value frozen at
+        construction (C4)."""
+        return _month_boundary()
 
     def _lock_for(self, namespace: str) -> threading.Lock:
         with self._meta_lock:
@@ -81,18 +88,30 @@ class ResponseCache:
         # Created on Monday → 7 days (expires next Monday, not same day).
         days_to_monday = (7 - created.weekday()) % 7 or 7
         next_monday = (created + timedelta(days=days_to_monday)).replace(
-            hour=0, minute=0, second=0, microsecond=0,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
         )
         # 1st of the next month after creation
         if created.month == 12:
             next_first = created.replace(
-                year=created.year + 1, month=1, day=1,
-                hour=0, minute=0, second=0, microsecond=0,
+                year=created.year + 1,
+                month=1,
+                day=1,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
             )
         else:
             next_first = created.replace(
-                month=created.month + 1, day=1,
-                hour=0, minute=0, second=0, microsecond=0,
+                month=created.month + 1,
+                day=1,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
             )
         return now >= min(next_monday, next_first)
 
@@ -157,12 +176,20 @@ class ResponseCache:
             self._write_entry(namespace, key, value, ttl_days)
 
     def _write_entry(
-        self, namespace: str, key: str, value: dict[str, Any], ttl_days: int,
+        self,
+        namespace: str,
+        key: str,
+        value: dict[str, Any],
+        ttl_days: int,
     ) -> None:
         """Atomic file write — must be called under the namespace lock."""
         ns_dir = self._ns_dir(namespace)
         os.makedirs(ns_dir, exist_ok=True)
-        entry = {"timestamp": time.time(), "ttl_days": ttl_days, "data": value}
+        # ttl_days is accepted for caller intent (and logged in put()), but is
+        # intentionally NOT stored or read back: positive-entry freshness is
+        # governed solely by the monthly boundary in get(), never a rolling
+        # per-entry TTL (C3).
+        entry = {"timestamp": time.time(), "data": value}
         path = self._entry_path(namespace, key)
         try:
             fd, tmp_path = tempfile.mkstemp(dir=ns_dir, suffix=".tmp")

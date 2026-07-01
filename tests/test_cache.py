@@ -418,3 +418,25 @@ def test_safe_negative_expired_december() -> None:
         mock_dt.fromtimestamp = datetime.fromtimestamp
         mock_dt.now.return_value = datetime(2027, 1, 1, 0, 0, 0, tzinfo=_AST)
         assert ResponseCache._safe_negative_expired(created_ts)
+
+
+def test_ttl_days_not_stored(tmp_path: Path) -> None:
+    """ttl_days must not be written into cache entries (C3: written-but-never-read)."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("ns", "k", {"v": 1}, ttl_days=99)
+    entry = json.loads(Path(cache._entry_path("ns", "k")).read_text(encoding="utf-8"))
+    assert "ttl_days" not in entry
+    assert entry["data"] == {"v": 1}
+    # The positive entry is still served (freshness = monthly boundary, not ttl).
+    assert cache.get("ns", "k") == {"v": 1}
+
+
+def test_month_boundary_recomputed_not_frozen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_month_boundary must recompute per access, not freeze at construction (C4)."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    _freeze_cache_clock(monkeypatch, datetime(2026, 3, 15, tzinfo=_AST))
+    march_boundary = cache._month_boundary
+    _freeze_cache_clock(monkeypatch, datetime(2026, 4, 15, tzinfo=_AST))
+    april_boundary = cache._month_boundary
+    assert april_boundary > march_boundary
+    assert april_boundary == datetime(2026, 4, 1, tzinfo=_AST).timestamp()
