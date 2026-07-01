@@ -2,11 +2,25 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
+from datetime import datetime, tzinfo
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from src.cache import _AST, ResponseCache, get_cache_hit_counts, reset_cache_hit_counts
+
+
+def _freeze_cache_clock(monkeypatch: pytest.MonkeyPatch, when: datetime) -> None:
+    """Freeze src.cache's wall clock to a fixed instant so expiry tests are date-independent."""
+    import src.cache as cache_mod
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+            return when.astimezone(tz) if tz is not None else when
+
+    monkeypatch.setattr(cache_mod, "datetime", _FrozenDatetime)
 
 
 def test_put_and_get(tmp_path: Path) -> None:
@@ -113,8 +127,10 @@ def test_corrupted_cache_file(tmp_path: Path) -> None:
     assert cache.get("test_ns", "key1") is None
 
 
-def test_negative_cache_ttl_expires(tmp_path: Path) -> None:
+def test_negative_cache_ttl_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that safe negative cache entries expire after their Monday/month TTL."""
+    # Freeze the wall clock so expiry does not depend on the real calendar date.
+    _freeze_cache_clock(monkeypatch, datetime(2026, 6, 17, 12, 0, tzinfo=_AST))
     cache = ResponseCache(cache_dir=str(tmp_path))
     # Build a safe negative (3 confirmations)
     for _ in range(3):
@@ -126,10 +142,10 @@ def test_negative_cache_ttl_expires(tmp_path: Path) -> None:
     assert result["_negative"] is True
     assert result["_safe"] is True
 
-    # Backdate by 8 days — guarantees a Monday boundary has passed
+    # Backdate to after the (frozen) month boundary with a Monday since elapsed.
     path = Path(cache._entry_path("test_ns", "key1"))
     entry = json.loads(path.read_text(encoding="utf-8"))
-    entry["timestamp"] = max(time.time() - 8 * 86400, cache._month_boundary + 1)
+    entry["timestamp"] = datetime(2026, 6, 2, tzinfo=_AST).timestamp()
     path.write_text(json.dumps(entry), encoding="utf-8")
 
     # Now it should be expired (either monthly or Monday boundary)
@@ -275,18 +291,22 @@ def test_positive_overwrites_negative(tmp_path: Path) -> None:
     assert result == {"title": "Real Paper"}
 
 
-def test_safe_negative_monday_expiry(tmp_path: Path) -> None:
+def test_safe_negative_monday_expiry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that a safe negative expires after the next Monday boundary."""
+    # Freeze the wall clock to a fixed Wednesday mid-month so the Monday-boundary
+    # math is date-independent (the real calendar must not decide the outcome).
+    _freeze_cache_clock(monkeypatch, datetime(2026, 6, 17, 12, 0, tzinfo=_AST))
     cache = ResponseCache(cache_dir=str(tmp_path))
     ns, key = "test_ns", "neg_key"
 
     for _ in range(3):
         cache.put_negative(ns, key)
 
-    # Backdate by 8 days — guarantees a Monday has passed
+    # Backdate to after the (frozen) month boundary with a Monday since elapsed,
+    # isolating the Monday branch (timestamp stays above the month boundary).
     path = Path(cache._entry_path(ns, key))
     entry = json.loads(path.read_text(encoding="utf-8"))
-    entry["timestamp"] = max(time.time() - 8 * 86400, cache._month_boundary + 1)
+    entry["timestamp"] = datetime(2026, 6, 2, tzinfo=_AST).timestamp()
     path.write_text(json.dumps(entry), encoding="utf-8")
 
     assert cache.get(ns, key) is None
