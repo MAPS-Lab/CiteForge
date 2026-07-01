@@ -25,6 +25,7 @@ from .config import (
     TRUST_DIFF_OVERRIDE_THRESHOLD,
     TRUST_ORDER,
 )
+from .fsscan import iter_author_bibs
 from .id_utils import (
     _norm_doi,
     allowlisted_url,
@@ -857,7 +858,7 @@ def save_entry_to_file(
     author_dir = os.path.join(out_dir, author_dirname)
     os.makedirs(author_dir, exist_ok=True)
 
-    all_files = sorted(f for f in os.listdir(author_dir) if f.endswith(".bib"))
+    all_files = iter_author_bibs(author_dir)
     collision_files = set(all_files) - {os.path.basename(prefer_path)} if prefer_path else set(all_files)
 
     filename = short_filename_for_entry(
@@ -1366,9 +1367,7 @@ def save_entry_to_file(
     # a distinguishing suffix to the key to avoid LaTeX collisions.
     new_key = (entry.get("key") or "").strip()
     if should_write and new_key:
-        for other_file in os.listdir(author_dir):
-            if not other_file.endswith(".bib"):
-                continue
+        for other_file in iter_author_bibs(author_dir):
             other_path = os.path.join(author_dir, other_file)
             if os.path.abspath(other_path) == os.path.abspath(path):
                 continue

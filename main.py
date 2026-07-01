@@ -85,6 +85,7 @@ from src.exceptions import (
     FULL_OPERATION_ERRORS,
     PARSE_ERRORS,
 )
+from src.fsscan import iter_author_bibs, iter_output_dirs
 from src.http_utils import get_api_call_counts, http_get_text, reset_api_call_counts
 from src.io_utils import (
     append_summary_to_csv,
@@ -814,7 +815,7 @@ def process_article(
     # If found, load it and use as baseline - enrichment process will update/fix fields
     if SKIP_SCHOLAR_FOR_EXISTING_FILES and os.path.exists(author_dir):
         # Sort filenames for deterministic iteration order
-        bib_files = sorted(f for f in os.listdir(author_dir) if f.endswith('.bib'))
+        bib_files = iter_author_bibs(author_dir)
         logger.debug(
             f"EXISTING_FILE_SCAN | dir={author_dir} | files_checked={len(bib_files)}",
             category=LogCategory.AUDIT,
@@ -2542,9 +2543,7 @@ def process_article(
         prefer_doi = _read_doi_from_file(path) if path and os.path.isfile(path) else ""
         check_dois = all_candidate_dois - {prefer_doi} if prefer_doi else all_candidate_dois
         if check_dois:
-            for existing_bib in os.listdir(author_dir):
-                if not existing_bib.endswith(".bib"):
-                    continue
+            for existing_bib in iter_author_bibs(author_dir):
                 epath = os.path.join(author_dir, existing_bib)
                 if path and os.path.abspath(epath) == os.path.abspath(path):
                     continue  # skip self
@@ -2855,7 +2854,7 @@ def count_existing_papers(rec: Record, out_dir: str) -> int:
     author_dirname = format_author_dirname(rec.name, effective_id)
     author_dir = os.path.join(out_dir, author_dirname)
     try:
-        return sum(1 for f in os.listdir(author_dir) if f.endswith('.bib'))
+        return len(iter_author_bibs(author_dir))
     except OSError:
         return 0
 
@@ -3161,9 +3160,9 @@ def main() -> int:
             # This catches orphans (files not processed during enrichment) and any
             # entries where Phase 4 corrections were undone by Tier 2 filling.
             postrun_fixed = 0
-            for pr_entry_name in sorted(os.listdir(out_dir)):
+            for pr_entry_name in iter_output_dirs(out_dir):
                 pr_dir = os.path.join(out_dir, pr_entry_name)
-                if not os.path.isdir(pr_dir) or pr_entry_name == "a2i2":
+                if pr_entry_name == "a2i2":
                     continue
                 for pr_fname in sorted(os.listdir(pr_dir)):
                     if not pr_fname.endswith(".bib"):
@@ -3196,10 +3195,9 @@ def main() -> int:
 
             # Write per-author baseline counts
             baseline: dict[str, int] = {}
-            for entry in sorted(os.listdir(out_dir)):
+            for entry in iter_output_dirs(out_dir):
                 d = os.path.join(out_dir, entry)
-                if os.path.isdir(d):
-                    baseline[entry] = sum(1 for f in os.listdir(d) if f.endswith(".bib"))
+                baseline[entry] = len(iter_author_bibs(d))
             baseline_path = os.path.join(out_dir, "baseline.json")
             try:
                 with open(baseline_path, "w", encoding="utf-8") as bf:
