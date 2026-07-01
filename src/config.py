@@ -40,11 +40,13 @@ def get_min_year() -> int:
     if MIN_YEAR is not None:
         return MIN_YEAR
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).year - (_CONTRIBUTION_WINDOW_FALLBACK - 1)
 
 
 def _current_year() -> int:
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).year
 
 
@@ -64,17 +66,17 @@ SKIP_SCHOLAR_FOR_EXISTING_FILES = True
 # Sources earlier in the list are more reliable than those later.
 # This ordering reflects data quality, completeness, and standardization.
 TRUST_ORDER = [
-    "csl",          # DOI → CSL-JSON (highest trust, structured metadata)
-    "doi_bibtex",   # DOI → BibTeX (direct from DOI resolver)
-    "datacite",     # DataCite DOIs (datasets/software, structured)
-    "pubmed",       # PubMed/NIH (biomedical, highly curated)
-    "europepmc",    # Europe PMC (biomedical + broader coverage)
-    "crossref",     # Crossref API (broad academic coverage)
-    "openalex",     # OpenAlex (open metadata)
-    "s2",           # Semantic Scholar (ML-enhanced metadata)
-    "orcid",        # ORCID works (author-verified)
-    "openreview",   # OpenReview (peer review platforms)
-    "arxiv",        # arXiv (preprints, self-reported)
+    "csl",  # DOI → CSL-JSON (highest trust, structured metadata)
+    "doi_bibtex",  # DOI → BibTeX (direct from DOI resolver)
+    "datacite",  # DataCite DOIs (datasets/software, structured)
+    "pubmed",  # PubMed/NIH (biomedical, highly curated)
+    "europepmc",  # Europe PMC (biomedical + broader coverage)
+    "crossref",  # Crossref API (broad academic coverage)
+    "openalex",  # OpenAlex (open metadata)
+    "s2",  # Semantic Scholar (ML-enhanced metadata)
+    "orcid",  # ORCID works (author-verified)
+    "openreview",  # OpenReview (peer review platforms)
+    "arxiv",  # arXiv (preprints, self-reported)
     "scholar_page",  # Scholar article page (web-scraped)
     "scholar_min",  # Scholar baseline (lowest trust, minimal data)
 ]
@@ -83,21 +85,21 @@ TRUST_ORDER = [
 SIM_TITLE_WEIGHT = 0.7
 SIM_AUTHOR_BONUS = 0.2
 SIM_YEAR_BONUS = 0.2
-SIM_YEAR_MATCH_WINDOW = 1.0      # max year difference that counts as a match
+SIM_YEAR_MATCH_WINDOW = 1.0  # max year difference that counts as a match
 
 # Similarity thresholds
-SIM_TITLE_SIM_MIN = 0.8          # min title sim to consider a candidate
-SIM_EXACT_PICK_THRESHOLD = 0.9   # auto-accept single strong candidate
-SIM_BEST_ITEM_THRESHOLD = 0.8    # min score for best-of-N selection
-SIM_SCHOLAR_FUZZY_ACCEPT = 0.9   # min sim for noisy Scholar data
+SIM_TITLE_SIM_MIN = 0.8  # min title sim to consider a candidate
+SIM_EXACT_PICK_THRESHOLD = 0.9  # auto-accept single strong candidate
+SIM_BEST_ITEM_THRESHOLD = 0.8  # min score for best-of-N selection
+SIM_SCHOLAR_FUZZY_ACCEPT = 0.9  # min sim for noisy Scholar data
 SIM_MERGE_DUPLICATE_THRESHOLD = 0.95  # threshold for merge-level dedup
 
 # DOI regex pattern
-_DOI_REGEX = r'\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b'
+_DOI_REGEX = r"\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b"
 
 # arXiv DOI patterns
-ARXIV_DOI_CHECK_PATTERN = r'10\.48550/arxiv'
-ARXIV_DOI_EXTRACT_PATTERN = r'(?i)10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5})'
+ARXIV_DOI_CHECK_PATTERN = r"10\.48550/arxiv"
+ARXIV_DOI_EXTRACT_PATTERN = r"(?i)10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5})"
 
 # HTTP timeouts (seconds)
 HTTP_TIMEOUT_FAST = 5.0
@@ -108,6 +110,18 @@ HTTP_BACKOFF_INITIAL = 0.25
 HTTP_BACKOFF_MAX = 16.0
 HTTP_MAX_RETRIES = 2
 HTTP_RETRY_STATUS_CODES = (408, 429, 500, 502, 503, 504)
+
+# Query-string parameter names whose values must be redacted before any URL or
+# exception text is logged, preventing API-key leakage into committed run logs.
+# Longest/most-specific names first so alternation prefers them.
+REDACT_QUERY_PARAM_NAMES: tuple[str, ...] = (
+    "access_token",
+    "api_key",
+    "apikey",
+    "api-key",
+    "token",
+    "key",
+)
 
 # BibTeX generation
 BIBTEX_KEY_MAX_WORDS = 4
@@ -130,75 +144,99 @@ CACHE_ENABLED = True
 SIM_FILE_DUPLICATE_THRESHOLD = 0.95
 
 # Preprint detection
-PREPRINT_SERVERS = frozenset({
-    'arxiv', 'biorxiv', 'medrxiv', 'chemrxiv', 'research square',
-    'ssrn', 'social science research network',
-    'preprints', 'psyarxiv', 'socarxiv', 'edarxiv',
-    'arxiv e-prints', 'e-prints', 'authorea', 'techrxiv',
-    'preprints.org', 'preprint server',
-    'zenodo', 'agrirxiv', 'qeios',
-})
+PREPRINT_SERVERS = frozenset(
+    {
+        "arxiv",
+        "biorxiv",
+        "medrxiv",
+        "chemrxiv",
+        "research square",
+        "ssrn",
+        "social science research network",
+        "preprints",
+        "psyarxiv",
+        "socarxiv",
+        "edarxiv",
+        "arxiv e-prints",
+        "e-prints",
+        "authorea",
+        "techrxiv",
+        "preprints.org",
+        "preprint server",
+        "zenodo",
+        "agrirxiv",
+        "qeios",
+    }
+)
 PREPRINT_DOI_PREFIXES = (
-    '10.48550/arxiv',     # arXiv
-    '10.21203/rs.',       # Research Square
-    '10.31234/osf.io',    # PsyArXiv / SocArXiv / EdArXiv (OSF Preprints)
-    '10.31219/osf.io',    # OSF Preprints (generic OSF DOI prefix)
-    '10.1101/',           # bioRxiv / medRxiv (all manuscript IDs)
-    '10.26434/chemrxiv',  # ChemRxiv
-    '10.20944/preprints', # Preprints.org
-    '10.2139/ssrn',       # SSRN
-    '10.64898/',          # openRxiv
-    '10.36227/techrxiv',  # TechRxiv (IEEE preprints)
-    '10.33774/',          # Cambridge UP preprints (Authoria/MIIR)
+    "10.48550/arxiv",  # arXiv
+    "10.21203/rs.",  # Research Square
+    "10.31234/osf.io",  # PsyArXiv / SocArXiv / EdArXiv (OSF Preprints)
+    "10.31219/osf.io",  # OSF Preprints (generic OSF DOI prefix)
+    "10.1101/",  # bioRxiv / medRxiv (all manuscript IDs)
+    "10.26434/chemrxiv",  # ChemRxiv
+    "10.20944/preprints",  # Preprints.org
+    "10.2139/ssrn",  # SSRN
+    "10.64898/",  # openRxiv
+    "10.36227/techrxiv",  # TechRxiv (IEEE preprints)
+    "10.33774/",  # Cambridge UP preprints (Authoria/MIIR)
 )
 
 # Publishers exclusively associated with preprint servers.
 # Used to strip leaked preprint publishers from published journal entries.
-PREPRINT_ONLY_PUBLISHERS = frozenset({
-    'openrxiv',
-    'cold spring harbor laboratory',  # bioRxiv / medRxiv
-    'research square',
-    'authorea, inc.',
-    'techrxiv',
-})
+PREPRINT_ONLY_PUBLISHERS = frozenset(
+    {
+        "openrxiv",
+        "cold spring harbor laboratory",  # bioRxiv / medRxiv
+        "research square",
+        "authorea, inc.",
+        "techrxiv",
+    }
+)
 
 # Journal names that are actually conferences (Crossref registers them as journals).
 # Used by merge_utils to reclassify @article→@inproceedings.
-CONFERENCE_AS_JOURNAL: frozenset[str] = frozenset({
-    "software engineering",  # German SE conference (Fachtagung Softwaretechnik)
-    "ijcnlp-aacl",           # Int'l Joint Conf on NLP / Asia-Pacific ACL
-    "canada human-computer communications society",  # Graphics Interface publisher
-})
+CONFERENCE_AS_JOURNAL: frozenset[str] = frozenset(
+    {
+        "software engineering",  # German SE conference (Fachtagung Softwaretechnik)
+        "ijcnlp-aacl",  # Int'l Joint Conf on NLP / Asia-Pacific ACL
+        "canada human-computer communications society",  # Graphics Interface publisher
+    }
+)
 
 # Strings in journal/booktitle that indicate repositories/portals, not real venues.
 # @article/@inproceedings with these → @misc.
-REPOSITORY_AS_JOURNAL: frozenset[str] = frozenset({
-    "tu/e research portal",
-    "escholarship",
-    "california digital library",
-    "eyls",
-    "dspace",
-    "zenodo",
-    "cern european organization",
-    "figshare",
-    "underline science",
-    "research portal",
-    "osti",
-})
+REPOSITORY_AS_JOURNAL: frozenset[str] = frozenset(
+    {
+        "tu/e research portal",
+        "escholarship",
+        "california digital library",
+        "eyls",
+        "dspace",
+        "zenodo",
+        "cern european organization",
+        "figshare",
+        "underline science",
+        "research portal",
+        "osti",
+    }
+)
 
 # Institutional repositories → entries should be @phdthesis (if thesis) or @misc
-INSTITUTIONAL_REPOSITORIES: frozenset[str] = frozenset({
-    "deep blue",
-    "uwspace",
-    "prism",
-    "mspace",
-    "tspace",
-})
+INSTITUTIONAL_REPOSITORIES: frozenset[str] = frozenset(
+    {
+        "deep blue",
+        "uwspace",
+        "prism",
+        "mspace",
+        "tspace",
+    }
+)
 
 # Data repository DOI prefixes (deprioritized in DOI selection)
 DATA_DOI_PREFIXES = (
-    '10.6084/m9.figshare',  # Figshare (data/supplementary)
-    '10.5281/zenodo',        # Zenodo (data/software)
+    "10.6084/m9.figshare",  # Figshare (data/supplementary)
+    "10.5281/zenodo",  # Zenodo (data/software)
 )
 
 # Relaxed title similarity for preprint/published pairs
@@ -206,39 +244,45 @@ SIM_PREPRINT_TITLE_THRESHOLD = 0.55
 
 # Journals whose names contain "Proceedings" but are NOT conference proceedings.
 # These override _is_conference_journal() to stay as @article.
-JOURNALS_NAMED_PROCEEDINGS: frozenset[str] = frozenset({
-    "proceedings of the national academy of sciences",
-    "proceedings of the vldb endowment",
-    "proceedings of the ieee",
-    "proceedings of the royal society",
-})
+JOURNALS_NAMED_PROCEEDINGS: frozenset[str] = frozenset(
+    {
+        "proceedings of the national academy of sciences",
+        "proceedings of the vldb endowment",
+        "proceedings of the ieee",
+        "proceedings of the royal society",
+    }
+)
 
 # Procedia/IFAC series: published as journal volumes but are conference proceedings.
 # @article with these as journal → @inproceedings (journal → booktitle).
-PROCEEDINGS_SERIES_AS_JOURNAL: frozenset[str] = frozenset({
-    "procedia cirp",
-    "procedia computer science",
-    "procedia manufacturing",
-    "procedia engineering",
-    "ifac-papersonline",
-    "ifac papersonline",
-    "frontiers in artificial intelligence and applications",
-})
+PROCEEDINGS_SERIES_AS_JOURNAL: frozenset[str] = frozenset(
+    {
+        "procedia cirp",
+        "procedia computer science",
+        "procedia manufacturing",
+        "procedia engineering",
+        "ifac-papersonline",
+        "ifac papersonline",
+        "frontiers in artificial intelligence and applications",
+    }
+)
 
 # ACM PACM journals: named "Proceedings of the ACM" but are real journals.
 # @inproceedings with these as booktitle → @article (booktitle → journal).
-ACM_JOURNAL_PROCEEDINGS: frozenset[str] = frozenset({
-    "proceedings of the acm on human-computer interaction",
-    "proceedings of the acm on networking",
-    "proceedings of the acm on software engineering",
-    "proceedings of the acm on programming languages",
-    "proceedings of the acm on interactive, mobile, wearable and ubiquitous technologies",
-    "proceedings of the acm on management of data",
-    "pacm on human-computer interaction",
-    "pacm on networking",
-    "pacm on software engineering",
-    "pacm hci",
-})
+ACM_JOURNAL_PROCEEDINGS: frozenset[str] = frozenset(
+    {
+        "proceedings of the acm on human-computer interaction",
+        "proceedings of the acm on networking",
+        "proceedings of the acm on software engineering",
+        "proceedings of the acm on programming languages",
+        "proceedings of the acm on interactive, mobile, wearable and ubiquitous technologies",
+        "proceedings of the acm on management of data",
+        "pacm on human-computer interaction",
+        "pacm on networking",
+        "pacm on software engineering",
+        "pacm hci",
+    }
+)
 
 # Publisher corrections: {journal_lower_substring: correct_publisher}
 PUBLISHER_CORRECTIONS: dict[str, str] = {
@@ -265,17 +309,25 @@ ACRONYM_CASE_CORRECTIONS: dict[str, str] = {
 }
 
 # Conference venues that lack standard keywords (proceedings, conference, etc.)
-KNOWN_CONFERENCE_VENUES = frozenset({
-    "neural information processing systems",
-    "advances in neural information processing systems",
-    "graphics interface",
-})
+KNOWN_CONFERENCE_VENUES = frozenset(
+    {
+        "neural information processing systems",
+        "advances in neural information processing systems",
+        "graphics interface",
+    }
+)
 
 # Keywords in venue strings that indicate conference proceedings (shared by
 # bibtex_build.determine_entry_type and publication_parser pattern matching).
 CONFERENCE_KEYWORDS: tuple[str, ...] = (
-    "proceedings", "conference", "symposium", "workshop",
-    "meeting", "summit", "congress", "colloquium",
+    "proceedings",
+    "conference",
+    "symposium",
+    "workshop",
+    "meeting",
+    "summit",
+    "congress",
+    "colloquium",
     "chapter of the association",  # NAACL, EACL, AACL, etc.
     "findings of",  # ACL/EMNLP workshop findings
     "lecture notes in computer science",  # LNCS is a conference proceedings series
@@ -325,7 +377,6 @@ ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "aimc": "AI Music Creativity Conference",
     "wnut": "Workshop on Noisy User-generated Text",
     "nlp4musa": "NLP for Music and Audio Workshop",
-
     "collas": "Conference on Lifelong Learning Agents",
     "ahfe international": "Applied Human Factors and Ergonomics International",
     "bcss@persuasive": "Behavior Change Support Systems Workshop",
@@ -343,19 +394,21 @@ PAGES_MAX_DIGITS = 8
 MIN_TITLE_WORDS = 2
 
 # Generic series names replaced with actual conference name during merge
-GENERIC_SERIES_NAMES = frozenset({
-    "lecture notes in computer science",
-    "lecture notes in artificial intelligence",
-    "lecture notes in business information processing",
-    "lecture notes in networks and systems",
-    "communications in computer and information science",
-    "advances in intelligent systems and computing",
-    "studies in health technology and informatics",
-    "leibniz international proceedings in informatics",
-    "lipics: leibniz international proceedings in informatics",
-    "dagstuhl seminar proceedings",
-    "oasics: open access series in informatics",
-})
+GENERIC_SERIES_NAMES = frozenset(
+    {
+        "lecture notes in computer science",
+        "lecture notes in artificial intelligence",
+        "lecture notes in business information processing",
+        "lecture notes in networks and systems",
+        "communications in computer and information science",
+        "advances in intelligent systems and computing",
+        "studies in health technology and informatics",
+        "leibniz international proceedings in informatics",
+        "lipics: leibniz international proceedings in informatics",
+        "dagstuhl seminar proceedings",
+        "oasics: open access series in informatics",
+    }
+)
 
 # Booktitle prefixes that indicate a journal, not a conference (e.g., Frontiers)
 JOURNAL_ONLY_PREFIXES = (
@@ -368,7 +421,7 @@ JOURNAL_ONLY_PREFIXES = (
 )
 
 # Author name suffixes to strip when extracting last names
-AUTHOR_NAME_SUFFIXES = frozenset({'jr', 'sr', 'ii', 'iii', 'iv', 'v'})
+AUTHOR_NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
 
 # Fused compound words: hyphens stripped by Google Scholar.
 # Maps lowercased fused form → correctly hyphenated replacement.
@@ -377,13 +430,43 @@ AUTHOR_NAME_SUFFIXES = frozenset({'jr', 'sr', 'ii', 'iii', 'iv', 'v'})
 # The suffix approach matches words like "Knowledgedriven" → "Knowledge-Driven"
 # when the prefix has ≥3 characters starting with an uppercase letter.
 COMPOUND_SUFFIXES: tuple[str, ...] = (
-    "based", "driven", "aware", "oriented", "informed", "powered", "defined",
-    "assisted", "enriched", "preserved", "focused", "engaged", "organized",
-    "grained", "specific", "dependent", "efficient", "adaptive", "cooperative",
-    "free", "level", "dimensional", "sensitive", "agnostic",
-    "centric", "intensive", "delivered",
-    "enhanced", "enhancing", "induced", "enabled", "augmented", "conditioned",
-    "embedded", "preserving", "centered", "aided",
+    "based",
+    "driven",
+    "aware",
+    "oriented",
+    "informed",
+    "powered",
+    "defined",
+    "assisted",
+    "enriched",
+    "preserved",
+    "focused",
+    "engaged",
+    "organized",
+    "grained",
+    "specific",
+    "dependent",
+    "efficient",
+    "adaptive",
+    "cooperative",
+    "free",
+    "level",
+    "dimensional",
+    "sensitive",
+    "agnostic",
+    "centric",
+    "intensive",
+    "delivered",
+    "enhanced",
+    "enhancing",
+    "induced",
+    "enabled",
+    "augmented",
+    "conditioned",
+    "embedded",
+    "preserving",
+    "centered",
+    "aided",
 )
 
 # Dictionary of fused compound words for cases NOT caught by suffix-based detection:
@@ -671,7 +754,6 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "digitaltwinenabled": "Digital-Twin-Enabled",
     "spaceairmarine": "Space-Air-Marine",
     "aerialmarine": "Aerial-Marine",
-
     "state-of-theart": "State-of-the-Art",
     "out-ofview": "Out-of-View",
     "out-ofdomain": "Out-of-Domain",
@@ -684,7 +766,6 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "modelintheloop": "Model-in-the-Loop",
     "learntorecommend": "Learn-to-Recommend",
     "delaytrajectoryaccuracy": "Delay-Trajectory-Accuracy",
-
     "iotenabled": "IoT-Enabled",
     "aienabled": "AI-Enabled",
     "aiassisted": "AI-Assisted",
@@ -699,7 +780,6 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "krakenlike": "KRAKEN-Like",
     "smemfinding": "SMEM-Finding",
     "enigmaataxia": "ENIGMA-Ataxia",
-
     "whitebox": "White-Box",
     "communityacquired": "Community-Acquired",
     "allcause": "All-Cause",
@@ -715,7 +795,6 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "metaaugmentation": "Meta-Augmentation",
     "metadimensionality": "Meta-Dimensionality",
     "minimumlength": "Minimum-Length",
-
     "burrowswheeler": "Burrows-Wheeler",
     "populationscale": "Population-Scale",
     "visionlanguage": "Vision-Language",
@@ -732,11 +811,9 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "scalesecond": "Scale-Second",
     "zerotargetassumption": "Zero-Target-Assumption",
     "multipsych": "MULTI-PSYCH",
-
     "model-in-theloop": "Model-in-the-Loop",
     "learn-torecommend": "Learn-to-Recommend",
     "diffuse-anddenoise": "Diffuse-and-Denoise",
-
     "sdiot": "SD-IoT",
     "gaoptimized": "GA-Optimized",
     "gptwritingprompts": "GPT-WritingPrompts",
@@ -746,15 +823,11 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "tsdetector": "TS-Detector",
     "oodprobe": "OOD-Probe",
     "veremiextension": "VeReMi-Extension",
-
     "emotionsemantic": "Emotion-Semantic",
     "resumejob": "Resume-Job",
-
     "eventdata": "Event Data",
-
     "postprocessing": "Post-Processing",
     "wellbeing": "Well-Being",
-
     "climatesmart": "Climate-Smart",
     "convergencerate": "Convergence-Rate",
     "earlywarning": "Early-Warning",
@@ -782,42 +855,38 @@ FUSED_COMPOUND_WORDS: dict[str, str] = {
     "treechild": "Tree-Child",
     "variancegated": "Variance-Gated",
     "weightloss": "Weight-Loss",
-
     "wolffacial": "Wolf Facial",
     "eulertour": "Euler-Tour",
     "glyphfield": "Glyph-Field",
-
     "recognitionthe": "recognition: The",
     "methanethe": "Methane: The",
     "frequencylow": "Frequency/Low",
     "spacetime": "Space-Time",
     "elearning": "E-Learning",
     "eprescription": "e-Prescription",
-
     "runlength": "Run-Length",
     "incontext": "In-Context",
-
     "sexdifferentiated": "Sex-Differentiated",
     "sizefractionated": "Size-Fractionated",
     "frontohippocampal": "Fronto-Hippocampal",
     "tradeoff": "Trade-Off",
-
     "nbody": "N-Body",
-
     "ofthe": "of the",
 }
 
 # Multi-signal dedup thresholds
-SIM_DEDUP_COMPOSITE_THRESHOLD = 0.60   # composite score to treat as same paper
-SIM_DEDUP_MULTI_SIGNAL_MIN = 0.35     # floor below which no signals trigger a match
+SIM_DEDUP_COMPOSITE_THRESHOLD = 0.60  # composite score to treat as same paper
+SIM_DEDUP_MULTI_SIGNAL_MIN = 0.35  # floor below which no signals trigger a match
 
 # Internal BibTeX fields for dedup, stripped before final output
-DEDUP_INTERNAL_FIELDS = frozenset({
-    "x_scholar_cluster_id",
-    "x_scholar_citation_id",
-    "x_s2_paper_id",
-    "x_openalex_id",
-})
+DEDUP_INTERNAL_FIELDS = frozenset(
+    {
+        "x_scholar_cluster_id",
+        "x_scholar_citation_id",
+        "x_s2_paper_id",
+        "x_openalex_id",
+    }
+)
 
 # Scoring tolerance for floating-point precision
 SIM_THRESHOLD_TOLERANCE = 0.01
@@ -834,19 +903,19 @@ MAX_WORKERS = int(os.environ.get("CITEFORGE_MAX_WORKERS", "12"))
 
 # Per-API rate limits: (tokens_per_second, burst_size)
 RATE_LIMITS: dict[str, tuple[float, int]] = {
-    "arxiv": (0.33, 1),           # arXiv asks for <=3 req/s; we use ~1 per 3s
-    "pubmed": (0.33, 1),          # NCBI rate limit (no API key): 3 req/s
-    "europepmc": (0.5, 2),        # Europe PMC is lenient
-    "crossref": (1.0, 3),         # Crossref polite pool (with mailto) is generous
-    "openalex": (1.0, 3),         # OpenAlex is generous
-    "s2": (1.0, 3),               # S2 with API key
-    "doi": (1.0, 2),              # DOI resolver
-    "gemini": (0.5, 2),           # Gemini rate limit (burst=2 for retry headroom)
-    "orcid": (1.0, 2),            # ORCID public API
-    "datacite": (1.0, 2),         # DataCite API
-    "dblp": (1.0, 2),             # DBLP search/person API
-    "serply": (1.0, 2),            # Serply REST API (conservative: 1 req/s, burst 2)
-    "serpapi": (1.0, 2),            # SerpAPI (conservative: 1 req/s, burst 2)
+    "arxiv": (0.33, 1),  # arXiv asks for <=3 req/s; we use ~1 per 3s
+    "pubmed": (0.33, 1),  # NCBI rate limit (no API key): 3 req/s
+    "europepmc": (0.5, 2),  # Europe PMC is lenient
+    "crossref": (1.0, 3),  # Crossref polite pool (with mailto) is generous
+    "openalex": (1.0, 3),  # OpenAlex is generous
+    "s2": (1.0, 3),  # S2 with API key
+    "doi": (1.0, 2),  # DOI resolver
+    "gemini": (0.5, 2),  # Gemini rate limit (burst=2 for retry headroom)
+    "orcid": (1.0, 2),  # ORCID public API
+    "datacite": (1.0, 2),  # DataCite API
+    "dblp": (1.0, 2),  # DBLP search/person API
+    "serply": (1.0, 2),  # Serply REST API (conservative: 1 req/s, burst 2)
+    "serpapi": (1.0, 2),  # SerpAPI (conservative: 1 req/s, burst 2)
 }
 
 # Global concurrency: max simultaneous in-flight API requests
@@ -864,5 +933,5 @@ REQUEST_DELAY_MAX = 1.0
 OPENREVIEW_SESSION_TTL_SECS = 3600
 
 # SerpAPI publication string parsing thresholds
-PUB_PARSE_TIER1_MIN_CONFIDENCE = 0.5   # Minimum confidence for venue-based API search
-PUB_PARSE_TIER2_MIN_CONFIDENCE = 0.7   # Minimum confidence for direct field population
+PUB_PARSE_TIER1_MIN_CONFIDENCE = 0.5  # Minimum confidence for venue-based API search
+PUB_PARSE_TIER2_MIN_CONFIDENCE = 0.7  # Minimum confidence for direct field population

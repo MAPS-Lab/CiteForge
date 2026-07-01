@@ -36,7 +36,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from ..config import HTTP_TIMEOUT_DEFAULT, SERPAPI_BASE
-from ..http_utils import http_fetch_bytes
+from ..http_utils import _scrub_secrets, http_fetch_bytes
 
 _log = logging.getLogger("CiteForge.serpapi")
 
@@ -47,8 +47,9 @@ _MAX_PAGES = 10
 _PAGE_SIZE = 100
 
 
-def _serpapi_get(api_key: str, author_id: str, start: int = 0, num: int = _PAGE_SIZE,
-                 sort: str = "pubdate") -> dict[str, Any]:
+def _serpapi_get(
+    api_key: str, author_id: str, start: int = 0, num: int = _PAGE_SIZE, sort: str = "pubdate"
+) -> dict[str, Any]:
     """Execute a GET request against the SerpAPI Scholar Author endpoint.
 
     Args:
@@ -61,14 +62,16 @@ def _serpapi_get(api_key: str, author_id: str, start: int = 0, num: int = _PAGE_
     Returns:
         Parsed JSON response dict, or empty dict on failure.
     """
-    params = urlencode({
-        "engine": "google_scholar_author",
-        "author_id": author_id,
-        "start": start,
-        "num": num,
-        "sort": sort,
-        "api_key": api_key,
-    })
+    params = urlencode(
+        {
+            "engine": "google_scholar_author",
+            "author_id": author_id,
+            "start": start,
+            "num": num,
+            "sort": sort,
+            "api_key": api_key,
+        }
+    )
     url = f"{SERPAPI_BASE}?{params}"
 
     headers = {"Accept": "application/json"}
@@ -81,7 +84,7 @@ def _serpapi_get(api_key: str, author_id: str, start: int = 0, num: int = _PAGE_
             return {}
         return data
     except Exception as exc:
-        _log.warning("SerpAPI request failed for %s: %s", author_id, exc)
+        _log.warning("SerpAPI request failed for %s: %s", author_id, _scrub_secrets(str(exc)))
         return {}
 
 
@@ -183,14 +186,15 @@ def serpapi_fetch_author_publications(
         # Year-bounded stop: if ALL articles with valid years on this page
         # are below min_year, we've passed the contribution window.
         if year_bounded and len(articles) > page_start:
-            page_years = [a["year"] for a in articles[page_start:]
-                          if isinstance(a["year"], int) and a["year"] > 0]
+            page_years = [a["year"] for a in articles[page_start:] if isinstance(a["year"], int) and a["year"] > 0]
             if page_years:
                 max_year = max(page_years)
                 if max_year < min_year:
                     _log.debug(
                         "Year-bounded stop for %s: page max year %d < min_year %d",
-                        author_id, max_year, min_year,
+                        author_id,
+                        max_year,
+                        min_year,
                     )
                     break
 

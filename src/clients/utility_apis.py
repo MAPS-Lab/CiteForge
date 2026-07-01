@@ -9,7 +9,7 @@ from typing import Any
 from ..cache import response_cache
 from ..config import CACHE_TTL_DOI_DAYS, CACHE_TTL_SEARCH_DAYS, DATACITE_BASE, GEMINI_BASE, ORCID_BASE
 from ..exceptions import ALL_API_ERRORS, NETWORK_ERRORS
-from ..http_utils import handle_api_errors, http_get_json, http_post_json
+from ..http_utils import _scrub_secrets, handle_api_errors, http_get_json, http_post_json
 from ..id_utils import _norm_doi
 from ..log_utils import LogCategory, LogSource, logger
 from ..text_utils import extract_year_from_any, normalize_title
@@ -17,14 +17,14 @@ from .helpers import _best_item_by_score
 
 # ============ Gemini ============
 
-def gemini_generate_short_title(
-    full_title: str, api_key: str, max_words: int | None = None
-) -> str | None:
+
+def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | None = None) -> str | None:
     """
     Call the Gemini API to generate a short CamelCase title for a publication,
     suitable for BibTeX keys and filenames.
     """
     from ..config import BIBTEX_KEY_MAX_WORDS
+
     if max_words is None:
         max_words = BIBTEX_KEY_MAX_WORDS
 
@@ -33,7 +33,7 @@ def gemini_generate_short_title(
 
     prompt = (
         f"Create a smart, concise CamelCase title (1 to {max_words} words) "
-        f"for this publication: \"{full_title}\". "
+        f'for this publication: "{full_title}". '
         "Extract the most important keywords. "
         "Skip stop words (a, an, the, for, of, and, to, in, with, from, by, at). "
         f"Use exactly {max_words} words or fewer if shorter captures the essence better. "
@@ -44,17 +44,13 @@ def gemini_generate_short_title(
 
     url = f"{GEMINI_BASE}?key={api_key}"
     payload = {
-        "contents": [{
-            "parts": [{
-                "text": prompt
-            }]
-        }],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "maxOutputTokens": 50,
             "temperature": 0.3,
             "topP": 0.8,
             "topK": 20,
-        }
+        },
     }
 
     import requests as _requests
@@ -71,23 +67,32 @@ def gemini_generate_short_title(
             break  # success
         except _requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 429 and attempt < max_retries:
-                wait = (2 ** attempt) + random.uniform(0, 1)
+                wait = (2**attempt) + random.uniform(0, 1)
                 logger.debug(
                     f"GEMINI_429 | attempt={attempt} | backoff={wait:.1f}s",
                     category=LogCategory.CITEKEY,
                 )
                 logger.info(
                     f"Gemini 429 (attempt {attempt}/{max_retries}), retrying in {wait:.1f}s",
-                    category=LogCategory.DEBUG, source=LogSource.SYSTEM,
+                    category=LogCategory.DEBUG,
+                    source=LogSource.SYSTEM,
                 )
                 time.sleep(wait)
                 continue
             logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
-            logger.warn(f"API call failed: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
+            logger.warn(
+                f"API call failed: {_scrub_secrets(str(e))}",
+                category=LogCategory.ERROR,
+                source=LogSource.SYSTEM,
+            )
             return None
         except (*ALL_API_ERRORS, ValueError) as e:
             logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
-            logger.warn(f"API call failed: {e}", category=LogCategory.ERROR, source=LogSource.SYSTEM)
+            logger.warn(
+                f"API call failed: {_scrub_secrets(str(e))}",
+                category=LogCategory.ERROR,
+                source=LogSource.SYSTEM,
+            )
             return None
 
     if data is None:
@@ -121,12 +126,14 @@ def gemini_generate_short_title(
     )
     logger.info(
         f"Generated title: {short_title}",
-        category=LogCategory.DEBUG, source=LogSource.SYSTEM,
+        category=LogCategory.DEBUG,
+        source=LogSource.SYSTEM,
     )
     return short_title
 
 
 # ============ DataCite ============
+
 
 @handle_api_errors(default_return=None)
 def datacite_search_doi(doi: str) -> dict[str, Any] | None:
@@ -183,8 +190,7 @@ def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | No
         return None
 
     authors: list[str] = [
-        name for creator in attributes.get("creators") or []
-        if (name := safe_get_field(creator, "name"))
+        name for creator in attributes.get("creators") or [] if (name := safe_get_field(creator, "name"))
     ]
 
     year = extract_year_from_any(attributes.get("publicationYear"), fallback=0) or 0
@@ -200,10 +206,12 @@ def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | No
 
     extra_fields: dict[str, str] = {}
     note_parts = [
-        part for part in [
+        part
+        for part in [
             f"Type: {resource_type_general}" if resource_type_general else "",
             f"Version: {attributes['version']}" if attributes.get("version") else "",
-        ] if part
+        ]
+        if part
     ]
     if note_parts:
         extra_fields["note"] = ", ".join(note_parts)
@@ -211,12 +219,20 @@ def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | No
         extra_fields["howpublished"] = venue
 
     return build_bibtex_entry(
-        entry_type=entry_type, title=title, authors=authors, year=year,
-        keyhint=keyhint, venue="", doi=doi, url=url, extra_fields=extra_fields,
+        entry_type=entry_type,
+        title=title,
+        authors=authors,
+        year=year,
+        keyhint=keyhint,
+        venue="",
+        doi=doi,
+        url=url,
+        extra_fields=extra_fields,
     )
 
 
 # ============ ORCID ============
+
 
 @handle_api_errors(default_return=[])
 def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
@@ -244,7 +260,7 @@ def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
         return []
 
     works = []
-    for work_group in (data.get("group") or []):
+    for work_group in data.get("group") or []:
         work_summary = work_group.get("work-summary") or []
         if not work_summary:
             continue
@@ -259,13 +275,15 @@ def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
         year = pub_date.get("year") or {}
         year_val = year.get("value") if isinstance(year, dict) else None
 
-        works.append({
-            "title": title,
-            "year": year_val,
-            "type": work.get("type"),
-            "external-ids": work.get("external-ids") or {},
-            "url": work.get("url") or {},
-        })
+        works.append(
+            {
+                "title": title,
+                "year": year_val,
+                "type": work.get("type"),
+                "external-ids": work.get("external-ids") or {},
+                "url": work.get("url") or {},
+            }
+        )
 
     logger.debug(
         f"orcid | WORKS | id={orcid_id} | count={len(works)}",
@@ -296,6 +314,7 @@ def orcid_search_work_by_title(orcid_id: str, title: str, _author_name: str | No
             return dict(work)
 
     from ..bibtex_build import create_scoring_function
+
     # NOTE: ORCID work-summary responses do not include contributor lists,
     # so we skip author matching (author_name=None) to avoid rejecting all
     # candidates when cand_authors is always empty.
@@ -310,8 +329,7 @@ def orcid_search_work_by_title(orcid_id: str, title: str, _author_name: str | No
 
     result = _best_item_by_score(works, score_fn)
     logger.debug(
-        f"orcid | TITLE_MATCH | title={title[:50]} | exact=False"
-        f" | result={'found' if result else 'none'}",
+        f"orcid | TITLE_MATCH | title={title[:50]} | exact=False | result={'found' if result else 'none'}",
         category=LogCategory.SCORE,
     )
     return result

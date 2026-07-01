@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import socket
 import threading
 import time
@@ -24,21 +25,36 @@ from .config import (
     HTTP_RETRY_STATUS_CODES,
     HTTP_TIMEOUT_FAST,
     RATE_LIMITS,
+    REDACT_QUERY_PARAM_NAMES,
     SESSION_ROTATION_THRESHOLD,
 )
 from .exceptions import ALL_API_ERRORS, DECODE_ERRORS, NUMERIC_ERRORS
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 # Safety net: cap all socket operations at 60s to prevent indefinite hangs
 # from DNS resolution, SSL handshake, or connection pool waits
 socket.setdefaulttimeout(60.0)
 
 # Standard HTTP headers for API requests
-DEFAULT_JSON_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (CiteForge Client)",
-    "Accept": "application/json"
-}
+DEFAULT_JSON_HEADERS = {"User-Agent": "Mozilla/5.0 (CiteForge Client)", "Accept": "application/json"}
+
+# Redact secret query-string values (API keys/tokens) before any URL or
+# exception text reaches a log record or exception message. Built from the
+# config-defined parameter names so the policy stays centralized.
+_SECRET_QS_RE = re.compile(
+    r"(?i)([?&](?:" + "|".join(re.escape(n) for n in REDACT_QUERY_PARAM_NAMES) + r")=)[^&#\s'\"\\)]+"
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Return *text* with secret query-string values replaced by ``REDACTED``.
+
+    Applied to URLs and exception strings before logging so credentials passed
+    as query parameters (e.g. ``?key=...``, ``&api_key=...``) never reach the
+    committed run logs.
+    """
+    return _SECRET_QS_RE.sub(r"\1REDACTED", text)
 
 
 def _generate_user_agent_pool() -> list[str]:
@@ -58,8 +74,7 @@ def _generate_user_agent_pool() -> list[str]:
     ]
 
     agents: list[str] = [
-        f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Chrome/{cv} Safari/537.36"
+        f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{cv} Safari/537.36"
         for platform in chrome_platforms
         for cv in chrome_versions
     ]
@@ -114,6 +129,7 @@ def _randomize_headers(headers: dict[str, str]) -> dict[str, str]:
     if "Accept-Language" not in h and random.random() < 0.7:
         h["Accept-Language"] = random.choice(_ACCEPT_LANGUAGE_POOL)
     return h
+
 
 _API_CALL_COUNTS: dict[str, int] = {}
 _CALL_COUNT_LOCK = threading.Lock()
@@ -264,17 +280,18 @@ def handle_api_errors(default_return: Any = None) -> Callable[[Callable[..., T]]
     """
     Decorator to handle API errors consistently across all API client functions, returning a default value on error.
     """
+
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 return func(*args, **kwargs)
             except ALL_API_ERRORS as e:
-                logging.getLogger("CiteForge.http").debug(
-                    "API error in %s: %s", func.__qualname__, e
-                )
+                logging.getLogger("CiteForge.http").debug("API error in %s: %s", func.__qualname__, e)
                 return default_return
+
         return wrapper
+
     return decorator
 
 
@@ -301,11 +318,11 @@ _MAX_RATE_LIMIT_RETRIES = 3
 
 
 def _http_request(
-        method: str,
-        url: str,
-        headers: dict[str, str],
-        timeout: float,
-        json_payload: dict[str, Any] | None = None,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    json_payload: dict[str, Any] | None = None,
 ) -> bytes:
     """Execute an HTTP request with the full CiteForge infrastructure.
 
@@ -342,12 +359,15 @@ def _http_request(
 
                 if method == "POST":
                     resp = session.post(
-                        url, json=json_payload, headers=headers,
+                        url,
+                        json=json_payload,
+                        headers=headers,
                         timeout=(connect_timeout, timeout),
                     )
                 else:
                     resp = session.get(
-                        url, headers=headers,
+                        url,
+                        headers=headers,
                         timeout=(connect_timeout, timeout),
                     )
             except requests.exceptions.RequestException:
@@ -356,7 +376,7 @@ def _http_request(
             else:
                 if resp.status_code in (429, 503) and attempt < _MAX_RATE_LIMIT_RETRIES - 1:
                     retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-                    rate_wait = retry_after if retry_after > 0 else (2 ** attempt) + random.uniform(0, 1)
+                    rate_wait = retry_after if retry_after > 0 else (2**attempt) + random.uniform(0, 1)
                     rate_limited = True
                 else:
                     resp.raise_for_status()
@@ -366,16 +386,16 @@ def _http_request(
         if rate_limited:
             time.sleep(min(rate_wait, HTTP_BACKOFF_MAX))
         else:
-            time.sleep((2 ** attempt) + random.uniform(0, 1))
+            time.sleep((2**attempt) + random.uniform(0, 1))
 
     # Unreachable -- the loop always returns or raises -- but satisfies mypy.
     raise requests.exceptions.RequestException(f"Failed to {method} {url}")
 
 
 def http_fetch_bytes(
-        url: str,
-        headers: dict[str, str],
-        timeout: float,
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
 ) -> bytes:
     """Perform an HTTP GET and return the raw response body.
 
@@ -396,7 +416,8 @@ def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
     except json.JSONDecodeError as ex:
         # include a preview for debugging
         preview = raw[:256].decode("utf-8", errors="replace")
-        raise ValueError(f"Invalid JSON from {url!r}: {ex.msg} at pos {ex.pos}; preview={preview!r}") from ex
+        safe_url = _scrub_secrets(url)
+        raise ValueError(f"Invalid JSON from {safe_url!r}: {ex.msg} at pos {ex.pos}; preview={preview!r}") from ex
 
 
 def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any]:
