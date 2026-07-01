@@ -106,11 +106,7 @@ from src.text_utils import (
     title_similarity,
     trim_title_default,
 )
-from src.textnorm import (
-    _fix_fused_compounds,  # noqa: F401
-    _is_corrupted_title,
-    _is_garbage_title,
-)
+from src.textnorm import _is_corrupted_title, _is_garbage_title
 
 FORCE_ENRICH = "--force" in sys.argv[1:]
 
