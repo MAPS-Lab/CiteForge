@@ -3,9 +3,7 @@ from __future__ import annotations
 import os
 import sys
 
-from src.canonicalize import (
-    _fixup_bib_entry,  # noqa: F401  # re-exported for test imports
-)
+from src.canonicalize import _fixup_bib_entry  # noqa: F401  # re-exported for test imports
 from src.config import (
     DEFAULT_INPUT,
     DEFAULT_OUT_DIR,
