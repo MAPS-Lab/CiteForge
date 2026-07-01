@@ -270,6 +270,12 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
         {\xx ...} commands (it, bf, em, etc.), escaped special characters
         (\&, \%, \$, \#, \_, \{, \}), tildes, and dashes (-- / ---).
         """
+        # Fast path: every transform below requires a backslash (commands and
+        # escaped specials), a tilde, a "--" run, or a double space. If none are
+        # present the function is a no-op, so skip the whole command scan.
+        if "\\" not in val and "~" not in val and "--" not in val and "  " not in val:
+            return val
+
         formatting_commands = [
             "textit",
             "textbf",
@@ -353,24 +359,31 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
         Decodes HTML entities, strips LaTeX formatting, converts accented
         characters via unidecode, and replaces curly quotes / dashes.
         """
-        val = html.unescape(val)
+        # html.unescape only changes a string containing an '&' entity.
+        if "&" in val:
+            val = html.unescape(val)
         val = _strip_latex_formatting(val)
-        val = strip_accents(val)
 
-        replacements = {
-            "\u2019": "'",  # Right single quotation mark → apostrophe
-            "\u2018": "'",  # Left single quotation mark → apostrophe
-            "\u201c": '"',  # Left double quotation mark → quote
-            "\u201d": '"',  # Right double quotation mark → quote
-            "\u2013": "-",  # En dash → hyphen
-            "\u2014": "--",  # Em dash → double hyphen
-            "\u2026": "...",  # Horizontal ellipsis → three dots
-            "\u00a0": " ",  # Non-breaking space → regular space
-        }
-        for unicode_char, ascii_char in replacements.items():
-            val = val.replace(unicode_char, ascii_char)
+        # strip_accents and every replacement key below are non-ASCII, so both
+        # are no-ops on an already-ASCII string; skip them in that common case.
+        if not val.isascii():
+            val = strip_accents(val)
+            replacements = {
+                "\u2019": "'",  # Right single quotation mark → apostrophe
+                "\u2018": "'",  # Left single quotation mark → apostrophe
+                "\u201c": '"',  # Left double quotation mark → quote
+                "\u201d": '"',  # Right double quotation mark → quote
+                "\u2013": "-",  # En dash → hyphen
+                "\u2014": "--",  # Em dash → double hyphen
+                "\u2026": "...",  # Horizontal ellipsis → three dots
+                "\u00a0": " ",  # Non-breaking space → regular space
+            }
+            for unicode_char, ascii_char in replacements.items():
+                val = val.replace(unicode_char, ascii_char)
 
-        val = re.sub(r"\s+'(\d{2})\b", r"'\1", val)
+        # The apostrophe-year fixup requires a literal single quote to match.
+        if "'" in val:
+            val = re.sub(r"\s+'(\d{2})\b", r"'\1", val)
 
         return val
 
