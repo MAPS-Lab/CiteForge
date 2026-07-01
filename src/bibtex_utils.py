@@ -30,10 +30,27 @@ from .text_utils import (
     title_similarity,
 )
 
-_TITLE_STOP_WORDS: frozenset[str] = frozenset({
-    "a", "an", "the", "on", "for", "of", "and", "to", "in",
-    "with", "using", "via", "from", "by", "at", "into", "through",
-})
+_TITLE_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "on",
+        "for",
+        "of",
+        "and",
+        "to",
+        "in",
+        "with",
+        "using",
+        "via",
+        "from",
+        "by",
+        "at",
+        "into",
+        "through",
+    }
+)
 
 
 def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entry") -> str:
@@ -86,19 +103,19 @@ def _extract_balanced_braces(text: str, start: int) -> str | None:
     position, keeping track of nested braces so inner blocks are preserved
     correctly.
     """
-    if start >= len(text) or text[start] != '{':
+    if start >= len(text) or text[start] != "{":
         return None
     depth = 0
     result: list[str] = []
     for ch in text[start:]:
-        if ch == '{':
+        if ch == "{":
             depth += 1
             if depth > 1:  # Don't include the outermost braces
                 result.append(ch)
-        elif ch == '}':
+        elif ch == "}":
             depth -= 1
             if depth == 0:
-                return ''.join(result)
+                return "".join(result)
             result.append(ch)
         else:
             result.append(ch)
@@ -111,9 +128,9 @@ def _assign_field_value(fields: dict[str, str], field_name: str, full_value: str
     brace-wrapped, quoted, or plain text. Keeps logic in one place to avoid
     duplication.
     """
-    if full_value.startswith('{'):
+    if full_value.startswith("{"):
         val = _extract_balanced_braces(full_value, 0)
-        fields[field_name] = val.strip() if val is not None else full_value.strip().strip('{}')
+        fields[field_name] = val.strip() if val is not None else full_value.strip().strip("{}")
     elif full_value.startswith('"'):
         m2 = re.match(r'^"([^"]*)"', full_value)
         fields[field_name] = m2.group(1).strip() if m2 else full_value.strip()
@@ -133,13 +150,9 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
         return None
     fields: dict[str, str] = {}
 
-    single_line_pattern = re.search(
-        r'@\s*[a-zA-Z]+\s*\{\s*[^,\s]+\s*,\s*(.+)\s*\}\s*$',
-        bibtex,
-        re.DOTALL
-    )
+    single_line_pattern = re.search(r"@\s*[a-zA-Z]+\s*\{\s*[^,\s]+\s*,\s*(.+)\s*\}\s*$", bibtex, re.DOTALL)
 
-    if single_line_pattern and '\n' not in bibtex.strip():
+    if single_line_pattern and "\n" not in bibtex.strip():
         fields_text = single_line_pattern.group(1).strip()
 
         brace_depth = 0
@@ -148,13 +161,13 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
         field_parts = []
 
         for i, char in enumerate(fields_text):
-            if char == '{' and not in_quote:
+            if char == "{" and not in_quote:
                 brace_depth += 1
-            elif char == '}' and not in_quote:
+            elif char == "}" and not in_quote:
                 brace_depth -= 1
             elif char == '"' and brace_depth == 0:
                 in_quote = not in_quote
-            elif char == ',' and brace_depth == 0 and not in_quote:
+            elif char == "," and brace_depth == 0 and not in_quote:
                 field_parts.append(fields_text[field_start:i].strip())
                 field_start = i + 1
 
@@ -165,7 +178,7 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
 
         # Now parse each field
         for part in field_parts:
-            m = re.match(r'^\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*=\s*(.*)$', part)
+            m = re.match(r"^\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*=\s*(.*)$", part)
             if m:
                 field_name = m.group(1).lower()
                 field_value = m.group(2).strip()
@@ -177,19 +190,19 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
     current_field = None
     accumulator: list[str] = []
 
-    for line in bibtex.split('\n'):
-        m = re.match(r'^\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*=\s*(.*)$', line)
+    for line in bibtex.split("\n"):
+        m = re.match(r"^\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*=\s*(.*)$", line)
 
         if m:
             if current_field and accumulator:
-                full_value = ' '.join(accumulator)
+                full_value = " ".join(accumulator)
                 _assign_field_value(fields, current_field, full_value)
 
             current_field = m.group(1).lower()
             rest = m.group(2).strip()
             accumulator = [rest]
 
-            if rest.startswith('{'):
+            if rest.startswith("{"):
                 val = _extract_balanced_braces(rest, 0)
                 if val is not None:
                     fields[current_field] = val.strip()
@@ -205,8 +218,8 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
             stripped = line.strip()
             if stripped:
                 accumulator.append(stripped)
-                full_value = ' '.join(accumulator)
-                if full_value.startswith('{'):
+                full_value = " ".join(accumulator)
+                if full_value.startswith("{"):
                     val = _extract_balanced_braces(full_value, 0)
                     if val is not None:
                         fields[current_field] = val.strip()
@@ -214,7 +227,7 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
                         accumulator = []
 
     if current_field and accumulator:
-        full_value = ' '.join(accumulator)
+        full_value = " ".join(accumulator)
         _assign_field_value(fields, current_field, full_value)
 
     return {"type": head["type"].lower(), "key": head["key"], "fields": fields}
@@ -235,8 +248,19 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
         (\&, \%, \$, \#, \_, \{, \}), tildes, and dashes (-- / ---).
         """
         formatting_commands = [
-            'textit', 'textbf', 'emph', 'textsc', 'texttt', 'textrm', 'textsf',
-            'underline', 'uppercase', 'lowercase', 'mbox', 'hbox', 'text'
+            "textit",
+            "textbf",
+            "emph",
+            "textsc",
+            "texttt",
+            "textrm",
+            "textsf",
+            "underline",
+            "uppercase",
+            "lowercase",
+            "mbox",
+            "hbox",
+            "text",
         ]
 
         prev_val = None
@@ -244,7 +268,7 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
             prev_val = val
             for cmd in formatting_commands:
                 # Match \command{...} with balanced braces
-                pattern = r'\\' + cmd + r'\s*\{'
+                pattern = r"\\" + cmd + r"\s*\{"
                 while True:
                     match = re.search(pattern, val)
                     if not match:
@@ -254,48 +278,48 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
                     depth = 0
                     end = start
                     for i in range(start, len(val)):
-                        if val[i] == '{':
+                        if val[i] == "{":
                             depth += 1
-                        elif val[i] == '}':
+                        elif val[i] == "}":
                             depth -= 1
                             if depth == 0:
                                 end = i
                                 break
                     if depth == 0:
                         # Extract content and replace
-                        content = val[start + 1:end]
-                        val = val[:match.start()] + content + val[end + 1:]
+                        content = val[start + 1 : end]
+                        val = val[: match.start()] + content + val[end + 1 :]
                     else:
                         # Unbalanced braces, skip this match
                         break
 
-        old_style_commands = ['it', 'bf', 'em', 'sc', 'tt', 'rm', 'sf', 'sl']
+        old_style_commands = ["it", "bf", "em", "sc", "tt", "rm", "sf", "sl"]
         for cmd in old_style_commands:
             # Match {\xx content} or {\xx{content}}
-            pattern = r'\{\\' + cmd + r'\s+([^}]+)\}'
-            val = re.sub(pattern, r'\1', val)
+            pattern = r"\{\\" + cmd + r"\s+([^}]+)\}"
+            val = re.sub(pattern, r"\1", val)
             # Also handle {\xx{content}}
-            pattern2 = r'\{\\' + cmd + r'\s*\{([^}]+)\}\}'
-            val = re.sub(pattern2, r'\1', val)
+            pattern2 = r"\{\\" + cmd + r"\s*\{([^}]+)\}\}"
+            val = re.sub(pattern2, r"\1", val)
 
         special_chars = {
-            r'\&': '&',
-            r'\%': '%',
-            r'\$': '$',
-            r'\#': '#',
-            r'\_': '_',
-            r'\{': '{',
-            r'\}': '}',
+            r"\&": "&",
+            r"\%": "%",
+            r"\$": "$",
+            r"\#": "#",
+            r"\_": "_",
+            r"\{": "{",
+            r"\}": "}",
         }
         for latex_char, plain_char in special_chars.items():
             val = val.replace(latex_char, plain_char)
 
-        val = re.sub(r'(?<![:/])~', ' ', val)
+        val = re.sub(r"(?<![:/])~", " ", val)
 
-        val = val.replace('---', '--')
-        val = val.replace('--', '-')
+        val = val.replace("---", "--")
+        val = val.replace("--", "-")
 
-        val = re.sub(r'  +', ' ', val)
+        val = re.sub(r"  +", " ", val)
 
         return val
 
@@ -311,14 +335,14 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
         val = strip_accents(val)
 
         replacements = {
-            '\u2019': "'",  # Right single quotation mark → apostrophe
-            '\u2018': "'",  # Left single quotation mark → apostrophe
-            '\u201C': '"',  # Left double quotation mark → quote
-            '\u201D': '"',  # Right double quotation mark → quote
-            '\u2013': '-',  # En dash → hyphen
-            '\u2014': '--', # Em dash → double hyphen
-            '\u2026': '...', # Horizontal ellipsis → three dots
-            '\u00A0': ' ',  # Non-breaking space → regular space
+            "\u2019": "'",  # Right single quotation mark → apostrophe
+            "\u2018": "'",  # Left single quotation mark → apostrophe
+            "\u201c": '"',  # Left double quotation mark → quote
+            "\u201d": '"',  # Right double quotation mark → quote
+            "\u2013": "-",  # En dash → hyphen
+            "\u2014": "--",  # Em dash → double hyphen
+            "\u2026": "...",  # Horizontal ellipsis → three dots
+            "\u00a0": " ",  # Non-breaking space → regular space
         }
         for unicode_char, ascii_char in replacements.items():
             val = val.replace(unicode_char, ascii_char)
@@ -335,15 +359,15 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
         trailing_period = False
 
         # Remove duplicated suffix after colon
-        if ':' in t:
-            parts = t.split(':')
+        if ":" in t:
+            parts = t.split(":")
             if len(parts) >= 3:  # Has at least 2 colons
                 # Check if last two parts are the same (after stripping whitespace)
                 last_part = parts[-1].strip()
                 second_last_part = parts[-2].strip()
                 if last_part and last_part == second_last_part and len(last_part) > 15:
                     # Remove the duplicated last part
-                    t = ':'.join(parts[:-1]).strip()
+                    t = ":".join(parts[:-1]).strip()
                     dup_suffix_removed = True
 
         # trim trailing periods unless it's an ellipsis
@@ -354,14 +378,13 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
                     category=LogCategory.SERIAL,
                 )
             return t
-        if t.endswith('.'):
+        if t.endswith("."):
             trailing_period = True
             t = t[:-1].rstrip()
 
         if dup_suffix_removed or trailing_period:
             logger.debug(
-                f"title_sanitize | dup_suffix_removed={dup_suffix_removed}"
-                f" | trailing_period={trailing_period}",
+                f"title_sanitize | dup_suffix_removed={dup_suffix_removed} | trailing_period={trailing_period}",
                 category=LogCategory.SERIAL,
             )
         return t
@@ -370,10 +393,21 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
     key = entry.get("key") or "entry"
     fields: dict[str, str] = entry.get("fields") or {}
     preferred = [
-        "title", "author", "year",
-        "journal", "booktitle", "howpublished", "publisher",
-        "volume", "number", "pages",
-        "doi", "url", "eprint", "archiveprefix", "primaryclass"
+        "title",
+        "author",
+        "year",
+        "journal",
+        "booktitle",
+        "howpublished",
+        "publisher",
+        "volume",
+        "number",
+        "pages",
+        "doi",
+        "url",
+        "eprint",
+        "archiveprefix",
+        "primaryclass",
     ]
     lines = [f"@{etype}{{{key},"]
     preferred_set = set(preferred)
@@ -388,17 +422,13 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
             if k not in ("url", "doi") and "&" in val and r"\&" not in val:
                 val = val.replace("&", r"\&")
             lines.append(f"  {k} = {{{val}}},")
-    if len(lines) > 1 and lines[-1].endswith(','):
+    if len(lines) > 1 and lines[-1].endswith(","):
         lines[-1] = lines[-1][:-1]
     lines.append("}")
     return "\n".join(lines) + "\n"
 
 
-def _short_title_for_key(
-    title: str,
-    max_words: int = BIBTEX_KEY_MAX_WORDS,
-    gemini_api_key: str | None = None
-) -> str:
+def _short_title_for_key(title: str, max_words: int = BIBTEX_KEY_MAX_WORDS, gemini_api_key: str | None = None) -> str:
     """
     Pick a few informative words from a title, skipping common stop words, and
     join them into a compact phrase that works well in keys or filenames.
@@ -414,7 +444,7 @@ def _short_title_for_key(
     so we bypass the cache and use the algorithmic approach to get more title words.
     """
     normalized_title = normalize_title(title)
-    use_cache = (max_words == BIBTEX_KEY_MAX_WORDS)
+    use_cache = max_words == BIBTEX_KEY_MAX_WORDS
 
     if gemini_api_key and use_cache:
         cached = response_cache.get("gemini", normalized_title)
@@ -432,7 +462,8 @@ def _short_title_for_key(
             if gemini_result:
                 logger.debug(f"gemini_api_success | short={gemini_result}", category=LogCategory.CITEKEY)
                 response_cache.put(
-                    "gemini", normalized_title,
+                    "gemini",
+                    normalized_title,
                     {"short_title": gemini_result},
                     ttl_days=CACHE_TTL_GEMINI_DAYS,
                 )
@@ -469,7 +500,7 @@ def _first_author_lastname(authors_field: str | None) -> str | None:
         last = first.split(",")[0].strip()
     else:
         toks = first.split()
-        while len(toks) > 1 and toks[-1].rstrip('.').lower() in AUTHOR_NAME_SUFFIXES:
+        while len(toks) > 1 and toks[-1].rstrip(".").lower() in AUTHOR_NAME_SUFFIXES:
             toks.pop()
         last = toks[-1] if toks else first
     last = re.sub(r"[^a-zA-Z0-9]", "", strip_accents(last)).lower()
@@ -499,8 +530,9 @@ def build_standard_citekey(entry: dict[str, Any], gemini_api_key: str | None = N
     return f"{last_cap}{y}:{short}"
 
 
-def short_filename_for_entry(entry: dict[str, Any], gemini_api_key: str | None = None,
-                             existing_files: set[str] | None = None, max_words: int = 2) -> str:
+def short_filename_for_entry(
+    entry: dict[str, Any], gemini_api_key: str | None = None, existing_files: set[str] | None = None, max_words: int = 2
+) -> str:
     """
     Construct a concise .bib filename from the first author's name, the year,
     and a shortened title so that exported files are easy to identify.
@@ -586,8 +618,7 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
         preprint_doi = a_doi if a_is_preprint else b_doi
         published_doi = b_doi if a_is_preprint else a_doi
         logger.debug(
-            f"ENTRY_FALLTHROUGH | PREPRINT_PUBLISHED_PAIR"
-            f" | preprint={preprint_doi} published={published_doi}",
+            f"ENTRY_FALLTHROUGH | PREPRINT_PUBLISHED_PAIR | preprint={preprint_doi} published={published_doi}",
             category=LogCategory.DEDUP,
         )
 
@@ -663,12 +694,7 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
     a_authors = parse_authors_any(af.get("author", ""))
     b_authors = parse_authors_any(bf.get("author", ""))
     author_overlap = author_overlap_ratio(af.get("author", ""), bf.get("author", ""))
-    high_author_match = (
-        author_overlap >= 0.9
-        and title_sim >= 0.6
-        and len(a_authors) >= 2
-        and len(b_authors) >= 2
-    )
+    high_author_match = author_overlap >= 0.9 and title_sim >= 0.6 and len(a_authors) >= 2 and len(b_authors) >= 2
 
     preprint_pair = a_preprint != b_preprint
     ext_ids = external_ids_match(af, bf)

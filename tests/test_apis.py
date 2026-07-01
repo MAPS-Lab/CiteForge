@@ -84,7 +84,8 @@ def test_openalex_search() -> None:
     if not work:
         with contextlib.suppress(Exception):
             work = http_get_json(
-                f"https://api.openalex.org/works/{paper['openalex_id']}", timeout=15,
+                f"https://api.openalex.org/works/{paper['openalex_id']}",
+                timeout=15,
             )
 
     work = work or OPENALEX_CANNED_WORK
@@ -106,9 +107,7 @@ def test_all_multiple_candidate_functions_exist() -> None:
         "europepmc_search_papers_multiple",
         "openreview_search_papers_multiple",
     ):
-        assert callable(getattr(search_apis, func_name, None)), (
-            f"Function {func_name} not found or not callable"
-        )
+        assert callable(getattr(search_apis, func_name, None)), f"Function {func_name} not found or not callable"
 
 
 def test_crossref_multiple_candidates() -> None:
@@ -152,7 +151,9 @@ def test_multiple_candidate_empty_inputs() -> None:
     assert isinstance(candidates, list), "None author: did not return list"
 
     candidates = search_apis.crossref_search_multiple(
-        "Attention Is All You Need", "Ashish Vaswani", max_results=0,
+        "Attention Is All You Need",
+        "Ashish Vaswani",
+        max_results=0,
     )
     assert not candidates, f"max_results=0: expected empty list, got {len(candidates)} items"
 
@@ -176,9 +177,7 @@ def test_api_field_mappings() -> None:
 def test_doi_validation_functions() -> None:
     """DOI validation utilities are present and callable."""
     for func_name in ("validate_doi_candidate", "process_validated_doi"):
-        assert callable(getattr(doi_utils, func_name, None)), (
-            f"{func_name} not found or not callable"
-        )
+        assert callable(getattr(doi_utils, func_name, None)), f"{func_name} not found or not callable"
 
 
 def test_bibtex_building_from_openalex_canned() -> None:

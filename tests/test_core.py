@@ -166,21 +166,27 @@ def test_arxiv_extraction() -> None:
 def test_bibtex_parsing() -> None:
     """Test BibTeX parsing."""
     valid_cases = [
-        (dedent("""
+        (
+            dedent("""
             @inproceedings{Vaswani2017,
               title = {Attention Is All You Need},
               author = {Ashish Vaswani},
               year = {2017}
             }
-        """).strip(), {'type': 'inproceedings', 'key': 'Vaswani2017'}),
-        (dedent("""
+        """).strip(),
+            {"type": "inproceedings", "key": "Vaswani2017"},
+        ),
+        (
+            dedent("""
             @article{He2016,
               title = {Deep Residual Learning for Image Recognition},
               author = {Kaiming He and Xiangyu Zhang},
               year = {2016},
               journal = {CVPR}
             }
-        """).strip(), {'type': 'article', 'key': 'He2016'}),
+        """).strip(),
+            {"type": "article", "key": "He2016"},
+        ),
     ]
 
     for bibtex_str, expected_keys in valid_cases:
@@ -203,19 +209,20 @@ def test_bibtex_building() -> None:
         2017,
         keyhint="Vaswani2017",
     )
-    assert bibtex and '@' in bibtex, "No valid BibTeX returned"
+    assert bibtex and "@" in bibtex, "No valid BibTeX returned"
 
     # Verify roundtrip
     parsed = bt.parse_bibtex_to_dict(bibtex)
-    assert parsed and 'title' in parsed.get('fields', {}), "Parsing built BibTeX failed"
+    assert parsed and "title" in parsed.get("fields", {}), "Parsing built BibTeX failed"
 
     # Dict to BibTeX
     entry = {
-        'type': 'article', 'key': 'Vaswani2017',
-        'fields': {'title': 'Attention Is All You Need', 'author': 'Ashish Vaswani', 'year': '2017'}
+        "type": "article",
+        "key": "Vaswani2017",
+        "fields": {"title": "Attention Is All You Need", "author": "Ashish Vaswani", "year": "2017"},
     }
     bibtex2 = bt.bibtex_from_dict(entry)
-    assert bibtex2 and '@article' in bibtex2, "Invalid BibTeX from dict"
+    assert bibtex2 and "@article" in bibtex2, "Invalid BibTeX from dict"
 
 
 def test_bibtex_latex_stripping() -> None:
@@ -231,7 +238,6 @@ def test_bibtex_latex_stripping() -> None:
         (r"\textsf{Sans Serif} Font", "Sans Serif Font"),
         (r"\underline{Underlined} Word", "Underlined Word"),
         (r"\mbox{No Break}", "No Break"),
-
         # Old-style LaTeX formatting
         (r"{\it Italic} text here", "Italic text here"),
         (r"{\bf Bold} text here", "Bold text here"),
@@ -240,11 +246,9 @@ def test_bibtex_latex_stripping() -> None:
         (r"{\tt Typewriter} font", "Typewriter font"),
         (r"{\rm Roman} font", "Roman font"),
         (r"{\sf Sans} font", "Sans font"),
-
         # Nested formatting commands
         (r"\textbf{\textit{Nested}} formatting", "Nested formatting"),
         (r"\emph{\textbf{Double}} nested", "Double nested"),
-
         # Special escaped characters
         (r"Research \& Development", r"Research \& Development"),
         (r"50\% Improvement", "50% Improvement"),
@@ -252,24 +256,19 @@ def test_bibtex_latex_stripping() -> None:
         (r"Item \#1", "Item #1"),
         (r"Under\_score", "Under_score"),
         (r"Curly \{brace\}", "Curly {brace}"),
-
         # Dashes
         ("Long---dash", "Long-dash"),
         ("Medium--dash", "Medium-dash"),
         ("En---and em--dashes together", "En-and em-dashes together"),
-
         # Tilde (non-breaking space)
         # Note: trailing period is stripped by _sanitize_title for titles
         ("Smith~et~al.", "Smith et al"),
-
         # Combined cases
         (r"\textit{Deep Learning}---A \textbf{Survey}", "Deep Learning-A Survey"),
         (r"The \emph{Art} of \textbf{Programming}: 50\% Complete", "The Art of Programming: 50% Complete"),
-
         # Edge cases - no LaTeX (should pass through unchanged)
         ("Plain text title", "Plain text title"),
         ("Title with: colon and punctuation!", "Title with: colon and punctuation!"),
-
         # Multiple spaces should be collapsed
         (r"\textit{Word}   multiple   spaces", "Word multiple spaces"),
     ]
@@ -298,31 +297,24 @@ def test_bibtex_unicode_normalization() -> None:
         ("François Dubois", "Francois Dubois"),
         ("Jørgen Ødegård", "Jorgen Odegard"),
         ("Łukasz Kowalski", "Lukasz Kowalski"),
-
         # Nordic characters
         ("Søren Kierkegaard", "Soren Kierkegaard"),
         ("Bjørn Borg", "Bjorn Borg"),
         ("Ærodynamics", "AErodynamics"),
-
         # Unicode quotation marks
-        ("It\u2019s a \u201Ctest\u201D", "It's a \"test\""),
+        ("It\u2019s a \u201ctest\u201d", 'It\'s a "test"'),
         ("\u2018Single\u2019 quotes", "'Single' quotes"),
-        ("\u201CDouble\u201D quotes", "\"Double\" quotes"),
-
+        ("\u201cDouble\u201d quotes", '"Double" quotes'),
         # Unicode dashes
         ("En\u2013dash", "En-dash"),
         ("Em—dash", "Em--dash"),
-
         # Ellipsis
         ("Trailing…", "Trailing..."),
-
         # Non-breaking space
-        ("Non\u00A0breaking", "Non breaking"),
-
+        ("Non\u00a0breaking", "Non breaking"),
         # Year abbreviation fix
         ("Class of '21", "Class of'21"),
         ("Back in '99", "Back in'99"),
-
         # Combined Unicode and special chars
         ("José's café—open 24/7", "Jose's cafe--open 24/7"),
     ]
@@ -346,19 +338,14 @@ def test_bibtex_latex_and_unicode_combined() -> None:
         # LaTeX + accents
         (r"\textit{Café} Culture", "Cafe Culture"),
         (r"The \emph{naïve} approach", "The naive approach"),
-
         # LaTeX + Unicode quotes
-        ("\\textbf{\u201CImportant\u201D} finding", "\"Important\" finding"),
-
+        ("\\textbf{\u201cImportant\u201d} finding", '"Important" finding'),
         # LaTeX + dashes + accents
         (r"\emph{José}—A \textbf{Survey}", "Jose--A Survey"),
-
         # Special chars + accents
         (r"50\% of café visitors", "50% of cafe visitors"),
-
         # Full complex case
-        ("\\textit{François}'s \\textbf{café}—50\\% \u201Cdiscount\u201D",
-         "Francois's cafe--50% \"discount\""),
+        ("\\textit{François}'s \\textbf{café}—50\\% \u201cdiscount\u201d", 'Francois\'s cafe--50% "discount"'),
     ]
 
     for input_title, expected_title in test_cases:
@@ -394,9 +381,7 @@ def test_bibtex_matching() -> None:
     parsed_bib1 = bt.parse_bibtex_to_dict(bib1)
     parsed_bib2 = bt.parse_bibtex_to_dict(bib2)
     assert parsed_bib1 is not None and parsed_bib2 is not None
-    assert bt.bibtex_entries_match_strict(parsed_bib1, parsed_bib2), (
-        "Exact entries should match"
-    )
+    assert bt.bibtex_entries_match_strict(parsed_bib1, parsed_bib2), "Exact entries should match"
 
     # With normalization
     bib3 = dedent("""
@@ -408,9 +393,7 @@ def test_bibtex_matching() -> None:
     """).strip()
     parsed_bib3 = bt.parse_bibtex_to_dict(bib3)
     assert parsed_bib3 is not None
-    assert bt.bibtex_entries_match_strict(parsed_bib1, parsed_bib3), (
-        "Case/punctuation differences should match"
-    )
+    assert bt.bibtex_entries_match_strict(parsed_bib1, parsed_bib3), "Case/punctuation differences should match"
 
     # Abbreviated authors
     bib4 = dedent("""
@@ -430,9 +413,7 @@ def test_bibtex_matching() -> None:
     parsed_bib4 = bt.parse_bibtex_to_dict(bib4)
     parsed_bib5 = bt.parse_bibtex_to_dict(bib5)
     assert parsed_bib4 is not None and parsed_bib5 is not None
-    assert bt.bibtex_entries_match_strict(parsed_bib4, parsed_bib5), (
-        "Abbreviated authors should match"
-    )
+    assert bt.bibtex_entries_match_strict(parsed_bib4, parsed_bib5), "Abbreviated authors should match"
 
     # Should NOT match
     bib6 = dedent("""
@@ -452,9 +433,7 @@ def test_bibtex_matching() -> None:
     parsed_bib6 = bt.parse_bibtex_to_dict(bib6)
     parsed_bib7 = bt.parse_bibtex_to_dict(bib7)
     assert parsed_bib6 is not None and parsed_bib7 is not None
-    assert not bt.bibtex_entries_match_strict(parsed_bib6, parsed_bib7), (
-        "Different titles should NOT match"
-    )
+    assert not bt.bibtex_entries_match_strict(parsed_bib6, parsed_bib7), "Different titles should NOT match"
 
 
 def test_bibtex_extra_fields() -> None:
@@ -479,14 +458,12 @@ def test_bibtex_extra_fields() -> None:
     parsed_minimal = bt.parse_bibtex_to_dict(minimal)
     parsed_enriched = bt.parse_bibtex_to_dict(enriched)
     assert parsed_minimal is not None and parsed_enriched is not None
-    assert bt.bibtex_entries_match_strict(parsed_minimal, parsed_enriched), (
-        "Extra fields should not prevent matching"
-    )
+    assert bt.bibtex_entries_match_strict(parsed_minimal, parsed_enriched), "Extra fields should not prevent matching"
 
 
 def test_config() -> None:
     """Test configuration constants."""
-    for const in ('CONTRIBUTION_WINDOW_YEARS', 'SIM_EXACT_PICK_THRESHOLD'):
+    for const in ("CONTRIBUTION_WINDOW_YEARS", "SIM_EXACT_PICK_THRESHOLD"):
         assert getattr(config, const, None) is not None, f"Missing constant: {const}"
 
 
@@ -555,34 +532,36 @@ def test_merge_with_policy() -> None:
     primary = {
         "type": "misc",
         "key": "Vaswani2017",
-        "fields": {
-            "title": "Attention Is All You Need",
-            "author": "Ashish Vaswani",
-            "year": "2017"
-        }
+        "fields": {"title": "Attention Is All You Need", "author": "Ashish Vaswani", "year": "2017"},
     }
 
     # Enrichers with different trust levels
     enrichers = [
-        ("crossref", {
-            "type": "inproceedings",
-            "fields": {
-                "title": "Attention Is All You Need",
-                "author": "Ashish Vaswani",
-                "year": "2017",
-                "booktitle": "NeurIPS",
-                "doi": "10.5555/3295222.3295349"
-            }
-        }),
-        ("s2", {
-            "type": "article",
-            "fields": {
-                "title": "Attention Is All You Need",
-                "author": "Ashish Vaswani",
-                "year": "2017",
-                "volume": "30"
-            }
-        }),
+        (
+            "crossref",
+            {
+                "type": "inproceedings",
+                "fields": {
+                    "title": "Attention Is All You Need",
+                    "author": "Ashish Vaswani",
+                    "year": "2017",
+                    "booktitle": "NeurIPS",
+                    "doi": "10.5555/3295222.3295349",
+                },
+            },
+        ),
+        (
+            "s2",
+            {
+                "type": "article",
+                "fields": {
+                    "title": "Attention Is All You Need",
+                    "author": "Ashish Vaswani",
+                    "year": "2017",
+                    "volume": "30",
+                },
+            },
+        ),
     ]
 
     merged = merge_utils.merge_with_policy(primary, enrichers)
@@ -609,18 +588,12 @@ def test_merge_doi_arxiv_handling() -> None:
             "year": "2017",
             "eprint": "1706.03762",
             "archiveprefix": "arXiv",
-        }
+        },
     }
 
     # Add DOI from trusted source
     enrichers = [
-        ("crossref", {
-            "type": "inproceedings",
-            "fields": {
-                "doi": "10.5555/3295222.3295349",
-                "booktitle": "NeurIPS"
-            }
-        }),
+        ("crossref", {"type": "inproceedings", "fields": {"doi": "10.5555/3295222.3295349", "booktitle": "NeurIPS"}}),
     ]
 
     merged = merge_utils.merge_with_policy(primary, enrichers)
@@ -639,45 +612,33 @@ def test_save_entry_to_file(tmp_path: Path) -> None:
     entry = {
         "type": "inproceedings",
         "key": "Vaswani2017",
-        "fields": {
-            "title": "Attention Is All You Need",
-            "author": "Ashish Vaswani",
-            "year": "2017"
-        }
+        "fields": {"title": "Attention Is All You Need", "author": "Ashish Vaswani", "year": "2017"},
     }
     tmpdir_str = str(tmp_path)
 
     # Save first time
-    path1, written1 = merge_utils.save_entry_to_file(
-        tmpdir_str, "Scholar123", entry,
-        author_name="Ashish Vaswani"
-    )
+    path1, written1 = merge_utils.save_entry_to_file(tmpdir_str, "Scholar123", entry, author_name="Ashish Vaswani")
 
     assert os.path.exists(path1), f"File not created: {path1}"
     assert written1, "First save should report was_written=True"
 
     # Save same entry again (should reuse same file)
     path2, _ = merge_utils.save_entry_to_file(
-        tmpdir_str, "Scholar123", entry,
-        prefer_path=path1,
-        author_name="Ashish Vaswani"
+        tmpdir_str, "Scholar123", entry, prefer_path=path1, author_name="Ashish Vaswani"
     )
 
     assert path1 == path2, f"Should reuse same path: {path1} vs {path2}"
 
     # Modify entry and save (should create new file or update)
     entry["fields"]["booktitle"] = "NeurIPS"
-    path3, _ = merge_utils.save_entry_to_file(
-        tmpdir_str, "Scholar123", entry,
-        author_name="Ashish Vaswani"
-    )
+    path3, _ = merge_utils.save_entry_to_file(tmpdir_str, "Scholar123", entry, author_name="Ashish Vaswani")
 
     assert os.path.exists(path3), f"Modified entry file not created: {path3}"
 
 
 def test_exception_definitions() -> None:
     """Test that exception tuples are properly defined."""
-    for name in ('HTTP_ERRORS', 'NETWORK_ERRORS', 'ALL_API_ERRORS', 'FILE_IO_ERRORS'):
+    for name in ("HTTP_ERRORS", "NETWORK_ERRORS", "ALL_API_ERRORS", "FILE_IO_ERRORS"):
         assert isinstance(getattr(exceptions, name, None), tuple), f"{name} missing or not a tuple"
 
 
@@ -723,7 +684,7 @@ def test_no_duplicate_titles_per_author() -> None:
                 pass  # intentionally skip unparseable .bib files
 
         for i, e1 in enumerate(entries):
-            for e2 in entries[i + 1:]:
+            for e2 in entries[i + 1 :]:
                 t1 = e1.get("fields", {}).get("title", "")
                 t2 = e2.get("fields", {}).get("title", "")
                 if not t1 or not t2:
@@ -738,14 +699,16 @@ def test_no_duplicate_titles_per_author() -> None:
                 if d1 and d2 and d1 != d2:
                     continue
 
-                duplicates.append({
-                    "author": author_dir.name,
-                    "file1": e1["_filename"],
-                    "file2": e2["_filename"],
-                    "similarity": sim,
-                    "title1": t1[:60],
-                    "title2": t2[:60],
-                })
+                duplicates.append(
+                    {
+                        "author": author_dir.name,
+                        "file1": e1["_filename"],
+                        "file2": e2["_filename"],
+                        "similarity": sim,
+                        "title1": t1[:60],
+                        "title2": t2[:60],
+                    }
+                )
 
     if duplicates:
         msg_lines = ["Found duplicate entries that should be deduplicated:"]

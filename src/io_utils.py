@@ -64,10 +64,7 @@ def _candidate_paths(primary: str, legacy: str | None = None) -> list[str]:
 
 
 def _read_key_file(
-    path: str,
-    legacy: str | None = None,
-    required: bool = True,
-    expected_lines: int = 1
+    path: str, legacy: str | None = None, required: bool = True, expected_lines: int = 1
 ) -> list[str] | None:
     """
     Generic key file reader that handles common patterns for loading API keys and
@@ -84,9 +81,7 @@ def _read_key_file(
                     last_err = ValueError(f"{os.path.basename(p)} is empty")
                     continue
                 if len(lines) < expected_lines:
-                    last_err = ValueError(
-                        f"{os.path.basename(p)} has {len(lines)} line(s), expected {expected_lines}"
-                    )
+                    last_err = ValueError(f"{os.path.basename(p)} has {len(lines)} line(s), expected {expected_lines}")
                     continue
                 return lines
         except FileNotFoundError as e:
@@ -179,7 +174,8 @@ def read_records(path: str = DEFAULT_INPUT) -> list[Record]:
                     if not name and (scholar_id or dblp_id):
                         logging.getLogger("CiteForge.io").warning(
                             "Skipping record with empty Name but ID(s): %s/%s",
-                            scholar_id, dblp_id,
+                            scholar_id,
+                            dblp_id,
                         )
                         continue
 
@@ -380,8 +376,7 @@ def collect_orphan_files(csv_path: str, output_dir: str) -> list[str]:
     orphans: list[str] = []
     try:
         subdirs = [
-            os.path.join(output_dir, d) for d in os.listdir(output_dir)
-            if os.path.isdir(os.path.join(output_dir, d))
+            os.path.join(output_dir, d) for d in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, d))
         ]
     except OSError:
         return []
@@ -484,9 +479,7 @@ def build_a2i2_folder(
 
     # --- Step 2: build name -> Record lookup --------------------------------
     name_to_rec: dict[str, Record] = {
-        normalize_person_name(rec.name): rec
-        for rec in records
-        if normalize_person_name(rec.name)
+        normalize_person_name(rec.name): rec for rec in records if normalize_person_name(rec.name)
     }
 
     # --- Step 3: collect .bib files from member directories -----------------
@@ -554,9 +547,7 @@ def build_a2i2_folder(
         if not doi:
             continue
 
-        matched_key = doi if doi in doi_to_idx else next(
-            (d for d in doi_to_idx if doi_bases_match(doi, d)), None
-        )
+        matched_key = doi if doi in doi_to_idx else next((d for d in doi_to_idx if doi_bases_match(doi, d)), None)
 
         if matched_key is not None:
             ki = doi_to_idx[matched_key]

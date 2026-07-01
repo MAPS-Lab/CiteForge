@@ -17,6 +17,7 @@ logging.addLevelName(SUCCESS_LEVEL, "SUCCESS")
 
 class LogSource:
     """Data-source constants for log naming and coloring."""
+
     SCHOLAR = "Scholar"
     DBLP = "DBLP"
     S2 = "Semantic Scholar"
@@ -32,6 +33,7 @@ class LogSource:
 
 class LogCategory:
     """Constants for log categories to replace indentation with semantic tagging."""
+
     AUTHOR = "AUTHOR"
     ARTICLE = "ARTICLE"
     FETCH = "FETCH"
@@ -118,10 +120,17 @@ class ColoredFormatter(logging.Formatter):
         LogCategory.PLAN: MAGENTA,
         **dict.fromkeys(
             [
-                LogCategory.AUDIT, LogCategory.MERGE, LogCategory.CLEANUP,
-                LogCategory.DEDUP, LogCategory.CACHE, LogCategory.SCORE,
-                LogCategory.DOI_VAL, LogCategory.ARXIV, LogCategory.PARSE,
-                LogCategory.SERIAL, LogCategory.CITEKEY,
+                LogCategory.AUDIT,
+                LogCategory.MERGE,
+                LogCategory.CLEANUP,
+                LogCategory.DEDUP,
+                LogCategory.CACHE,
+                LogCategory.SCORE,
+                LogCategory.DOI_VAL,
+                LogCategory.ARXIV,
+                LogCategory.PARSE,
+                LogCategory.SERIAL,
+                LogCategory.CITEKEY,
             ],
             DARK_GRAY,
         ),
@@ -144,9 +153,7 @@ class ColoredFormatter(logging.Formatter):
 
         if self.use_color:
             if record.levelname in self.LEVEL_COLORS:
-                record.levelname = (
-                    f"{self.LEVEL_COLORS[record.levelname]}{record.levelname}{self.RESET}"
-                )
+                record.levelname = f"{self.LEVEL_COLORS[record.levelname]}{record.levelname}{self.RESET}"
 
             parts: list[str] = []
             if source:

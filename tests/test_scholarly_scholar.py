@@ -137,7 +137,7 @@ class TestSerpapiFetchAuthorPublications:
     def test_pagination_multi_page(self, mock_http: MagicMock) -> None:
         """Multiple pages should be fetched when serpapi_pagination.next is present."""
         page1_articles = [_make_serpapi_article(title=f"Paper {i}") for i in range(3)]
-        page2_articles = [_make_serpapi_article(title=f"Paper {i+3}") for i in range(2)]
+        page2_articles = [_make_serpapi_article(title=f"Paper {i + 3}") for i in range(2)]
         page1 = _make_serpapi_response(page1_articles, has_next=True)
         page2 = _make_serpapi_response(page2_articles, has_next=False)
 
@@ -352,7 +352,11 @@ class TestSerpapiFetchAuthorPublications:
         )
         mock_http.return_value = _json_bytes(page1)
         result = serpapi_fetch_author_publications(
-            "key", "aid", num=1000, min_year=2019, sort="citedby",
+            "key",
+            "aid",
+            num=1000,
+            min_year=2019,
+            sort="citedby",
         )
         assert len(result["articles"]) == 1
 
@@ -551,7 +555,9 @@ class TestFacadeCacheBehavior:
     @patch("src.clients.scholar.response_cache")
     @patch("src.clients.scholar.serpapi_fetch_author_publications")
     def test_publications_cache_hit(
-        self, mock_serpapi: MagicMock, mock_cache: MagicMock,
+        self,
+        mock_serpapi: MagicMock,
+        mock_cache: MagicMock,
     ) -> None:
         """Cached publications should be returned without calling SerpAPI."""
         cached_data = {"articles": [{"title": "Cached"}], "search_metadata": {"status": "Success"}}
@@ -565,7 +571,9 @@ class TestFacadeCacheBehavior:
     @patch("src.clients.scholar.response_cache")
     @patch("src.clients.scholar.serpapi_fetch_author_publications")
     def test_publications_cache_miss(
-        self, mock_serpapi: MagicMock, mock_cache: MagicMock,
+        self,
+        mock_serpapi: MagicMock,
+        mock_cache: MagicMock,
     ) -> None:
         """Cache miss should call SerpAPI with author_id and store the result."""
         mock_cache.get.return_value = None
@@ -585,7 +593,9 @@ class TestFacadeCacheBehavior:
     @patch("src.clients.scholar.response_cache")
     @patch("src.clients.scholar.serpapi_fetch_author_publications")
     def test_publications_cache_miss_empty_result(
-        self, mock_serpapi: MagicMock, mock_cache: MagicMock,
+        self,
+        mock_serpapi: MagicMock,
+        mock_cache: MagicMock,
     ) -> None:
         """When SerpAPI returns no articles, result must not be cached."""
         mock_cache.get.return_value = None
@@ -602,7 +612,9 @@ class TestFacadeCacheBehavior:
     @patch("src.clients.scholar.response_cache")
     @patch("src.clients.scholar.serply_fetch_citation")
     def test_citation_cache_hit(
-        self, mock_serply: MagicMock, mock_cache: MagicMock,
+        self,
+        mock_serply: MagicMock,
+        mock_cache: MagicMock,
     ) -> None:
         """Cached citation should be returned without calling Serply."""
         mock_cache.get.return_value = {"title": "Cached Paper"}
@@ -630,7 +642,9 @@ class TestFacadeCacheBehavior:
     @patch("src.clients.scholar.response_cache")
     @patch("src.clients.scholar.serply_fetch_citation")
     def test_citation_negative_not_cached(
-        self, mock_serply: MagicMock, mock_cache: MagicMock,
+        self,
+        mock_serply: MagicMock,
+        mock_cache: MagicMock,
     ) -> None:
         """When Serply returns None, no negative is cached (Serply conflates errors and empty)."""
         mock_cache.get.return_value = None
@@ -648,7 +662,9 @@ class TestFacadeCacheBehavior:
     @patch("src.clients.scholar.response_cache")
     @patch("src.clients.scholar.serpapi_fetch_author_publications")
     def test_stale_cache_invalidated(
-        self, mock_serpapi: MagicMock, mock_cache: MagicMock,
+        self,
+        mock_serpapi: MagicMock,
+        mock_cache: MagicMock,
     ) -> None:
         """Cache with count-truncated results should be invalidated and re-fetched."""
         stale_data = {
@@ -667,7 +683,9 @@ class TestFacadeCacheBehavior:
     @patch("src.clients.scholar.response_cache")
     @patch("src.clients.scholar.serpapi_fetch_author_publications")
     def test_complete_cache_not_invalidated(
-        self, mock_serpapi: MagicMock, mock_cache: MagicMock,
+        self,
+        mock_serpapi: MagicMock,
+        mock_cache: MagicMock,
     ) -> None:
         """Cache covering the full window should not be invalidated."""
         complete_data = {
@@ -697,6 +715,4 @@ class TestThreadSafety:
         import importlib
 
         mod = importlib.import_module(module_path)
-        assert not hasattr(mod, forbidden_attr), (
-            f"{module_path} should not have '{forbidden_attr}'"
-        )
+        assert not hasattr(mod, forbidden_attr), f"{module_path} should not have '{forbidden_attr}'"

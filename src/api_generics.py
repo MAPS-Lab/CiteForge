@@ -71,6 +71,7 @@ class APISearchConfig:
     Configuration for API-specific search behavior including endpoint details,
     query parameters, and custom field extractors.
     """
+
     api_name: str
     base_url: str
 
@@ -100,6 +101,7 @@ class APIFieldMapping:
     Configuration for API-specific field mappings when building BibTeX entries,
     translating diverse field names and structures to a unified BibTeX format.
     """
+
     api_name: str
 
     # Core field mappings (list of possible field names, first match wins)
@@ -145,18 +147,13 @@ def _build_scoring_function(
     """
     from .bibtex_build import create_scoring_function
 
-    title_getter: Callable[[dict[str, Any]], str] = (
-        config.title_getter
-        or (lambda c: safe_get_field(c, config.title_field) or "")
+    title_getter: Callable[[dict[str, Any]], str] = config.title_getter or (
+        lambda c: safe_get_field(c, config.title_field) or ""
     )
-    authors_getter: Callable[[dict[str, Any]], Any] = (
-        config.authors_getter
-        or (lambda c: c.get(config.author_field) or [])
+    authors_getter: Callable[[dict[str, Any]], Any] = config.authors_getter or (
+        lambda c: c.get(config.author_field) or []
     )
-    year_getter: Callable[[dict[str, Any]], int | None] = (
-        config.year_getter
-        or (lambda c: c.get("year"))
-    )
+    year_getter: Callable[[dict[str, Any]], int | None] = config.year_getter or (lambda c: c.get("year"))
 
     return create_scoring_function(
         title=title,
@@ -169,10 +166,7 @@ def _build_scoring_function(
 
 
 def search_api_generic(
-    title: str,
-    author_name: str | None,
-    config: APISearchConfig,
-    api_key: str | None = None
+    title: str, author_name: str | None, config: APISearchConfig, api_key: str | None = None
 ) -> dict[str, Any] | None:
     """
     Search for academic publications across different API providers using a unified
@@ -226,10 +220,7 @@ def search_api_generic(
         norm_match = normalize_title(item_title) == target_norm
         if norm_match and author_name:
             item_authors = get_authors(item)
-            author_ok = (
-                author_name_matches(author_name, item_authors)
-                or author_in_text(author_name, item_authors)
-            )
+            author_ok = author_name_matches(author_name, item_authors) or author_in_text(author_name, item_authors)
         else:
             author_ok = True
         logger.debug(
@@ -269,11 +260,7 @@ def search_api_generic(
 
 
 def search_api_generic_multiple(
-    title: str,
-    author_name: str | None,
-    config: APISearchConfig,
-    api_key: str | None = None,
-    max_results: int = 5
+    title: str, author_name: str | None, config: APISearchConfig, api_key: str | None = None, max_results: int = 5
 ) -> list[dict[str, Any]]:
     """
     Search for academic publications and return multiple candidates sorted by relevance.
@@ -348,7 +335,10 @@ def search_api_generic_multiple(
 
 
 def _first_resolved_str(
-    obj: dict[str, Any], field_names: list[str], *, check_placeholder: bool = False,
+    obj: dict[str, Any],
+    field_names: list[str],
+    *,
+    check_placeholder: bool = False,
 ) -> str | None:
     """Return the first non-empty string resolved from a list of dotted field paths."""
     for name in field_names:
@@ -374,7 +364,8 @@ def _first_resolved_with_transform(
 
 
 def _extract_venue(
-    response: dict[str, Any], mapping: APIFieldMapping,
+    response: dict[str, Any],
+    mapping: APIFieldMapping,
 ) -> str | None:
     """Extract the best venue string from an API response, filtering generic series names."""
     venue: str | None = None
@@ -384,8 +375,11 @@ def _extract_venue(
         # Prefer the non-generic element over generic series names like LNCS
         if isinstance(raw_venue, list) and len(raw_venue) > 1:
             non_generic = next(
-                (str(c).strip() for c in raw_venue
-                 if str(c).strip() and str(c).strip().lower() not in GENERIC_SERIES_NAMES),
+                (
+                    str(c).strip()
+                    for c in raw_venue
+                    if str(c).strip() and str(c).strip().lower() not in GENERIC_SERIES_NAMES
+                ),
                 None,
             )
             venue = non_generic or _resolve_dotted_str(response, field_name)
@@ -406,8 +400,7 @@ def _extract_venue(
             event_name = (event.get("name") or "").strip()
             if event_name:
                 logger.debug(
-                    f"{mapping.api_name} | EVENT_NAME | generic_series={venue[:40]}"
-                    f" | event={event_name[:40]}",
+                    f"{mapping.api_name} | EVENT_NAME | generic_series={venue[:40]} | event={event_name[:40]}",
                     category=LogCategory.SCORE,
                 )
                 venue = event_name
@@ -415,11 +408,7 @@ def _extract_venue(
     return venue
 
 
-def build_bibtex_from_response(
-    response: dict[str, Any],
-    keyhint: str,
-    mapping: APIFieldMapping
-) -> str | None:
+def build_bibtex_from_response(response: dict[str, Any], keyhint: str, mapping: APIFieldMapping) -> str | None:
     """
     Build a BibTeX entry from an API response using configured field mappings to handle
     diverse field naming conventions and data structures across different academic APIs.
@@ -441,7 +430,7 @@ def build_bibtex_from_response(
             author_data,
             name_key=mapping.author_name_key or "name",
             given_key=mapping.author_given_key,
-            family_key=mapping.author_family_key
+            family_key=mapping.author_family_key,
         )
 
     if not authors or has_placeholder(", ".join(authors)):
@@ -456,7 +445,7 @@ def build_bibtex_from_response(
         response,
         type_field=mapping.entry_type_field,
         publication_types_field=mapping.entry_type_list_field,
-        venue_hints=mapping.venue_hints
+        venue_hints=mapping.venue_hints,
     )
 
     venue = _extract_venue(response, mapping)
@@ -487,5 +476,5 @@ def build_bibtex_from_response(
         doi=doi,
         url=url,
         arxiv_id=arxiv_id,
-        extra_fields=extra_fields
+        extra_fields=extra_fields,
     )

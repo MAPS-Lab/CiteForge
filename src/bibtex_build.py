@@ -18,7 +18,12 @@ _CHAPTER_TYPES = {"book-chapter", "book_chapter", "incollection"}
 _BOOK_TYPES = {"book", "edited-book", "monograph", "reference-book"}
 
 _BOOK_SERIES_KEYWORDS = (
-    "lecture notes", "series", "handbook", "advances in", "studies in", "chapter",
+    "lecture notes",
+    "series",
+    "handbook",
+    "advances in",
+    "studies in",
+    "chapter",
 )
 
 _BOOK_PUBLISHER_KEYWORDS = ("springer", "elsevier", "wiley", "crc press", "cambridge", "oxford")
@@ -46,16 +51,16 @@ def format_author_field(authors: list[str]) -> str | None:
 
 
 def build_bibtex_entry(
-        entry_type: str,
-        title: str,
-        authors: list[str],
-        year: int,
-        keyhint: str,
-        venue: str | None = None,
-        doi: str | None = None,
-        url: str | None = None,
-        arxiv_id: str | None = None,
-        extra_fields: dict[str, str] | None = None
+    entry_type: str,
+    title: str,
+    authors: list[str],
+    year: int,
+    keyhint: str,
+    venue: str | None = None,
+    doi: str | None = None,
+    url: str | None = None,
+    arxiv_id: str | None = None,
+    extra_fields: dict[str, str] | None = None,
 ) -> str:
     """
     Build a complete BibTeX entry from the main publication details and optional
@@ -89,22 +94,18 @@ def build_bibtex_entry(
     if extra_fields:
         fields.update(extra_fields)
 
-    entry = {
-        "type": entry_type,
-        "key": key,
-        "fields": {k: v for k, v in fields.items() if v}
-    }
+    entry = {"type": entry_type, "key": key, "fields": {k: v for k, v in fields.items() if v}}
     return bibtex_from_dict(entry)
 
 
 def create_scoring_function(
-        title: str,
-        author_name: str | None,
-        year_hint: int | None,
-        title_getter: Callable[[Any], str],
-        authors_getter: Callable[[Any], Any],
-        year_getter: Callable[[Any], int | None] | None = None,
-        author_match_fn: Callable[[str, Any], bool] | None = None
+    title: str,
+    author_name: str | None,
+    year_hint: int | None,
+    title_getter: Callable[[Any], str],
+    authors_getter: Callable[[Any], Any],
+    year_getter: Callable[[Any], int | None] | None = None,
+    author_match_fn: Callable[[str, Any], bool] | None = None,
 ) -> Callable[[Any], float]:
     """
     Create a scoring function that ranks search results against a target title,
@@ -174,10 +175,10 @@ def _is_conference_venue(venue: str) -> bool:
 
 
 def determine_entry_type(
-        obj: Any,
-        type_field: str = "type",
-        publication_types_field: str | None = None,
-        venue_hints: dict[str, str] | None = None
+    obj: Any,
+    type_field: str = "type",
+    publication_types_field: str | None = None,
+    venue_hints: dict[str, str] | None = None,
 ) -> str:
     """
     Guess whether a publication should be treated as a journal article,
@@ -208,13 +209,17 @@ def determine_entry_type(
 
         # Book chapter heuristic: howpublished + publisher + pages without journal/booktitle
         if (
-            obj.get("howpublished") and obj.get("publisher") and obj.get("pages")
-            and not obj.get("journal") and not obj.get("booktitle")
+            obj.get("howpublished")
+            and obj.get("publisher")
+            and obj.get("pages")
+            and not obj.get("journal")
+            and not obj.get("booktitle")
         ):
             hp_lower = str(obj["howpublished"]).lower()
             pub_lower = str(obj["publisher"]).lower()
-            if (any(kw in hp_lower for kw in _BOOK_SERIES_KEYWORDS)
-                    or any(kw in pub_lower for kw in _BOOK_PUBLISHER_KEYWORDS)):
+            if any(kw in hp_lower for kw in _BOOK_SERIES_KEYWORDS) or any(
+                kw in pub_lower for kw in _BOOK_PUBLISHER_KEYWORDS
+            ):
                 return "incollection"
 
         for venue_field in ("journal", "container-title", "venue", "booktitle"):

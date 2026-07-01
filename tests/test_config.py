@@ -32,9 +32,7 @@ def test_publications_per_year_reasonable() -> None:
 def test_contribution_window_reasonable() -> None:
     """Test that CONTRIBUTION_WINDOW_YEARS is a reasonable value."""
     assert CONTRIBUTION_WINDOW_YEARS >= 1, "CONTRIBUTION_WINDOW_YEARS must be at least 1"
-    assert CONTRIBUTION_WINDOW_YEARS <= 20, (
-        f"CONTRIBUTION_WINDOW_YEARS is very long ({CONTRIBUTION_WINDOW_YEARS})."
-    )
+    assert CONTRIBUTION_WINDOW_YEARS <= 20, f"CONTRIBUTION_WINDOW_YEARS is very long ({CONTRIBUTION_WINDOW_YEARS})."
 
 
 def test_max_publications_positive() -> None:
@@ -65,6 +63,7 @@ def test_min_year_valid() -> None:
 def test_get_min_year_fixed(monkeypatch: object) -> None:
     """Test that get_min_year returns the fixed MIN_YEAR when set."""
     import pytest
+
     mp = pytest.MonkeyPatch()
     mp.setattr(config, "MIN_YEAR", 2020)
     assert get_min_year() == 2020
@@ -74,6 +73,7 @@ def test_get_min_year_fixed(monkeypatch: object) -> None:
 def test_get_min_year_rolling(monkeypatch: object) -> None:
     """Test that get_min_year falls back to rolling window when MIN_YEAR is None."""
     import pytest
+
     mp = pytest.MonkeyPatch()
     mp.setattr(config, "MIN_YEAR", None)
     expected = datetime.now(timezone.utc).year - (_CONTRIBUTION_WINDOW_FALLBACK - 1)

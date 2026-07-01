@@ -19,7 +19,7 @@ from .exceptions import DECODE_ERRORS, NUMERIC_ERRORS, PARSE_ERRORS
 from .id_utils import external_ids_match
 
 _ET_AL = "et al."
-_ABBREVIATED_AUTHOR_PATTERN = re.compile(r'^[A-Z]\.?[ \t]*[A-Z]?\.?[ \t]*[A-Z]?\.?[ \t]+[A-Z][a-z]+', re.IGNORECASE)
+_ABBREVIATED_AUTHOR_PATTERN = re.compile(r"^[A-Z]\.?[ \t]*[A-Z]?\.?[ \t]*[A-Z]?\.?[ \t]+[A-Z][a-z]+", re.IGNORECASE)
 
 __all__ = [
     "author_in_text",
@@ -40,7 +40,6 @@ __all__ = [
     "is_truncated",
     "is_valid_value",
     "name_signature",
-
     "normalize_person_name",
     "normalize_title",
     "parse_authors_any",
@@ -138,10 +137,10 @@ def normalize_title(t: str | None) -> str:
     t_str = str(t)
 
     t_str = html_module.unescape(t_str)
-    t_str = re.sub(r'\$([^$]*)\$', r'\1', t_str)
-    t_str = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', t_str)
-    t_str = re.sub(r'\\[a-zA-Z]+\{([^}]*)}', r'\1', t_str)
-    t_str = re.sub(r'\\[a-zA-Z]+', '', t_str)
+    t_str = re.sub(r"\$([^$]*)\$", r"\1", t_str)
+    t_str = re.sub(r"\\frac\{([^}]*)\}\{([^}]*)\}", r"\1/\2", t_str)
+    t_str = re.sub(r"\\[a-zA-Z]+\{([^}]*)}", r"\1", t_str)
+    t_str = re.sub(r"\\[a-zA-Z]+", "", t_str)
     t2 = strip_accents(t_str).lower()
     t2 = re.sub(r"[,.;:!?\n\t\r'\"\-\(\)\[\]\{\}~]", " ", t2)
     result = " ".join(t2.split())
@@ -156,18 +155,56 @@ def normalize_title(t: str | None) -> str:
 
 _ARTIFACT_PREFIXES = ("Check for updates ", "Check for Updates ")
 
-_DANGLING_ENDINGS = frozenset({
-    "a", "an", "the", "of", "in", "on", "at", "to", "for", "from",
-    "with", "by", "and", "or", "but", "via", "using", "based",
-})
+_DANGLING_ENDINGS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "of",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "from",
+        "with",
+        "by",
+        "and",
+        "or",
+        "but",
+        "via",
+        "using",
+        "based",
+    }
+)
 
 _TRUNCATION_MARKERS = ("...", "\u2026", "et al", _ET_AL, "[truncated]", "[...]")
 
 # Words that should stay uppercase when converting ALL-CAPS titles to title case
-_ACRONYMS = frozenset({
-    "a", "an", "and", "as", "at", "but", "by", "for", "if", "in",
-    "nor", "of", "on", "or", "so", "the", "to", "up", "vs", "yet",
-})
+_ACRONYMS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "but",
+        "by",
+        "for",
+        "if",
+        "in",
+        "nor",
+        "of",
+        "on",
+        "or",
+        "so",
+        "the",
+        "to",
+        "up",
+        "vs",
+        "yet",
+    }
+)
 
 
 def _fix_allcaps_title(s: str) -> str:
@@ -212,14 +249,14 @@ def trim_title_default(t: str | None) -> str:
         return ""
     for prefix in _ARTIFACT_PREFIXES:
         if s.startswith(prefix):
-            s = s[len(prefix):]
+            s = s[len(prefix) :]
             break
     if s.endswith("…") or s.endswith("..."):
         return _fix_allcaps_title(s)
-    s = s.rstrip('*').rstrip()
+    s = s.rstrip("*").rstrip()
     i = len(s) - 1
     dots = 0
-    while i >= 0 and s[i] == '.':
+    while i >= 0 and s[i] == ".":
         dots += 1
         i -= 1
     if dots and dots < 3:
@@ -258,10 +295,28 @@ def normalize_person_name(n: Any | None) -> str:
     return " ".join(n2.split())
 
 
-_NOBLE_PARTICLES = frozenset({
-    "van", "von", "de", "del", "der", "den", "di", "la", "le", "al",
-    "el", "bin", "ibn", "da", "dos", "das", "du", "lo",
-})
+_NOBLE_PARTICLES = frozenset(
+    {
+        "van",
+        "von",
+        "de",
+        "del",
+        "der",
+        "den",
+        "di",
+        "la",
+        "le",
+        "al",
+        "el",
+        "bin",
+        "ibn",
+        "da",
+        "dos",
+        "das",
+        "du",
+        "lo",
+    }
+)
 
 
 _INITIALS_EXCLUSIONS = frozenset({"jr", "sr", "ii", "iii", "iv", "md", "phd"})
@@ -270,10 +325,7 @@ _INITIALS_EXCLUSIONS = frozenset({"jr", "sr", "ii", "iii", "iv", "md", "phd"})
 def _is_initials_token(token: str) -> bool:
     """Check if a token is uppercase initials (1-4 chars, not a suffix/title)."""
     clean = token.replace(".", "").strip()
-    return (1 <= len(clean) <= 4
-            and clean.isalpha()
-            and clean.isupper()
-            and clean.lower() not in _INITIALS_EXCLUSIONS)
+    return 1 <= len(clean) <= 4 and clean.isalpha() and clean.isupper() and clean.lower() not in _INITIALS_EXCLUSIONS
 
 
 _RE_NON_ALNUM = r"[^a-z0-9]"
@@ -307,8 +359,7 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
     # Detect PubMed/Europe PMC "Lastname INITIALS" format (e.g. "Alanko JN")
     # by checking if the last token in the original text is all uppercase
     raw_tokens = to_text(n).strip().split()
-    if (len(tokens) == 2 and len(raw_tokens) == 2
-            and _is_initials_token(raw_tokens[-1])):
+    if len(tokens) == 2 and len(raw_tokens) == 2 and _is_initials_token(raw_tokens[-1]):
         last_norm = re.sub(_RE_NON_ALNUM, "", tokens[0])
         initials = re.sub(r"[^a-z]", "", tokens[1])
         return {"last": last_norm, "initials": initials}
@@ -355,7 +406,7 @@ def format_author_dirname(author_name: str | None, author_id: str) -> str:
     """
     last_name = extract_last_name(author_name)
 
-    sanitized_id = re.sub(r'[/\\:*?"<>|]+', '-', author_id)
+    sanitized_id = re.sub(r'[/\\:*?"<>|]+', "-", author_id)
 
     if not sanitized_id:
         if last_name and last_name != "Unknown":
@@ -480,12 +531,8 @@ def author_overlap_ratio(authors_a: str | None, authors_b: str | None) -> float:
 
 def venue_similarity(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> float:
     """Compute similarity between venues, with a 0.5 bonus for preprint/published pairs."""
-    a_venue = (
-        fields_a.get("journal") or fields_a.get("booktitle") or fields_a.get("howpublished") or ""
-    ).strip()
-    b_venue = (
-        fields_b.get("journal") or fields_b.get("booktitle") or fields_b.get("howpublished") or ""
-    ).strip()
+    a_venue = (fields_a.get("journal") or fields_a.get("booktitle") or fields_a.get("howpublished") or "").strip()
+    b_venue = (fields_b.get("journal") or fields_b.get("booktitle") or fields_b.get("howpublished") or "").strip()
     if not a_venue or not b_venue:
         return 0.0
     a_norm = normalize_title(a_venue)
@@ -513,9 +560,7 @@ def compute_dedup_score(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> f
     score = 0.0
 
     # Signal 1: Title similarity (weight 0.40)
-    title_sim = title_similarity(
-        str(fields_a.get("title") or ""), str(fields_b.get("title") or "")
-    )
+    title_sim = title_similarity(str(fields_a.get("title") or ""), str(fields_b.get("title") or ""))
     score += 0.40 * title_sim
 
     # Signal 2: Author overlap ratio (weight 0.25)
@@ -609,11 +654,7 @@ def author_in_text(target_author: str | None, text: Any) -> bool:
     return re.search(rf"\b{re.escape(last_tok)}\b", txt) is not None
 
 
-def extract_year_from_any(
-        obj: Any,
-        field_names: list[str] | None = None,
-        fallback: int | None = None
-) -> int | None:
+def extract_year_from_any(obj: Any, field_names: list[str] | None = None, fallback: int | None = None) -> int | None:
     """
     Try to recover a four-digit publication year from many possible formats,
     including integers, free text, date dictionaries, Crossref-style date parts,
@@ -648,8 +689,10 @@ def extract_year_from_any(
             if isinstance(issued, dict):
                 parts = issued.get("date-parts")
                 if (
-                    isinstance(parts, list) and parts
-                    and isinstance(parts[0], list) and parts[0]
+                    isinstance(parts, list)
+                    and parts
+                    and isinstance(parts[0], list)
+                    and parts[0]
                     and isinstance(parts[0][0], int)
                 ):
                     year = parts[0][0]
@@ -661,6 +704,7 @@ def extract_year_from_any(
             if isinstance(ms, (int, float)):
                 try:
                     from datetime import datetime, timezone
+
                     year = datetime.fromtimestamp(float(ms) / 1000.0, timezone.utc).year
                     if VALID_YEAR_MIN <= year <= VALID_YEAR_MAX:
                         return year
@@ -674,12 +718,12 @@ def extract_year_from_any(
 
 
 def extract_authors_from_any(
-        obj: Any,
-        field_names: list[str] | None = None,
-        sanitize_dblp: bool = False,
-        name_key: str = "name",
-        given_key: str | None = None,
-        family_key: str | None = None
+    obj: Any,
+    field_names: list[str] | None = None,
+    sanitize_dblp: bool = False,
+    name_key: str = "name",
+    given_key: str | None = None,
+    family_key: str | None = None,
 ) -> list[str]:
     """
     Extract a list of author names from flexible metadata structures such as lists,
@@ -693,6 +737,7 @@ def extract_authors_from_any(
     # Lazy import to avoid circular dependency; cached after first call
     if sanitize_dblp:
         from .clients.helpers import _sanitize_dblp_author
+
         _sanitize: Any = _sanitize_dblp_author
     else:
         _sanitize = None
@@ -704,8 +749,12 @@ def extract_authors_from_any(
             val = obj.get(fname)
             if val is not None:
                 authors = extract_authors_from_any(
-                    val, field_names=None, sanitize_dblp=sanitize_dblp,
-                    name_key=name_key, given_key=given_key, family_key=family_key
+                    val,
+                    field_names=None,
+                    sanitize_dblp=sanitize_dblp,
+                    name_key=name_key,
+                    given_key=given_key,
+                    family_key=family_key,
                 )
                 if authors:
                     return authors
@@ -777,12 +826,8 @@ def extract_authors_from_any(
             parts = [p.strip() for p in obj_str.split(",")]
             if obj_str.count(",") > 1:
                 authors = [p for p in parts if p]
-            elif (
-                len(parts) == 2
-                and (
-                    all(_ABBREVIATED_AUTHOR_PATTERN.match(p) for p in parts)
-                    or all(" " in p.strip() for p in parts)
-                )
+            elif len(parts) == 2 and (
+                all(_ABBREVIATED_AUTHOR_PATTERN.match(p) for p in parts) or all(" " in p.strip() for p in parts)
             ):
                 authors = parts
             else:
@@ -799,11 +844,7 @@ def extract_authors_from_any(
     return authors
 
 
-def extract_valid_title(
-        obj: Any,
-        field_names: list[str] | None = None,
-        check_placeholder: bool = True
-) -> str | None:
+def extract_valid_title(obj: Any, field_names: list[str] | None = None, check_placeholder: bool = True) -> str | None:
     """
     Pull a title from an object using common field names, discard placeholder-like
     values, and return a trimmed version or None when no usable title is available.
@@ -853,18 +894,12 @@ def is_valid_value(val: Any, check_placeholder: bool = True) -> bool:
     return True
 
 
-def filter_valid_fields(
-        fields: dict[str, Any],
-        check_placeholder: bool = True
-) -> dict[str, Any]:
+def filter_valid_fields(fields: dict[str, Any], check_placeholder: bool = True) -> dict[str, Any]:
     """
     Remove keys whose values are empty, None, or placeholder-like so the
     remaining dictionary contains only useful metadata fields.
     """
-    return {
-        k: v for k, v in fields.items()
-        if is_valid_value(v, check_placeholder=check_placeholder)
-    }
+    return {k: v for k, v in fields.items() if is_valid_value(v, check_placeholder=check_placeholder)}
 
 
 def is_truncated(text: str | None) -> bool:
@@ -906,7 +941,7 @@ def safe_get_field(
     default: str = "",
     strip: bool = True,
     required: bool = False,
-    check_placeholder: bool = False
+    check_placeholder: bool = False,
 ) -> str | None:
     """
     Safely extract and validate a string field from a dictionary, handling None values,
@@ -952,19 +987,10 @@ def safe_get_nested(obj: Any, *keys: str, default: Any = None) -> Any:
 
 
 def extract_author_names(
-    authors_field: Any,
-    *,
-    name_key: str = "name",
-    given_key: str | None = None,
-    family_key: str | None = None
+    authors_field: Any, *, name_key: str = "name", given_key: str | None = None, family_key: str | None = None
 ) -> list[str]:
     """
     Extract author names from various formats including list of dicts, list of strings,
     comma-separated strings, and single dict or string.
     """
-    return extract_authors_from_any(
-        authors_field,
-        name_key=name_key,
-        given_key=given_key,
-        family_key=family_key
-    )
+    return extract_authors_from_any(authors_field, name_key=name_key, given_key=given_key, family_key=family_key)

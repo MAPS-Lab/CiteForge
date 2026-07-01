@@ -19,9 +19,7 @@ from .config import (
     PREPRINT_SERVERS,
 )
 
-_CONFERENCE_AS_JOURNAL_LOWER: frozenset[str] = frozenset(
-    c.lower() for c in CONFERENCE_AS_JOURNAL
-)
+_CONFERENCE_AS_JOURNAL_LOWER: frozenset[str] = frozenset(c.lower() for c in CONFERENCE_AS_JOURNAL)
 
 # ---------------------------------------------------------------------------
 # Pre-compiled regexes (applied in cascade order)
@@ -36,9 +34,7 @@ _JOURNAL_VOL_ISSUE_PAGES_RE = re.compile(
 
 # Pattern 2: Journal vol, pages, year  (no issue)
 #   e.g. "IEEE Access 14, 9506-9531, 2026"
-_JOURNAL_VOL_PAGES_RE = re.compile(
-    r"^(.+?)\s+(\d+)\s*,\s*(\w[\w\s,\u2013-]*?)\s*,\s*(\d{4})\s*$"
-)
+_JOURNAL_VOL_PAGES_RE = re.compile(r"^(.+?)\s+(\d+)\s*,\s*(\w[\w\s,\u2013-]*?)\s*,\s*(\d{4})\s*$")
 
 # Pattern 3: arXiv preprint
 #   e.g. "arXiv preprint arXiv:2407.18753, 2024"
@@ -56,15 +52,11 @@ _BIORXIV_DOI_RE = re.compile(
 
 # Pattern 5: US Patent
 #   e.g. "US Patent 10,901,713, 2021" or "US Patent App. 16/234,567, 2019"
-_PATENT_RE = re.compile(
-    r"^US\s+Patent(?:\s+App\.?)?\s+([\d,/]+)\s*,\s*(\d{4})\s*$", re.IGNORECASE
-)
+_PATENT_RE = re.compile(r"^US\s+Patent(?:\s+App\.?)?\s+([\d,/]+)\s*,\s*(\d{4})\s*$", re.IGNORECASE)
 
 # Pattern 6/7: Venue with pages, year  (conference or generic)
 #   e.g. "Proceedings of the 2020 GECCO conference, 1-8, 2020"
-_VENUE_PAGES_YEAR_RE = re.compile(
-    r"^(.+?)\s*,\s*(\w[\w\s,\u2013-]*?)\s*,\s*(\d{4})\s*$"
-)
+_VENUE_PAGES_YEAR_RE = re.compile(r"^(.+?)\s*,\s*(\w[\w\s,\u2013-]*?)\s*,\s*(\d{4})\s*$")
 
 # Pattern 8: Venue, year  (no pages, no volume)
 #   e.g. "Sage, 2021"
@@ -75,12 +67,13 @@ _VENUE_YEAR_RE = re.compile(r"^(.+?)\s*,\s*(\d{4})\s*$")
 # Data class
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class ParsedPublication:
     """Structured fields extracted from a SerpAPI publication string."""
 
     venue_name: str = ""
-    venue_type: str = "unknown"   # journal | conference | preprint | patent | publisher | unknown
+    venue_type: str = "unknown"  # journal | conference | preprint | patent | publisher | unknown
     volume: str = ""
     issue: str = ""
     pages: str = ""
@@ -94,6 +87,7 @@ class ParsedPublication:
 # ---------------------------------------------------------------------------
 # Venue-type classifier
 # ---------------------------------------------------------------------------
+
 
 def _classify_venue_type(venue: str) -> str:
     """Classify a venue name as journal, conference, preprint, or unknown."""
@@ -123,7 +117,7 @@ def _strip_ellipsis(text: str) -> str:
     t = text.rstrip()
     for suffix in ("...", "\u2026"):
         if t.endswith(suffix):
-            t = t[:-len(suffix)].rstrip()
+            t = t[: -len(suffix)].rstrip()
             t = _TRAILING_PREPOSITIONS.sub("", t)
             return t.rstrip(" ,;:")
     return text
@@ -138,6 +132,7 @@ def _is_page_like(token: str) -> bool:
 # ---------------------------------------------------------------------------
 # Main parser
 # ---------------------------------------------------------------------------
+
 
 def parse_publication_string(pub: str | None) -> ParsedPublication | None:
     """Parse a SerpAPI ``publication`` string into structured metadata.

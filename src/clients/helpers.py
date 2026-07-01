@@ -22,14 +22,14 @@ _DBLP_NUMERIC_SUFFIX_RE = re.compile(r"\s+\d{1,4}\s*$")
 
 
 def _score_candidate_generic(
-        target_title: str,
-        target_author: str | None,
-        target_year: int | None,
-        cand_title: str,
-        cand_authors: Any,
-        cand_year: int | None,
-        title_sim: Callable[[str, str], float],
-        author_match: Callable[[str, Any], bool],
+    target_title: str,
+    target_author: str | None,
+    target_year: int | None,
+    cand_title: str,
+    cand_authors: Any,
+    cand_year: int | None,
+    title_sim: Callable[[str, str], float],
+    author_match: Callable[[str, Any], bool],
 ) -> float:
     tsim = title_sim(target_title, cand_title)
     s = SIM_TITLE_WEIGHT * tsim
@@ -59,9 +59,9 @@ def _score_candidate_generic(
 
 
 def _best_item_by_score(
-        items: list[Any],
-        score_fn: Callable[[Any], float],
-        threshold: float = SIM_BEST_ITEM_THRESHOLD,
+    items: list[Any],
+    score_fn: Callable[[Any], float],
+    threshold: float = SIM_BEST_ITEM_THRESHOLD,
 ) -> Any | None:
     """Pick the highest-scoring item that meets the threshold."""
     best = None
@@ -94,8 +94,7 @@ def extract_authors_from_article(art: dict[str, Any]) -> list[str] | None:
     names = extract_author_names(authors, name_key="name")
 
     filtered_names = [
-        n for n in names
-        if n and n.strip().lower() not in ("...", "\u2026") and "et al" not in n.strip().lower()
+        n for n in names if n and n.strip().lower() not in ("...", "\u2026") and "et al" not in n.strip().lower()
     ]
 
     return filtered_names or None
@@ -138,4 +137,5 @@ def _sanitize_dblp_author(name: str) -> str:
 
 def get_current_year() -> int:
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).year

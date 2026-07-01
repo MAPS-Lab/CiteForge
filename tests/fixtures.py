@@ -15,9 +15,7 @@ def _load_keys_once() -> dict[str, Any]:
         "serply": io_utils.read_serply_api_key(API_CONFIGS["serply"]["key_file"]),
         "semantic": io_utils.read_semantic_api_key(API_CONFIGS["semantic_scholar"]["key_file"]),
         "openreview": io_utils.read_openreview_credentials(API_CONFIGS["openreview"]["key_file"]),
-        "gemini": io_utils.read_gemini_api_key(
-            API_CONFIGS.get("gemini", {}).get("key_file", "keys/Gemini.key")
-        ),
+        "gemini": io_utils.read_gemini_api_key(API_CONFIGS.get("gemini", {}).get("key_file", "keys/Gemini.key")),
     }
 
 

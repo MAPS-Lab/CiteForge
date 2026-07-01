@@ -65,16 +65,18 @@ def _cache_covers_window(cached: dict[str, Any], min_year: int) -> bool:
     articles = cached.get("articles") or []
     if not articles:
         return False
-    years = [a.get("year") for a in articles
-             if isinstance(a.get("year"), int) and a["year"] > 0]
+    years = [a.get("year") for a in articles if isinstance(a.get("year"), int) and a["year"] > 0]
     if not years or min(years) <= min_year:
         return True
     return len(articles) % 100 != 0
 
 
 def fetch_author_publications(
-    api_key: str, author_id: str, _author_name: str,
-    num: int = 100, min_year: int = 0,
+    api_key: str,
+    author_id: str,
+    _author_name: str,
+    num: int = 100,
+    min_year: int = 0,
 ) -> dict[str, Any]:
     """Fetch publications for an author from Google Scholar via SerpAPI.
 
@@ -95,7 +97,8 @@ def fetch_author_publications(
         if min_year > 0 and not _cache_covers_window(cached, min_year):
             _log.info(
                 "Cache for %s does not cover min_year=%d; re-fetching",
-                author_id, min_year,
+                author_id,
+                min_year,
             )
             response_cache.invalidate("serpapi_publications", cache_key)
         else:
@@ -109,7 +112,9 @@ def fetch_author_publications(
 
 
 def fetch_scholar_citation(
-    api_key: str, title: str, author_name: str,
+    api_key: str,
+    title: str,
+    author_name: str,
 ) -> dict[str, str] | None:
     """Fetch citation details for an article from Google Scholar via Serply."""
     if not title:
@@ -156,13 +161,20 @@ def build_bibtex_from_scholar_fields(fields: dict[str, str], keyhint: str) -> st
     url = safe_get_field(fields, "url")
 
     extra_fields = {
-        k: v for k, v in
-        {"volume": volume, "number": number, "pages": pages, "publisher": publisher}.items()
+        k: v
+        for k, v in {"volume": volume, "number": number, "pages": pages, "publisher": publisher}.items()
         if v is not None
     }
     return build_bibtex_entry(
-        entry_type=entry_type, title=title, authors=authors, year=year, keyhint=keyhint,
-        venue=venue, doi=doi, url=url, extra_fields=extra_fields,
+        entry_type=entry_type,
+        title=title,
+        authors=authors,
+        year=year,
+        keyhint=keyhint,
+        venue=venue,
+        doi=doi,
+        url=url,
+        extra_fields=extra_fields,
     )
 
 
@@ -179,7 +191,8 @@ def sort_articles_by_year_current_first(articles: list[dict[str, Any]]) -> list[
 
 
 def _deduplicate_publication_list(
-    pubs: list[dict[str, Any]], _target_author: str | None = None,
+    pubs: list[dict[str, Any]],
+    _target_author: str | None = None,
 ) -> list[dict[str, Any]]:
     """Remove internal duplicates from a single publication list."""
     if not pubs:
@@ -231,8 +244,9 @@ def _deduplicate_publication_list(
     return deduplicated
 
 
-def merge_publication_lists(primary: list[dict[str, Any]], secondary: list[dict[str, Any]],
-                            target_author: str | None) -> list[dict[str, Any]]:
+def merge_publication_lists(
+    primary: list[dict[str, Any]], secondary: list[dict[str, Any]], target_author: str | None
+) -> list[dict[str, Any]]:
     """Merge two publication lists into one unified list with complete deduplication."""
     primary_deduped = _deduplicate_publication_list(primary, target_author)
     secondary_deduped = _deduplicate_publication_list(secondary, target_author)
@@ -250,9 +264,14 @@ def merge_publication_lists(primary: list[dict[str, Any]], secondary: list[dict[
             if tsim < SIM_TITLE_SIM_MIN:
                 continue
             score = _score_candidate_generic(
-                target_title=p.get("title") or "", target_author=target_author, target_year=p.get("year"),
-                cand_title=s_title, cand_authors=s_authors, cand_year=s_year,
-                title_sim=title_similarity, author_match=authors_overlap,
+                target_title=p.get("title") or "",
+                target_author=target_author,
+                target_year=p.get("year"),
+                cand_title=s_title,
+                cand_authors=s_authors,
+                cand_year=s_year,
+                title_sim=title_similarity,
+                author_match=authors_overlap,
             )
             if score >= SIM_MERGE_DUPLICATE_THRESHOLD:
                 is_duplicate = True

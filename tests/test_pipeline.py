@@ -12,29 +12,29 @@ from src.doi_utils import process_validated_doi, validate_doi_candidate
 
 # Shared baseline entries reused across DOI validation tests
 _BASELINE_FULL: dict[str, Any] = {
-    'type': 'inproceedings',
-    'key': 'Vaswani2017',
-    'fields': {
-        'title': 'Attention Is All You Need',
-        'author': 'Ashish Vaswani and Noam Shazeer and Niki Parmar',
-        'year': '2017',
+    "type": "inproceedings",
+    "key": "Vaswani2017",
+    "fields": {
+        "title": "Attention Is All You Need",
+        "author": "Ashish Vaswani and Noam Shazeer and Niki Parmar",
+        "year": "2017",
     },
 }
 
 _BASELINE_MINIMAL: dict[str, Any] = {
-    'type': 'inproceedings',
-    'key': 'Vaswani2017',
-    'fields': {
-        'title': 'Attention Is All You Need',
-        'author': 'Ashish Vaswani',
-        'year': '2017',
+    "type": "inproceedings",
+    "key": "Vaswani2017",
+    "fields": {
+        "title": "Attention Is All You Need",
+        "author": "Ashish Vaswani",
+        "year": "2017",
     },
 }
 
 _MATCHING_CSL: dict[str, Any] = {
-    'title': 'Attention Is All You Need',
-    'author': [{'given': 'Ashish', 'family': 'Vaswani'}],
-    'issued': {'date-parts': [[2017]]},
+    "title": "Attention Is All You Need",
+    "author": [{"given": "Ashish", "family": "Vaswani"}],
+    "issued": {"date-parts": [[2017]]},
 }
 
 _MATCHING_BIBTEX = dedent("""\
@@ -45,9 +45,9 @@ _MATCHING_BIBTEX = dedent("""\
     }""")
 
 _WRONG_CSL_BERT: dict[str, Any] = {
-    'title': 'BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding',
-    'author': [{'given': 'Jacob', 'family': 'Devlin'}],
-    'issued': {'date-parts': [[2019]]},
+    "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+    "author": [{"given": "Jacob", "family": "Devlin"}],
+    "issued": {"date-parts": [[2019]]},
 }
 
 _WRONG_BIBTEX_BERT = dedent("""\
@@ -70,16 +70,12 @@ def _patch_doi_resolvers(
     bibtex_side_effect: Any = None,
 ) -> contextlib.ExitStack:
     """Patch DOI resolver functions with the given return values or side effects."""
-    csl_kwargs: dict[str, Any] = (
-        {"side_effect": csl_side_effect} if csl_side_effect else {"return_value": csl}
-    )
-    bib_kwargs: dict[str, Any] = (
-        {"side_effect": bibtex_side_effect} if bibtex_side_effect else {"return_value": bibtex}
-    )
+    csl_kwargs: dict[str, Any] = {"side_effect": csl_side_effect} if csl_side_effect else {"return_value": csl}
+    bib_kwargs: dict[str, Any] = {"side_effect": bibtex_side_effect} if bibtex_side_effect else {"return_value": bibtex}
     stack = contextlib.ExitStack()
-    stack.enter_context(patch.object(search_apis, 'fetch_csl_via_doi', **csl_kwargs))
-    stack.enter_context(patch.object(search_apis, 'fetch_bibtex_via_doi', **bib_kwargs))
-    stack.enter_context(patch.object(search_apis, 'bibtex_from_csl', return_value=bibtex_from_csl))
+    stack.enter_context(patch.object(search_apis, "fetch_csl_via_doi", **csl_kwargs))
+    stack.enter_context(patch.object(search_apis, "fetch_bibtex_via_doi", **bib_kwargs))
+    stack.enter_context(patch.object(search_apis, "bibtex_from_csl", return_value=bibtex_from_csl))
     return stack
 
 
@@ -89,20 +85,24 @@ def test_validate_doi_candidate_both_formats_match() -> None:
     from the DOI resolver match the baseline publication.
     """
     mock_csl = {
-        'type': 'paper-conference',
-        'title': 'Attention Is All You Need',
-        'author': [
-            {'given': 'Ashish', 'family': 'Vaswani'},
-            {'given': 'Noam', 'family': 'Shazeer'},
+        "type": "paper-conference",
+        "title": "Attention Is All You Need",
+        "author": [
+            {"given": "Ashish", "family": "Vaswani"},
+            {"given": "Noam", "family": "Shazeer"},
         ],
-        'issued': {'date-parts': [[2017]]},
+        "issued": {"date-parts": [[2017]]},
     }
 
     with _patch_doi_resolvers(
-        csl=mock_csl, bibtex=_MATCHING_BIBTEX, bibtex_from_csl=_MATCHING_BIBTEX,
+        csl=mock_csl,
+        bibtex=_MATCHING_BIBTEX,
+        bibtex_from_csl=_MATCHING_BIBTEX,
     ):
         csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-            doi=_ARXIV_DOI, baseline_entry=_BASELINE_FULL, result_id="test",
+            doi=_ARXIV_DOI,
+            baseline_entry=_BASELINE_FULL,
+            result_id="test",
         )
 
     # CSL matched, so BibTeX fetch is skipped (Phase 3a optimization)
@@ -118,12 +118,12 @@ def test_validate_doi_candidate_csl_only_matches() -> None:
     (Phase 3a optimization) even if BibTeX would resolve to a wrong paper.
     """
     baseline_entry: dict[str, Any] = {
-        'type': 'inproceedings',
-        'key': 'Vaswani2017',
-        'fields': {
-            'title': 'Attention Is All You Need',
-            'author': 'Ashish Vaswani and Noam Shazeer',
-            'year': '2017',
+        "type": "inproceedings",
+        "key": "Vaswani2017",
+        "fields": {
+            "title": "Attention Is All You Need",
+            "author": "Ashish Vaswani and Noam Shazeer",
+            "year": "2017",
         },
     }
 
@@ -135,10 +135,14 @@ def test_validate_doi_candidate_csl_only_matches() -> None:
         }""")
 
     with _patch_doi_resolvers(
-        csl=_MATCHING_CSL, bibtex=mock_bibtex_wrong, bibtex_from_csl=_MATCHING_BIBTEX,
+        csl=_MATCHING_CSL,
+        bibtex=mock_bibtex_wrong,
+        bibtex_from_csl=_MATCHING_BIBTEX,
     ):
         csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-            doi=_ARXIV_DOI, baseline_entry=baseline_entry, result_id="test",
+            doi=_ARXIV_DOI,
+            baseline_entry=baseline_entry,
+            result_id="test",
         )
 
     assert csl_matched, "CSL should match"
@@ -152,10 +156,14 @@ def test_validate_doi_candidate_neither_matches() -> None:
     Test complete rejection when a DOI resolves to metadata for a different paper.
     """
     with _patch_doi_resolvers(
-        csl=_WRONG_CSL_BERT, bibtex=_WRONG_BIBTEX_BERT, bibtex_from_csl=_WRONG_BIBTEX_BERT,
+        csl=_WRONG_CSL_BERT,
+        bibtex=_WRONG_BIBTEX_BERT,
+        bibtex_from_csl=_WRONG_BIBTEX_BERT,
     ):
         csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-            doi=_BERT_DOI, baseline_entry=_BASELINE_MINIMAL, result_id="test",
+            doi=_BERT_DOI,
+            baseline_entry=_BASELINE_MINIMAL,
+            result_id="test",
         )
 
     assert not csl_matched, "CSL should be rejected"
@@ -171,12 +179,18 @@ def test_validate_doi_candidate_network_errors() -> None:
     with _patch_doi_resolvers(
         csl_side_effect=urllib.error.URLError("Network error"),
         bibtex_side_effect=urllib.error.HTTPError(
-            url='test', code=500, msg='Server Error', hdrs=Message(), fp=None,
+            url="test",
+            code=500,
+            msg="Server Error",
+            hdrs=Message(),
+            fp=None,
         ),
         bibtex_from_csl=None,
     ):
         csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-            doi=_ARXIV_DOI, baseline_entry=_BASELINE_MINIMAL, result_id="test",
+            doi=_ARXIV_DOI,
+            baseline_entry=_BASELINE_MINIMAL,
+            result_id="test",
         )
 
     assert not csl_matched, "CSL should not match on network error"
@@ -191,9 +205,9 @@ def test_validate_doi_candidate_bibtex_fallback_when_csl_fails() -> None:
     exercising the Phase 3a short-circuit logic in reverse.
     """
     mock_csl_wrong: dict[str, Any] = {
-        'title': 'A Completely Different Paper Title',
-        'author': [{'given': 'John', 'family': 'Doe'}],
-        'issued': {'date-parts': [[2020]]},
+        "title": "A Completely Different Paper Title",
+        "author": [{"given": "John", "family": "Doe"}],
+        "issued": {"date-parts": [[2020]]},
     }
 
     mock_bibtex_from_csl_wrong = dedent("""\
@@ -204,10 +218,14 @@ def test_validate_doi_candidate_bibtex_fallback_when_csl_fails() -> None:
         }""")
 
     with _patch_doi_resolvers(
-        csl=mock_csl_wrong, bibtex=_MATCHING_BIBTEX, bibtex_from_csl=mock_bibtex_from_csl_wrong,
+        csl=mock_csl_wrong,
+        bibtex=_MATCHING_BIBTEX,
+        bibtex_from_csl=mock_bibtex_from_csl_wrong,
     ):
         csl_matched, bibtex_matched, csl_entry, bibtex_entry = validate_doi_candidate(
-            doi=_ARXIV_DOI, baseline_entry=_BASELINE_MINIMAL, result_id="test",
+            doi=_ARXIV_DOI,
+            baseline_entry=_BASELINE_MINIMAL,
+            result_id="test",
         )
 
     assert not csl_matched, "CSL should not match (wrong paper)"
@@ -225,11 +243,16 @@ def test_process_validated_doi_success() -> None:
     flags = {"doi_csl": False, "doi_bibtex": False}
 
     with _patch_doi_resolvers(
-        csl=_MATCHING_CSL, bibtex=_MATCHING_BIBTEX, bibtex_from_csl=_MATCHING_BIBTEX,
+        csl=_MATCHING_CSL,
+        bibtex=_MATCHING_BIBTEX,
+        bibtex_from_csl=_MATCHING_BIBTEX,
     ):
         doi_matched = process_validated_doi(
-            doi=_ARXIV_DOI, baseline_entry=_BASELINE_MINIMAL,
-            result_id="test", enr_list=enr_list, flags=flags,
+            doi=_ARXIV_DOI,
+            baseline_entry=_BASELINE_MINIMAL,
+            result_id="test",
+            enr_list=enr_list,
+            flags=flags,
         )
 
     assert doi_matched, "Should return True"
@@ -258,11 +281,16 @@ def test_process_validated_doi_failure() -> None:
     flags = {"doi_csl": False, "doi_bibtex": False}
 
     with _patch_doi_resolvers(
-        csl=_WRONG_CSL_BERT, bibtex=mock_bibtex_wrong, bibtex_from_csl=mock_bibtex_wrong,
+        csl=_WRONG_CSL_BERT,
+        bibtex=mock_bibtex_wrong,
+        bibtex_from_csl=mock_bibtex_wrong,
     ):
         doi_matched = process_validated_doi(
-            doi=_BERT_DOI, baseline_entry=_BASELINE_MINIMAL,
-            result_id="test", enr_list=enr_list, flags=flags,
+            doi=_BERT_DOI,
+            baseline_entry=_BASELINE_MINIMAL,
+            result_id="test",
+            enr_list=enr_list,
+            flags=flags,
         )
 
     assert not doi_matched, "Should return False"

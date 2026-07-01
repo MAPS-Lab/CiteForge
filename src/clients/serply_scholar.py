@@ -125,7 +125,7 @@ def _parse_description(description: str) -> tuple[str, str]:
     # Extract journal/venue: everything before the year in the middle part
     journal = ""
     if year_match:
-        journal = middle[:year_match.start()].rstrip(", ")
+        journal = middle[: year_match.start()].rstrip(", ")
     elif middle:
         journal = middle.strip()
 
