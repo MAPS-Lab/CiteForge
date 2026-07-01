@@ -3299,3 +3299,45 @@ class TestDecodeValueErrorContainment:
             patch.object(utility_apis, "http_get_json", side_effect=ValueError("Invalid JSON")),
         ):
             assert utility_apis.orcid_fetch_works("0000-0001-2345-6789") == []
+
+
+class TestOpenReviewSessionThreadSafety:
+    """Concurrent openreview_login calls must reuse a valid cached session
+    atomically: never re-login and never return a torn/None value (C6)."""
+
+    def test_concurrent_reuse_no_relogin(self) -> None:
+        import threading
+
+        from src.clients import search_apis as sa
+
+        prev_session = sa._OPENREVIEW_SESSION
+        prev_created = sa._OPENREVIEW_SESSION_CREATED_AT
+        relogins = {"n": 0}
+
+        def _fake_get_session() -> Any:
+            relogins["n"] += 1
+            raise AssertionError("must not re-login while a valid session is cached")
+
+        results: list[Any] = []
+        results_lock = threading.Lock()
+
+        def _worker() -> None:
+            r = sa.openreview_login(("user", "pass"))
+            with results_lock:
+                results.append(r)
+
+        try:
+            sa._OPENREVIEW_SESSION = {"Cookie": "sess=abc"}
+            sa._OPENREVIEW_SESSION_CREATED_AT = time.monotonic()
+            with patch.object(sa, "_get_session", _fake_get_session):
+                threads = [threading.Thread(target=_worker) for _ in range(8)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+            assert relogins["n"] == 0
+            assert len(results) == 8
+            assert all(r == {"Cookie": "sess=abc"} for r in results)
+        finally:
+            sa._OPENREVIEW_SESSION = prev_session
+            sa._OPENREVIEW_SESSION_CREATED_AT = prev_created

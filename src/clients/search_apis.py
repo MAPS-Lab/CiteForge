@@ -66,6 +66,7 @@ _QP_BIBLIOGRAPHIC = "query.bibliographic"
 
 # ============ Semantic Scholar ============
 
+
 def s2_search_paper(title: str, author_name: str | None, api_key: str | None) -> dict[str, Any] | None:
     """Search Semantic Scholar for a paper matching the given title and optional author."""
     if not api_key or not title:
@@ -75,6 +76,7 @@ def s2_search_paper(title: str, author_name: str | None, api_key: str | None) ->
         query_parts.append(author_name)
     from ..api_configs import S2_SEARCH_CONFIG
     from ..api_generics import search_api_generic
+
     config = copy.copy(S2_SEARCH_CONFIG)
     config.additional_params = {**config.additional_params, config.query_param_name: " ".join(query_parts)}
     return search_api_generic(title, author_name, config, api_key=api_key)
@@ -84,11 +86,15 @@ def build_bibtex_from_s2(paper: dict[str, Any], keyhint: str) -> str | None:
     """Convert a Semantic Scholar paper record into a BibTeX entry."""
     from ..api_configs import S2_FIELD_MAPPING
     from ..api_generics import build_bibtex_from_response
+
     return build_bibtex_from_response(paper, keyhint, S2_FIELD_MAPPING)
 
 
 def s2_search_papers_multiple(
-    title: str, author_name: str | None, api_key: str | None, max_results: int = 5,
+    title: str,
+    author_name: str | None,
+    api_key: str | None,
+    max_results: int = 5,
 ) -> list[dict[str, Any]]:
     """Search Semantic Scholar for multiple paper candidates."""
     if not api_key or not title:
@@ -105,6 +111,7 @@ def s2_search_papers_multiple(
     if author_name:
         query_parts.append(author_name)
     from ..api_configs import S2_SEARCH_CONFIG
+
     config = copy.copy(S2_SEARCH_CONFIG)
     config.additional_params = {**config.additional_params, "limit": min(max_results * 2, 20)}
     params = {config.query_param_name: " ".join(query_parts), **config.additional_params}
@@ -124,12 +131,14 @@ def s2_search_papers_multiple(
 
 # ============ Crossref ============
 
+
 def crossref_search(title: str, author_name: str | None) -> dict[str, Any] | None:
     """Look up a publication in Crossref by title and optional author."""
     if not title:
         return None
     from ..api_configs import CROSSREF_SEARCH_CONFIG
     from ..api_generics import search_api_generic
+
     config = copy.copy(CROSSREF_SEARCH_CONFIG)
     additional_params = dict(config.additional_params)
     if author_name:
@@ -148,6 +157,7 @@ def build_bibtex_from_crossref(item: dict[str, Any], keyhint: str) -> str | None
     """Build a BibTeX entry from a Crossref record."""
     from ..api_configs import CROSSREF_FIELD_MAPPING
     from ..api_generics import build_bibtex_from_response
+
     return build_bibtex_from_response(item, keyhint, CROSSREF_FIELD_MAPPING)
 
 
@@ -157,6 +167,7 @@ def crossref_search_multiple(title: str, author_name: str | None, max_results: i
         return []
     from ..api_configs import CROSSREF_SEARCH_CONFIG
     from ..api_generics import search_api_generic_multiple
+
     config = copy.copy(CROSSREF_SEARCH_CONFIG)
     additional_params = dict(config.additional_params)
     if author_name:
@@ -172,6 +183,7 @@ def crossref_search_multiple(title: str, author_name: str | None, max_results: i
 
 
 # ============ DOI / CSL ============
+
 
 @handle_api_errors(default_return=None)
 def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
@@ -230,13 +242,10 @@ def bibtex_from_csl(csl: dict[str, Any], keyhint: str) -> str:
     """Translate a CSL-JSON citation description into a BibTeX entry."""
     from ..bibtex_build import build_bibtex_entry, determine_entry_type
     from ..text_utils import extract_authors_from_any, extract_year_from_any, safe_get_field
+
     title = safe_get_field(csl, "title") or ""
     subtitle_raw = csl.get("subtitle")
-    subtitle = (
-        (subtitle_raw[0] if subtitle_raw else "")
-        if isinstance(subtitle_raw, list)
-        else (subtitle_raw or "")
-    )
+    subtitle = (subtitle_raw[0] if subtitle_raw else "") if isinstance(subtitle_raw, list) else (subtitle_raw or "")
     if subtitle:
         title = f"{title}: {subtitle}" if title else subtitle
     authors = extract_authors_from_any(csl, field_names=["author"])
@@ -275,11 +284,17 @@ def bibtex_from_csl(csl: dict[str, Any], keyhint: str) -> str:
         category=LogCategory.SCORE,
     )
     return build_bibtex_entry(
-        entry_type=entry_type, title=title, authors=authors, year=year, keyhint=keyhint,
-        venue=container or None, doi=doi or None, url=url or None,
+        entry_type=entry_type,
+        title=title,
+        authors=authors,
+        year=year,
+        keyhint=keyhint,
+        venue=container or None,
+        doi=doi or None,
+        url=url or None,
         extra_fields={
-            k: v for k, v in
-            {"volume": volume, "number": number, "pages": pages, "publisher": publisher}.items()
+            k: v
+            for k, v in {"volume": volume, "number": number, "pages": pages, "publisher": publisher}.items()
             if v is not None
         },
     )
@@ -287,8 +302,12 @@ def bibtex_from_csl(csl: dict[str, Any], keyhint: str) -> str:
 
 # ============ arXiv ============
 
+
 def arxiv_search(
-    title: str, author_name: str | None, year_hint: int | None, max_results: int = 10,
+    title: str,
+    author_name: str | None,
+    year_hint: int | None,
+    max_results: int = 10,
 ) -> list[dict[str, Any]]:
     """Search arXiv for papers matching the given title and optional author."""
     if not title:
@@ -306,8 +325,11 @@ def arxiv_search(
         q_parts.append(f'au:"{author_name}"')
     search_query = "+AND+".join(q_parts)
     params = {
-        "search_query": search_query, "start": 0, "max_results": max_results,
-        "sortBy": "relevance", "sortOrder": "descending",
+        "search_query": search_query,
+        "start": 0,
+        "max_results": max_results,
+        "sortBy": "relevance",
+        "sortOrder": "descending",
     }
     url = build_url(ARXIV_BASE, params)
     try:
@@ -362,20 +384,30 @@ def arxiv_search(
             if doi_val and pc:
                 break
         arxiv_id = find_arxiv_in_text(link_abs or entry_id) or ""
-        entries.append({
-            "title": title_val, "authors": authors_list, "year": year,
-            "abs_url": link_abs, "doi": doi_val, "primary_class": pc, "arxiv_id": arxiv_id,
-        })
+        entries.append(
+            {
+                "title": title_val,
+                "authors": authors_list,
+                "year": year,
+                "abs_url": link_abs,
+                "doi": doi_val,
+                "primary_class": pc,
+                "arxiv_id": arxiv_id,
+            }
+        )
     if not entries:
         response_cache.put_negative("arxiv", cache_key)
         return []
     from ..bibtex_build import create_scoring_function
+
     score_fn = create_scoring_function(
-        title=title, author_name=author_name, year_hint=year_hint,
+        title=title,
+        author_name=author_name,
+        year_hint=year_hint,
         title_getter=lambda ent: ent.get("title", ""),
         authors_getter=lambda ent: ent.get("authors", []),
         year_getter=lambda ent: ent.get("year"),
-        author_match_fn=authors_overlap
+        author_match_fn=authors_overlap,
     )
     entries.sort(key=score_fn, reverse=True)
     response_cache.put("arxiv", cache_key, {"entries": entries}, ttl_days=CACHE_TTL_SEARCH_DAYS)
@@ -390,6 +422,7 @@ def build_bibtex_from_arxiv(entry: dict[str, Any], keyhint: str) -> str | None:
     """Turn a parsed arXiv search result into a BibTeX entry."""
     from ..api_configs import ARXIV_FIELD_MAPPING
     from ..api_generics import build_bibtex_from_response
+
     return build_bibtex_from_response(entry, keyhint, ARXIV_FIELD_MAPPING)
 
 
@@ -442,13 +475,14 @@ def openreview_login(creds: tuple[str, ...] | None) -> dict[str, str] | None:
     global _OPENREVIEW_SESSION, _OPENREVIEW_SESSION_CREATED_AT
     if not creds:
         return None
+
     def _reuse_session() -> bool:
         return _OPENREVIEW_SESSION is not None and not _openreview_session_expired()
 
-    # Fast path: return cached session if not expired
-    if _reuse_session():
-        logger.debug("openreview | SESSION | reused=True", category=LogCategory.CACHE)
-        return _OPENREVIEW_SESSION
+    # All reads of the shared session globals happen under the lock so the
+    # session pointer and its created-at timestamp are read atomically together.
+    # The previous lock-free fast path could observe a torn state, or return a
+    # session that a concurrent re-login had just cleared to None (C6).
     with _OPENREVIEW_SESSION_LOCK:
         # Double-check after acquiring lock (may have been refreshed by another thread)
         if _reuse_session():
@@ -521,7 +555,9 @@ def _or_fetch_candidates(title: str, headers: dict[str, str]) -> list[dict[str, 
 
 
 def _or_is_exact_match(
-    cand: dict[str, Any], target_norm: str, author_name: str | None,
+    cand: dict[str, Any],
+    target_norm: str,
+    author_name: str | None,
 ) -> bool:
     """Check if an OpenReview note is an exact title match with compatible authors."""
     if normalize_title(_or_note_title(cand)) != target_norm:
@@ -533,7 +569,9 @@ def _or_is_exact_match(
 
 
 def openreview_search_paper(
-    title: str, author_name: str | None, creds: tuple[str, ...] | None,
+    title: str,
+    author_name: str | None,
+    creds: tuple[str, ...] | None,
 ) -> dict[str, Any] | None:
     """Query OpenReview for notes matching the requested paper."""
     if not title:
@@ -562,8 +600,11 @@ def openreview_search_paper(
     from ..bibtex_build import create_scoring_function
 
     score_fn = create_scoring_function(
-        title=title, author_name=author_name, year_hint=None,
-        title_getter=_or_note_title, authors_getter=_or_note_authors,
+        title=title,
+        author_name=author_name,
+        year_hint=None,
+        title_getter=_or_note_title,
+        authors_getter=_or_note_authors,
         year_getter=_or_note_year,
     )
     best = _best_item_by_score(candidates, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
@@ -579,11 +620,15 @@ def build_bibtex_from_openreview(note: dict[str, Any], keyhint: str) -> str | No
     """Build a BibTeX entry from an OpenReview note."""
     from ..api_configs import OPENREVIEW_FIELD_MAPPING
     from ..api_generics import build_bibtex_from_response
+
     return build_bibtex_from_response(note, keyhint, OPENREVIEW_FIELD_MAPPING)
 
 
 def openreview_search_papers_multiple(
-    title: str, author_name: str | None, creds: tuple[str, ...] | None, max_results: int = 5,
+    title: str,
+    author_name: str | None,
+    creds: tuple[str, ...] | None,
+    max_results: int = 5,
 ) -> list[dict[str, Any]]:
     """Query OpenReview for multiple candidate notes."""
     if not title:
@@ -610,8 +655,11 @@ def openreview_search_papers_multiple(
     from ..bibtex_build import create_scoring_function
 
     score_fn = create_scoring_function(
-        title=title, author_name=author_name, year_hint=None,
-        title_getter=_or_note_title, authors_getter=_or_note_authors,
+        title=title,
+        author_name=author_name,
+        year_hint=None,
+        title_getter=_or_note_title,
+        authors_getter=_or_note_authors,
         year_getter=_or_note_year,
     )
     scored = []
@@ -633,6 +681,7 @@ def openreview_search_papers_multiple(
 
 
 # ============ DBLP ============
+
 
 def dblp_extract_pid(val: str | None) -> str | None:
     """Extract a DBLP person identifier from a hint value."""
@@ -747,8 +796,11 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
         abs_or_url = ee or dburl
         venue = _xml_text(child.find("journal")) or _xml_text(child.find("booktitle"))
         art: dict[str, Any] = {
-            "title": title, "authors": authors_list, "year": year,
-            "publication": venue, "link": abs_or_url,
+            "title": title,
+            "authors": authors_list,
+            "year": year,
+            "publication": venue,
+            "link": abs_or_url,
             "snippet": ", ".join([v for v in [venue, str(year) if year else "", doi or ""] if v]),
             "source": "dblp",
         }
@@ -781,10 +833,12 @@ def dblp_fetch_for_author(name: str, dblp_hint: str | None, min_year: int | None
 
 # ============ OpenAlex ============
 
+
 def openalex_search_paper(title: str, author_name: str | None) -> dict[str, Any] | None:
     """Search OpenAlex for a publication by title and optional author."""
     from ..api_configs import OPENALEX_SEARCH_CONFIG
     from ..api_generics import search_api_generic
+
     return search_api_generic(title, author_name, OPENALEX_SEARCH_CONFIG)
 
 
@@ -792,6 +846,7 @@ def build_bibtex_from_openalex(work: dict[str, Any], keyhint: str) -> str | None
     """Build a BibTeX entry from an OpenAlex work record."""
     from ..api_configs import OPENALEX_FIELD_MAPPING
     from ..api_generics import build_bibtex_from_response
+
     return build_bibtex_from_response(work, keyhint, OPENALEX_FIELD_MAPPING)
 
 
@@ -801,10 +856,12 @@ def openalex_search_multiple(title: str, author_name: str | None, max_results: i
         return []
     from ..api_configs import OPENALEX_SEARCH_CONFIG
     from ..api_generics import search_api_generic_multiple
+
     return search_api_generic_multiple(title, author_name, OPENALEX_SEARCH_CONFIG, None, max_results)
 
 
 # ============ PubMed ============
+
 
 @handle_api_errors(default_return=None)
 def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] | None:
@@ -861,8 +918,11 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
             )
             return result
     from ..bibtex_build import create_scoring_function
+
     score_fn = create_scoring_function(
-        title=title, author_name=author_name, year_hint=None,
+        title=title,
+        author_name=author_name,
+        year_hint=None,
         title_getter=lambda a: a.get("title") or "",
         authors_getter=lambda a: [auth.get("name") or "" for auth in (a.get("authors") or []) if auth.get("name")],
         year_getter=lambda a: extract_year_from_any(a.get("pubdate"), fallback=None),
@@ -881,6 +941,7 @@ def build_bibtex_from_pubmed(article: dict[str, Any], keyhint: str) -> str | Non
     """Build a BibTeX entry from a PubMed article record."""
     from ..bibtex_build import build_bibtex_entry, determine_entry_type
     from ..text_utils import extract_author_names, safe_get_field
+
     title = safe_get_field(article, "title")
     if not title:
         return None
@@ -905,8 +966,15 @@ def build_bibtex_from_pubmed(article: dict[str, Any], keyhint: str) -> str | Non
     if pmid:
         extra_fields["note"] = f"PMID: {pmid}"
     return build_bibtex_entry(
-        entry_type=entry_type, title=title, authors=authors, year=year,
-        keyhint=keyhint, venue=venue, doi=doi, url=url, extra_fields=extra_fields,
+        entry_type=entry_type,
+        title=title,
+        authors=authors,
+        year=year,
+        keyhint=keyhint,
+        venue=venue,
+        doi=doi,
+        url=url,
+        extra_fields=extra_fields,
     )
 
 
@@ -957,13 +1025,15 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
 
 # ============ Europe PMC ============
 
+
 def europepmc_search_paper(title: str, author_name: str | None) -> dict[str, Any] | None:
     """Search Europe PMC for a publication by title and optional author."""
     if not title:
         return None
     from ..api_configs import EUROPEPMC_SEARCH_CONFIG
     from ..api_generics import search_api_generic
-    safe_title = title.replace('"', '')
+
+    safe_title = title.replace('"', "")
     query = f'TITLE:"{safe_title}"'
     if author_name:
         query += f' AND AUTH:"{author_name}"'
@@ -976,6 +1046,7 @@ def build_bibtex_from_europepmc(article: dict[str, Any], keyhint: str) -> str | 
     """Build a BibTeX entry from a Europe PMC article record."""
     from ..bibtex_build import build_bibtex_entry, determine_entry_type
     from ..text_utils import extract_author_names, safe_get_field
+
     title = safe_get_field(article, "title")
     if not title:
         return None
@@ -983,7 +1054,8 @@ def build_bibtex_from_europepmc(article: dict[str, Any], keyhint: str) -> str | 
     year = extract_year_from_any(article.get("pubYear"), fallback=0) or 0
     venue = safe_get_field(article, "journalTitle") or safe_get_field(article, "bookTitle")
     entry_type = determine_entry_type(
-        article, type_field="pubType",
+        article,
+        type_field="pubType",
         venue_hints={"journalTitle": "article", "bookTitle": "inproceedings"},
     )
     doi = safe_get_field(article, "doi")
@@ -1010,8 +1082,15 @@ def build_bibtex_from_europepmc(article: dict[str, Any], keyhint: str) -> str | 
             note_parts.append(f"PMCID: {pmcid}")
         extra_fields["note"] = ", ".join(note_parts)
     return build_bibtex_entry(
-        entry_type=entry_type, title=title, authors=authors, year=year,
-        keyhint=keyhint, venue=venue, doi=doi, url=url, extra_fields=extra_fields,
+        entry_type=entry_type,
+        title=title,
+        authors=authors,
+        year=year,
+        keyhint=keyhint,
+        venue=venue,
+        doi=doi,
+        url=url,
+        extra_fields=extra_fields,
     )
 
 
@@ -1028,7 +1107,8 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
         logger.debug(f"europepmc_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return list(cached.get("results", []))
     from ..api_configs import EUROPEPMC_SEARCH_CONFIG
-    safe_title = title.replace('"', '')
+
+    safe_title = title.replace('"', "")
     query = f'TITLE:"{safe_title}"'
     if author_name:
         query += f' AND AUTH:"{author_name}"'
@@ -1070,9 +1150,7 @@ def crossref_search_by_venue(
     from ..api_generics import _build_scoring_function
 
     cache_key = (
-        f"venue|{normalize_title(title)}"
-        f"|{(author_name or '').strip().lower()}"
-        f"|{container_title.lower().strip()}"
+        f"venue|{normalize_title(title)}|{(author_name or '').strip().lower()}|{container_title.lower().strip()}"
     )
     cached = response_cache.get("crossref_venue", cache_key)
     if cached is not None:
@@ -1144,11 +1222,7 @@ def openalex_search_by_venue(
     from ..api_configs import OPENALEX_SEARCH_CONFIG
     from ..api_generics import _build_scoring_function
 
-    cache_key = (
-        f"venue|{normalize_title(title)}"
-        f"|{(author_name or '').strip().lower()}"
-        f"|{venue_name.lower().strip()}"
-    )
+    cache_key = f"venue|{normalize_title(title)}|{(author_name or '').strip().lower()}|{venue_name.lower().strip()}"
     cached = response_cache.get("openalex_venue", cache_key)
     if cached is not None:
         if cached.get("_negative"):
