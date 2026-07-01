@@ -233,6 +233,29 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
     return {"type": head["type"].lower(), "key": head["key"], "fields": fields}
 
 
+# Canonical BibTeX field emission order. Fields not listed are appended in
+# sorted() order afterwards. This ordering is part of the byte-identity output
+# contract (of-bibtex-field-order-stable); do not reorder without updating the
+# golden serializer test.
+PREFERRED_FIELD_ORDER: tuple[str, ...] = (
+    "title",
+    "author",
+    "year",
+    "journal",
+    "booktitle",
+    "howpublished",
+    "publisher",
+    "volume",
+    "number",
+    "pages",
+    "doi",
+    "url",
+    "eprint",
+    "archiveprefix",
+    "primaryclass",
+)
+
+
 def bibtex_from_dict(entry: dict[str, Any]) -> str:
     """
     Format a dictionary-based BibTeX entry back into text, listing common
@@ -392,23 +415,7 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
     etype = (entry.get("type") or "misc").lower()
     key = entry.get("key") or "entry"
     fields: dict[str, str] = entry.get("fields") or {}
-    preferred = [
-        "title",
-        "author",
-        "year",
-        "journal",
-        "booktitle",
-        "howpublished",
-        "publisher",
-        "volume",
-        "number",
-        "pages",
-        "doi",
-        "url",
-        "eprint",
-        "archiveprefix",
-        "primaryclass",
-    ]
+    preferred = list(PREFERRED_FIELD_ORDER)
     lines = [f"@{etype}{{{key},"]
     preferred_set = set(preferred)
     ordered_keys = list(preferred) + sorted(k for k in fields if k not in preferred_set)
