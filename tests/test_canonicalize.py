@@ -501,31 +501,46 @@ def test_real_dispatch_preprint_journal_no_doi_moves_to_howpublished(journal: st
     assert result["fields"]["howpublished"].lower() == journal.lower()
 
 
-def test_real_dispatch_article_preprint_doi_no_pages_promotes_to_inproceedings() -> None:
-    """@article with a real journal + arXiv (secondary) DOI + no volume/pages.
+def test_real_dispatch_article_preprint_doi_no_pages_settles_at_misc() -> None:
+    """@article with a real journal + arXiv (secondary) DOI + no volume/pages
+    settles at @misc and must NOT be fabricated into a conference.
 
-    THE captured real behavior (see real_bugs_found): POST_MERGE does NOT settle
-    at @misc. _rule_article_preprint_doi first downgrades to @misc and moves the
-    journal into howpublished, then _rule_howpublished_to_inproceedings re-promotes
-    that plain venue name into a FABRICATED @inproceedings with booktitle = the
-    original journal. The DOI is kept. This diverges from what
-    TestArticlePreprintDoiDowngrade.test_article_with_arxiv_doi_becomes_misc
-    asserts (it re-implements a @misc+howpublished result in its own body and
-    never runs this dispatch). The file's own test_r19_misc_downgrade_branch note
-    already documents this misc->inproceedings promotion at full POST_MERGE.
+    _rule_article_preprint_doi downgrades to @misc and moves the journal into
+    howpublished. _rule_howpublished_to_inproceedings must then leave it alone:
+    a journal name ("Neural Computing and Applications") carries no conference
+    signal, so promoting it to @inproceedings with the journal as a booktitle
+    would fabricate a venue that does not exist. The DOI is kept.
     """
     result = _canon(_article(journal="Neural Computing and Applications", doi="10.48550/arxiv.2302.02792"))
-    # Locked to the REAL end state, not the naive @misc expectation.
-    assert result["type"] == "inproceedings"
-    assert result["fields"]["booktitle"] == "Neural Computing and Applications"
+    assert result["type"] == "misc"
+    assert result["fields"]["howpublished"] == "Neural Computing and Applications"
+    assert "booktitle" not in result["fields"]
     assert "journal" not in result["fields"]
-    assert "howpublished" not in result["fields"]
     assert result["fields"]["doi"] == "10.48550/arxiv.2302.02792"
-    # Even the fabricated @inproceedings is a data fixpoint (no further churn).
+    # The @misc end state is a data fixpoint (no oscillation on repeat).
     repeat = copy.deepcopy(result)
     canonicalize(repeat, stage=CanonicalStage.POST_MERGE)
     assert repeat["type"] == result["type"]
     assert repeat["fields"] == result["fields"]
+
+
+@pytest.mark.parametrize("journal", ["Nature Communications", "Scientific Reports", "IEEE Transactions on Computers"])
+def test_real_dispatch_journal_preprint_never_becomes_conference(journal: str) -> None:
+    """A real journal reaching howpublished via the preprint-DOI downgrade never
+    becomes a fabricated @inproceedings, across several journals."""
+    result = _canon(_article(journal=journal, doi="10.48550/arxiv.2401.00001"))
+    assert result["type"] == "misc"
+    assert result["fields"].get("howpublished") == journal
+    assert "booktitle" not in result["fields"]
+
+
+def test_real_dispatch_misc_conference_howpublished_still_promotes() -> None:
+    """A @misc whose howpublished is a genuine conference is still upgraded to
+    @inproceedings (the fix narrows the rule, it does not disable it)."""
+    result = _canon(_article(type="misc", howpublished="Workshop on Machine Learning for Health"))
+    assert result["type"] == "inproceedings"
+    assert result["fields"]["booktitle"] == "Workshop on Machine Learning for Health"
+    assert "howpublished" not in result["fields"]
 
 
 def test_real_dispatch_article_preprint_doi_with_pages_keeps_article() -> None:

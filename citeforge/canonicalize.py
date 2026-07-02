@@ -15,6 +15,7 @@ import re
 from enum import Enum
 from typing import Any
 
+from citeforge import bibtex_build as bb
 from citeforge import id_utils as idu
 from citeforge import merge_utils as mu
 from citeforge.config import (
@@ -734,13 +735,20 @@ def _rule_normalize_howpublished(entry: dict[str, Any], fields: dict[str, Any]) 
 def _rule_howpublished_to_inproceedings(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
     """Upgrade @misc with a conference/workshop howpublished -> @inproceedings.
 
-    When howpublished is a venue name (not a preprint server or repository),
-    the entry is a conference/workshop paper that should be @inproceedings.
+    The howpublished must carry a positive conference signal (a conference
+    keyword or a known conference venue) before it is treated as a proceedings
+    booktitle. This prevents fabricating a conference out of a journal name that
+    reached howpublished through the preprint-DOI downgrade (e.g. an @article in
+    "Neural Computing and Applications" carrying only an arXiv DOI becomes @misc
+    with that journal as its howpublished, and must stay @misc rather than turn
+    into a bogus @inproceedings). A journal that merely contains "Proceedings"
+    in its name (PNAS, PVLDB) is likewise excluded.
+
     A howpublished that was backfilled from the DOI (i.e. equals
-    infer_howpublished_from_doi) is a preprint/repository label, never a
-    conference venue -- e.g. "EGU" (10.5194/egusphere), "Preprint" (Cambridge
-    Open Engage), "Institutional Repository" (10.32920) -- so it must NOT be
-    upgraded into a fabricated @inproceedings.
+    infer_howpublished_from_doi), a preprint server, or a repository label is a
+    preprint/repository marker -- e.g. "EGU" (10.5194/egusphere), "Preprint"
+    (Cambridge Open Engage), "Institutional Repository" (10.32920) -- and is
+    never a conference venue, so it is excluded too.
     """
     if entry.get("type") == "misc" and fields.get("howpublished"):
         hp_val = (fields.get("howpublished") or "").strip()
@@ -752,7 +760,8 @@ def _rule_howpublished_to_inproceedings(entry: dict[str, Any], fields: dict[str,
         doi = (fields.get("doi") or "").strip()
         inferred = mu.infer_howpublished_from_doi(doi) if doi else None
         is_doi_backfilled = inferred is not None and hp_lower == inferred.lower()
-        if not is_preprint_hp and not is_repository_hp and not is_doi_backfilled and hp_val:
+        is_conference_hp = bb._is_conference_venue(hp_val) and not mu._matches_journal_named_proceedings(hp_lower)
+        if is_conference_hp and not is_preprint_hp and not is_repository_hp and not is_doi_backfilled:
             entry["type"] = "inproceedings"
             fields["booktitle"] = fields.pop("howpublished")
             return True
