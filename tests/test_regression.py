@@ -1175,6 +1175,18 @@ class TestGeminiUsesHttpPostJson:
         assert "generativelanguage.googleapis.com" in url
 
     @patch("src.clients.utility_apis.http_post_json")
+    def test_gemini_key_travels_in_header_not_url(self, mock_post: MagicMock) -> None:
+        """The API key must be sent as the x-goog-api-key header and never appear in the URL."""
+        mock_post.return_value = {"candidates": [{"content": {"parts": [{"text": "DeepNets"}]}}]}
+        gemini_generate_short_title("Deep Nets for Ocean State", "SECRET-KEY-123")
+        mock_post.assert_called_once()
+        url = mock_post.call_args[0][0]
+        headers = mock_post.call_args.kwargs.get("headers", {})
+        assert headers.get("x-goog-api-key") == "SECRET-KEY-123"
+        assert "SECRET-KEY-123" not in url
+        assert "key=" not in url
+
+    @patch("src.clients.utility_apis.http_post_json")
     def test_gemini_handles_value_error(self, mock_post: MagicMock) -> None:
         """Gemini should handle ValueError from non-JSON responses gracefully."""
         mock_post.side_effect = ValueError("No JSON object could be decoded")
@@ -1703,7 +1715,7 @@ class TestPhantomArxivJournal:
             ),
         ]
         merged = merge_utils.merge_with_policy(entry, enrichers)
-        # After B2: eprint removed because published DOI exists,
+        # The eprint is removed because a published DOI exists,
         # journal should be the enricher's journal, not "arXiv e-prints"
         journal = merged["fields"].get("journal", "")
         assert journal.lower() not in ("arxiv e-prints", "arxiv")
@@ -3399,7 +3411,7 @@ class TestDoiBackfilledPreprintNotFabricatedConference:
     """A DOI-inferred preprint/repository label must never become a fabricated
     @inproceedings venue. infer_howpublished_from_doi returns labels like
     "EGU", "Preprint", "Institutional Repository" that are not conference names;
-    R20 must not upgrade them, and any already-upgraded entry must self-heal.
+    the conference upgrade must not fire on them, and any already-upgraded entry must self-heal.
     A REAL venue that merely carries a preprint-prefix DOI stays @inproceedings.
     """
 

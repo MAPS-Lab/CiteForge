@@ -421,7 +421,7 @@ def test_safe_negative_expired_december() -> None:
 
 
 def test_ttl_days_not_stored(tmp_path: Path) -> None:
-    """ttl_days must not be written into cache entries (C3: written-but-never-read)."""
+    """ttl_days must not be written into cache entries (they are never read back)."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     cache.put("ns", "k", {"v": 1}, ttl_days=99)
     entry = json.loads(Path(cache._entry_path("ns", "k")).read_text(encoding="utf-8"))
