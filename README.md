@@ -31,7 +31,7 @@ CiteForge takes care of this. Point it at a list of authors with their Google Sc
 - Merge fields using a **multi-level trust hierarchy** that prefers authoritative sources; and,
 - Output clean, LaTeX-ready `.bib` files organized by author.
 
-The result is deterministic — on cache-hit runs, CiteForge produces **byte-identical output** across consecutive runs, verified by SHA-256 checksums.
+The result is deterministic. On cache-hit runs, CiteForge produces **byte-identical output** across consecutive runs, verified by SHA-256 checksums.
 
 ## Getting Started
 
@@ -61,7 +61,7 @@ python3 main.py data/custom.csv  # Custom input
 python3 main.py --force          # Force re-enrichment
 ```
 
-The input CSV has three columns — name, Scholar link, and an optional DBLP link:
+The input CSV has three columns (name, Scholar link, and an optional DBLP link):
 
 ```csv
 Name,Scholar Link,DBLP Link
@@ -95,7 +95,7 @@ To maintain efficiency and stability, author queries run in parallel while respe
 
 ## Data Sources
 
-[SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/) require keys — everything else is free or optional:
+[SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/) require keys. Everything else is free or optional:
 
 - **Required:** [SerpAPI](https://serpapi.com/) (Google Scholar), [Serply](https://serply.io/) (citation details);
 - **Recommended:** [Semantic Scholar](https://www.semanticscholar.org/);
@@ -122,4 +122,4 @@ If you use CiteForge in your research or find it useful, please consider citing 
 
 ## License
 
-This project is licensed under the **MIT [License](LICENSE)** — you're free to use, modify, and distribute it for any purpose.
+This project is licensed under the **MIT [License](LICENSE)**. You're free to use, modify, and distribute it for any purpose.

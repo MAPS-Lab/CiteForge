@@ -28,7 +28,7 @@ Ruff config: line-length 120, rules E/F/W/I/N/UP/B/C4/SIM/RUF/S (see pyproject.t
 
 ## Architecture
 
-`main.py` is a thin command-line entry point (~120 LOC) that loads API keys, reads author records, and delegates to the `src/pipeline/` package (`article.py` for per-article enrichment, `scheduler.py` for author-level scheduling, `postrun.py` for the post-run tail). Each article passes through Phase 1 (DOI validation) → Phase 2 (multi-API enrichment) → Phase 2.5 (SerpAPI publication string fallback) → Phase 3 (late DOI inference) → Phase 4 (trust-based merge + save). Post-run steps run in order: flush CSV → reconcile phantoms → remove orphans → year-window cleanup → build a2i2 → rebuild baseline.json.
+`main.py` is a thin command-line entry point (~120 LOC) that loads API keys, reads author records, and delegates to the `src/pipeline/` package (`article.py` for per-article enrichment, `scheduler.py` for author-level scheduling, `postrun.py` for the post-run tail). Each article passes through Phase 1 (DOI validation) → Phase 2 (multi-API enrichment) → Phase 2.5 (SerpAPI publication string fallback) → Phase 3 (late DOI inference) → Phase 4 (trust-based merge + save). Post-run steps run in order: flush CSV → reconcile phantoms → remove orphans → year-window cleanup → post-run fixup → build a2i2 → rebuild baseline.json → rebuild badges.json.
 
 Trust hierarchy in `src/merge_utils.py:merge_with_policy()` merges fields from 13 ranked sources with special override rules for DOI (published > preprint), journal (never downgrade to preprint), title (prefer longer), pages (reject invalid), and booktitle (upgrade generic series to conference name).
 
