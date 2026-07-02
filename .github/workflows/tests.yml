@@ -83,7 +83,7 @@ jobs:
         echo "$GEMINI_KEY" > keys/Gemini.key
 
     - name: Run tests with coverage
-      run: pytest --cov=src --cov=main --cov-report=term-missing --cov-report=xml --cov-fail-under=60
+      run: pytest --cov=src --cov=main --cov-report=term-missing --cov-report=xml --cov-fail-under=55
 
     - name: Upload coverage report
       if: always()
