@@ -11,7 +11,13 @@ from __future__ import annotations
 
 import pytest
 
-from citeforge.bibtex_build import build_bibtex_entry, determine_entry_type, get_container_field
+from citeforge.bibtex_build import (
+    build_bibtex_entry,
+    create_scoring_function,
+    determine_entry_type,
+    get_container_field,
+)
+from citeforge.config import SIM_EXACT_PICK_THRESHOLD, SIM_THRESHOLD_TOLERANCE
 from tests.conftest import extract_bibtex_field
 
 # ---------------------------------------------------------------------------
@@ -127,6 +133,76 @@ def test_build_bibtex_entry_exact_bytes_locks_serializer() -> None:
         "}\n"
     )
     assert out == expected
+
+
+# ---------------------------------------------------------------------------
+# create_scoring_function -- year signal (published DOI recovery)
+# ---------------------------------------------------------------------------
+
+_ACCEPT = SIM_EXACT_PICK_THRESHOLD - SIM_THRESHOLD_TOLERANCE
+
+
+def _candidate(title: str, author: str, year: int) -> dict[str, object]:
+    """A Crossref-shaped candidate with a single author and an ``issued`` year."""
+    given, _, family = author.partition(" ")
+    return {
+        "title": [title],
+        "author": [{"given": given, "family": family}],
+        "issued": {"date-parts": [[year]]},
+    }
+
+
+def _score(target_title: str, target_author: str, year_hint: int | None, cand: dict[str, object]) -> float:
+    """Score *cand* against the target using the real scoring function."""
+    fn = create_scoring_function(
+        title=target_title,
+        author_name=target_author,
+        year_hint=year_hint,
+        title_getter=lambda c: (c.get("title") or [""])[0],
+        authors_getter=lambda c: c.get("author") or [],
+        year_getter=lambda c: c.get("issued", {}).get("date-parts", [[None]])[0][0],
+    )
+    return fn(cand)
+
+
+def test_year_hint_recovers_published_record_with_trivial_title_diff() -> None:
+    """A same-year, same-author candidate whose title differs only by a leading
+    article word ("A Web-based" vs "Web-based") clears the accept threshold WHEN a
+    matching year hint is supplied, but falls just below it without one. This is
+    the exact NxPlain/EACL case that left a preprint DOI in place; the year signal
+    is what recovers the authoritative published DOI.
+    """
+    target_title = "NxPlain: Web-based Tool for Discovery of Latent Concepts"
+    cand = _candidate("NxPlain: A Web-based Tool for Discovery of Latent Concepts", "Hassan Sajjad", 2023)
+
+    without_year = _score(target_title, "Hassan Sajjad", None, cand)
+    with_year = _score(target_title, "Hassan Sajjad", 2023, cand)
+
+    assert without_year < _ACCEPT, "regression guard: without a year hint the record is (wrongly) rejected"
+    assert with_year >= _ACCEPT, "with a matching year hint the published record must be accepted"
+
+
+def test_year_hint_does_not_admit_title_mismatch() -> None:
+    """The year signal never rescues a title mismatch: the title-minimum gate
+    short-circuits to zero before year is considered, so a wrong-title candidate
+    scores 0 even with a matching year and author.
+    """
+    target_title = "Detecting Ongoing Events Using Contextual Word Embeddings"
+    cand = _candidate("A Completely Unrelated Paper About Marine Biology", "Hassan Sajjad", 2023)
+    assert _score(target_title, "Hassan Sajjad", 2023, cand) == 0.0
+
+
+def test_year_hint_wrong_year_gives_no_bonus() -> None:
+    """A candidate whose year disagrees with the hint earns no year bonus, so the
+    bonus cannot inflate an off-year near-title match past the threshold.
+    """
+    target_title = "NxPlain: Web-based Tool for Discovery of Latent Concepts"
+    cand = _candidate("NxPlain: A Web-based Tool for Discovery of Latent Concepts", "Hassan Sajjad", 2019)
+
+    off_year = _score(target_title, "Hassan Sajjad", 2023, cand)
+    no_hint = _score(target_title, "Hassan Sajjad", None, cand)
+    assert off_year == no_hint, "a year mismatch must contribute exactly nothing (same as no hint)"
+    assert off_year < _ACCEPT, "an off-year near-title match must not be auto-accepted"
 
 
 # ---------------------------------------------------------------------------

@@ -146,12 +146,18 @@ def _build_scoring_function(
     title: str,
     author_name: str | None,
     config: APISearchConfig,
+    year_hint: int | None = None,
 ) -> Callable[[Any], float]:
     """Build getter functions from an APISearchConfig and return a scoring function.
 
     Resolves custom getters (title_getter, authors_getter, year_getter) from the
     config, falling back to default field-based accessors, and composes them into
-    a single scoring function via ``create_scoring_function``.
+    a single scoring function via ``create_scoring_function``. When ``year_hint``
+    is supplied, a candidate whose year agrees with it earns the year bonus, which
+    lets a same-year, same-author, near-identical-title published record clear the
+    accept threshold even when a trivial title-word difference lowers the raw title
+    similarity. It never admits a title/author mismatch: the title-minimum and
+    author gates run first and short-circuit to zero before year is considered.
     """
     from .bibtex_build import create_scoring_function
 
@@ -166,7 +172,7 @@ def _build_scoring_function(
     return create_scoring_function(
         title=title,
         author_name=author_name,
-        year_hint=None,
+        year_hint=year_hint,
         title_getter=title_getter,
         authors_getter=authors_getter,
         year_getter=year_getter,
@@ -268,7 +274,12 @@ def search_api_generic(
 
 
 def search_api_generic_multiple(
-    title: str, author_name: str | None, config: APISearchConfig, api_key: str | None = None, max_results: int = 5
+    title: str,
+    author_name: str | None,
+    config: APISearchConfig,
+    api_key: str | None = None,
+    max_results: int = 5,
+    year_hint: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Search for academic publications and return multiple candidates sorted by relevance.
@@ -309,7 +320,7 @@ def search_api_generic_multiple(
         response_cache.put_negative(config.api_name, cache_key)
         return []
 
-    score_fn = _build_scoring_function(title, author_name, config)
+    score_fn = _build_scoring_function(title, author_name, config, year_hint)
 
     scored_results = []
     effective_threshold = SIM_EXACT_PICK_THRESHOLD - SIM_THRESHOLD_TOLERANCE

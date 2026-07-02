@@ -683,7 +683,7 @@ def process_article(
     logger.debug(f"SEARCH_START | source=Crossref | title={title[:60]}", category=LogCategory.AUDIT)
     cr_item = None
     try:
-        cr_items = crossref_search_multiple(title, rec.name, max_results=5)
+        cr_items = crossref_search_multiple(title, rec.name, max_results=5, year_hint=year_hint)
         if cr_items:
             _, cr_item = _try_multiple_candidates(
                 LogSource.CROSSREF,
@@ -742,7 +742,7 @@ def process_article(
     logger.debug(f"SEARCH_START | source=OpenAlex | title={title[:60]}", category=LogCategory.AUDIT)
     oa_work = None
     try:
-        oa_works = openalex_search_multiple(title, rec.name, max_results=5)
+        oa_works = openalex_search_multiple(title, rec.name, max_results=5, year_hint=year_hint)
         if oa_works:
             _, oa_work = _try_multiple_candidates(
                 LogSource.OPENALEX,

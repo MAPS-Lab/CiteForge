@@ -35,7 +35,7 @@ from citeforge.io_utils import append_summary_to_csv, init_summary_csv
 from citeforge.models import Record
 from citeforge.pipeline import postrun
 from citeforge.pipeline.postrun import finalize_run
-from tests.factories import article, write_bib
+from tests.factories import article, misc, write_bib
 
 # A year comfortably inside the contribution window regardless of any
 # CITEFORGE_MIN_YEAR override (under the default env this is exactly 2024, so the
@@ -184,6 +184,123 @@ def test_both_orphan_branches_in_one_run(tmp_path: Path, no_a2i2: None) -> None:
     assert tracked.exists()
     assert keep.exists(), "dissimilar orphan kept"
     assert not remove.exists(), "duplicate orphan removed"
+
+
+# --- PREPRINT SUPERSEDED BY PUBLISHED ---------------------------------------
+
+
+def test_preprint_superseded_by_published_is_removed(
+    tmp_path: Path, no_a2i2: None, cf_caplog: pytest.LogCaptureFixture
+) -> None:
+    """When an author has a preprint (arXiv DOI) AND a published record of the
+    same work (same title, real journal DOI), the preprint file is deleted and
+    the published one is kept. This is the "published outranks preprint" pair
+    guard, applied generally across authors.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    same_title = "Detecting Ongoing Events Using Contextual Word and Sentence Embeddings"
+
+    preprint = write_bib(
+        author,
+        misc(
+            key="PreA",
+            title=same_title,
+            year=str(_IN_WINDOW_YEAR - 2),
+            howpublished="arXiv",
+            doi="10.48550/arxiv.2007.01379",
+        ),
+        f"Doe{_IN_WINDOW_YEAR - 2}-Detecting.bib",
+    )
+    published = write_bib(
+        author,
+        article(
+            key="PubA",
+            title=same_title,
+            year=str(_IN_WINDOW_YEAR),
+            journal="Expert Systems with Applications",
+            doi="10.1016/j.eswa.2022.118257",
+        ),
+        f"Doe{_IN_WINDOW_YEAR}-Detecting.bib",
+    )
+
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [preprint, published])
+
+    finalize_run(str(out_dir), _records(), total_saved=2, processed=2, summary_csv_path=str(csv_path))
+
+    assert published.exists(), "published record must be kept"
+    assert not preprint.exists(), "preprint superseded by a published twin must be removed"
+    assert any(
+        "Removed superseded preprint" in rec.getMessage() and "Detecting" in rec.getMessage()
+        for rec in cf_caplog.records
+    ), "superseded-preprint removal must be logged"
+
+
+def test_standalone_preprint_is_retained(tmp_path: Path, no_a2i2: None) -> None:
+    """A preprint with NO published counterpart in the author dir is retained
+    (the goal keeps arXiv/repository entries when no published record exists).
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+
+    lone = write_bib(
+        author,
+        misc(
+            key="Lone",
+            title="Succinct Euler Tour Trees for Sparse Graphs",
+            year=str(_IN_WINDOW_YEAR),
+            howpublished="arXiv",
+            doi="10.48550/arxiv.2105.04965",
+        ),
+        f"Doe{_IN_WINDOW_YEAR}-Euler.bib",
+    )
+    unrelated = write_bib(
+        author,
+        article(
+            key="Other",
+            title="A Completely Different Published Paper on Weather",
+            year=str(_IN_WINDOW_YEAR),
+            journal="Journal of Climate",
+            doi="10.1175/jcli-d-20-0001.1",
+        ),
+        f"Doe{_IN_WINDOW_YEAR}-Weather.bib",
+    )
+
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [lone, unrelated])
+
+    finalize_run(str(out_dir), _records(), total_saved=2, processed=2, summary_csv_path=str(csv_path))
+
+    assert lone.exists(), "standalone preprint (no published twin) must be retained"
+    assert unrelated.exists(), "unrelated published paper must be kept"
+
+
+def test_two_preprints_no_published_both_retained(tmp_path: Path, no_a2i2: None) -> None:
+    """Two preprints with no published record are both kept: supersede only fires
+    against a genuinely published twin, never preprint-vs-preprint.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    title = "On the Convergence of Variable Metric Methods"
+
+    p1 = write_bib(
+        author,
+        misc(key="P1", title=title, year=str(_IN_WINDOW_YEAR), howpublished="arXiv", doi="10.48550/arxiv.2401.00001"),
+        f"Doe{_IN_WINDOW_YEAR}-One.bib",
+    )
+    p2 = write_bib(
+        author,
+        misc(key="P2", title=title, year=str(_IN_WINDOW_YEAR), howpublished="arXiv", doi="10.48550/arxiv.2401.00002"),
+        f"Doe{_IN_WINDOW_YEAR}-Two.bib",
+    )
+
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [p1, p2])
+
+    finalize_run(str(out_dir), _records(), total_saved=2, processed=2, summary_csv_path=str(csv_path))
+
+    assert p1.exists() and p2.exists(), "two preprints with no published twin must both be retained"
 
 
 # --- YEAR-WINDOW ------------------------------------------------------------

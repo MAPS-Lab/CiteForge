@@ -13,8 +13,10 @@ import json
 import os
 import re
 import time
+from typing import Any
 
 from citeforge import bibtex_utils as bt
+from citeforge.bibtex_build import get_container_field
 from citeforge.cache import get_cache_hit_counts
 from citeforge.canonicalize import (
     _fixup_bib_entry,
@@ -36,6 +38,7 @@ from citeforge.io_utils import (
 from citeforge.log_utils import LogCategory, logger
 from citeforge.models import Record
 from citeforge.text_utils import (
+    _is_preprint_fields,
     extract_year_from_any,
     title_similarity,
 )
@@ -189,6 +192,14 @@ def finalize_run(
                 category=LogCategory.CLEANUP,
             )
 
+        # Drop preprints superseded by a published record of the same work.
+        superseded = _remove_superseded_preprints(out_dir)
+        if superseded:
+            logger.info(
+                f"Removed {superseded} superseded preprint .bib files (published twin exists)",
+                category=LogCategory.CLEANUP,
+            )
+
         # Build a2i2 joint output folder
         a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
         if a2i2_count:
@@ -231,6 +242,83 @@ def finalize_run(
             pass
 
         logger.info(f"Summary CSV: {summary_csv_path}", category=LogCategory.PLAN)
+
+
+def _looks_published(entry: dict[str, Any]) -> bool:
+    """Return True when *entry* is a published record rather than a preprint.
+
+    A record counts as published when it is not preprint-flagged (by DOI prefix or
+    journal name) and carries either a DOI or a real container field (journal for
+    ``@article``, booktitle for ``@inproceedings``/``@incollection``). Used to
+    decide whether a preprint twin has been superseded.
+    """
+    fields = entry.get("fields", {}) or {}
+    if _is_preprint_fields(fields):
+        return False
+    if str(fields.get("doi") or "").strip():
+        return True
+    container = get_container_field(str(entry.get("type") or ""))
+    return bool(container and str(fields.get(container) or "").strip())
+
+
+def _remove_superseded_preprints(out_dir: str) -> int:
+    """Delete a preprint ``.bib`` when a published record of the same work exists.
+
+    Within each author directory, a preprint file is removed only when another
+    file in that directory is a genuinely published record (see
+    :func:`_looks_published`) whose title matches at or above
+    ``SIM_MERGE_DUPLICATE_THRESHOLD``. This generalizes the "published outranks a
+    preprint" rule across every author and paper: a standalone preprint with no
+    published counterpart is always retained, and published files are never
+    removed. Deterministic (sorted iteration) and idempotent -- once the preprint
+    is gone a later run finds no preprint+published pair and removes nothing.
+
+    Returns the number of preprint files removed.
+    """
+    removed = 0
+    for entry_name in iter_output_dirs(out_dir):
+        if entry_name == "a2i2":
+            continue
+        author_dir = os.path.join(out_dir, entry_name)
+        parsed: list[tuple[str, dict[str, Any]]] = []
+        for fname in iter_author_bibs(author_dir):
+            path = os.path.join(author_dir, fname)
+            try:
+                with open(path, encoding="utf-8") as bf:
+                    parsed_entry = bt.parse_bibtex_to_dict(bf.read())
+            except (OSError, ValueError):
+                parsed_entry = None
+            if parsed_entry:
+                parsed.append((path, parsed_entry))
+
+        published = [(p, e) for p, e in parsed if _looks_published(e)]
+        if not published:
+            continue
+
+        for path, entry in parsed:
+            fields = entry.get("fields", {}) or {}
+            if not _is_preprint_fields(fields):
+                continue
+            title = str(fields.get("title") or "")
+            if not title:
+                continue
+            has_published_twin = any(
+                pub_path != path
+                and title_similarity(title, str((pub_entry.get("fields", {}) or {}).get("title") or ""))
+                >= SIM_MERGE_DUPLICATE_THRESHOLD
+                for pub_path, pub_entry in published
+            )
+            if has_published_twin:
+                try:
+                    os.remove(path)
+                    removed += 1
+                    logger.info(
+                        f"Removed superseded preprint: {os.path.basename(path)}",
+                        category=LogCategory.CLEANUP,
+                    )
+                except OSError:
+                    pass
+    return removed
 
 
 def _load_csv_titles(csv_path: str) -> dict[str, list[str]]:

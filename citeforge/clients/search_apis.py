@@ -170,8 +170,16 @@ def build_bibtex_from_crossref(item: dict[str, Any], keyhint: str) -> str | None
     return build_bibtex_from_response(item, keyhint, CROSSREF_FIELD_MAPPING)
 
 
-def crossref_search_multiple(title: str, author_name: str | None, max_results: int = 5) -> list[dict[str, Any]]:
-    """Search Crossref for multiple work candidates."""
+def crossref_search_multiple(
+    title: str, author_name: str | None, max_results: int = 5, year_hint: int | None = None
+) -> list[dict[str, Any]]:
+    """Search Crossref for multiple work candidates.
+
+    ``year_hint`` (the known publication year of the paper being enriched) is
+    passed through to scoring so a same-year published record earns the year
+    bonus, letting the authoritative version outrank a preprint even when a
+    trivial title-word difference lowers the raw title similarity.
+    """
     if not title:
         return []
     from ..api_configs import CROSSREF_SEARCH_CONFIG
@@ -188,7 +196,7 @@ def crossref_search_multiple(title: str, author_name: str | None, max_results: i
     if mailto:
         additional_params["mailto"] = mailto
     config.additional_params = additional_params
-    return search_api_generic_multiple(title, author_name, config, None, max_results)
+    return search_api_generic_multiple(title, author_name, config, None, max_results, year_hint)
 
 
 # ============ DOI / CSL ============
@@ -859,14 +867,21 @@ def build_bibtex_from_openalex(work: dict[str, Any], keyhint: str) -> str | None
     return build_bibtex_from_response(work, keyhint, OPENALEX_FIELD_MAPPING)
 
 
-def openalex_search_multiple(title: str, author_name: str | None, max_results: int = 5) -> list[dict[str, Any]]:
-    """Search OpenAlex for multiple work candidates."""
+def openalex_search_multiple(
+    title: str, author_name: str | None, max_results: int = 5, year_hint: int | None = None
+) -> list[dict[str, Any]]:
+    """Search OpenAlex for multiple work candidates.
+
+    ``year_hint`` (the known publication year of the paper being enriched) is
+    passed through to scoring so a same-year record earns the year bonus, keeping
+    parity with the Crossref search path.
+    """
     if not title:
         return []
     from ..api_configs import OPENALEX_SEARCH_CONFIG
     from ..api_generics import search_api_generic_multiple
 
-    return search_api_generic_multiple(title, author_name, OPENALEX_SEARCH_CONFIG, None, max_results)
+    return search_api_generic_multiple(title, author_name, OPENALEX_SEARCH_CONFIG, None, max_results, year_hint)
 
 
 # ============ PubMed ============
