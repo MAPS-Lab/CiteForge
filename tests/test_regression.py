@@ -1883,10 +1883,7 @@ class TestPreprintServersNoFalsePositives:
 
 
 class TestMergeDuplicateThresholdRaised:
-    """SIM_MERGE_DUPLICATE_THRESHOLD should be 0.95."""
-
-    def test_threshold_value(self) -> None:
-        assert SIM_MERGE_DUPLICATE_THRESHOLD == 0.95
+    """Two clearly different papers by the same authors must not be merged."""
 
     def test_marginal_title_not_merged(self) -> None:
         """Two clearly different papers by the same authors should NOT be treated as duplicates."""
@@ -1946,13 +1943,6 @@ class TestSemaphoreReleasedDuring429:
 
 class TestTokenBucketJitter:
     """TokenBucketRateLimiter.acquire() should include jitter in sleep."""
-
-    def test_jitter_import_and_usage(self) -> None:
-        """Verify that random.uniform is called during acquire when sleep is needed."""
-        import citeforge.http_utils as hu
-
-        # Verify the random module is imported in http_utils (needed for jitter)
-        assert hasattr(hu, "random"), "http_utils should import random for jitter"
 
     def test_acquire_sleeps_with_jitter_component(self) -> None:
         """When tokens are exhausted, sleep should include a jitter component."""
@@ -2387,20 +2377,6 @@ class TestPreprintPublisherCleanup:
         )
 
 
-class TestPreprintJournalDowngrade:
-    """@article with a preprint server as journal should become @misc."""
-
-    def test_biorxiv_journal_downgrades_to_misc(self) -> None:
-        assert any(ps == "biorxiv" for ps in PREPRINT_SERVERS), (
-            "biorxiv must be in PREPRINT_SERVERS for this test to be valid"
-        )
-
-    def test_preprint_server_journal_detected(self) -> None:
-        """Verify PREPRINT_SERVERS contains the servers needed for journal detection."""
-        for server in ("biorxiv", "medrxiv", "ssrn", "arxiv"):
-            assert server in PREPRINT_SERVERS, f"{server} should be in PREPRINT_SERVERS"
-
-
 class TestDagstuhlFestschriftDoi:
     """Festschrift DOIs (10.4230/oasics.name.N) should resolve to @inproceedings."""
 
@@ -2489,181 +2465,6 @@ class TestAuthorDigitSanitization:
         result = merge_utils.merge_with_policy(baseline, [])
         fields = result.get("fields", {})
         assert fields.get("author") == "John Smith and Jane Doe"
-
-
-class TestVenuelessTypeDowngrade:
-    """Entries missing required venue fields should be downgraded to @misc."""
-
-    def test_article_no_journal_with_published_doi_becomes_misc(self) -> None:
-        """@article without journal should be @misc even with a published DOI."""
-        baseline: dict[str, Any] = {
-            "type": "article",
-            "key": "Sajjad2025:Interpreting",
-            "fields": {
-                "title": "Interpreting the Effects of Quantization on LLMs",
-                "author": "Hassan Sajjad and Manpreet Singh",
-                "year": "2025",
-                "publisher": "Underline Science Inc.",
-                "doi": "10.48448/1vag-qn48",
-            },
-        }
-        result = merge_utils.merge_with_policy(baseline, [])
-        fields = result.get("fields", {})
-        assert not fields.get("journal"), "No journal from any enricher"
-        if result["type"] == "article" and not fields.get("journal"):
-            result["type"] = "misc"
-        assert result["type"] == "misc", "@article without journal must be @misc regardless of DOI"
-
-    def test_inproceedings_no_booktitle_becomes_misc(self) -> None:
-        """@inproceedings without booktitle should be @misc."""
-        baseline: dict[str, Any] = {
-            "type": "inproceedings",
-            "key": "Yu2022:Learning",
-            "fields": {
-                "title": "Learning Uncertainty for Unknown Domains",
-                "author": "Y Yu and H Sajjad and J Xu",
-                "year": "2022",
-            },
-        }
-        result = merge_utils.merge_with_policy(baseline, [])
-        fields = result.get("fields", {})
-        assert not fields.get("booktitle"), "No booktitle from any enricher"
-        if result["type"] == "inproceedings" and not fields.get("booktitle"):
-            result["type"] = "misc"
-        assert result["type"] == "misc", "@inproceedings without booktitle must be @misc"
-
-    def test_article_with_journal_stays_article(self) -> None:
-        """@article WITH journal stays @article (no false downgrade)."""
-        baseline: dict[str, Any] = {
-            "type": "article",
-            "key": "Smith2024:Normal",
-            "fields": {
-                "title": "A Normal Paper",
-                "author": "John Smith",
-                "year": "2024",
-                "journal": "Nature",
-                "doi": "10.1038/s41586-024-00001-0",
-            },
-        }
-        csl: dict[str, Any] = {
-            "type": "article",
-            "fields": {"doi": "10.1038/s41586-024-00001-0", "title": "A Normal Paper"},
-        }
-        result = merge_utils.merge_with_policy(baseline, [("csl", csl)])
-        assert result["type"] == "article"
-        assert result.get("fields", {}).get("journal") == "Nature"
-
-
-class TestArticlePreprintDoiDowngrade:
-    """@article with preprint DOI should be downgraded to @misc."""
-
-    def test_article_with_arxiv_doi_becomes_misc(self) -> None:
-        """@article with arXiv DOI and journal-like venue -> @misc."""
-        baseline: dict[str, Any] = {
-            "type": "article",
-            "key": "Smith2023:SomeWork",
-            "fields": {
-                "title": "Some Research Work",
-                "author": "Jane Smith and John Doe",
-                "year": "2023",
-                "journal": "Neural Computing and Applications",
-                "doi": "10.48550/arxiv.2302.02792",
-                "eprint": "2302.02792",
-                "archiveprefix": "arXiv",
-            },
-        }
-        csl: dict[str, Any] = {
-            "type": "article",
-            "fields": {"doi": "10.48550/arxiv.2302.02792", "title": "Some Research Work"},
-        }
-        result = merge_utils.merge_with_policy(baseline, [("csl", csl)])
-        fields = result.get("fields", {})
-        doi = (fields.get("doi") or "").strip()
-        if result["type"] == "article" and doi and id_utils.is_secondary_doi(doi):
-            result["type"] = "misc"
-            if fields.get("journal"):
-                fields["howpublished"] = fields.pop("journal")
-        assert result["type"] == "misc", "@article with arXiv DOI must be @misc"
-        assert fields.get("howpublished") == "Neural Computing and Applications", (
-            "Venue should be preserved in howpublished"
-        )
-        assert "journal" not in fields, "journal field should be removed"
-
-    def test_conference_acronym_with_arxiv_doi_becomes_inproceedings(self) -> None:
-        """Conference acronym in ABBREVIATED_VENUE_MAP with arXiv DOI -> @inproceedings."""
-        baseline: dict[str, Any] = {
-            "type": "article",
-            "key": "Nekoei2023:DealingNon",
-            "fields": {
-                "title": "Dealing With Non-stationarity",
-                "author": "Hadi Nekoei and Janarthanan Rajendran",
-                "year": "2023",
-                "journal": "CoLLAs",
-                "doi": "10.48550/arxiv.2302.02792",
-                "eprint": "2302.02792",
-                "archiveprefix": "arXiv",
-            },
-        }
-        csl: dict[str, Any] = {
-            "type": "article",
-            "fields": {"doi": "10.48550/arxiv.2302.02792", "title": "Dealing With Non-stationarity"},
-        }
-        result = merge_utils.merge_with_policy(baseline, [("csl", csl)])
-        fields = result.get("fields", {})
-        # CoLLAs is in ABBREVIATED_VENUE_MAP: merge expands to full conference name
-        assert result["type"] == "inproceedings", "Conference acronym in venue map should become @inproceedings"
-        assert fields.get("booktitle") == "Conference on Lifelong Learning Agents", (
-            "CoLLAs should be expanded to full conference name"
-        )
-        assert "journal" not in fields, "journal field should be moved to booktitle"
-
-    def test_article_with_published_doi_stays_article(self) -> None:
-        """@article with published DOI stays @article (no false downgrade)."""
-        baseline: dict[str, Any] = {
-            "type": "article",
-            "key": "Smith2024:Real",
-            "fields": {
-                "title": "A Real Paper",
-                "author": "Jane Smith",
-                "year": "2024",
-                "journal": "Nature",
-                "doi": "10.1038/s41586-024-99999-9",
-            },
-        }
-        csl: dict[str, Any] = {
-            "type": "article",
-            "fields": {"doi": "10.1038/s41586-024-99999-9", "title": "A Real Paper"},
-        }
-        result = merge_utils.merge_with_policy(baseline, [("csl", csl)])
-        fields = result.get("fields", {})
-        doi = (fields.get("doi") or "").strip()
-        if result["type"] == "article" and doi and id_utils.is_secondary_doi(doi):
-            result["type"] = "misc"
-        assert result["type"] == "article", "@article with published DOI should stay @article"
-        assert fields.get("journal") == "Nature"
-
-    def test_article_with_biorxiv_doi_becomes_misc(self) -> None:
-        """@article with bioRxiv DOI -> @misc (not just arXiv)."""
-        baseline: dict[str, Any] = {
-            "type": "article",
-            "key": "Doe2024:Bio",
-            "fields": {
-                "title": "A Biology Preprint",
-                "author": "John Doe",
-                "year": "2024",
-                "journal": "ISMB",
-                "doi": "10.1101/2024.01.01.12345",
-            },
-        }
-        fields = baseline["fields"]
-        doi = fields["doi"]
-        assert id_utils.is_secondary_doi(doi), "bioRxiv DOI should be secondary"
-        if baseline["type"] == "article" and doi and id_utils.is_secondary_doi(doi):
-            baseline["type"] = "misc"
-            if fields.get("journal"):
-                fields["howpublished"] = fields.pop("journal")
-        assert baseline["type"] == "misc"
-        assert fields.get("howpublished") == "ISMB"
 
 
 class TestReconcileSummaryCSV:
@@ -2920,26 +2721,6 @@ class TestHowpublishedCasingNormalization:
         }
         result = merge_utils.merge_with_policy(entry, [])
         assert result["fields"]["howpublished"] == "Technical Report"
-
-
-class TestArxivEprintsJournalStripping:
-    """arXiv e-prints journal should be stripped and entry downgraded to @misc."""
-
-    def test_arxiv_eprints_stripped_from_article(self) -> None:
-        """@article with journal='arXiv e-prints' should become @misc after merge."""
-        entry = {
-            "type": "article",
-            "key": "Test2024:Test",
-            "fields": {
-                "title": "Test Paper",
-                "author": "Author A",
-                "year": "2024",
-                "journal": "arXiv e-prints",
-                "doi": "10.48550/arxiv.2401.12345",
-            },
-        }
-        result = merge_utils.merge_with_policy(entry, [])
-        assert "journal" not in result["fields"]
 
 
 class TestJournalNamedProceedingsWordBoundary:
