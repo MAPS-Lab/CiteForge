@@ -461,6 +461,66 @@ def test_bibtex_extra_fields() -> None:
     assert bt.bibtex_entries_match_strict(parsed_minimal, parsed_enriched), "Extra fields should not prevent matching"
 
 
+def test_bibtex_mislabeled_arxiv_id_does_not_match() -> None:
+    """A shared arXiv id with clearly different titles must NOT match.
+
+    Guards against a mislabeled identifier (a Scholar entry pointing at the wrong
+    arXiv id): the exact-id fast path must not adopt a different paper's metadata.
+    """
+    movelet = dedent("""
+        @misc{Gagie2024Movelet,
+          title = {Movelet Trees},
+          author = {Travis Gagie and Giovanni Manzini},
+          year = {2024},
+          eprint = {2408.04537},
+          archiveprefix = {arXiv}
+        }
+    """).strip()
+    faster = dedent("""
+        @misc{Gagie2024Faster,
+          title = {Faster run-length compressed suffix arrays},
+          author = {Travis Gagie and Giovanni Manzini},
+          year = {2024},
+          eprint = {2408.04537},
+          archiveprefix = {arXiv}
+        }
+    """).strip()
+    p_movelet = bt.parse_bibtex_to_dict(movelet)
+    p_faster = bt.parse_bibtex_to_dict(faster)
+    assert p_movelet is not None and p_faster is not None
+    assert not bt.bibtex_entries_match_strict(p_movelet, p_faster), (
+        "same arXiv id but clearly different titles must be treated as a mislabeled id, not a match"
+    )
+
+
+def test_bibtex_same_arxiv_id_reformatted_title_still_matches() -> None:
+    """The guard must not break legitimate matches: the same arXiv id with only a
+    reformatted (case/punctuation) title is still the same paper and must match.
+    """
+    canonical = dedent("""
+        @misc{Sajjad2020,
+          title = {Poor Man's BERT: Smaller and Faster Transformer Models},
+          author = {Hassan Sajjad},
+          year = {2020},
+          eprint = {2004.03844},
+          archiveprefix = {arXiv}
+        }
+    """).strip()
+    reformatted = dedent("""
+        @misc{Sajjad2020b,
+          title = {Poor man s bert smaller and faster transformer models},
+          author = {Hassan Sajjad},
+          year = {2020},
+          eprint = {2004.03844},
+          archiveprefix = {arXiv}
+        }
+    """).strip()
+    p_a = bt.parse_bibtex_to_dict(canonical)
+    p_b = bt.parse_bibtex_to_dict(reformatted)
+    assert p_a is not None and p_b is not None
+    assert bt.bibtex_entries_match_strict(p_a, p_b), "same arXiv id with a reformatted title must still match"
+
+
 def test_config() -> None:
     """Test configuration constants."""
     for const in ("CONTRIBUTION_WINDOW_YEARS", "SIM_EXACT_PICK_THRESHOLD"):

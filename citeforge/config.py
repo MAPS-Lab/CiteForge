@@ -152,6 +152,14 @@ CACHE_ENABLED = True
 # File-level dedup threshold (must be >= SIM_MERGE_DUPLICATE_THRESHOLD)
 SIM_FILE_DUPLICATE_THRESHOLD = 0.95
 
+# Minimum title similarity required to trust an EXACT DOI/arXiv identifier match.
+# Guards against mislabeled identifiers: when two records share a DOI or arXiv id
+# but their titles are clearly different papers, the identifier was attached to
+# the wrong work (e.g., a Scholar entry pointing at the wrong arXiv id) and must
+# not be treated as a match. The same paper reformatted across sources scores far
+# above this; only genuinely different titles fall below it.
+SIM_IDENTIFIER_TITLE_MIN = 0.55
+
 # Preprint detection
 PREPRINT_SERVERS = frozenset(
     {

@@ -23,6 +23,7 @@ from .config import (
     SIM_DEDUP_COMPOSITE_THRESHOLD,
     SIM_DEDUP_MULTI_SIGNAL_MIN,
     SIM_FILE_DUPLICATE_THRESHOLD,
+    SIM_IDENTIFIER_TITLE_MIN,
 )
 from .id_utils import _norm_doi, external_ids_match, extract_arxiv_eprint
 from .log_utils import LogCategory, logger
@@ -610,6 +611,22 @@ def _is_preprint_entry(fields: dict[str, Any]) -> bool:
     return any(ps in journal for ps in PREPRINT_SERVERS)
 
 
+def _identifier_title_conflict(af: dict[str, Any], bf: dict[str, Any]) -> bool:
+    """Return True when two records carry clearly different titles.
+
+    "Clearly different" means both titles are present and their similarity is
+    below ``SIM_IDENTIFIER_TITLE_MIN``. Used to veto an exact DOI/arXiv identifier
+    match that stems from a mislabeled identifier (a source attaching the wrong id
+    to a work). When either title is missing there is nothing to contradict the
+    identifier, so the match is allowed to stand (returns False).
+    """
+    a_title = normalize_title(af.get("title"))
+    b_title = normalize_title(bf.get("title"))
+    if not a_title or not b_title:
+        return False
+    return title_similarity(a_title, b_title) < SIM_IDENTIFIER_TITLE_MIN
+
+
 def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]) -> bool:
     """
     Decide whether two BibTeX records refer to the same publication by comparing
@@ -630,6 +647,12 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
     b_doi = _norm_doi(bf.get("doi"))
     if a_doi and b_doi:
         if a_doi == b_doi:
+            if _identifier_title_conflict(af, bf):
+                logger.debug(
+                    f"ENTRY_REJECT | DOI_EXACT_TITLE_CONFLICT | doi={a_doi} | result=False",
+                    category=LogCategory.DEDUP,
+                )
+                return False
             logger.debug(f"ENTRY_MATCH | DOI_EXACT | doi={a_doi} | result=True", category=LogCategory.DEDUP)
             return True
         a_is_preprint = any(a_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
@@ -655,6 +678,12 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
     b_ax = extract_arxiv_eprint(entry_b)
     if a_ax and b_ax:
         if a_ax == b_ax:
+            if _identifier_title_conflict(af, bf):
+                logger.debug(
+                    f"ENTRY_REJECT | ARXIV_EXACT_TITLE_CONFLICT | id={a_ax} | result=False",
+                    category=LogCategory.DEDUP,
+                )
+                return False
             logger.debug(f"ENTRY_MATCH | ARXIV_EXACT | id={a_ax} | result=True", category=LogCategory.DEDUP)
             return True
         logger.debug(f"ENTRY_REJECT | DIFF_ARXIV | a={a_ax} b={b_ax} | result=False", category=LogCategory.DEDUP)
