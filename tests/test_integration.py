@@ -27,8 +27,8 @@ def test_fetch_and_merge(api_keys: dict[str, Any]) -> None:
     Validate end-to-end publication fetching from Scholar and DBLP followed
     by deduplication.
     """
-    if not api_keys.get("serply"):
-        pytest.skip("Serply key not available")
+    if not api_keys.get("serpapi"):
+        pytest.skip("SerpAPI key not available")
 
     rec = Record(
         name=TEST_AUTHOR["name"],
@@ -37,7 +37,7 @@ def test_fetch_and_merge(api_keys: dict[str, Any]) -> None:
     )
 
     scholar_data = scholar.fetch_author_publications(
-        api_keys["serply"],
+        api_keys["serpapi"],
         rec.scholar_id,
         rec.name,
     )
