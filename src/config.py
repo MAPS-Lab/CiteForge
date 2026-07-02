@@ -180,6 +180,17 @@ PREPRINT_DOI_PREFIXES = (
     "10.64898/",  # openRxiv
     "10.36227/techrxiv",  # TechRxiv (IEEE preprints)
     "10.33774/",  # Cambridge UP preprints (Authoria/MIIR)
+    # Grey-literature / preprint sub-prefixes. Keyed on the SPECIFIC sub-prefix
+    # (not the registrant) so a published journal DOI under the same registrant
+    # (e.g. 10.5194/acp) stays published. Kept in sync with
+    # venue._DOI_PREFIX_TO_HOWPUB so every DOI recognized for howpublished
+    # inference is also classified as secondary by is_secondary_doi.
+    "10.5194/egusphere",  # EGU preprints (egusphere), NOT published EGU journals
+    "10.2172/",  # OSTI technical reports
+    "10.31220/agrirxiv",  # agriRxiv
+    "10.32388/",  # Qeios
+    "10.48448/",  # Underline Science
+    "10.32920/",  # Institutional repositories (Toronto Metropolitan etc.)
 )
 
 # Publishers exclusively associated with preprint servers.

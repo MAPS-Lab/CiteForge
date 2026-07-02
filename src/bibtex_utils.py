@@ -723,10 +723,16 @@ def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]
         logger.debug("ENTRY_REJECT | GATE_CLOSED | result=False", category=LogCategory.DEDUP)
         return False
 
-    score = compute_dedup_score(af, bf)
+    # When the composite gate opened *because* this is a preprint/published pair, the XOR
+    # split is the precondition and must not also be banked inside the score (that is the
+    # double-count that tips distinct works over threshold). When the gate opened via an
+    # external-id or strong-author match instead, the split is independent evidence and is
+    # counted once.
+    score = compute_dedup_score(af, bf, count_preprint_xor=not preprint_pair)
     result = score >= SIM_DEDUP_COMPOSITE_THRESHOLD
     logger.debug(
-        f"ENTRY_COMPOSITE | score={score:.3f} | threshold={SIM_DEDUP_COMPOSITE_THRESHOLD} | result={result}",
+        f"ENTRY_COMPOSITE | score={score:.3f} | threshold={SIM_DEDUP_COMPOSITE_THRESHOLD} "
+        f"| preprint_pair={preprint_pair} | result={result}",
         category=LogCategory.DEDUP,
     )
     return result

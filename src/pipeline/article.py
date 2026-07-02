@@ -1283,6 +1283,19 @@ def process_article(
                             )
                             _revert_misattributed_doi(merged_fields, edoi, doi_validated, doi_early)
                             continue
+                    # Published supersedes preprint: if the on-disk match is a preprint/
+                    # secondary DOI while the incoming entry carries a genuine published
+                    # DOI, remove the on-disk preprint and keep the published entry rather
+                    # than dropping the published file (mirrors the save-time tiebreak).
+                    merged_is_published = bool(merged_doi and not idu.is_secondary_doi(merged_doi))
+                    if merged_is_published and idu.is_secondary_doi(edoi):
+                        logger.debug(
+                            f"CANDIDATE_DOI_DEDUP | published supersedes preprint"
+                            f" | published={merged_doi} | preprint={edoi} | removed={existing_bib}",
+                            category=LogCategory.DEDUP,
+                        )
+                        os.remove(epath)
+                        continue
                     logger.debug(
                         f"CANDIDATE_DOI_DEDUP | doi={edoi} | existing={existing_bib} | skipping_write=True",
                         category=LogCategory.DEDUP,

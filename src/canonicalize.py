@@ -464,13 +464,21 @@ def _rule_add_url_from_doi(entry: dict[str, Any], fields: dict[str, Any]) -> boo
 # Site-B-only rules (load repair; existing-file fixup before enrichment)
 # ---------------------------------------------------------------------------
 def _rule_strip_preprint_journal_load(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """Strip a preprint-server journal: @article -> @misc (journal -> howpublished);
-    any other type simply drops the journal."""
+    """Strip a preprint-server journal on load.
+
+    @article with a genuine published DOI: drop the stale preprint journal but keep it a
+    published work (no ``howpublished=<server>``). @article without a published DOI: @misc
+    (journal -> howpublished). Any other type simply drops the journal.
+    """
     jnl = (fields.get("journal") or "").strip().lower()
     if jnl and any(ps == jnl or ps in jnl for ps in PREPRINT_SERVERS):
         if entry.get("type") == "article":
-            fields["howpublished"] = fields.pop("journal")
+            doi = (fields.get("doi") or "").strip()
             entry["type"] = "misc"
+            if doi and not idu.is_secondary_doi(doi):
+                fields.pop("journal", None)
+            else:
+                fields["howpublished"] = fields.pop("journal")
         else:
             fields.pop("journal", None)
         return True
@@ -576,12 +584,23 @@ def _rule_inproceedings_no_booktitle_to_misc(entry: dict[str, Any], fields: dict
 
 
 def _rule_preprint_journal_to_misc(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """@article with a preprint server as journal -> @misc (journal -> howpublished)."""
+    """@article with a preprint-server journal.
+
+    A genuine *published* DOI means the preprint journal is a stale enrichment artifact,
+    not evidence that the work is a preprint: drop the stale journal WITHOUT asserting a
+    preprint (no ``howpublished=<server>``), keeping the published DOI. Only when the DOI
+    is itself secondary (or absent) is the entry an actual preprint, relabeled @misc with
+    journal -> howpublished.
+    """
     if entry.get("type") == "article":
         j_lower = (fields.get("journal") or "").lower().strip()
         if j_lower and any(ps == j_lower or ps in j_lower for ps in PREPRINT_SERVERS):
+            doi = (fields.get("doi") or "").strip()
             entry["type"] = "misc"
-            fields["howpublished"] = fields.pop("journal")
+            if doi and not idu.is_secondary_doi(doi):
+                fields.pop("journal", None)
+            else:
+                fields["howpublished"] = fields.pop("journal")
             return True
     return False
 

@@ -1527,23 +1527,38 @@ class TestAuthorOverlapWithInitials:
 
 
 class TestVenueSimilarityPreprint:
-    """L14: venue_similarity should correctly detect preprint servers even with hyphens."""
+    """L14 (reinforced): venue_similarity is PURE venue-string similarity. The preprint /
+    published (XOR) split is no longer smuggled in as a 0.5 bonus; it is a single explicit
+    signal in compute_dedup_score (Signal 6), counted exactly once. Rewarding it in both
+    places double-counted the same evidence and tipped distinct works over threshold."""
 
-    def test_biorxiv_vs_journal(self) -> None:
-        """bioRxiv vs a journal should give 0.5 (preprint/published pair)."""
+    def test_biorxiv_vs_journal_is_plain_fuzz_not_xor_bonus(self) -> None:
+        """bioRxiv vs a dissimilar journal -> plain fuzz (< 0.5), not the old 0.5 XOR bonus."""
         sim = text_utils.venue_similarity(
             {"journal": "bioRxiv"},
             {"journal": "Nature Medicine"},
         )
-        assert sim == 0.5
+        assert sim < 0.5
 
-    def test_arxiv_eprints_vs_conference(self) -> None:
-        """arXiv e-prints vs conference should give 0.5."""
+    def test_arxiv_eprints_vs_conference_is_plain_fuzz_not_xor_bonus(self) -> None:
+        """arXiv e-prints vs conference -> plain fuzz (< 0.5), not the old 0.5 XOR bonus."""
         sim = text_utils.venue_similarity(
             {"journal": "arXiv e-prints"},
             {"booktitle": "NeurIPS 2024"},
         )
-        assert sim == 0.5
+        assert sim < 0.5
+
+    def test_identical_venue_is_one(self) -> None:
+        assert text_utils.venue_similarity({"journal": "Nature"}, {"journal": "Nature"}) == 1.0
+
+    def test_preprint_xor_counted_once_in_composite(self) -> None:
+        """The split contributes exactly Signal 6 (0.10) to the composite and nothing via
+        venue_similarity, so excluding it drops the score by exactly 0.10."""
+        pre = {"title": "Same Work", "author": "Ada Byron", "year": "2020", "journal": "bioRxiv"}
+        pub = {"title": "Same Work", "author": "Ada Byron", "year": "2020", "journal": "Nature Medicine"}
+        with_xor = text_utils.compute_dedup_score(pre, pub, count_preprint_xor=True)
+        without_xor = text_utils.compute_dedup_score(pre, pub, count_preprint_xor=False)
+        assert abs((with_xor - without_xor) - 0.10) < 1e-9
 
 
 class TestBothPreprintDoiDedup:

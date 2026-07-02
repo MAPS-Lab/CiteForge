@@ -530,7 +530,13 @@ def author_overlap_ratio(authors_a: str | None, authors_b: str | None) -> float:
 
 
 def venue_similarity(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> float:
-    """Compute similarity between venues, with a 0.5 bonus for preprint/published pairs."""
+    """Compute string similarity between two venue names (journal/booktitle/howpublished).
+
+    Pure venue-string similarity only. The preprint-vs-published (XOR) split is NOT
+    encoded here: it is a single explicit signal in ``compute_dedup_score`` (Signal 6),
+    so rewarding it here too would double-count the same piece of evidence and can tip
+    two distinct works over the duplicate threshold.
+    """
     a_venue = (fields_a.get("journal") or fields_a.get("booktitle") or fields_a.get("howpublished") or "").strip()
     b_venue = (fields_b.get("journal") or fields_b.get("booktitle") or fields_b.get("howpublished") or "").strip()
     if not a_venue or not b_venue:
@@ -539,10 +545,6 @@ def venue_similarity(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> floa
     b_norm = normalize_title(b_venue)
     if a_norm == b_norm:
         return 1.0
-    a_is_preprint = any(normalize_title(ps) in a_norm for ps in PREPRINT_SERVERS)
-    b_is_preprint = any(normalize_title(ps) in b_norm for ps in PREPRINT_SERVERS)
-    if a_is_preprint ^ b_is_preprint:
-        return 0.5
     return fuzz_ratio(a_norm, b_norm) / 100.0
 
 
@@ -555,8 +557,14 @@ def _is_preprint_fields(fields: dict[str, Any]) -> bool:
     return any(ps in journal for ps in PREPRINT_SERVERS)
 
 
-def compute_dedup_score(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> float:
-    """Additive composite score from 6 signals for multi-signal deduplication."""
+def compute_dedup_score(fields_a: dict[str, Any], fields_b: dict[str, Any], count_preprint_xor: bool = True) -> float:
+    """Additive composite score from up to 6 signals for multi-signal deduplication.
+
+    ``count_preprint_xor`` controls the preprint-vs-published split (Signal 6). Callers
+    that reach this composite only after already establishing the XOR split as a
+    precondition pass ``count_preprint_xor=False`` so the same evidence is not counted
+    twice (the split contributes here exactly once, and never via ``venue_similarity``).
+    """
     score = 0.0
 
     # Signal 1: Title similarity (weight 0.40)
@@ -584,8 +592,8 @@ def compute_dedup_score(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> f
     if external_ids_match(fields_a, fields_b):
         score += 0.15
 
-    # Signal 6: Preprint pair bonus (0.10)
-    if _is_preprint_fields(fields_a) ^ _is_preprint_fields(fields_b):
+    # Signal 6: Preprint-vs-published split (0.10) -- the single place the XOR is counted.
+    if count_preprint_xor and (_is_preprint_fields(fields_a) ^ _is_preprint_fields(fields_b)):
         score += 0.10
 
     return score

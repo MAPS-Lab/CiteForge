@@ -14,7 +14,6 @@ from .config import (
     GENERIC_SERIES_NAMES,
     JOURNAL_ONLY_PREFIXES,
     PAGES_MAX_DIGITS,
-    PREPRINT_DOI_PREFIXES,
     PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
     PUBLISHER_CORRECTIONS,
@@ -123,8 +122,16 @@ def _sanitize_author_digits(name: str) -> str:
 
 
 def _is_preprint_doi(doi: str) -> bool:
-    """Check if a DOI belongs to a preprint server (arXiv, Research Square, etc.)."""
-    return any(doi.lower().startswith(p) for p in PREPRINT_DOI_PREFIXES)
+    """Check if a DOI is a preprint / repository / data DOI rather than a published one.
+
+    Delegates to the single canonical predicate ``id_utils.is_secondary_doi`` so every
+    merge and save decision classifies a DOI identically to the rest of the pipeline
+    (arXiv, bioRxiv, Research Square, EGU egusphere, OSTI, Qeios, agriRxiv, Underline,
+    institutional repositories, Zenodo, Figshare, ...). ``PREPRINT_DOI_PREFIXES`` keys on
+    specific sub-prefixes (e.g. ``10.5194/egusphere``), so a published journal DOI under the
+    same registrant (``10.5194/acp``) is correctly left as published.
+    """
+    return is_secondary_doi(doi)
 
 
 def _pop_fields(target: dict[str, Any], field_names: set[str] | frozenset[str], log_tag: str) -> None:
@@ -266,6 +273,19 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             if k == "author":
                 cur_parts = parse_authors_any(str(cur))
                 new_parts = parse_authors_any(str(v))
+                # Never drop authors: a truncated (shorter) list must not overwrite a more
+                # complete one unless the new source is much more trusted (>= the title
+                # rule's TRUST_DIFF_OVERRIDE_THRESHOLD). Mirrors the title-length guard so
+                # a source that emits "A. Smith and others" cannot shrink a full list by rank.
+                if cur_parts and new_parts and len(new_parts) < len(cur_parts):
+                    trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
+                    if trust_diff < TRUST_DIFF_OVERRIDE_THRESHOLD:
+                        logger.debug(
+                            f"AUTHOR_KEEP_SUPERSET | cur_n={len(cur_parts)} new_n={len(new_parts)} "
+                            f"trust_diff={trust_diff} | src={src} | keeping more complete author list",
+                            category=LogCategory.MERGE,
+                        )
+                        continue
                 if cur_parts and new_parts and len(cur_parts) == len(new_parts):
                     # Count initials-only tokens (e.g. "J." but not "Jr.")
                     cur_inits = sum(1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
@@ -316,15 +336,22 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             if k == "booktitle":
                 cur_lower = str(cur).lower().strip()
                 new_lower = str(v).lower().strip()
-                # If current is a generic series name and new is more specific, always accept
+                # If current is a generic series name and new is more specific, accept the
+                # upgrade -- but only when the specific value is not much less trusted than
+                # the incumbent, so a low-trust source cannot overwrite a trusted generic by
+                # specificity alone. When it is far less trusted, fall through to the rank
+                # gate (which keeps the more-trusted generic).
                 if cur_lower in GENERIC_SERIES_NAMES and new_lower not in GENERIC_SERIES_NAMES:
-                    logger.debug(
-                        f"BOOKTITLE_UPGRADE | generic->specific | old={str(cur)[:60]} | new={str(v)[:60]} | src={src}",
-                        category=LogCategory.MERGE,
-                    )
-                    merged[k] = v
-                    field_sources[k] = src
-                    continue
+                    trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
+                    if trust_diff > -TRUST_DIFF_OVERRIDE_THRESHOLD:
+                        logger.debug(
+                            f"BOOKTITLE_UPGRADE | generic->specific | old={str(cur)[:60]} "
+                            f"| new={str(v)[:60]} | src={src} | trust_diff={trust_diff}",
+                            category=LogCategory.MERGE,
+                        )
+                        merged[k] = v
+                        field_sources[k] = src
+                        continue
                 # Never replace a specific conference name with a generic series
                 if cur_lower not in GENERIC_SERIES_NAMES and new_lower in GENERIC_SERIES_NAMES:
                     logger.debug(
@@ -396,7 +423,15 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             ),
             None,
         )
-        if not doi_trusted_src:
+        if not doi_trusted_src and _is_preprint_doi(merged_doi_norm or ""):
+            # A preprint/repository self-DOI (arXiv, bioRxiv, EGU, Zenodo, ...) is the
+            # record's own correct identifier; keep it even when no registration agency
+            # echoes it. Only genuinely published DOIs must clear the registry gate.
+            logger.debug(
+                f"doi_kept_selfpreprint | source={field_sources.get('doi', 'unknown')} | doi={merged_doi_norm}",
+                category=LogCategory.CLEANUP,
+            )
+        elif not doi_trusted_src:
             doi_src = field_sources.get("doi", "unknown")
             logger.debug(
                 f"doi_untrusted | source={doi_src} | trusted_sources={sorted(trusted_doi_sources)} | action=removed",
@@ -933,17 +968,19 @@ def save_entry_to_file(
                             n_title = new_fields.get("title", "")
                             preprint_sim = title_similarity(e_title, n_title)
                             if preprint_sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-                                score = compute_dedup_score(existing_fields, new_fields)
-                                # The preprint-pair bonus (0.10) in composite is
-                                # circular here — we already verified the XOR
-                                # precondition.  Subtract it to avoid inflating
-                                # the composite with evidence we already used.
-                                effective_score = score - 0.10
+                                # The preprint/published (XOR) split was already verified as
+                                # the precondition above, so exclude it from the composite
+                                # rather than adding it and subtracting a flat 0.10. Excluding
+                                # is exact and predicate-independent, so a genuine twin whose
+                                # published side still carries a leaked preprint journal is no
+                                # longer wrongly dropped by an over-subtraction.
+                                effective_score = compute_dedup_score(
+                                    existing_fields, new_fields, count_preprint_xor=False
+                                )
                                 if effective_score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
                                     logger.debug(
                                         f"FILE_MATCH | PREPRINT_PAIR | file={existing_filename}"
-                                        f" | sim={preprint_sim:.3f} | composite={score:.3f}"
-                                        f" | effective={effective_score:.3f}"
+                                        f" | sim={preprint_sim:.3f} | effective={effective_score:.3f}"
                                         f" | e_preprint={e_preprint} n_preprint={n_preprint}",
                                         category=LogCategory.DEDUP,
                                     )
@@ -1021,7 +1058,9 @@ def save_entry_to_file(
                                 and key_title_sim >= SIM_PREPRINT_TITLE_THRESHOLD
                                 and authors_overlap(existing_fields.get("author"), new_fields.get("author"))
                             ):
-                                key_preprint_score = compute_dedup_score(existing_fields, new_fields)
+                                key_preprint_score = compute_dedup_score(
+                                    existing_fields, new_fields, count_preprint_xor=False
+                                )
                                 logger.debug(
                                     f"FILE_MATCH | KEY_PREPRINT_PAIR | file={existing_filename} "
                                     f"| sim={key_title_sim:.3f} | composite={key_preprint_score:.3f}",
