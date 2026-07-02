@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone, tzinfo
+from email.utils import format_datetime
+
 import pytest
 import requests
 
 from citeforge import http_utils
+from citeforge.config import HTTP_BACKOFF_MAX, SESSION_ROTATION_THRESHOLD
+from citeforge.exceptions import DecodeError
 from citeforge.http_utils import _decode_json_bytes, _scrub_secrets
+from tests.corpus import RETRY_AFTER_CASES
+from tests.fakes import FakeResponse, FakeSession
 
 
 class TestSecretRedaction:
@@ -97,3 +104,127 @@ class TestRetryBounding:
         out = http_utils._http_request("GET", "https://example.com/x", {"Accept": "*/*"}, 1.0)
         assert out == b"ok"
         assert attempts["n"] == 3
+
+
+class TestParseRetryAfter:
+    """_parse_retry_after interprets numeric delays, HTTP dates, and junk deterministically.
+
+    Numeric and unparseable cases come from the corpus table; the HTTP-date cases depend
+    on the clock, so a past date must clamp to 0.0 and a future date (against a frozen now)
+    must return the exact positive delta.
+    """
+
+    @pytest.mark.parametrize(("header", "expected"), RETRY_AFTER_CASES)
+    def test_table_cases(self, header: str | None, expected: float) -> None:
+        assert http_utils._parse_retry_after(header) == expected
+
+    def test_past_http_date_clamped_to_zero(self) -> None:
+        # An HTTP date in the past must never yield a negative wait; it clamps to 0.0.
+        assert http_utils._parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
+
+    def test_future_http_date_returns_positive_delta(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        class _FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+                return fixed_now.astimezone(tz) if tz is not None else fixed_now
+
+        monkeypatch.setattr(http_utils, "datetime", _FrozenDateTime)
+        header = format_datetime(fixed_now + timedelta(seconds=300), usegmt=True)
+        result = http_utils._parse_retry_after(header)
+        assert result == pytest.approx(300.0, abs=1.0)
+        assert result > 0.0
+
+
+class TestBackoffCapAndPostRetry:
+    """The manual 429/503 loop caps its sleep at HTTP_BACKOFF_MAX and never auto-resends a POST body."""
+
+    def test_retry_after_sleep_capped_at_backoff_max(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr(http_utils.time, "sleep", lambda s: sleeps.append(s))
+        session = FakeSession([FakeResponse(429, headers={"Retry-After": "1000"}), FakeResponse(200)])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+
+        out = http_utils._http_request("GET", "https://example.com/x", {"Accept": "*/*"}, 1.0)
+
+        assert out == b"{}"
+        # A 1000 s Retry-After is clamped to the configured ceiling, not slept verbatim.
+        assert sleeps == [HTTP_BACKOFF_MAX]
+
+    def test_post_500_sent_once_then_httperror_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session = FakeSession([FakeResponse(500)])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            http_utils._http_request("POST", "https://example.com/x", {"Accept": "*/*"}, 1.0, json_payload={"q": 1})
+
+        # The non-idempotent body is sent exactly once; no silent re-send on a hard 500.
+        assert session.post_calls == 1
+        assert session.get_calls == 0
+
+    def test_post_429_429_200_reaches_success_in_three_calls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session = FakeSession([FakeResponse(429), FakeResponse(429), FakeResponse(200)])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+
+        out = http_utils._http_request("POST", "https://example.com/x", {"Accept": "*/*"}, 1.0, json_payload={"q": 1})
+
+        assert out == b"{}"
+        # Manual 429 handling re-sends the POST twice, succeeding on the third call.
+        assert session.post_calls == 3
+        assert session.get_calls == 0
+
+
+class TestSessionRotation:
+    """_get_session rotates the per-thread Session at SESSION_ROTATION_THRESHOLD, closing the old one."""
+
+    def test_reuses_below_threshold_and_rotates_at_threshold(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        factory_calls = {"n": 0}
+
+        def _factory() -> FakeSession:
+            factory_calls["n"] += 1
+            return FakeSession(FakeResponse(200))
+
+        monkeypatch.setattr(http_utils, "_new_session", _factory)
+        try:
+            http_utils._THREAD_LOCAL.session = None
+            http_utils._THREAD_LOCAL.session_request_count = 0
+
+            first = http_utils._get_session()
+            assert isinstance(first, FakeSession)
+            assert factory_calls["n"] == 1
+
+            # Below the threshold: same Session, no fresh build, old one still open.
+            http_utils._THREAD_LOCAL.session_request_count = SESSION_ROTATION_THRESHOLD - 1
+            same = http_utils._get_session()
+            assert same is first
+            assert factory_calls["n"] == 1
+            assert first.closed is False
+
+            # At the threshold: old Session closed, a fresh one built, counter reset to 0.
+            http_utils._THREAD_LOCAL.session_request_count = SESSION_ROTATION_THRESHOLD
+            rotated = http_utils._get_session()
+            assert rotated is not first
+            assert first.closed is True
+            assert factory_calls["n"] == 2
+            assert http_utils._THREAD_LOCAL.session_request_count == 0
+        finally:
+            http_utils._THREAD_LOCAL.session = None
+            http_utils._THREAD_LOCAL.session_request_count = 0
+
+
+class TestDecodeJsonBodyScrub:
+    """A non-JSON error body carrying a query-string secret is redacted before it reaches the DecodeError."""
+
+    def test_secret_in_body_redacted_not_leaked(self) -> None:
+        raw = b"upstream 400 ?api_key=SECRETVALUE&q=1 <html>not json</html>"
+        with pytest.raises(DecodeError) as excinfo:
+            http_utils._decode_json_bytes(raw, "https://api.crossref.org/works")
+        message = str(excinfo.value)
+        assert "SECRETVALUE" not in message
+        assert "REDACTED" in message

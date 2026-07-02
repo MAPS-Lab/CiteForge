@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime, tzinfo
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from citeforge import cache as cache_mod
 from citeforge.cache import _AST, ResponseCache, get_cache_hit_counts, reset_cache_hit_counts
 
 
@@ -440,3 +442,64 @@ def test_month_boundary_recomputed_not_frozen(tmp_path: Path, monkeypatch: pytes
     april_boundary = cache._month_boundary
     assert april_boundary > march_boundary
     assert april_boundary == datetime(2026, 4, 1, tzinfo=_AST).timestamp()
+
+
+# --- Write-failure, disabled-flag, and defensive-copy contracts ---
+
+
+def test_atomic_write_oserror_swallowed_with_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An OSError during the atomic rename is swallowed and surfaced as a CACHE_WRITE_FAILED warning."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+
+    def _raise_oserror(*_a: object, **_k: object) -> None:
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(cache_mod.os, "replace", _raise_oserror)
+
+    # The "CiteForge" logger has propagate=False, so caplog's root handler never sees its
+    # records. Attach caplog's handler directly to that logger for the duration of the call.
+    cf_logger = logging.getLogger("CiteForge")
+    cf_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="CiteForge"):
+            cache.put("ns", "k", {"v": 1})  # must NOT raise despite the write failure
+    finally:
+        cf_logger.removeHandler(caplog.handler)
+
+    assert any("CACHE_WRITE_FAILED" in rec.getMessage() for rec in caplog.records)
+    # A failed atomic write leaves no entry file behind (the temp file is cleaned up).
+    assert not Path(cache._entry_path("ns", "k")).exists()
+
+
+def test_cache_disabled_get_put_are_noops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With CACHE_ENABLED False, get/put/put_negative are no-ops that touch no disk."""
+    monkeypatch.setattr(cache_mod, "CACHE_ENABLED", False)
+    cache = ResponseCache(cache_dir=str(tmp_path))
+
+    assert cache.get("ns", "k") is None
+    cache.put("ns", "k", {"v": 1})
+    cache.put_negative("ns", "k")
+    assert cache.get("ns", "k") is None
+
+    # Nothing was written: no entry file, no namespace directory, an empty cache root.
+    assert not Path(cache._entry_path("ns", "k")).exists()
+    assert not (tmp_path / "ns").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_get_returns_defensive_copy(tmp_path: Path) -> None:
+    """Mutating the dict returned by get() must not corrupt the stored payload."""
+    cache = ResponseCache(cache_dir=str(tmp_path))
+    cache.put("ns", "k", {"a": 1, "b": [1, 2]})
+
+    first = cache.get("ns", "k")
+    assert first == {"a": 1, "b": [1, 2]}
+    assert first is not None
+    first["a"] = 999
+    first["c"] = "mutated"
+
+    second = cache.get("ns", "k")
+    assert second == {"a": 1, "b": [1, 2]}
+    assert second is not first

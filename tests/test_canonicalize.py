@@ -19,6 +19,14 @@ from citeforge.canonicalize import (
     _rule_article_preprint_doi,
     canonicalize,
 )
+from citeforge.id_utils import is_secondary_doi
+from tests.corpus import PREPRINT_SERVER_JOURNALS
+
+# DOI fixtures drawn from tests.corpus.SECONDARY_DOI_CASES. Their classification is
+# load-bearing for the preprint-journal contracts below, so it is asserted in
+# test_doi_fixtures_are_classified_as_expected rather than assumed.
+_PUBLISHED_DOI = "10.1145/3580305"  # SECONDARY_DOI_CASES: is_secondary=False
+_SECONDARY_DOI = "10.48550/arxiv.2401.00001"  # SECONDARY_DOI_CASES: is_secondary=True
 
 
 def _load_repair(entry: dict[str, Any]) -> dict[str, Any]:
@@ -350,3 +358,235 @@ def test_complete_finalize_is_fixpoint_on_corpus() -> None:
         if entry["type"] != snapshot["type"] or entry["fields"] != snapshot["fields"]:
             non_fixpoint.append(bib_path)
     assert not non_fixpoint, f"COMPLETE_SKIP_FINALIZE not a data fixpoint for: {non_fixpoint[:10]}"
+
+
+# ---------------------------------------------------------------------------
+# Real-dispatch venueless / preprint downgrades (Site C, POST_MERGE)
+#
+# These drive the REAL canonicalize(entry, stage=POST_MERGE) dispatch and assert
+# the production rule performs the reclassification. They are the genuine home
+# for the contracts that tests/test_regression.py's TestVenuelessTypeDowngrade,
+# TestArticlePreprintDoiDowngrade, and TestPreprintJournalDowngrade only *claimed*
+# to test: those regression tests call merge_with_policy, observe that the
+# downgrade did NOT happen there, then re-implement it in the test body
+# (result["type"] = "misc") and assert on their own mutation -- so they would
+# stay green even if canonicalize.py deleted every rule. The tests below have no
+# such escape hatch; they mutate nothing and read only what canonicalize does.
+# ---------------------------------------------------------------------------
+def _load_then_post_twice(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply the three fix sites in order (LOAD_REPAIR -> POST_MERGE -> POST_MERGE).
+
+    Returns (settled_after_first_post_merge, after_repeat) so a caller can assert
+    the second POST_MERGE pass is a strict data fixpoint (the anti-oscillation
+    contract that keeps entry types from flipping between consecutive runs).
+    """
+    e = copy.deepcopy(entry)
+    canonicalize(e, stage=CanonicalStage.LOAD_REPAIR)
+    canonicalize(e, stage=CanonicalStage.POST_MERGE)
+    settled = copy.deepcopy(e)
+    canonicalize(e, stage=CanonicalStage.POST_MERGE)
+    return settled, e
+
+
+def test_doi_fixtures_are_classified_as_expected() -> None:
+    """Guard the DOI fixtures the downgrade contracts depend on.
+
+    If is_secondary_doi's verdict for these two DOIs ever flips, the preprint
+    contracts below would silently test the wrong branch. Assert the premise.
+    """
+    assert is_secondary_doi(_SECONDARY_DOI) is True
+    assert is_secondary_doi(_PUBLISHED_DOI) is False
+
+
+def test_real_dispatch_article_no_journal_becomes_misc() -> None:
+    """@article with no journal -> @misc through the REAL POST_MERGE dispatch.
+
+    Regression counterpart: TestVenuelessTypeDowngrade
+    .test_article_no_journal_with_published_doi_becomes_misc, which sets
+    result["type"] = "misc" itself. Here the dispatch does the downgrade.
+    """
+    result = _canon(_article())  # title/author/year only; no journal
+    assert result["type"] == "misc"
+    assert "journal" not in result["fields"]
+    # POST_MERGE is a data fixpoint on the downgraded entry.
+    assert canonicalize(copy.deepcopy(result), stage=CanonicalStage.POST_MERGE) is False
+
+
+def test_real_dispatch_article_no_journal_downgrades_even_with_published_doi() -> None:
+    """A published DOI does NOT rescue a journal-less @article: still @misc.
+
+    This is the exact shape TestVenuelessTypeDowngrade uses (a real published
+    DOI, no journal); the real rule downgrades on the missing journal alone.
+    """
+    result = _canon(_article(doi=_PUBLISHED_DOI, publisher="Underline Science Inc."))
+    assert result["type"] == "misc"
+    assert "journal" not in result["fields"]
+    assert result["fields"]["doi"] == _PUBLISHED_DOI
+
+
+def test_real_dispatch_inproceedings_no_booktitle_becomes_misc() -> None:
+    """@inproceedings with no booktitle -> @misc through the REAL POST_MERGE dispatch.
+
+    Regression counterpart: TestVenuelessTypeDowngrade
+    .test_inproceedings_no_booktitle_becomes_misc (which re-implements the flip).
+    """
+    result = _canon(_article(type="inproceedings"))  # no booktitle
+    assert result["type"] == "misc"
+    assert "booktitle" not in result["fields"]
+    assert canonicalize(copy.deepcopy(result), stage=CanonicalStage.POST_MERGE) is False
+
+
+def test_real_dispatch_article_with_journal_stays_article() -> None:
+    """Negative control: @article WITH a real journal is not falsely downgraded."""
+    result = _canon(_article(journal="Nature", doi="10.1038/s41586-024-00001"))
+    assert result["type"] == "article"
+    assert result["fields"]["journal"] == "Nature"
+
+
+@pytest.mark.parametrize("journal", PREPRINT_SERVER_JOURNALS)
+def test_real_dispatch_preprint_journal_published_doi_drops_journal(journal: str) -> None:
+    """@article whose journal names a preprint server + a PUBLISHED DOI.
+
+    Real POST_MERGE settles it to @misc with the stale preprint journal DROPPED
+    and the published DOI KEPT (no howpublished manufactured). Captured from the
+    live function: _rule_preprint_journal_to_misc always relabels @misc, and the
+    published-DOI branch pops the journal without asserting a preprint server.
+
+    Regression counterpart: TestPreprintJournalDowngrade, which only asserts that
+    PREPRINT_SERVERS *contains* the server strings and never drives a downgrade.
+    """
+    result = _canon(_article(journal=journal, doi=_PUBLISHED_DOI))
+    assert result["type"] == "misc"
+    assert "journal" not in result["fields"]
+    assert result["fields"]["doi"] == _PUBLISHED_DOI
+    assert "howpublished" not in result["fields"]
+    # Repeat POST_MERGE is a strict data fixpoint.
+    repeat = copy.deepcopy(result)
+    canonicalize(repeat, stage=CanonicalStage.POST_MERGE)
+    assert repeat["type"] == result["type"]
+    assert repeat["fields"] == result["fields"]
+
+
+@pytest.mark.parametrize("journal", PREPRINT_SERVER_JOURNALS)
+def test_real_dispatch_preprint_journal_secondary_doi_moves_to_howpublished(journal: str) -> None:
+    """@article whose journal names a preprint server + a SECONDARY DOI.
+
+    Real POST_MERGE settles it to @misc with the journal MOVED to howpublished
+    (case-normalized) and the journal field removed. The howpublished stays a
+    preprint-server label, so the misc->inproceedings upgrade correctly declines.
+    """
+    result = _canon(_article(journal=journal, doi=_SECONDARY_DOI))
+    assert result["type"] == "misc"
+    assert "journal" not in result["fields"]
+    # Journal string is carried into howpublished (normalization only touches case).
+    assert result["fields"]["howpublished"].lower() == journal.lower()
+    repeat = copy.deepcopy(result)
+    canonicalize(repeat, stage=CanonicalStage.POST_MERGE)
+    assert repeat["type"] == result["type"]
+    assert repeat["fields"] == result["fields"]
+
+
+@pytest.mark.parametrize("journal", PREPRINT_SERVER_JOURNALS)
+def test_real_dispatch_preprint_journal_no_doi_moves_to_howpublished(journal: str) -> None:
+    """@article whose journal names a preprint server + NO DOI.
+
+    Same terminal state as the secondary-DOI case: @misc, journal moved to
+    howpublished, no DOI fabricated. Exercises the else branch of
+    _rule_preprint_journal_to_misc (missing DOI is treated like a secondary one).
+    """
+    result = _canon(_article(journal=journal))
+    assert result["type"] == "misc"
+    assert "journal" not in result["fields"]
+    assert "doi" not in result["fields"]
+    assert result["fields"]["howpublished"].lower() == journal.lower()
+
+
+def test_real_dispatch_article_preprint_doi_no_pages_promotes_to_inproceedings() -> None:
+    """@article with a real journal + arXiv (secondary) DOI + no volume/pages.
+
+    THE captured real behavior (see real_bugs_found): POST_MERGE does NOT settle
+    at @misc. _rule_article_preprint_doi first downgrades to @misc and moves the
+    journal into howpublished, then _rule_howpublished_to_inproceedings re-promotes
+    that plain venue name into a FABRICATED @inproceedings with booktitle = the
+    original journal. The DOI is kept. This diverges from what
+    TestArticlePreprintDoiDowngrade.test_article_with_arxiv_doi_becomes_misc
+    asserts (it re-implements a @misc+howpublished result in its own body and
+    never runs this dispatch). The file's own test_r19_misc_downgrade_branch note
+    already documents this misc->inproceedings promotion at full POST_MERGE.
+    """
+    result = _canon(_article(journal="Neural Computing and Applications", doi="10.48550/arxiv.2302.02792"))
+    # Locked to the REAL end state, not the naive @misc expectation.
+    assert result["type"] == "inproceedings"
+    assert result["fields"]["booktitle"] == "Neural Computing and Applications"
+    assert "journal" not in result["fields"]
+    assert "howpublished" not in result["fields"]
+    assert result["fields"]["doi"] == "10.48550/arxiv.2302.02792"
+    # Even the fabricated @inproceedings is a data fixpoint (no further churn).
+    repeat = copy.deepcopy(result)
+    canonicalize(repeat, stage=CanonicalStage.POST_MERGE)
+    assert repeat["type"] == result["type"]
+    assert repeat["fields"] == result["fields"]
+
+
+def test_real_dispatch_article_preprint_doi_with_pages_keeps_article() -> None:
+    """Contrast branch: real journal + secondary DOI + volume/pages stays @article.
+
+    _rule_article_preprint_doi's keep-branch strips the preprint DOI/URL but does
+    NOT downgrade, so there is no journal->howpublished move and thus no spurious
+    @inproceedings promotion. This is the non-fabricating half of the same rule.
+    """
+    result = _canon(
+        _article(
+            journal="Neural Computing and Applications",
+            doi="10.48550/arxiv.2302.02792",
+            volume="42",
+            pages="1-20",
+            url="https://arxiv.org/abs/2302.02792",
+        )
+    )
+    assert result["type"] == "article"
+    assert result["fields"]["journal"] == "Neural Computing and Applications"
+    assert "doi" not in result["fields"]
+    assert "url" not in result["fields"]
+
+
+# ---------------------------------------------------------------------------
+# Anti-oscillation across the three fix sites (LOAD_REPAIR -> POST_MERGE x2)
+#
+# The real contract that keeps entry types + container fields from flipping
+# between consecutive pipeline runs: after the load-repair pass and the first
+# post-merge pass settle an entry, a second post-merge pass must be a strict
+# data fixpoint (identical type and fields).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("label", "entry"),
+    [
+        ("article_no_journal", _article()),
+        ("inproceedings_no_booktitle", _article(type="inproceedings")),
+        ("preprint_journal_secondary_doi", _article(journal="bioRxiv", doi=_SECONDARY_DOI)),
+        ("preprint_journal_published_doi", _article(journal="arXiv", doi=_PUBLISHED_DOI)),
+        ("real_journal_preprint_doi", _article(journal="Neural Computing and Applications", doi=_SECONDARY_DOI)),
+    ],
+)
+def test_three_fix_sites_reach_a_fixpoint(label: str, entry: dict[str, Any]) -> None:
+    """Applying canonicalize at LOAD_REPAIR then POST_MERGE then POST_MERGE again
+    reaches a fixpoint: the type and every field are identical after the repeat.
+
+    This is the real anti-oscillation guarantee (the three-way fix pattern in
+    CLAUDE.md), driven end to end through the dispatch rather than asserted on a
+    single rule in isolation.
+    """
+    settled, after_repeat = _load_then_post_twice(entry)
+    assert after_repeat["type"] == settled["type"], f"{label}: type oscillated"
+    assert after_repeat["fields"] == settled["fields"], f"{label}: fields oscillated"
+
+
+def test_three_fix_sites_container_settles_venueless_to_misc() -> None:
+    """Concrete anti-oscillation end state: a journal-less @article settles at
+    @misc with no journal/booktitle container and stays there on repeat."""
+    settled, after_repeat = _load_then_post_twice(_article())
+    assert settled["type"] == "misc"
+    assert "journal" not in settled["fields"]
+    assert "booktitle" not in settled["fields"]
+    assert after_repeat["type"] == "misc"
+    assert after_repeat["fields"] == settled["fields"]
