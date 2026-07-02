@@ -9,7 +9,7 @@ from typing import Any
 from ..cache import response_cache
 from ..config import CACHE_TTL_DOI_DAYS, CACHE_TTL_SEARCH_DAYS, DATACITE_BASE, GEMINI_BASE, ORCID_BASE
 from ..exceptions import ALL_API_ERRORS, ALL_FETCH_ERRORS
-from ..http_utils import _scrub_secrets, handle_api_errors, http_get_json, http_post_json
+from ..http_utils import handle_api_errors, http_get_json, http_post_json
 from ..id_utils import _norm_doi
 from ..log_utils import LogCategory, LogSource, logger
 from ..text_utils import extract_year_from_any, normalize_title
@@ -42,7 +42,10 @@ def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | 
         "Return ONLY the CamelCase title with no quotes, explanation, spaces, or punctuation."
     )
 
-    url = f"{GEMINI_BASE}?key={api_key}"
+    # The API key travels in the x-goog-api-key header rather than a URL query
+    # parameter, so it never appears in a request URL, redirect, or log record.
+    url = GEMINI_BASE
+    request_headers = {"x-goog-api-key": api_key}
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -63,7 +66,7 @@ def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | 
             category=LogCategory.CITEKEY,
         )
         try:
-            data = http_post_json(url, payload, timeout=15.0)
+            data = http_post_json(url, payload, headers=request_headers, timeout=15.0)
             break  # success
         except _requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 429 and attempt < max_retries:
@@ -81,7 +84,7 @@ def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | 
                 continue
             logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
             logger.warn(
-                f"API call failed: {_scrub_secrets(str(e))}",
+                f"API call failed: {type(e).__name__}",
                 category=LogCategory.ERROR,
                 source=LogSource.SYSTEM,
             )
@@ -89,7 +92,7 @@ def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | 
         except (*ALL_API_ERRORS, ValueError) as e:
             logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
             logger.warn(
-                f"API call failed: {_scrub_secrets(str(e))}",
+                f"API call failed: {type(e).__name__}",
                 category=LogCategory.ERROR,
                 source=LogSource.SYSTEM,
             )
