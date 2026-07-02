@@ -6,8 +6,8 @@ from textwrap import dedent
 
 import pytest
 
-from src import bibtex_utils as bt
-from src import config, exceptions, http_utils, id_utils, io_utils, merge_utils, text_utils
+from citeforge import bibtex_utils as bt
+from citeforge import config, exceptions, http_utils, id_utils, io_utils, merge_utils, text_utils
 from tests.conftest import extract_bibtex_field
 
 

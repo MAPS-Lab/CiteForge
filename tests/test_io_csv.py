@@ -4,8 +4,8 @@ import csv
 from pathlib import Path
 from textwrap import dedent
 
-from src import io_utils
-from src.models import Record
+from citeforge import io_utils
+from citeforge.models import Record
 
 _SOURCE_FLAG_KEYS = [
     "scholar_bib",

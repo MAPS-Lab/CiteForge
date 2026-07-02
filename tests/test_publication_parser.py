@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.publication_parser import parse_publication_string
+from citeforge.publication_parser import parse_publication_string
 
 
 class TestJournalPatterns:

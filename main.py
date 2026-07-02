@@ -11,20 +11,20 @@ from __future__ import annotations
 import os
 import sys
 
-from src.canonicalize import _fixup_bib_entry  # noqa: F401  # re-exported for test imports
-from src.config import (
+from citeforge.canonicalize import _fixup_bib_entry  # noqa: F401  # re-exported for test imports
+from citeforge.config import (
     DEFAULT_INPUT,
     DEFAULT_OUT_DIR,
     DEFAULT_S2_KEY_FILE,
     DEFAULT_SERPAPI_KEY_FILE,
     DEFAULT_SERPLY_KEY_FILE,
 )
-from src.exceptions import (
+from citeforge.exceptions import (
     FILE_IO_ERRORS,
     FILE_READ_ERRORS,
 )
-from src.http_utils import reset_api_call_counts
-from src.io_utils import (
+from citeforge.http_utils import reset_api_call_counts
+from citeforge.io_utils import (
     init_summary_csv,
     read_gemini_api_key,
     read_openreview_credentials,
@@ -33,10 +33,10 @@ from src.io_utils import (
     read_serpapi_api_key,
     read_serply_api_key,
 )
-from src.log_utils import LogCategory, logger
-from src.pipeline.postrun import finalize_run
-from src.pipeline.scheduler import prioritize_records, run_all
-from src.textnorm import _is_corrupted_title, _is_garbage_title  # noqa: F401  # re-exported for test imports
+from citeforge.log_utils import LogCategory, logger
+from citeforge.pipeline.postrun import finalize_run
+from citeforge.pipeline.scheduler import prioritize_records, run_all
+from citeforge.textnorm import _is_corrupted_title, _is_garbage_title  # noqa: F401  # re-exported for test imports
 
 
 def main() -> int:

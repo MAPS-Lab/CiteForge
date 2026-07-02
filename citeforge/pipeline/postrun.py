@@ -14,28 +14,28 @@ import os
 import re
 import time
 
-from src import bibtex_utils as bt
-from src.cache import get_cache_hit_counts
-from src.canonicalize import (
+from citeforge import bibtex_utils as bt
+from citeforge.cache import get_cache_hit_counts
+from citeforge.canonicalize import (
     _fixup_bib_entry,
 )
-from src.config import (
+from citeforge.config import (
     DEFAULT_A2I2_INPUT,
     SIM_MERGE_DUPLICATE_THRESHOLD,
     get_min_year,
 )
-from src.fsscan import iter_author_bibs, iter_output_dirs
-from src.http_utils import get_api_call_counts
-from src.io_utils import (
+from citeforge.fsscan import iter_author_bibs, iter_output_dirs
+from citeforge.http_utils import get_api_call_counts
+from citeforge.io_utils import (
     build_a2i2_folder,
     collect_orphan_files,
     flush_summary_csv,
     reconcile_summary_csv,
     safe_write_file,
 )
-from src.log_utils import LogCategory, logger
-from src.models import Record
-from src.text_utils import (
+from citeforge.log_utils import LogCategory, logger
+from citeforge.models import Record
+from citeforge.text_utils import (
     extract_year_from_any,
     title_similarity,
 )

@@ -5,10 +5,10 @@ defects in scholarly titles and booktitles: fused compound words (hyphens
 stripped by Google Scholar), acronym casing, verbose conference metadata,
 non-bibliographic "garbage" titles, and DBLP author-name corruption.
 
-Depends only on stdlib ``re`` and ``src.config`` (no dependency on ``main`` or
+Depends only on stdlib ``re`` and ``citeforge.config`` (no dependency on ``main`` or
 the pipeline), so the canonicalization layer and the orchestrator can both build
 on it without an import cycle. Pattern data (compound-word and acronym-case
-dictionaries) is sourced from ``src.config`` per the config-driven convention;
+dictionaries) is sourced from ``citeforge.config`` per the config-driven convention;
 this module owns only the compiled matching logic.
 """
 
@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import re
 
-from src.config import ACRONYM_CASE_CORRECTIONS, COMPOUND_SUFFIXES, FUSED_COMPOUND_WORDS
+from citeforge.config import ACRONYM_CASE_CORRECTIONS, COMPOUND_SUFFIXES, FUSED_COMPOUND_WORDS
 
 # Pre-compiled patterns for _fix_fused_compounds (avoids ~800 re.compile() calls per invocation)
 # Each compiled pattern carries a cheap literal pre-guard. A ``\b<word>\b``
 # pattern cannot match unless the literal word/suffix is a substring of the
 # working string (word boundaries only add constraints), so a substring test
 # lets us skip the vast majority of re.sub calls that would match nothing.
-# Literals are sourced from src.config (config-driven convention).
+# Literals are sourced from citeforge.config (config-driven convention).
 _FUSED_DICT_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"\b" + re.escape(fused) + r"\b", re.IGNORECASE), repl, fused.lower())
     for fused, repl in FUSED_COMPOUND_WORDS.items()

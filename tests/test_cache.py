@@ -8,12 +8,12 @@ from unittest.mock import patch
 
 import pytest
 
-from src.cache import _AST, ResponseCache, get_cache_hit_counts, reset_cache_hit_counts
+from citeforge.cache import _AST, ResponseCache, get_cache_hit_counts, reset_cache_hit_counts
 
 
 def _freeze_cache_clock(monkeypatch: pytest.MonkeyPatch, when: datetime) -> None:
-    """Freeze src.cache's wall clock to a fixed instant so expiry tests are date-independent."""
-    import src.cache as cache_mod
+    """Freeze citeforge.cache's wall clock to a fixed instant so expiry tests are date-independent."""
+    import citeforge.cache as cache_mod
 
     class _FrozenDatetime(datetime):
         @classmethod
@@ -372,13 +372,13 @@ def test_safe_negative_expired_created_on_monday() -> None:
     created_ts = datetime(2026, 3, 2, 12, 0, 0, tzinfo=_AST).timestamp()
 
     # March 8 (Saturday) — NOT expired (next Monday is March 9)
-    with patch("src.cache.datetime") as mock_dt:
+    with patch("citeforge.cache.datetime") as mock_dt:
         mock_dt.fromtimestamp = datetime.fromtimestamp
         mock_dt.now.return_value = datetime(2026, 3, 8, 23, 59, 0, tzinfo=_AST)
         assert not ResponseCache._safe_negative_expired(created_ts)
 
     # March 9 (Monday) — expired
-    with patch("src.cache.datetime") as mock_dt:
+    with patch("citeforge.cache.datetime") as mock_dt:
         mock_dt.fromtimestamp = datetime.fromtimestamp
         mock_dt.now.return_value = datetime(2026, 3, 9, 0, 0, 0, tzinfo=_AST)
         assert ResponseCache._safe_negative_expired(created_ts)
@@ -390,13 +390,13 @@ def test_safe_negative_expired_month_before_monday() -> None:
     created_ts = datetime(2026, 3, 31, 12, 0, 0, tzinfo=_AST).timestamp()
 
     # March 31 end-of-day — NOT expired
-    with patch("src.cache.datetime") as mock_dt:
+    with patch("citeforge.cache.datetime") as mock_dt:
         mock_dt.fromtimestamp = datetime.fromtimestamp
         mock_dt.now.return_value = datetime(2026, 3, 31, 23, 59, 0, tzinfo=_AST)
         assert not ResponseCache._safe_negative_expired(created_ts)
 
     # April 1 — expired (month boundary before Monday)
-    with patch("src.cache.datetime") as mock_dt:
+    with patch("citeforge.cache.datetime") as mock_dt:
         mock_dt.fromtimestamp = datetime.fromtimestamp
         mock_dt.now.return_value = datetime(2026, 4, 1, 0, 0, 0, tzinfo=_AST)
         assert ResponseCache._safe_negative_expired(created_ts)
@@ -408,13 +408,13 @@ def test_safe_negative_expired_december() -> None:
     created_ts = datetime(2026, 12, 28, 12, 0, 0, tzinfo=_AST).timestamp()
 
     # December 31 — NOT expired
-    with patch("src.cache.datetime") as mock_dt:
+    with patch("citeforge.cache.datetime") as mock_dt:
         mock_dt.fromtimestamp = datetime.fromtimestamp
         mock_dt.now.return_value = datetime(2026, 12, 31, 23, 59, 0, tzinfo=_AST)
         assert not ResponseCache._safe_negative_expired(created_ts)
 
     # January 1, 2027 — expired
-    with patch("src.cache.datetime") as mock_dt:
+    with patch("citeforge.cache.datetime") as mock_dt:
         mock_dt.fromtimestamp = datetime.fromtimestamp
         mock_dt.now.return_value = datetime(2027, 1, 1, 0, 0, 0, tzinfo=_AST)
         assert ResponseCache._safe_negative_expired(created_ts)

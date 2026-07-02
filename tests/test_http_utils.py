@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import requests
 
-from src import http_utils
-from src.http_utils import _decode_json_bytes, _scrub_secrets
+from citeforge import http_utils
+from citeforge.http_utils import _decode_json_bytes, _scrub_secrets
 
 
 class TestSecretRedaction:

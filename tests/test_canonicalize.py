@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from src.bibtex_utils import parse_bibtex_to_dict
-from src.canonicalize import (
+from citeforge.bibtex_utils import parse_bibtex_to_dict
+from citeforge.canonicalize import (
     CanonicalStage,
     _rule_article_preprint_doi,
     canonicalize,

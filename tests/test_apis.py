@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
-from src import api_configs, api_generics, bibtex_utils, doi_utils
-from src.clients import scholar, search_apis
-from src.http_utils import http_get_json
+from citeforge import api_configs, api_generics, bibtex_utils, doi_utils
+from citeforge.clients import scholar, search_apis
+from citeforge.http_utils import http_get_json
 from tests.fixtures import load_api_keys
 from tests.test_data import API_SPECIFIC_PAPERS, KNOWN_PAPERS, OPENALEX_CANNED_WORK
 

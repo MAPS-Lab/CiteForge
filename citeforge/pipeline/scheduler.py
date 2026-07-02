@@ -15,16 +15,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from src.clients.helpers import get_article_year, strip_html_tags
-from src.clients.scholar import (
+from citeforge.clients.helpers import get_article_year, strip_html_tags
+from citeforge.clients.scholar import (
     fetch_author_publications,
     merge_publication_lists,
     sort_articles_by_year_current_first,
 )
-from src.clients.search_apis import (
+from citeforge.clients.search_apis import (
     dblp_fetch_for_author,
 )
-from src.config import (
+from citeforge.config import (
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
     REQUEST_DELAY_MAX,
@@ -32,14 +32,14 @@ from src.config import (
     SIM_MERGE_DUPLICATE_THRESHOLD,
     get_min_year,
 )
-from src.exceptions import (
+from citeforge.exceptions import (
     FULL_OPERATION_ERRORS,
 )
-from src.fsscan import iter_author_bibs
-from src.log_utils import LogCategory, LogSource, logger
-from src.models import Record
-from src.pipeline.article import process_article
-from src.text_utils import (
+from citeforge.fsscan import iter_author_bibs
+from citeforge.log_utils import LogCategory, LogSource, logger
+from citeforge.models import Record
+from citeforge.pipeline.article import process_article
+from citeforge.text_utils import (
     format_author_dirname,
     trim_title_default,
 )

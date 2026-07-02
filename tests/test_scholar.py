@@ -8,15 +8,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.clients.scholar import fetch_author_publications, fetch_scholar_citation
-from src.clients.serpapi_scholar import serpapi_fetch_author_publications
-from src.clients.serply_scholar import (
+from citeforge.clients.scholar import fetch_author_publications, fetch_scholar_citation
+from citeforge.clients.serpapi_scholar import serpapi_fetch_author_publications
+from citeforge.clients.serply_scholar import (
     serply_fetch_author_publications,
     serply_fetch_citation,
 )
 
-_SERPLY_HTTP_PATCH = "src.clients.serply_scholar.http_fetch_bytes"
-_SERPAPI_HTTP_PATCH = "src.clients.serpapi_scholar.http_fetch_bytes"
+_SERPLY_HTTP_PATCH = "citeforge.clients.serply_scholar.http_fetch_bytes"
+_SERPAPI_HTTP_PATCH = "citeforge.clients.serpapi_scholar.http_fetch_bytes"
 
 
 def _json_bytes(obj: Any) -> bytes:
@@ -552,8 +552,8 @@ class TestSerplyFetchCitation:
 class TestFacadeCacheBehavior:
     """Test that facade functions use cache and skip API calls on cache hit."""
 
-    @patch("src.clients.scholar.response_cache")
-    @patch("src.clients.scholar.serpapi_fetch_author_publications")
+    @patch("citeforge.clients.scholar.response_cache")
+    @patch("citeforge.clients.scholar.serpapi_fetch_author_publications")
     def test_publications_cache_hit(
         self,
         mock_serpapi: MagicMock,
@@ -568,8 +568,8 @@ class TestFacadeCacheBehavior:
         mock_cache.get.assert_called_once_with("serpapi_publications", "author_a|page_0")
         mock_serpapi.assert_not_called()
 
-    @patch("src.clients.scholar.response_cache")
-    @patch("src.clients.scholar.serpapi_fetch_author_publications")
+    @patch("citeforge.clients.scholar.response_cache")
+    @patch("citeforge.clients.scholar.serpapi_fetch_author_publications")
     def test_publications_cache_miss(
         self,
         mock_serpapi: MagicMock,
@@ -590,8 +590,8 @@ class TestFacadeCacheBehavior:
         assert put_args[0] == "serpapi_publications"
         assert put_args[1] == "author_b|page_0"
 
-    @patch("src.clients.scholar.response_cache")
-    @patch("src.clients.scholar.serpapi_fetch_author_publications")
+    @patch("citeforge.clients.scholar.response_cache")
+    @patch("citeforge.clients.scholar.serpapi_fetch_author_publications")
     def test_publications_cache_miss_empty_result(
         self,
         mock_serpapi: MagicMock,
@@ -609,8 +609,8 @@ class TestFacadeCacheBehavior:
         mock_serpapi.assert_called_once()
         mock_cache.put.assert_not_called()
 
-    @patch("src.clients.scholar.response_cache")
-    @patch("src.clients.scholar.serply_fetch_citation")
+    @patch("citeforge.clients.scholar.response_cache")
+    @patch("citeforge.clients.scholar.serply_fetch_citation")
     def test_citation_cache_hit(
         self,
         mock_serply: MagicMock,
@@ -623,8 +623,8 @@ class TestFacadeCacheBehavior:
         assert result["title"] == "Cached Paper"
         mock_serply.assert_not_called()
 
-    @patch("src.clients.scholar.response_cache")
-    @patch("src.clients.scholar.serply_fetch_citation")
+    @patch("citeforge.clients.scholar.response_cache")
+    @patch("citeforge.clients.scholar.serply_fetch_citation")
     def test_citation_cache_miss(self, mock_serply: MagicMock, mock_cache: MagicMock) -> None:
         """Cache miss should call Serply and store the result."""
         mock_cache.get.return_value = None
@@ -639,8 +639,8 @@ class TestFacadeCacheBehavior:
         assert put_args[0] == "serply_citation"
         assert put_args[2] == {"title": "Fresh Citation"}
 
-    @patch("src.clients.scholar.response_cache")
-    @patch("src.clients.scholar.serply_fetch_citation")
+    @patch("citeforge.clients.scholar.response_cache")
+    @patch("citeforge.clients.scholar.serply_fetch_citation")
     def test_citation_negative_not_cached(
         self,
         mock_serply: MagicMock,
@@ -659,8 +659,8 @@ class TestFacadeCacheBehavior:
         result = fetch_scholar_citation("key", "", "Author")
         assert result is None
 
-    @patch("src.clients.scholar.response_cache")
-    @patch("src.clients.scholar.serpapi_fetch_author_publications")
+    @patch("citeforge.clients.scholar.response_cache")
+    @patch("citeforge.clients.scholar.serpapi_fetch_author_publications")
     def test_stale_cache_invalidated(
         self,
         mock_serpapi: MagicMock,
@@ -680,8 +680,8 @@ class TestFacadeCacheBehavior:
         mock_cache.invalidate.assert_called_once()
         mock_serpapi.assert_called_once()
 
-    @patch("src.clients.scholar.response_cache")
-    @patch("src.clients.scholar.serpapi_fetch_author_publications")
+    @patch("citeforge.clients.scholar.response_cache")
+    @patch("citeforge.clients.scholar.serpapi_fetch_author_publications")
     def test_complete_cache_not_invalidated(
         self,
         mock_serpapi: MagicMock,
@@ -704,10 +704,10 @@ class TestThreadSafety:
     @pytest.mark.parametrize(
         ("module_path", "forbidden_attr"),
         [
-            ("src.clients.serply_scholar", "_lock"),
-            ("src.clients.serply_scholar", "_author_pubs_cache"),
-            ("src.clients.serpapi_scholar", "_lock"),
-            ("src.clients.serpapi_scholar", "_author_pubs_cache"),
+            ("citeforge.clients.serply_scholar", "_lock"),
+            ("citeforge.clients.serply_scholar", "_author_pubs_cache"),
+            ("citeforge.clients.serpapi_scholar", "_lock"),
+            ("citeforge.clients.serpapi_scholar", "_author_pubs_cache"),
         ],
     )
     def test_no_module_level_state(self, module_path: str, forbidden_attr: str) -> None:

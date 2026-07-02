@@ -20,12 +20,12 @@ from typing import Any
 
 import pytest
 
-from src import bibtex_utils as bt
-from src import id_utils as idu
-from src import merge_utils as mu
-from src import text_utils as tu
-from src.canonicalize import CanonicalStage, canonicalize
-from src.config import SIM_DEDUP_COMPOSITE_THRESHOLD
+from citeforge import bibtex_utils as bt
+from citeforge import id_utils as idu
+from citeforge import merge_utils as mu
+from citeforge import text_utils as tu
+from citeforge.canonicalize import CanonicalStage, canonicalize
+from citeforge.config import SIM_DEDUP_COMPOSITE_THRESHOLD
 
 
 def _entry(etype: str, **fields: str) -> dict[str, Any]:

@@ -9,10 +9,10 @@ from typing import Any
 
 import pytest
 
-from src import bibtex_utils, merge_utils
-from src.clients import scholar, search_apis
-from src.config import get_min_year
-from src.models import Record
+from citeforge import bibtex_utils, merge_utils
+from citeforge.clients import scholar, search_apis
+from citeforge.config import get_min_year
+from citeforge.models import Record
 from tests.fixtures import load_api_keys
 from tests.test_data import KNOWN_PAPERS, REQUIRED_FIELDS, TEST_AUTHOR
 
@@ -214,7 +214,7 @@ def test_csv_summary_integration(tmp_path: Path) -> None:
     """
     Confirm that CSV summary export integrates correctly with the processing pipeline.
     """
-    from src.io_utils import append_summary_to_csv, init_summary_csv
+    from citeforge.io_utils import append_summary_to_csv, init_summary_csv
 
     csv_path = tmp_path / "summary.csv"
     csv_path_str = str(csv_path)

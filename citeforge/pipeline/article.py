@@ -15,20 +15,20 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from src import bibtex_utils as bt
-from src import id_utils as idu
-from src import merge_utils as mu
-from src.canonicalize import (
+from citeforge import bibtex_utils as bt
+from citeforge import id_utils as idu
+from citeforge import merge_utils as mu
+from citeforge.canonicalize import (
     CanonicalStage,
     _fixup_bib_entry,  # noqa: F401  # re-exported for test imports
     canonicalize,
 )
-from src.clients.helpers import extract_authors_from_article, get_article_year, strip_html_tags
-from src.clients.scholar import (
+from citeforge.clients.helpers import extract_authors_from_article, get_article_year, strip_html_tags
+from citeforge.clients.scholar import (
     build_bibtex_from_scholar_fields,
     fetch_scholar_citation,
 )
-from src.clients.search_apis import (
+from citeforge.clients.search_apis import (
     arxiv_search,
     build_bibtex_from_arxiv,
     build_bibtex_from_crossref,
@@ -46,7 +46,7 @@ from src.clients.search_apis import (
     pubmed_search_papers_multiple,
     s2_search_papers_multiple,
 )
-from src.config import (
+from citeforge.config import (
     GENERIC_SERIES_NAMES,
     MIN_TITLE_WORDS,
     PREPRINT_SERVERS,
@@ -56,22 +56,22 @@ from src.config import (
     SIM_PREPRINT_TITLE_THRESHOLD,
     SKIP_SCHOLAR_FOR_EXISTING_FILES,
 )
-from src.doi_utils import process_validated_doi
-from src.exceptions import (
+from citeforge.doi_utils import process_validated_doi
+from citeforge.exceptions import (
     ALL_API_ERRORS,
     PARSE_ERRORS,
 )
-from src.fsscan import iter_author_bibs
-from src.http_utils import http_get_text
-from src.io_utils import (
+from citeforge.fsscan import iter_author_bibs
+from citeforge.http_utils import http_get_text
+from citeforge.io_utils import (
     append_summary_to_csv,
     is_known_summary_path,
     safe_write_file,
 )
-from src.log_utils import LogCategory, LogSource, logger
-from src.models import Record
-from src.publication_parser import parse_publication_string
-from src.text_utils import (
+from citeforge.log_utils import LogCategory, LogSource, logger
+from citeforge.models import Record
+from citeforge.publication_parser import parse_publication_string
+from citeforge.text_utils import (
     author_name_matches,
     extract_year_from_any,
     format_author_dirname,
@@ -79,7 +79,7 @@ from src.text_utils import (
     title_similarity,
     trim_title_default,
 )
-from src.textnorm import _is_corrupted_title, _is_garbage_title
+from citeforge.textnorm import _is_corrupted_title, _is_garbage_title
 
 _ARXIV_ABS_RE = re.compile(r"arxiv\.org/abs/(\d{4}\.\d{4,5})", re.IGNORECASE)
 
@@ -376,7 +376,7 @@ def process_article(
                 continue
 
     # Fix up stale entries loaded from disk before enrichment. The pure entry
-    # field and type rewrites are single-sourced in src/canonicalize.py at the
+    # field and type rewrites are single-sourced in citeforge/canonicalize.py at the
     # LOAD_REPAIR stage, and the destructive title==venue delete and the
     # bare-ampersand rewrite trigger stay here in the pipeline.
     if existing_file_loaded and baseline_entry is not None:
@@ -999,7 +999,7 @@ def process_article(
 
             # Fall back to cached HTML scraping only if no DOI found yet
             if not doi_candidates:
-                from src.cache import response_cache as _doi_cache
+                from citeforge.cache import response_cache as _doi_cache
 
                 for u in filter(None, url_candidates):
                     _u_str = str(u)
@@ -1116,7 +1116,7 @@ def process_article(
         merged_fields = merged.get("fields") or {}
 
         # Phase-4 post-merge canonicalization: entry-type reclassification and
-        # text/venue normalization, single-sourced in src/canonicalize.py.
+        # text/venue normalization, single-sourced in citeforge/canonicalize.py.
         # POST_MERGE is the terminal stage; absence rules (article/inproceedings
         # missing venue, preprint-DOI downgrade) fire here after enrichment.
         canonicalize(merged, stage=CanonicalStage.POST_MERGE)

@@ -17,8 +17,8 @@ python3 main.py --force   # Force re-enrichment (ignore cache completeness)
 All three must pass before merge:
 
 ```bash
-ruff check src/ tests/ main.py      # Lint
-mypy src/ main.py                    # Type check (strict, ignore_missing_imports)
+ruff check citeforge/ tests/ main.py      # Lint
+mypy citeforge/ main.py                    # Type check (strict, ignore_missing_imports)
 pytest tests/ -v --tb=short          # Tests (full suite, Python 3.10-3.13)
 ```
 
@@ -28,9 +28,9 @@ Ruff config: line-length 120, rules E/F/W/I/N/UP/B/C4/SIM/RUF/S (see pyproject.t
 
 ## Architecture
 
-`main.py` is a thin command-line entry point (~120 LOC) that loads API keys, reads author records, and delegates to the `src/pipeline/` package (`article.py` for per-article enrichment, `scheduler.py` for author-level scheduling, `postrun.py` for the post-run tail). Each article passes through Phase 1 (DOI validation) → Phase 2 (multi-API enrichment) → Phase 2.5 (SerpAPI publication string fallback) → Phase 3 (late DOI inference) → Phase 4 (trust-based merge + save). Post-run steps run in order: flush CSV → reconcile phantoms → remove orphans → year-window cleanup → post-run fixup → build a2i2 → rebuild baseline.json → rebuild badges.json.
+`main.py` is a thin command-line entry point (~120 LOC) that loads API keys, reads author records, and delegates to the `citeforge/pipeline/` package (`article.py` for per-article enrichment, `scheduler.py` for author-level scheduling, `postrun.py` for the post-run tail). Each article passes through Phase 1 (DOI validation) → Phase 2 (multi-API enrichment) → Phase 2.5 (SerpAPI publication string fallback) → Phase 3 (late DOI inference) → Phase 4 (trust-based merge + save). Post-run steps run in order: flush CSV → reconcile phantoms → remove orphans → year-window cleanup → post-run fixup → build a2i2 → rebuild baseline.json → rebuild badges.json.
 
-Trust hierarchy in `src/merge_utils.py:merge_with_policy()` merges fields from 13 ranked sources with special override rules for DOI (published > preprint), journal (never downgrade to preprint), title (prefer longer), pages (reject invalid), and booktitle (upgrade generic series to conference name).
+Trust hierarchy in `citeforge/merge_utils.py:merge_with_policy()` merges fields from 13 ranked sources with special override rules for DOI (published > preprint), journal (never downgrade to preprint), title (prefer longer), pages (reject invalid), and booktitle (upgrade generic series to conference name).
 
 ## Three-Way Fix Pattern (CRITICAL)
 
@@ -51,9 +51,9 @@ The following fixes are also applied in all 3 locations:
 
 ## Key Conventions
 
-- **Config-driven**: All thresholds, API endpoints, trust order, rate limits, compound word dictionaries live in `src/config.py`. Never hardcode these values elsewhere.
+- **Config-driven**: All thresholds, API endpoints, trust order, rate limits, compound word dictionaries live in `citeforge/config.py`. Never hardcode these values elsewhere.
 - **Determinism**: Pipeline produces byte-identical output across consecutive cache-hit runs. Use `sorted()` for all directory/file iterations. No randomization in output-affecting code.
-- **DOI normalization**: Always use `_norm_doi()` from `src/id_utils.py`. Always pair DOI matches with `title_similarity >= 0.55` check.
+- **DOI normalization**: Always use `_norm_doi()` from `citeforge/id_utils.py`. Always pair DOI matches with `title_similarity >= 0.55` check.
 - **Preprint detection**: Uses `PREPRINT_SERVERS`, `PREPRINT_DOI_PREFIXES`, and `PREPRINT_ONLY_PUBLISHERS`. Check all three for completeness.
 - **Container fields**: `@article` → `journal`, `@inproceedings`/`@incollection` → `booktitle`, `@misc` → `howpublished`. See `get_container_field()`.
 - **Repository guard**: `REPOSITORY_AS_JOURNAL` (Zenodo, OSTI, Figshare, etc.) prevents @misc→@inproceedings oscillation.
@@ -67,7 +67,7 @@ The following fixes are also applied in all 3 locations:
 
 ## Testing Patterns
 
-- Tests in `tests/` mirror `src/` modules (e.g., `test_merge.py` tests `merge_utils.py`)
+- Tests in `tests/` mirror `citeforge/` modules (e.g., `test_merge.py` tests `merge_utils.py`)
 - `tests/conftest.py` + `tests/fixtures.py` provide shared fixtures
 - Integration tests requiring API keys auto-skip when keys unavailable
 - Use `monkeypatch` for HTTP mocking; never make real API calls in unit tests

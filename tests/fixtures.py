@@ -3,7 +3,7 @@ from __future__ import annotations
 import functools
 from typing import Any
 
-from src import io_utils
+from citeforge import io_utils
 from tests.test_data import API_CONFIGS
 
 

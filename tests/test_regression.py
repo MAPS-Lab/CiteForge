@@ -14,20 +14,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src import bibtex_utils as bt
-from src import id_utils, merge_utils, text_utils
-from src.api_generics import (
+from citeforge import bibtex_utils as bt
+from citeforge import id_utils, merge_utils, text_utils
+from citeforge.api_generics import (
     APISearchConfig,
     _resolve_dotted,
     _resolve_dotted_str,
     search_api_generic_multiple,
 )
-from src.bibtex_build import determine_entry_type
-from src.bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict
-from src.clients.scholar import _deduplicate_publication_list
-from src.clients.search_apis import bibtex_from_csl
-from src.clients.utility_apis import gemini_generate_short_title, orcid_fetch_works
-from src.config import (
+from citeforge.bibtex_build import determine_entry_type
+from citeforge.bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict
+from citeforge.clients.scholar import _deduplicate_publication_list
+from citeforge.clients.search_apis import bibtex_from_csl
+from citeforge.clients.utility_apis import gemini_generate_short_title, orcid_fetch_works
+from citeforge.config import (
     ABBREVIATED_VENUE_MAP,
     MIN_TITLE_WORDS,
     OPENREVIEW_SESSION_TTL_SECS,
@@ -35,17 +35,17 @@ from src.config import (
     PREPRINT_SERVERS,
     SIM_MERGE_DUPLICATE_THRESHOLD,
 )
-from src.doi_utils import validate_doi_candidate
-from src.http_utils import (
+from citeforge.doi_utils import validate_doi_candidate
+from citeforge.http_utils import (
     _THREAD_LOCAL,
     TokenBucketRateLimiter,
     _get_rate_limiter,
     _http_request,
     http_post_json,
 )
-from src.io_utils import read_records
-from src.merge_utils import merge_with_policy, save_entry_to_file
-from src.text_utils import author_name_matches, author_overlap_ratio
+from citeforge.io_utils import read_records
+from citeforge.merge_utils import merge_with_policy, save_entry_to_file
+from citeforge.text_utils import author_name_matches, author_overlap_ratio
 from tests.conftest import extract_bibtex_field
 
 
@@ -191,8 +191,8 @@ class TestSearchApiGenericMultipleCache:
         }
 
         with (
-            patch("src.api_generics.response_cache") as mock_cache,
-            patch("src.api_generics.http_get_json", return_value=fake_results) as mock_http,
+            patch("citeforge.api_generics.response_cache") as mock_cache,
+            patch("citeforge.api_generics.http_get_json", return_value=fake_results) as mock_http,
         ):
             mock_cache.get.return_value = None
             search_api_generic_multiple(
@@ -220,9 +220,9 @@ class TestSearchApiGenericMultipleCache:
 class TestDoiValidationSkipsBibtexWhenCslMatches:
     """Test that validate_doi_candidate does not fetch BibTeX when CSL matches."""
 
-    @patch("src.doi_utils.search_apis.fetch_bibtex_via_doi")
-    @patch("src.doi_utils.search_apis.fetch_csl_via_doi")
-    @patch("src.doi_utils.search_apis.bibtex_from_csl")
+    @patch("citeforge.doi_utils.search_apis.fetch_bibtex_via_doi")
+    @patch("citeforge.doi_utils.search_apis.fetch_csl_via_doi")
+    @patch("citeforge.doi_utils.search_apis.bibtex_from_csl")
     def test_csl_match_skips_bibtex(
         self,
         mock_bibtex_from_csl: MagicMock,
@@ -249,7 +249,7 @@ class TestDoiValidationSkipsBibtexWhenCslMatches:
             "}\n"
         )
 
-        with patch("src.doi_utils.bt.bibtex_entries_match_strict", return_value=True):
+        with patch("citeforge.doi_utils.bt.bibtex_entries_match_strict", return_value=True):
             csl_matched, bibtex_matched, _, _ = validate_doi_candidate(
                 doi="10.1234/test",
                 baseline_entry=baseline_entry,
@@ -262,7 +262,7 @@ class TestDoiValidationSkipsBibtexWhenCslMatches:
 
 
 class TestDeduplicatePublicationList:
-    """Test _deduplicate_publication_list from src/clients/scholar.py."""
+    """Test _deduplicate_publication_list from citeforge/clients/scholar.py."""
 
     def test_empty_list(self) -> None:
         """Empty input should return empty output."""
@@ -1026,7 +1026,7 @@ class TestDOINormalizationInDedup:
 class TestHttpPostJson:
     """Tests for http_post_json going through the full HTTP infrastructure."""
 
-    @patch("src.http_utils._http_request")
+    @patch("citeforge.http_utils._http_request")
     def test_post_calls_http_request_with_post_method(self, mock_request: MagicMock) -> None:
         """http_post_json should delegate to _http_request with method='POST'."""
         mock_request.return_value = b'{"result": "ok"}'
@@ -1043,7 +1043,7 @@ class TestHttpPostJson:
 
     def test_post_sets_content_type(self) -> None:
         """http_post_json should set Content-Type header when not provided."""
-        with patch("src.http_utils._http_request") as mock_req:
+        with patch("citeforge.http_utils._http_request") as mock_req:
             mock_req.return_value = b'{"ok": true}'
             http_post_json("https://example.com/api", {"data": 1})
             headers = mock_req.call_args[0][2]
@@ -1051,7 +1051,7 @@ class TestHttpPostJson:
 
     def test_post_preserves_custom_content_type(self) -> None:
         """Custom headers with Content-Type should not be overridden."""
-        with patch("src.http_utils._http_request") as mock_req:
+        with patch("citeforge.http_utils._http_request") as mock_req:
             mock_req.return_value = b'{"ok": true}'
             custom = {"Content-Type": "application/x-custom", "Accept": "application/json"}
             http_post_json("https://example.com/api", {"data": 1}, headers=custom)
@@ -1061,7 +1061,7 @@ class TestHttpPostJson:
 
 def _reset_openreview_session() -> None:
     """Reset OpenReview session state to a clean slate."""
-    import src.clients.search_apis as sa
+    import citeforge.clients.search_apis as sa
 
     with sa._OPENREVIEW_SESSION_LOCK:
         sa._OPENREVIEW_SESSION = None
@@ -1081,7 +1081,7 @@ class TestOpenReviewSessionExpiry:
 
     def test_expired_session_triggers_relogin(self) -> None:
         """After TTL expires, openreview_login should re-authenticate."""
-        import src.clients.search_apis as sa
+        import citeforge.clients.search_apis as sa
 
         _reset_openreview_session()
 
@@ -1089,7 +1089,7 @@ class TestOpenReviewSessionExpiry:
         mock_session.post.return_value = _make_openreview_mock("abc123")
         creds = ("user@example.com", "password123")
 
-        with patch("src.clients.search_apis._get_session", return_value=mock_session):
+        with patch("citeforge.clients.search_apis._get_session", return_value=mock_session):
             result1 = sa.openreview_login(creds)
             assert result1 is not None
             assert result1["Cookie"] == "session=abc123"
@@ -1109,7 +1109,7 @@ class TestOpenReviewSessionExpiry:
 
     def test_valid_session_reused(self) -> None:
         """A session within TTL should be returned without re-login."""
-        import src.clients.search_apis as sa
+        import citeforge.clients.search_apis as sa
 
         _reset_openreview_session()
 
@@ -1117,7 +1117,7 @@ class TestOpenReviewSessionExpiry:
         mock_session.post.return_value = _make_openreview_mock("valid")
         creds = ("user@example.com", "password123")
 
-        with patch("src.clients.search_apis._get_session", return_value=mock_session):
+        with patch("citeforge.clients.search_apis._get_session", return_value=mock_session):
             result1 = sa.openreview_login(creds)
             assert result1 is not None
 
@@ -1149,11 +1149,11 @@ class TestBaselineThresholdConsistency:
 class TestOrcidUsesHttpGetJson:
     """ORCID should go through http_get_json (shared HTTP infrastructure)."""
 
-    @patch("src.clients.utility_apis.http_get_json")
+    @patch("citeforge.clients.utility_apis.http_get_json")
     def test_orcid_calls_http_get_json(self, mock_get: MagicMock) -> None:
         """orcid_fetch_works should use http_get_json, not urllib."""
         mock_get.return_value = {"group": []}
-        with patch("src.clients.utility_apis.response_cache") as mock_cache:
+        with patch("citeforge.clients.utility_apis.response_cache") as mock_cache:
             mock_cache.get.return_value = None
             orcid_fetch_works("0000-0001-2345-6789")
         mock_get.assert_called_once()
@@ -1164,7 +1164,7 @@ class TestOrcidUsesHttpGetJson:
 class TestGeminiUsesHttpPostJson:
     """Gemini should go through http_post_json (shared HTTP infrastructure)."""
 
-    @patch("src.clients.utility_apis.http_post_json")
+    @patch("citeforge.clients.utility_apis.http_post_json")
     def test_gemini_calls_http_post_json(self, mock_post: MagicMock) -> None:
         """gemini_generate_short_title should use http_post_json, not urllib."""
         mock_post.return_value = {"candidates": [{"content": {"parts": [{"text": "MachineLearning"}]}}]}
@@ -1174,7 +1174,7 @@ class TestGeminiUsesHttpPostJson:
         url = mock_post.call_args[0][0]
         assert "generativelanguage.googleapis.com" in url
 
-    @patch("src.clients.utility_apis.http_post_json")
+    @patch("citeforge.clients.utility_apis.http_post_json")
     def test_gemini_key_travels_in_header_not_url(self, mock_post: MagicMock) -> None:
         """The API key must be sent as the x-goog-api-key header and never appear in the URL."""
         mock_post.return_value = {"candidates": [{"content": {"parts": [{"text": "DeepNets"}]}}]}
@@ -1186,7 +1186,7 @@ class TestGeminiUsesHttpPostJson:
         assert "SECRET-KEY-123" not in url
         assert "key=" not in url
 
-    @patch("src.clients.utility_apis.http_post_json")
+    @patch("citeforge.clients.utility_apis.http_post_json")
     def test_gemini_handles_value_error(self, mock_post: MagicMock) -> None:
         """Gemini should handle ValueError from non-JSON responses gracefully."""
         mock_post.side_effect = ValueError("No JSON object could be decoded")
@@ -1211,8 +1211,8 @@ class TestHttpRequestPostDispatch:
         """_http_request('POST', ...) should call session.post, not session.get."""
         mock_session = self._make_mock_session("post")
         with (
-            patch("src.http_utils._get_session", return_value=mock_session),
-            patch("src.http_utils._get_rate_limiter", return_value=None),
+            patch("citeforge.http_utils._get_session", return_value=mock_session),
+            patch("citeforge.http_utils._get_rate_limiter", return_value=None),
         ):
             result = _http_request("POST", "https://example.com/api", {}, 10.0, json_payload={"key": "val"})
             mock_session.post.assert_called_once()
@@ -1223,8 +1223,8 @@ class TestHttpRequestPostDispatch:
         """_http_request('GET', ...) should call session.get, not session.post."""
         mock_session = self._make_mock_session("get")
         with (
-            patch("src.http_utils._get_session", return_value=mock_session),
-            patch("src.http_utils._get_rate_limiter", return_value=None),
+            patch("citeforge.http_utils._get_session", return_value=mock_session),
+            patch("citeforge.http_utils._get_rate_limiter", return_value=None),
         ):
             result = _http_request("GET", "https://example.com/api", {}, 10.0)
             mock_session.get.assert_called_once()
@@ -1252,7 +1252,7 @@ class TestOpenReviewTTLBoundary:
     @staticmethod
     def _set_session_age(elapsed: float) -> None:
         """Set a fake OpenReview session with the given elapsed time."""
-        import src.clients.search_apis as sa
+        import citeforge.clients.search_apis as sa
 
         with sa._OPENREVIEW_SESSION_LOCK:
             sa._OPENREVIEW_SESSION = {"Cookie": "session=test"}
@@ -1260,7 +1260,7 @@ class TestOpenReviewTTLBoundary:
 
     def test_session_expires_at_exact_ttl(self) -> None:
         """Session should be treated as expired when elapsed == TTL (>= check)."""
-        import src.clients.search_apis as sa
+        import citeforge.clients.search_apis as sa
 
         self._set_session_age(OPENREVIEW_SESSION_TTL_SECS)
         assert sa._openreview_session_expired()
@@ -1268,7 +1268,7 @@ class TestOpenReviewTTLBoundary:
 
     def test_session_valid_just_before_ttl(self) -> None:
         """Session created 'just now' (0 seconds elapsed) must not be expired."""
-        import src.clients.search_apis as sa
+        import citeforge.clients.search_apis as sa
 
         self._set_session_age(0.0)
         assert not sa._openreview_session_expired()
@@ -1933,9 +1933,9 @@ class TestSemaphoreReleasedDuring429:
         mock_session.get.side_effect = [mock_resp_429, mock_resp_200]
 
         with (
-            patch("src.http_utils._get_session", return_value=mock_session),
-            patch("src.http_utils._get_rate_limiter", return_value=None),
-            patch("src.http_utils.time") as mock_time,
+            patch("citeforge.http_utils._get_session", return_value=mock_session),
+            patch("citeforge.http_utils._get_rate_limiter", return_value=None),
+            patch("citeforge.http_utils.time") as mock_time,
         ):
             mock_time.monotonic.return_value = 1000.0
             mock_time.sleep = MagicMock()
@@ -1949,7 +1949,7 @@ class TestTokenBucketJitter:
 
     def test_jitter_import_and_usage(self) -> None:
         """Verify that random.uniform is called during acquire when sleep is needed."""
-        import src.http_utils as hu
+        import citeforge.http_utils as hu
 
         # Verify the random module is imported in http_utils (needed for jitter)
         assert hasattr(hu, "random"), "http_utils should import random for jitter"
@@ -1967,7 +1967,7 @@ class TestTokenBucketJitter:
             sleep_values.append(duration)
             # Don't actually sleep
 
-        with patch("src.http_utils.time.sleep", side_effect=capture_sleep):
+        with patch("citeforge.http_utils.time.sleep", side_effect=capture_sleep):
             limiter.acquire()
 
         # Should have slept at least once
@@ -2673,7 +2673,7 @@ class TestReconcileSummaryCSV:
         """Rows pointing to non-existent files are stripped from the CSV."""
         import csv as _csv
 
-        from src.io_utils import _SUMMARY_CSV_FIELDNAMES, reconcile_summary_csv
+        from citeforge.io_utils import _SUMMARY_CSV_FIELDNAMES, reconcile_summary_csv
 
         csv_path = str(tmp_path / "summary.csv")
         real_file = tmp_path / "real.bib"
@@ -2701,7 +2701,7 @@ class TestReconcileSummaryCSV:
         """When all files exist, CSV is untouched (no rewrite)."""
         import csv as _csv
 
-        from src.io_utils import _SUMMARY_CSV_FIELDNAMES, reconcile_summary_csv
+        from citeforge.io_utils import _SUMMARY_CSV_FIELDNAMES, reconcile_summary_csv
 
         csv_path = str(tmp_path / "summary.csv")
         real_file = tmp_path / "real.bib"
@@ -2727,7 +2727,7 @@ class TestCollectOrphanFiles:
         """A .bib file with no CSV entry is reported as an orphan."""
         import csv as _csv
 
-        from src.io_utils import _SUMMARY_CSV_FIELDNAMES, collect_orphan_files
+        from citeforge.io_utils import _SUMMARY_CSV_FIELDNAMES, collect_orphan_files
 
         out_dir = tmp_path / "output"
         author_dir = out_dir / "Author (ID)"
@@ -2754,7 +2754,7 @@ class TestCollectOrphanFiles:
         """When all files are in the CSV, no orphans are reported."""
         import csv as _csv
 
-        from src.io_utils import _SUMMARY_CSV_FIELDNAMES, collect_orphan_files
+        from citeforge.io_utils import _SUMMARY_CSV_FIELDNAMES, collect_orphan_files
 
         out_dir = tmp_path / "output"
         author_dir = out_dir / "Author (ID)"
@@ -2781,7 +2781,7 @@ class TestIsKnownSummaryPath:
         """Paths loaded from an existing CSV are recognized as known."""
         import csv as _csv
 
-        from src.io_utils import (
+        from citeforge.io_utils import (
             _SUMMARY_CSV_FIELDNAMES,
             init_summary_csv,
             is_known_summary_path,
@@ -2801,7 +2801,7 @@ class TestIsKnownSummaryPath:
 
     def test_unknown_path_fresh_csv(self, tmp_path: Any) -> None:
         """After fresh init, no paths are known."""
-        from src.io_utils import init_summary_csv, is_known_summary_path
+        from citeforge.io_utils import init_summary_csv, is_known_summary_path
 
         csv_path = str(tmp_path / "summary_fresh.csv")
         init_summary_csv(csv_path, preserve_existing=False)
@@ -3124,7 +3124,7 @@ class TestCachePutOSError:
     """Cache.put() must log on OSError, not silently swallow."""
 
     def test_oserror_does_not_raise(self, monkeypatch: Any, tmp_path: Any) -> None:
-        from src.cache import ResponseCache
+        from citeforge.cache import ResponseCache
 
         cache = ResponseCache(str(tmp_path / "cache"))
         # Make mkstemp raise OSError
@@ -3133,7 +3133,7 @@ class TestCachePutOSError:
         cache.put("test_ns", "test_key", {"data": 1})
 
     def test_oserror_logged(self, monkeypatch: Any, tmp_path: Any, capfd: Any) -> None:
-        from src.cache import ResponseCache
+        from citeforge.cache import ResponseCache
 
         cache = ResponseCache(str(tmp_path / "cache"))
 
@@ -3150,30 +3150,30 @@ class TestCacheCoversWindow:
     """_cache_covers_window edge cases."""
 
     def test_empty_articles_returns_false(self) -> None:
-        from src.clients.scholar import _cache_covers_window
+        from citeforge.clients.scholar import _cache_covers_window
 
         assert _cache_covers_window({"articles": []}, 2020) is False
 
     def test_no_articles_key_returns_false(self) -> None:
-        from src.clients.scholar import _cache_covers_window
+        from citeforge.clients.scholar import _cache_covers_window
 
         assert _cache_covers_window({}, 2020) is False
 
     def test_covers_min_year_returns_true(self) -> None:
-        from src.clients.scholar import _cache_covers_window
+        from citeforge.clients.scholar import _cache_covers_window
 
         cached = {"articles": [{"year": 2019}, {"year": 2021}]}
         assert _cache_covers_window(cached, 2020) is True  # min(years)=2019 <= 2020
 
     def test_truncated_returns_false(self) -> None:
-        from src.clients.scholar import _cache_covers_window
+        from citeforge.clients.scholar import _cache_covers_window
 
         # 100 articles, all years > min_year → likely truncated
         cached = {"articles": [{"year": 2022}] * 100}
         assert _cache_covers_window(cached, 2020) is False
 
     def test_non_truncated_returns_true(self) -> None:
-        from src.clients.scholar import _cache_covers_window
+        from citeforge.clients.scholar import _cache_covers_window
 
         # 99 articles, all years > min_year → not truncated (not % 100)
         cached = {"articles": [{"year": 2022}] * 99}
@@ -3184,29 +3184,29 @@ class TestStripEllipsis:
     """_strip_ellipsis removes trailing '...' and dangling prepositions."""
 
     def test_no_ellipsis(self) -> None:
-        from src.publication_parser import _strip_ellipsis
+        from citeforge.publication_parser import _strip_ellipsis
 
         assert _strip_ellipsis("Normal Text") == "Normal Text"
 
     def test_trailing_dots(self) -> None:
-        from src.publication_parser import _strip_ellipsis
+        from citeforge.publication_parser import _strip_ellipsis
 
         assert _strip_ellipsis("Workshop on Bridging Language...") == "Workshop on Bridging Language"
 
     def test_trailing_dots_with_preposition(self) -> None:
-        from src.publication_parser import _strip_ellipsis
+        from citeforge.publication_parser import _strip_ellipsis
 
         result = _strip_ellipsis("CHI Conference on Human Factors in ...")
         assert result == "CHI Conference on Human Factors"
         assert not result.endswith(" in")
 
     def test_unicode_ellipsis(self) -> None:
-        from src.publication_parser import _strip_ellipsis
+        from citeforge.publication_parser import _strip_ellipsis
 
         assert _strip_ellipsis("Some Text\u2026") == "Some Text"
 
     def test_parser_strips_ellipsis_from_venue(self) -> None:
-        from src.publication_parser import parse_publication_string
+        from citeforge.publication_parser import parse_publication_string
 
         result = parse_publication_string(
             "Extended Abstracts of the 2019 CHI Conference on Human Factors in Computing ..., 2019"
@@ -3315,7 +3315,7 @@ class TestDecodeValueErrorContainment:
     """
 
     def test_decode_error_is_caught_by_all_api_errors(self) -> None:
-        from src.exceptions import ALL_API_ERRORS, DecodeError
+        from citeforge.exceptions import ALL_API_ERRORS, DecodeError
 
         # The invariant that makes all ~11 `except ALL_API_ERRORS` sites graceful.
         assert issubclass(DecodeError, ValueError)
@@ -3324,8 +3324,8 @@ class TestDecodeValueErrorContainment:
         assert not issubclass(ValueError, ALL_API_ERRORS)
 
     def test_decode_json_bytes_raises_decode_error(self) -> None:
-        from src.exceptions import DecodeError
-        from src.http_utils import _decode_json_bytes
+        from citeforge.exceptions import DecodeError
+        from citeforge.http_utils import _decode_json_bytes
 
         with pytest.raises(DecodeError):
             _decode_json_bytes(b"<html>not json</html>", "https://api.openalex.org/works?q=x")
@@ -3333,9 +3333,9 @@ class TestDecodeValueErrorContainment:
     def test_generic_search_swallows_decode_error(self) -> None:
         # The primary enrichment path (OpenAlex/Crossref/S2) must return None,
         # not propagate, when an upstream serves an HTML 200 body.
-        from src import api_generics
-        from src.api_configs import OPENALEX_SEARCH_CONFIG
-        from src.exceptions import DecodeError
+        from citeforge import api_generics
+        from citeforge.api_configs import OPENALEX_SEARCH_CONFIG
+        from citeforge.exceptions import DecodeError
 
         with (
             patch.object(api_generics.response_cache, "get", return_value=None),
@@ -3345,8 +3345,8 @@ class TestDecodeValueErrorContainment:
             assert api_generics.search_api_generic("A Title", "Author", OPENALEX_SEARCH_CONFIG) is None
 
     def test_datacite_swallows_decode_error(self) -> None:
-        from src.clients import utility_apis
-        from src.exceptions import DecodeError
+        from citeforge.clients import utility_apis
+        from citeforge.exceptions import DecodeError
 
         with (
             patch.object(utility_apis.response_cache, "get", return_value=None),
@@ -3355,8 +3355,8 @@ class TestDecodeValueErrorContainment:
             assert utility_apis.datacite_search_doi("10.5281/zenodo.123") is None
 
     def test_orcid_swallows_decode_error(self) -> None:
-        from src.clients import utility_apis
-        from src.exceptions import DecodeError
+        from citeforge.clients import utility_apis
+        from citeforge.exceptions import DecodeError
 
         with (
             patch.object(utility_apis.response_cache, "get", return_value=None),
@@ -3372,7 +3372,7 @@ class TestOpenReviewSessionThreadSafety:
     def test_concurrent_reuse_no_relogin(self) -> None:
         import threading
 
-        from src.clients import search_apis as sa
+        from citeforge.clients import search_apis as sa
 
         prev_session = sa._OPENREVIEW_SESSION
         prev_created = sa._OPENREVIEW_SESSION_CREATED_AT
@@ -3416,7 +3416,7 @@ class TestDoiBackfilledPreprintNotFabricatedConference:
     """
 
     def test_backfilled_label_not_upgraded_to_inproceedings(self) -> None:
-        from src.canonicalize import CanonicalStage, canonicalize
+        from citeforge.canonicalize import CanonicalStage, canonicalize
 
         # @misc whose howpublished is the bare DOI-inferred label -> stays @misc.
         entry = {
@@ -3430,7 +3430,7 @@ class TestDoiBackfilledPreprintNotFabricatedConference:
         assert entry["fields"].get("howpublished") == "EGU"
 
     def test_bare_infer_label_booktitle_downgraded_to_misc(self) -> None:
-        from src.canonicalize import CanonicalStage, canonicalize
+        from citeforge.canonicalize import CanonicalStage, canonicalize
 
         # Already-fabricated @inproceedings with the bare label as booktitle -> @misc.
         entry = {
@@ -3444,7 +3444,7 @@ class TestDoiBackfilledPreprintNotFabricatedConference:
         assert entry["fields"].get("howpublished") == "Institutional Repository"
 
     def test_real_conference_with_preprint_doi_preserved(self) -> None:
-        from src.canonicalize import CanonicalStage, canonicalize
+        from citeforge.canonicalize import CanonicalStage, canonicalize
 
         # A genuine venue name that happens to carry an egusphere DOI stays @inproceedings.
         entry = {

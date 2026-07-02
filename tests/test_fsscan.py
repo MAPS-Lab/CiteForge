@@ -1,10 +1,10 @@
-"""Tests for src.fsscan: deterministic directory-scan helpers."""
+"""Tests for citeforge.fsscan: deterministic directory-scan helpers."""
 
 from __future__ import annotations
 
 import pathlib
 
-from src.fsscan import iter_author_bibs, iter_output_dirs
+from citeforge.fsscan import iter_author_bibs, iter_output_dirs
 
 
 def test_iter_author_bibs_returns_sorted_bib_names_only(tmp_path: pathlib.Path) -> None:

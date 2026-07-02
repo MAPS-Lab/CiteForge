@@ -91,7 +91,7 @@ A trust-based consolidation stage merges the collected records according to sour
 
 The pipeline further corrects recurrent metadata issues, such as fragmented compound words, misclassified publication types, invalid page ranges, and titles written entirely in capital letters. Deterministic caching ensures that cache-hit executions produce byte-identical outputs, verified through SHA-256 checksums.
 
-To maintain efficiency and stability, author queries run in parallel while respecting per-API rate limits. All configurable parameters, including source trust order, similarity thresholds, rate limits, and venue mappings, are centralized in [`src/config.py`](src/config.py).
+To maintain efficiency and stability, author queries run in parallel while respecting per-API rate limits. All configurable parameters, including source trust order, similarity thresholds, rate limits, and venue mappings, are centralized in [`citeforge/config.py`](citeforge/config.py).
 
 ## Data Sources
 

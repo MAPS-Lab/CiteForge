@@ -7,8 +7,8 @@ from textwrap import dedent
 from typing import Any
 from unittest.mock import patch
 
-from src.clients import search_apis
-from src.doi_utils import process_validated_doi, validate_doi_candidate
+from citeforge.clients import search_apis
+from citeforge.doi_utils import process_validated_doi, validate_doi_candidate
 
 # Shared baseline entries reused across DOI validation tests
 _BASELINE_FULL: dict[str, Any] = {

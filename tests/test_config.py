@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src import config
-from src.config import (
+from citeforge import config
+from citeforge.config import (
     _CONTRIBUTION_WINDOW_FALLBACK,
     CONTRIBUTION_WINDOW_YEARS,
     MAX_PUBLICATIONS_PER_AUTHOR,

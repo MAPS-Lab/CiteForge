@@ -15,9 +15,9 @@ import re
 from enum import Enum
 from typing import Any
 
-from src import id_utils as idu
-from src import merge_utils as mu
-from src.config import (
+from citeforge import id_utils as idu
+from citeforge import merge_utils as mu
+from citeforge.config import (
     ABBREVIATED_VENUE_MAP,
     ACM_JOURNAL_PROCEEDINGS,
     INSTITUTIONAL_REPOSITORIES,
@@ -30,9 +30,9 @@ from src.config import (
     REPOSITORY_AS_JOURNAL,
     VENUE_CASE_CORRECTIONS,
 )
-from src.publication_parser import _strip_ellipsis
-from src.text_utils import trim_title_default
-from src.textnorm import _apply_booktitle_fixups, _fix_title_text
+from citeforge.publication_parser import _strip_ellipsis
+from citeforge.text_utils import trim_title_default
+from citeforge.textnorm import _apply_booktitle_fixups, _fix_title_text
 
 
 class CanonicalStage(Enum):
@@ -861,7 +861,7 @@ _POST_MERGE_RULES = (
 # runs Site B and returns before it ever reaches Site C, so the terminal rules
 # that only Site C carries (url-booktitle->misc, misc->inproceedings, and
 # article-no-journal->misc) are absent here. The destructive title==venue delete
-# and the bare-ampersand rewrite run in src/pipeline/article.py around the
+# and the bare-ampersand rewrite run in citeforge/pipeline/article.py around the
 # canonicalize() call.
 _LOAD_REPAIR_RULES = (
     _rule_strip_preprint_journal_load,
