@@ -1,3 +1,11 @@
+"""HTTP infrastructure shared by every API client.
+
+Provides rate-limited, retrying, concurrency-gated requests with per-thread
+session rotation and header randomization, plus JSON and text helpers. Secret
+query-string values are scrubbed from every URL and exception string before it
+can reach a log record.
+"""
+
 from __future__ import annotations
 
 import json
@@ -184,7 +192,7 @@ _RETRY_STRATEGY = Retry(
     # with our manual Retry-After handling in _http_request
     status_forcelist=tuple(c for c in HTTP_RETRY_STATUS_CODES if c not in (429, 503)),
     # Only auto-retry idempotent GET. POST is intentionally excluded so urllib3
-    # never silently re-sends a non-idempotent request body (C1). POSTs still
+    # never silently re-sends a non-idempotent request body. POSTs still
     # get manual 429/503 handling in _http_request.
     allowed_methods=["GET"],
     # Disable urllib3's own Retry-After handling so it doesn't sleep for
@@ -378,7 +386,7 @@ def _http_request(
             except requests.exceptions.RetryError:
                 # urllib3 already exhausted its own retries for a forced status
                 # (persistent 500/502/504). Do not re-drive it through the manual
-                # loop, which would compound to ~9 requests for one failure (C1).
+                # loop, which would compound to ~9 requests for one failure.
                 raise
             except requests.exceptions.RequestException:
                 if attempt == _MAX_RATE_LIMIT_RETRIES - 1:

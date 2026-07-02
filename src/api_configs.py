@@ -1,3 +1,11 @@
+"""Per-source API search configurations.
+
+Holds the `APISearchConfig` and `APIFieldMapping` instances for each scholarly
+source (Semantic Scholar, Crossref, OpenAlex, PubMed, Europe PMC, arXiv,
+OpenReview, DataCite) that `api_generics.py` consumes to run searches and build
+BibTeX entries.
+"""
+
 from __future__ import annotations
 
 import os

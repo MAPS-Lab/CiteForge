@@ -8,10 +8,11 @@ from src.http_utils import _decode_json_bytes, _scrub_secrets
 
 
 class TestSecretRedaction:
-    """API keys/tokens passed as query params must never reach logs or exception text (defect C2).
+    """API keys and tokens passed as query params must never reach logs or exception text.
 
-    Gemini uses ``?key=`` and SerpAPI uses ``&api_key=``; those URLs previously
-    leaked into WARN logs (committed to a public branch) via exception messages.
+    Gemini uses ``?key=`` and SerpAPI uses ``&api_key=``. These URLs must not reach
+    a WARN log or an exception message, since run logs can be committed to a public
+    branch.
     """
 
     @pytest.mark.parametrize(
@@ -50,7 +51,7 @@ class TestSecretRedaction:
 
 class TestRetryBounding:
     """Persistent 5xx must not compound urllib3 x manual retries into ~9 requests,
-    and non-idempotent POST must not be auto-retried by urllib3 (defect C1).
+    and non-idempotent POST must not be auto-retried by urllib3.
     429/503 stays single-layer (excluded from urllib3, handled by the manual loop).
     """
 

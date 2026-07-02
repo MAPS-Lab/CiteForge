@@ -1,3 +1,11 @@
+"""Config-driven, source-agnostic search and BibTeX construction.
+
+Provides the generic search-and-build engine (`APISearchConfig`,
+`APIFieldMapping`, the generic search routine, and the build-from-response
+converter) that `api_configs.py` parameterizes for each individual API, so every
+source shares one matching and construction path.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable

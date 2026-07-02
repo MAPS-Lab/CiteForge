@@ -1,3 +1,11 @@
+"""Post-run finalization tail.
+
+Runs the deterministic sequence that closes out a run, flushing the summary CSV,
+reconciling phantom rows, removing duplicate orphan files, applying the
+year-window cleanup, running the post-run fixup pass, building the a2i2 folder,
+and rewriting `baseline.json` and `badges.json`. The order is load-bearing.
+"""
+
 from __future__ import annotations
 
 import csv

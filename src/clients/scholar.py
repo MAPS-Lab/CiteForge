@@ -1,3 +1,11 @@
+"""Google Scholar orchestration layer.
+
+Fetches an author's publications through SerpAPI and per-article citation detail
+through Serply, then deduplicates and merges the resulting publication lists by
+title similarity, author overlap, and year proximity. Results are cached so
+repeated runs stay fast and deterministic.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -58,9 +66,9 @@ def _first_author_sortkey(authors: Any) -> str:
 def _cache_covers_window(cached: dict[str, Any], min_year: int) -> bool:
     """Check whether a cached SerpAPI result covers the full contribution window.
 
-    Returns *False* when the cache was likely truncated by the old count-based
-    regime (article count is a multiple of 100 AND the oldest article is still
-    above *min_year*).
+    Returns *False* when the cached result looks truncated (the article count is
+    a multiple of 100 and the oldest article is still above *min_year*), which
+    suggests a page cap dropped older publications.
     """
     articles = cached.get("articles") or []
     if not articles:

@@ -1,3 +1,10 @@
+"""DOI validation through content negotiation.
+
+Confirms a candidate DOI by fetching its metadata in CSL-JSON and BibTeX and
+checking it against the baseline entry with a strict title-and-author match, so
+enrichment only accepts a DOI that genuinely describes the same work.
+"""
+
 from __future__ import annotations
 
 import contextlib

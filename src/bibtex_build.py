@@ -1,3 +1,11 @@
+"""Entry-type classification and BibTeX entry construction.
+
+Classifies a record into a BibTeX entry type, maps it to the correct container
+field (journal, booktitle, or howpublished), and assembles the entry. Also
+provides the scoring-function factory used to rank candidate matches returned by
+the search APIs.
+"""
+
 from __future__ import annotations
 
 import re

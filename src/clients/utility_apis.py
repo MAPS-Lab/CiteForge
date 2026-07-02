@@ -1,3 +1,11 @@
+"""Auxiliary enrichment services.
+
+Wraps the optional helper services. Gemini generates CamelCase citation-key
+titles, DataCite resolves dataset and software DOIs, and ORCID validates
+authorship. Each fills a specific gap and degrades gracefully when its key is
+absent.
+"""
+
 from __future__ import annotations
 
 import random

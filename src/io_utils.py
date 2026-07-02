@@ -1,3 +1,10 @@
+"""Filesystem and CSV input/output.
+
+Reads the API key files and author records, maintains the summary CSV, collects
+orphaned output files, and builds the derived output folders (including a2i2).
+This is the single boundary between the pipeline and the local filesystem.
+"""
+
 from __future__ import annotations
 
 import csv

@@ -1,3 +1,12 @@
+"""Central configuration for CiteForge.
+
+This module is the single source of truth for every tunable constant, including
+the source trust hierarchy, similarity thresholds, HTTP rate limits and
+timeouts, API endpoints, key-file paths, and the venue and compound-word
+dictionaries. Per the config-driven convention these values live here and are
+never hardcoded elsewhere.
+"""
+
 from __future__ import annotations
 
 import os

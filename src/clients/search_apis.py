@@ -1,3 +1,12 @@
+"""Scholarly metadata API clients.
+
+Queries Semantic Scholar, Crossref, DOI content negotiation, arXiv, OpenReview,
+DBLP, OpenAlex, PubMed, and Europe PMC. Each client follows the same shape,
+searching for candidates, scoring and matching them against the target paper,
+caching the result (including confirmation-counted negatives), and converting
+the chosen record into a BibTeX entry through a ``build_bibtex_from_*`` helper.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -481,8 +490,8 @@ def openreview_login(creds: tuple[str, ...] | None) -> dict[str, str] | None:
 
     # All reads of the shared session globals happen under the lock so the
     # session pointer and its created-at timestamp are read atomically together.
-    # The previous lock-free fast path could observe a torn state, or return a
-    # session that a concurrent re-login had just cleared to None (C6).
+    # Without the lock a reader could observe a torn state, or return a session
+    # that a concurrent re-login had just cleared to None.
     with _OPENREVIEW_SESSION_LOCK:
         # Double-check after acquiring lock (may have been refreshed by another thread)
         if _reuse_session():

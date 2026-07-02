@@ -1,3 +1,12 @@
+"""Trust-based metadata merge and BibTeX persistence.
+
+`merge_with_policy` blends fields from ranked sources so each record keeps the
+most authoritative value for every field while filling genuine gaps from
+lower-trust sources, with published records winning over preprints.
+`save_entry_to_file` deduplicates against existing output and writes the merged
+entry to a stable, collision-free filename.
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -968,12 +977,12 @@ def save_entry_to_file(
                             n_title = new_fields.get("title", "")
                             preprint_sim = title_similarity(e_title, n_title)
                             if preprint_sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-                                # The preprint/published (XOR) split was already verified as
-                                # the precondition above, so exclude it from the composite
-                                # rather than adding it and subtracting a flat 0.10. Excluding
-                                # is exact and predicate-independent, so a genuine twin whose
-                                # published side still carries a leaked preprint journal is no
-                                # longer wrongly dropped by an over-subtraction.
+                                # The preprint/published (XOR) split is already the
+                                # precondition here, so it is excluded from the composite
+                                # to avoid double-counting. Excluding it keeps the score
+                                # exact and predicate-independent, so a genuine twin whose
+                                # published side still carries a leaked preprint journal is
+                                # scored correctly.
                                 effective_score = compute_dedup_score(
                                     existing_fields, new_fields, count_preprint_xor=False
                                 )

@@ -1,3 +1,11 @@
+"""BibTeX parsing, serialization, and matching helpers.
+
+Parses BibTeX into field dictionaries and serializes them back with a stable
+field order, and provides the citation-key, filename, and duplicate-matching
+helpers. The serializer is deterministic so cache-hit runs produce
+byte-identical `.bib` files.
+"""
+
 from __future__ import annotations
 
 import html
@@ -235,7 +243,7 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
 
 # Canonical BibTeX field emission order. Fields not listed are appended in
 # sorted() order afterwards. This ordering is part of the byte-identity output
-# contract (of-bibtex-field-order-stable); do not reorder without updating the
+# contract; do not reorder without updating the
 # golden serializer test.
 PREFERRED_FIELD_ORDER: tuple[str, ...] = (
     "title",

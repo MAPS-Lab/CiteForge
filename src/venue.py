@@ -1,3 +1,10 @@
+"""Venue classification and howpublished canonicalization.
+
+Disambiguates conferences from journals, canonicalizes the ``howpublished``
+label for preprint entries, and infers a howpublished value from a DOI prefix
+when the venue itself is unknown.
+"""
+
 from __future__ import annotations
 
 import re

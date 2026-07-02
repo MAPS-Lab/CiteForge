@@ -1,3 +1,10 @@
+"""Shared helpers for the API client layer.
+
+Generic candidate scoring by title, author, and year, best-item selection, and
+the Scholar and DBLP field-extraction helpers (including HTML cleanup) used by
+the individual client modules.
+"""
+
 from __future__ import annotations
 
 import re

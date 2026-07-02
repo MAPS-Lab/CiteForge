@@ -1,3 +1,14 @@
+"""Entry-type reclassification and text-normalization rules.
+
+The reclassification and normalization rules are defined once as ``_rule_*``
+helpers and dispatched in a fixed order per `CanonicalStage`, so the three fix
+sites share one implementation. Site A handles orphan and terminal repair (via
+`_fixup_bib_entry`), Site B handles existing-file load repair before
+enrichment, and Site C is the Phase 4 post-merge pass. Keeping the rule bodies
+in one place is what prevents entry types, titles, and booktitles from
+oscillating between consecutive runs.
+"""
+
 from __future__ import annotations
 
 import re
@@ -64,7 +75,7 @@ _ZENTRUM_FUER = 'Zentrum f{\\"u}r Informatik'
 _PROC_EXT_ABSTRACTS = "Proceedings of the Extended Abstracts"
 _PROC_OF_THE = "Proceedings of the "
 
-# Preprint howpublished names checked by the misc->inproceedings upgrade (R20).
+# Preprint howpublished names checked by the misc->inproceedings upgrade.
 _R20_PREPRINT_HOWPUBLISHED = (
     "arxiv",
     "biorxiv",
@@ -180,10 +191,11 @@ def _rule_doi_backfilled_booktitle_to_misc(entry: dict[str, Any], fields: dict[s
     """@inproceedings whose booktitle is a DOI-inferred preprint/repository label
     -> @misc (booktitle -> howpublished).
 
-    Inverse of _rule_howpublished_to_inproceedings' DOI-backfill guard: corrects
-    entries mis-upgraded into a fabricated conference (e.g. booktitle "EGU" for
-    10.5194/egusphere, "Institutional Repository" for 10.32920) before that guard
-    existed. Once downgraded, the gated upgrade leaves them @misc.
+    Counterpart to _rule_howpublished_to_inproceedings' DOI-backfill guard. It
+    corrects entries that a DOI-backfilled booktitle would otherwise mis-upgrade
+    into a fabricated conference (booktitle "EGU" for 10.5194/egusphere, or
+    "Institutional Repository" for 10.32920). Once downgraded, the gated upgrade
+    leaves them @misc.
     """
     if entry.get("type") == "inproceedings" and fields.get("booktitle"):
         doi = (fields.get("doi") or "").strip()
@@ -769,7 +781,7 @@ def _rule_strip_preprint_only_publisher(entry: dict[str, Any], fields: dict[str,
 # ---------------------------------------------------------------------------
 # Per-stage ordered rule sequences
 # ---------------------------------------------------------------------------
-# Site A (orphan/terminal sweep). Reproduces _fixup_bib_entry's exact rule order.
+# Site A applies the orphan and terminal sweep for _fixup_bib_entry, in order.
 _POSTRUN_ORPHAN_REPAIR_RULES = (
     _rule_procedia_to_inproceedings,
     _rule_pacm_booktitle_to_article,
@@ -803,7 +815,7 @@ _POSTRUN_ORPHAN_REPAIR_RULES = (
     _rule_add_url_from_doi,
 )
 
-# Site C (Phase-4 post-merge). Reproduces the inline post-merge block's exact order.
+# Site C applies the Phase 4 post-merge rules, in order.
 _POST_MERGE_RULES = (
     _rule_article_no_journal_to_misc,
     _rule_inproceedings_no_booktitle_to_misc,
@@ -844,13 +856,13 @@ _POST_MERGE_RULES = (
     _rule_howpublished_to_inproceedings,
 )
 
-# Site B (existing-file load repair, before enrichment). Reproduces the inline
-# process_article() fixup block's exact rule subset and order. NOTE: this is Site
-# B's current subset, NOT the union with Site C: complete entries run Site B and
-# return before ever reaching Site C, so C-only terminal rules (e.g. R13
-# url-booktitle->misc, R20 misc->inproceedings, article-no-journal->misc) are
-# deliberately ABSENT here. The destructive title==venue delete (N22) and the
-# bare-& rewrite trigger stay in main.py around the canonicalize() call.
+# Site B applies the existing-file load repair that runs before enrichment, in
+# order. It is a deliberate subset of Site C, not the union. A complete entry
+# runs Site B and returns before it ever reaches Site C, so the terminal rules
+# that only Site C carries (url-booktitle->misc, misc->inproceedings, and
+# article-no-journal->misc) are absent here. The destructive title==venue delete
+# and the bare-ampersand rewrite run in src/pipeline/article.py around the
+# canonicalize() call.
 _LOAD_REPAIR_RULES = (
     _rule_strip_preprint_journal_load,
     _rule_strip_email_from_author,
@@ -893,11 +905,10 @@ _LOAD_REPAIR_RULES = (
     _rule_normalize_howpublished,
 )
 
-# COMPLETE_SKIP_FINALIZE (complete entry, enrichment skipped). Folds the single
-# live "quick fixup" that ran just before the skip-path write: strip a leaked
-# preprint-only publisher. The former "@article + preprint DOI -> @misc"
-# quick-fixup that sat alongside it was DEAD CODE (unreachable: _entry_is_complete
-# only admits NON-preprint DOIs) and is intentionally NOT reproduced here.
+# COMPLETE_SKIP_FINALIZE runs the single fixup that applies just before a
+# complete entry is written on the skip-enrichment path, stripping a leaked
+# preprint-only publisher. No preprint-to-@misc reclassification is needed here
+# because _entry_is_complete only admits entries whose DOI is not a preprint.
 _COMPLETE_SKIP_FINALIZE_RULES = (_rule_strip_preprint_only_publisher,)
 
 _STAGE_RULES = {

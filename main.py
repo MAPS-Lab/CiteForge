@@ -1,3 +1,11 @@
+"""CiteForge command-line entry point.
+
+Loads the API keys and author records, runs the parallel enrichment scheduler
+over every author, then finalizes the run. Accepts an optional input CSV path
+(default ``data/input.csv``) and a ``--force`` flag that re-enriches every
+record regardless of cache completeness.
+"""
+
 from __future__ import annotations
 
 import os

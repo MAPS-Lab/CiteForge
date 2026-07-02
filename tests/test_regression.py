@@ -1350,7 +1350,7 @@ class TestAbbreviatedVenueExpansion:
 
 
 class TestBiorxivDoiPrefix:
-    """L3: bioRxiv DOIs with any 10.1101/ prefix should be classified as preprint."""
+    """bioRxiv DOIs with any 10.1101/ prefix should be classified as preprint."""
 
     def test_biorxiv_old_numeric_doi(self) -> None:
         """Pre-2020 bioRxiv DOI (no date prefix) should be secondary."""
@@ -1370,7 +1370,7 @@ class TestBiorxivDoiPrefix:
 
 
 class TestDoiUrlDecoding:
-    """L15: _norm_doi should URL-decode percent-encoded characters."""
+    """_norm_doi should URL-decode percent-encoded characters."""
 
     def test_percent_encoded_slash(self) -> None:
         """DOI with %2F should normalize to match plain slash version."""
@@ -1385,7 +1385,7 @@ class TestDoiUrlDecoding:
 
 
 class TestNobleParticleMatching:
-    """B8/L8: Noble particles (van, von, de, etc.) should produce consistent signatures."""
+    """Noble particles (van, von, de, etc.) should produce consistent signatures."""
 
     def test_van_der_waals_first_last(self) -> None:
         """'Johan van der Waals' in First Last format."""
@@ -1437,7 +1437,7 @@ class TestNobleParticleMatching:
 
 
 class TestEllipsisPlaceholder:
-    """L5: Only short strings with ellipsis should be treated as placeholder."""
+    """Only short strings with ellipsis should be treated as placeholder."""
 
     def test_short_ellipsis_is_placeholder(self) -> None:
         """Short string with ellipsis should be a placeholder."""
@@ -1456,7 +1456,7 @@ class TestEllipsisPlaceholder:
 
 
 class TestCJKTitleNormalization:
-    """L7: CJK-only titles should not normalize to empty string."""
+    """CJK-only titles should not normalize to empty string."""
 
     def test_cjk_title_not_empty(self) -> None:
         """Chinese characters should not produce empty normalized title."""
@@ -1477,7 +1477,7 @@ class TestCJKTitleNormalization:
 
 
 class TestHtmlEntityInNormalizeTitle:
-    """D7: HTML entities should be decoded before title normalization."""
+    """HTML entities should be decoded before title normalization."""
 
     def test_amp_decoded(self) -> None:
         """&amp; should become & in normalized title."""
@@ -1498,7 +1498,7 @@ class TestHtmlEntityInNormalizeTitle:
 
 
 class TestAuthorOverlapWithInitials:
-    """L9: author_overlap_ratio should distinguish authors with same last name but different initials."""
+    """author_overlap_ratio should distinguish authors with same last name but different initials."""
 
     def test_same_last_different_initials_distinguished(self) -> None:
         """'J. Smith' and 'K. Smith' should not be merged when both have initials."""
@@ -1527,13 +1527,13 @@ class TestAuthorOverlapWithInitials:
 
 
 class TestVenueSimilarityPreprint:
-    """L14 (reinforced): venue_similarity is PURE venue-string similarity. The preprint /
-    published (XOR) split is no longer smuggled in as a 0.5 bonus; it is a single explicit
-    signal in compute_dedup_score (Signal 6), counted exactly once. Rewarding it in both
-    places double-counted the same evidence and tipped distinct works over threshold."""
+    """venue_similarity is PURE venue-string similarity. The preprint/published (XOR)
+    split is not folded in as a 0.5 bonus here; it is a single explicit signal in
+    compute_dedup_score (Signal 6), counted exactly once. Rewarding it in both places
+    would double-count the same evidence and tip distinct works over threshold."""
 
     def test_biorxiv_vs_journal_is_plain_fuzz_not_xor_bonus(self) -> None:
-        """bioRxiv vs a dissimilar journal -> plain fuzz (< 0.5), not the old 0.5 XOR bonus."""
+        """bioRxiv vs a dissimilar journal -> plain fuzz (< 0.5), not a 0.5 XOR bonus."""
         sim = text_utils.venue_similarity(
             {"journal": "bioRxiv"},
             {"journal": "Nature Medicine"},
@@ -1541,7 +1541,7 @@ class TestVenueSimilarityPreprint:
         assert sim < 0.5
 
     def test_arxiv_eprints_vs_conference_is_plain_fuzz_not_xor_bonus(self) -> None:
-        """arXiv e-prints vs conference -> plain fuzz (< 0.5), not the old 0.5 XOR bonus."""
+        """arXiv e-prints vs conference -> plain fuzz (< 0.5), not a 0.5 XOR bonus."""
         sim = text_utils.venue_similarity(
             {"journal": "arXiv e-prints"},
             {"booktitle": "NeurIPS 2024"},
@@ -1562,7 +1562,7 @@ class TestVenueSimilarityPreprint:
 
 
 class TestBothPreprintDoiDedup:
-    """B6: Two entries with different preprint DOIs should NOT match."""
+    """Two entries with different preprint DOIs should NOT match."""
 
     def test_different_arxiv_dois_not_matched(self) -> None:
         """Two different arXiv preprints should not be considered duplicates."""
@@ -1593,7 +1593,7 @@ class TestBothPreprintDoiDedup:
 
 
 class TestYearGapWidened:
-    """L6: Year gap > 3 should reject, <= 3 should allow preprint→published."""
+    """Year gap > 3 should reject, <= 3 should allow preprint→published."""
 
     def test_3_year_gap_allowed(self) -> None:
         """A 3-year gap (preprint in 2021, published in 2024) should allow matching."""
@@ -1651,7 +1651,7 @@ class TestYearGapWidened:
 
 
 class TestDoiConflictPreserveUpgrade:
-    """B1: DOI merge should not revert a preprint→published upgrade."""
+    """DOI merge should not revert a preprint→published upgrade."""
 
     def test_preprint_doi_upgraded_to_published(self) -> None:
         """When primary has arXiv DOI and enricher has published DOI, keep published."""
@@ -1674,7 +1674,7 @@ class TestDoiConflictPreserveUpgrade:
 
 
 class TestPhantomArxivJournal:
-    """B2: 'arXiv e-prints' journal should be cleared when published DOI exists."""
+    """'arXiv e-prints' journal should be cleared when published DOI exists."""
 
     def test_arxiv_journal_cleared_with_published_doi(self) -> None:
         """When eprint removed due to published DOI, phantom journal should also go."""
@@ -1759,7 +1759,7 @@ class TestPhantomArxivJournal:
 
 
 class TestIncollectionPromotionRestricted:
-    """B4: incollection→inproceedings should only fire for GENERIC_SERIES_NAMES."""
+    """incollection→inproceedings should only fire for GENERIC_SERIES_NAMES."""
 
     def test_generic_series_promotes(self) -> None:
         """incollection with LNCS booktitle should become inproceedings."""
@@ -1793,7 +1793,7 @@ class TestIncollectionPromotionRestricted:
 
 
 class TestCslArticleTypePreserved:
-    """L16: CSL/doi_bibtex article type should not be overridden to inproceedings."""
+    """CSL/doi_bibtex article type should not be overridden to inproceedings."""
 
     def test_proceedings_journal_becomes_inproceedings(self) -> None:
         """Proceedings-named venues should become @inproceedings, not @article."""
@@ -1852,7 +1852,7 @@ class TestCslArticleTypePreserved:
 
 
 class TestPreprintServersNoFalsePositives:
-    """L19: Journals with 'preprint' substring should not be misclassified."""
+    """Journals with 'preprint' substring should not be misclassified."""
 
     def test_preprint_not_in_servers(self) -> None:
         """The generic word 'preprint' should not be in PREPRINT_SERVERS."""
@@ -1871,7 +1871,7 @@ class TestPreprintServersNoFalsePositives:
 
 
 class TestMergeDuplicateThresholdRaised:
-    """L1: SIM_MERGE_DUPLICATE_THRESHOLD should be 0.95 (was 0.9)."""
+    """SIM_MERGE_DUPLICATE_THRESHOLD should be 0.95."""
 
     def test_threshold_value(self) -> None:
         assert SIM_MERGE_DUPLICATE_THRESHOLD == 0.95
@@ -1907,7 +1907,7 @@ class TestMergeDuplicateThresholdRaised:
 
 
 class TestSemaphoreReleasedDuring429:
-    """B9: Global semaphore should be released before sleeping on 429."""
+    """Global semaphore should be released before sleeping on 429."""
 
     def test_429_sleep_outside_semaphore(self) -> None:
         """Verify the semaphore is not held during 429 retry sleep."""
@@ -1933,7 +1933,7 @@ class TestSemaphoreReleasedDuring429:
 
 
 class TestTokenBucketJitter:
-    """L17: TokenBucketRateLimiter.acquire() should include jitter in sleep."""
+    """TokenBucketRateLimiter.acquire() should include jitter in sleep."""
 
     def test_jitter_import_and_usage(self) -> None:
         """Verify that random.uniform is called during acquire when sleep is needed."""
@@ -1967,7 +1967,7 @@ class TestTokenBucketJitter:
 
 
 class TestEmptyNameSkipped:
-    """L12: Records with empty Name but valid IDs should be skipped."""
+    """Records with empty Name but valid IDs should be skipped."""
 
     def test_empty_name_with_scholar_id_skipped(self, tmp_path: Any) -> None:
         """Record with Scholar ID but no Name should be skipped."""
@@ -1982,7 +1982,7 @@ class TestEmptyNameSkipped:
 
 
 class TestCslEventNameFallback:
-    """B10: bibtex_from_csl should use event-name when container is a generic series."""
+    """bibtex_from_csl should use event-name when container is a generic series."""
 
     def test_lncs_with_event_name(self) -> None:
         """When CSL container is LNCS and event-name exists, use event name."""
@@ -3355,7 +3355,7 @@ class TestDecodeValueErrorContainment:
 
 class TestOpenReviewSessionThreadSafety:
     """Concurrent openreview_login calls must reuse a valid cached session
-    atomically: never re-login and never return a torn/None value (C6)."""
+    atomically: never re-login and never return a torn/None value."""
 
     def test_concurrent_reuse_no_relogin(self) -> None:
         import threading
@@ -3397,7 +3397,7 @@ class TestOpenReviewSessionThreadSafety:
 
 class TestDoiBackfilledPreprintNotFabricatedConference:
     """A DOI-inferred preprint/repository label must never become a fabricated
-    @inproceedings venue (I1). infer_howpublished_from_doi returns labels like
+    @inproceedings venue. infer_howpublished_from_doi returns labels like
     "EGU", "Preprint", "Institutional Repository" that are not conference names;
     R20 must not upgrade them, and any already-upgraded entry must self-heal.
     A REAL venue that merely carries a preprint-prefix DOI stays @inproceedings.

@@ -4,15 +4,14 @@ Each test asserts an invariant of the trust-based merge / dedup logic across MAN
 synthetic authors, venues, and preprint/published pairs rather than a single example,
 so the rules are provably general and never hinge on one title, DOI, author, or venue.
 
-Covered fixes:
-    F1  single canonical preprint-DOI predicate (EGU/OSTI/Qeios/Zenodo recognized;
-        published journals under the same registrant stay published)
-    F2  preprint-XOR split counted exactly once (no venue_similarity double-count)
-    F3  a published-DOI paper is never relabeled as a preprint by a stale journal
-    F4  a truncated author list never overwrites a more complete one by rank
-    F5  a record's own preprint self-DOI survives the registry trust gate
-    F6  published supersedes preprint in the save-time candidate-DOI net
-    F7  a low-trust specific booktitle does not overwrite a trusted generic one
+The invariants covered span a single canonical preprint-DOI predicate (EGU, OSTI,
+Qeios, and Zenodo are recognized while published journals under the same registrant
+stay published), the preprint/published split counted exactly once in the dedup
+composite, a published-DOI paper never relabeled as a preprint by a stale journal, a
+truncated author list never overwriting a more complete one by rank, a record's own
+preprint self-DOI surviving the registry trust gate, published superseding preprint in
+the save-time candidate-DOI net, and a low-trust specific booktitle never overwriting a
+trusted generic one.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ def _inp(**fields: str) -> dict[str, Any]:
     return _entry("inproceedings", **fields)
 
 
-# --------------------------------------------------------------------------- F1
+# ---------------------------------------------------------------------------
 # One canonical predicate: every preprint/grey/data DOI is "secondary" everywhere;
 # a published journal DOI under the same registrant as a preprint stays published.
 
@@ -96,7 +95,7 @@ def test_published_doi_beats_extended_preprint_doi(pre_doi: str) -> None:
     assert merged["fields"].get("doi") == "10.1038/s41586-024-00001"
 
 
-# --------------------------------------------------------------------------- F2
+# ---------------------------------------------------------------------------
 # The preprint/published (XOR) split is a single explicit signal, never doubled.
 
 PREPRINT_SERVER_NAMES = ["bioRxiv", "medRxiv", "arXiv", "arXiv e-prints", "Research Square", "SSRN", "ChemRxiv"]
@@ -104,8 +103,8 @@ PREPRINT_SERVER_NAMES = ["bioRxiv", "medRxiv", "arXiv", "arXiv e-prints", "Resea
 
 @pytest.mark.parametrize("server", PREPRINT_SERVER_NAMES)
 def test_venue_similarity_has_no_preprint_xor_bonus(server: str) -> None:
-    """venue_similarity is pure string similarity: a preprint-vs-journal pair never
-    returns the old disguised 0.5 XOR bonus."""
+    """venue_similarity is pure string similarity, so a preprint-vs-journal pair
+    never returns a disguised 0.5 XOR bonus."""
     sim = tu.venue_similarity({"journal": server}, {"journal": "Nature Communications"})
     assert sim != 0.5
     assert sim < 0.5
@@ -114,7 +113,7 @@ def test_venue_similarity_has_no_preprint_xor_bonus(server: str) -> None:
 @pytest.mark.parametrize("server", PREPRINT_SERVER_NAMES)
 def test_preprint_xor_contributes_exactly_once(server: str) -> None:
     """Excluding the XOR signal drops the composite by exactly 0.10 (Signal 6 only),
-    proving venue_similarity no longer adds a second, hidden XOR contribution."""
+    proving venue_similarity adds no second, hidden XOR contribution."""
     a = {"title": "Shared Title", "author": "Ada Byron and Carl Ohm", "year": "2020", "journal": server}
     b = {
         "title": "Shared Title",
@@ -130,8 +129,8 @@ def test_preprint_xor_contributes_exactly_once(server: str) -> None:
 @pytest.mark.parametrize("suffix", range(6))
 def test_distinct_preprint_published_works_do_not_false_merge(suffix: int) -> None:
     """Two DISTINCT works (different last title word, only partial author overlap, one
-    preprint one published) must not be merged: the old venue+Signal-6 double-count used
-    to tip them over 0.60. Parametrised over independent author sets and titles."""
+    preprint and one published) must not be merged. Counting the XOR signal only once
+    keeps their composite below 0.60. Parametrised over independent author sets and titles."""
     a = _art(
         title=f"Robust Graph Kernels for Seismic Inference Case{suffix}",
         author=f"Ann Lee and Bob Ng{suffix} and Cara Poe{suffix}",
@@ -154,9 +153,8 @@ def test_distinct_preprint_published_works_do_not_false_merge(suffix: int) -> No
 
 def test_genuine_twin_with_leaked_preprint_journal_still_clears_threshold() -> None:
     """A real preprint/published twin whose published side still carries a leaked preprint
-    journal must NOT be dropped. The merge PREPRINT_PAIR site now excludes the XOR signal
-    exactly (count_preprint_xor=False) instead of subtracting a flat 0.10 that may never
-    have been added, so the effective score stays above threshold."""
+    journal must NOT be dropped. The merge PREPRINT_PAIR site excludes the XOR signal
+    exactly (count_preprint_xor=False), so the effective score stays above threshold."""
     existing = {
         "title": "Deep Nets for Ocean State",
         "author": "Ann Lee and Bob Ng",
@@ -173,7 +171,7 @@ def test_genuine_twin_with_leaked_preprint_journal_still_clears_threshold() -> N
     assert effective >= SIM_DEDUP_COMPOSITE_THRESHOLD
 
 
-# --------------------------------------------------------------------------- F3
+# ---------------------------------------------------------------------------
 # A published-DOI paper is never relabeled as a preprint by a stale journal string.
 
 
@@ -199,7 +197,7 @@ def test_genuine_preprint_still_relabeled_to_misc(server: str) -> None:
     assert server.lower() in entry["fields"].get("howpublished", "").lower()
 
 
-# --------------------------------------------------------------------------- F4
+# ---------------------------------------------------------------------------
 # A truncated author list must not overwrite a more complete one by trust alone.
 
 
@@ -230,7 +228,7 @@ def test_much_more_trusted_source_may_still_correct_authors() -> None:
     assert len(tu.parse_authors_any(merged["fields"]["author"])) == 2
 
 
-# --------------------------------------------------------------------------- F5
+# ---------------------------------------------------------------------------
 # A record's own preprint self-DOI is definitionally correct and survives the gate.
 
 
@@ -253,7 +251,7 @@ def test_unverified_published_doi_still_dropped() -> None:
     assert "doi" not in merged["fields"]
 
 
-# --------------------------------------------------------------------------- F6
+# ---------------------------------------------------------------------------
 # Published supersedes preprint in the candidate-DOI net's survivor decision.
 
 
@@ -269,7 +267,7 @@ def test_net_published_supersedes_preprint_decision(pre_doi: str, pub_doi: str) 
     assert idu.is_secondary_doi(on_disk_doi or "") is True
 
 
-# --------------------------------------------------------------------------- F7
+# ---------------------------------------------------------------------------
 # A low-trust specific booktitle must not overwrite a trusted generic one.
 
 

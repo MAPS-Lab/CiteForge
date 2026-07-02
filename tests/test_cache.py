@@ -432,7 +432,7 @@ def test_ttl_days_not_stored(tmp_path: Path) -> None:
 
 
 def test_month_boundary_recomputed_not_frozen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """_month_boundary must recompute per access, not freeze at construction (C4)."""
+    """_month_boundary must recompute per access, not freeze at construction."""
     cache = ResponseCache(cache_dir=str(tmp_path))
     _freeze_cache_clock(monkeypatch, datetime(2026, 3, 15, tzinfo=_AST))
     march_boundary = cache._month_boundary

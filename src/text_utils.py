@@ -1,3 +1,11 @@
+"""Text and author-name normalization and similarity scoring.
+
+Shared helpers for normalizing titles and author names and for scoring the
+similarity between records. The merge, deduplication, and BibTeX-building layers
+all compare records through these functions so the notion of the same paper
+stays consistent across the pipeline.
+"""
+
 from __future__ import annotations
 
 import functools
@@ -434,7 +442,7 @@ def title_similarity(a: str | None, b: str | None) -> float:
     Compute a similarity score between two titles after normalization, returning
     a value between 0 and 1 where higher means more similar.
 
-    Uses rapidfuzz for ~10-100x faster fuzzy matching than difflib.SequenceMatcher.
+    Uses rapidfuzz for fast fuzzy-ratio scoring.
     """
     norm_a = normalize_title(a or "")
     norm_b = normalize_title(b or "")

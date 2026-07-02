@@ -1,3 +1,10 @@
+"""Colored, category-tagged logging.
+
+A thread-aware logger with custom STEP and SUCCESS levels and category tags. It
+mirrors each worker's output to a per-author log file while writing the main run
+log, so a run can be followed both globally and per author.
+"""
+
 from __future__ import annotations
 
 import contextlib

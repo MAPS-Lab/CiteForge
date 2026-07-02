@@ -54,7 +54,7 @@ def _complete_finalize(entry: dict[str, Any]) -> dict[str, Any]:
 # Per-rule tests at POST_MERGE
 # ---------------------------------------------------------------------------
 def test_r11_conference_journal_to_inproceedings() -> None:
-    """R11: @article with a conference-proceedings journal -> @inproceedings."""
+    """@article with a conference-proceedings journal -> @inproceedings."""
     result = _canon(_article(journal="Proceedings of the International Conference on Machine Learning"))
     assert result["type"] == "inproceedings"
     assert result["fields"]["booktitle"] == "Proceedings of the International Conference on Machine Learning"
@@ -64,7 +64,7 @@ def test_r11_conference_journal_to_inproceedings() -> None:
 
 
 def test_r14_patent_to_misc() -> None:
-    """R14: @article with a US patent number as journal -> @misc (journal -> note)."""
+    """@article with a US patent number as journal -> @misc (journal -> note)."""
     result = _canon(_article(journal="US Patent 10,123,456"))
     assert result["type"] == "misc"
     assert result["fields"]["note"] == "US Patent 10,123,456"
@@ -73,7 +73,7 @@ def test_r14_patent_to_misc() -> None:
 
 
 def test_r15_unpublished_to_misc() -> None:
-    """R15: @article with "Unpublished" journal -> @misc."""
+    """@article with "Unpublished" journal -> @misc."""
     result = _canon(_article(journal="Unpublished"))
     assert result["type"] == "misc"
     assert "journal" not in result["fields"]
@@ -81,7 +81,7 @@ def test_r15_unpublished_to_misc() -> None:
 
 
 def test_r16_preprint_journal_to_misc() -> None:
-    """R16: @article with a preprint server as journal -> @misc (journal -> howpublished)."""
+    """@article with a preprint server as journal -> @misc (journal -> howpublished)."""
     result = _canon(_article(journal="arXiv"))
     assert result["type"] == "misc"
     assert result["fields"]["howpublished"] == "arXiv"
@@ -90,11 +90,12 @@ def test_r16_preprint_journal_to_misc() -> None:
 
 
 def test_r19_misc_downgrade_branch() -> None:
-    """R19 (misc branch): @article with a preprint DOI and no volume/pages -> @misc.
+    """An @article with a preprint DOI and no volume/pages is downgraded to @misc
+    (the misc branch of the preprint-DOI rule).
 
-    Exercised via the rule helper directly: at full POST_MERGE the manufactured
-    howpublished is a plain venue name that R20 subsequently upgrades, so the
-    misc-downgrade branch is asserted in isolation here.
+    This exercises the rule helper directly. At full POST_MERGE the manufactured
+    howpublished is a plain venue name that the misc->inproceedings upgrade would
+    then promote, so the misc-downgrade branch is asserted in isolation here.
     """
     entry = _article(journal="Journal of Foo", doi="10.48550/arXiv.2101.00001")
     fields = entry["fields"]
@@ -108,7 +109,7 @@ def test_r19_misc_downgrade_branch() -> None:
 
 
 def test_r19_keep_article_strips_preprint_doi() -> None:
-    """R19 (keep branch): real journal + volume/pages keeps @article, strips preprint DOI/URL."""
+    """Keep branch: real journal + volume/pages keeps @article, strips preprint DOI/URL."""
     entry = _article(
         journal="Real Journal",
         doi="10.48550/arXiv.2101.00002",
@@ -126,7 +127,7 @@ def test_r19_keep_article_strips_preprint_doi() -> None:
 
 
 def test_r20_misc_howpublished_to_inproceedings() -> None:
-    """R20: @misc with a conference/workshop howpublished -> @inproceedings."""
+    """@misc with a conference/workshop howpublished -> @inproceedings."""
     result = _canon(_article(type="misc", howpublished="International Conference on Learning Representations"))
     assert result["type"] == "inproceedings"
     assert result["fields"]["booktitle"] == "International Conference on Learning Representations"
@@ -200,7 +201,7 @@ def test_load_repair_strips_bracket_j_title() -> None:
 
 def test_load_repair_strip_secondary_doi_keeps_article() -> None:
     """LOAD_REPAIR strips the preprint DOI/URL when journal + volume/pages exist,
-    keeping the entry as @article (mirrors POST_MERGE R19 keep-branch)."""
+    keeping the entry as @article (mirrors the POST_MERGE keep-branch)."""
     result = _load_repair(
         _article(
             journal="Real Journal",
@@ -217,8 +218,8 @@ def test_load_repair_strip_secondary_doi_keeps_article() -> None:
 
 
 def test_load_repair_secondary_doi_misc_branch_absent() -> None:
-    """C-only R19 misc-downgrade is ABSENT at LOAD_REPAIR: an @article with a
-    preprint DOI but no volume/pages is left unchanged (still @article, DOI kept).
+    """The POST_MERGE-only misc-downgrade is absent at LOAD_REPAIR. An @article with
+    a preprint DOI but no volume/pages is left unchanged (still @article, DOI kept).
 
     POST_MERGE would downgrade this to @misc; LOAD_REPAIR must not.
     """
@@ -227,7 +228,7 @@ def test_load_repair_secondary_doi_misc_branch_absent() -> None:
     assert result["type"] == "article"
     assert result["fields"]["journal"] == "Journal of Foo"
     assert result["fields"]["doi"] == "10.48550/arXiv.2101.00001"
-    # Contrast: POST_MERGE moves it out of @article (downgrade then R20 upgrade),
+    # Contrast: POST_MERGE moves it out of @article (downgrade then misc->inproceedings upgrade),
     # so LOAD_REPAIR's keep-as-article behavior is genuinely distinct.
     post = _canon(entry)
     assert post["type"] != "article"
@@ -235,8 +236,9 @@ def test_load_repair_secondary_doi_misc_branch_absent() -> None:
 
 
 def test_load_repair_r20_misc_howpublished_absent() -> None:
-    """C-only R20 (misc howpublished -> @inproceedings) is ABSENT at LOAD_REPAIR:
-    a @misc with a conference howpublished stays @misc (POST_MERGE would upgrade it)."""
+    """The POST_MERGE-only misc-howpublished-to-@inproceedings upgrade is absent at
+    LOAD_REPAIR. A @misc with a conference howpublished stays @misc (POST_MERGE
+    would upgrade it)."""
     entry = _article(type="misc", howpublished="International Conference on Learning Representations")
     result = _load_repair(entry)
     assert result["type"] == "misc"
@@ -247,8 +249,8 @@ def test_load_repair_r20_misc_howpublished_absent() -> None:
 
 
 def test_load_repair_r13_url_booktitle_absent() -> None:
-    """C-only R13 (url-fragment booktitle -> @misc) is ABSENT at LOAD_REPAIR:
-    an @inproceedings with a URL booktitle stays @inproceedings (POST_MERGE -> @misc)."""
+    """The POST_MERGE-only url-booktitle-to-@misc downgrade is absent at LOAD_REPAIR.
+    An @inproceedings with a URL booktitle stays @inproceedings (POST_MERGE -> @misc)."""
     entry = _article(type="inproceedings", booktitle="https://foo.example/paper")
     result = _load_repair(entry)
     assert result["type"] == "inproceedings"

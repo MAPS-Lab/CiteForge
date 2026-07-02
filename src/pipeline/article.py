@@ -1,3 +1,13 @@
+"""Per-article enrichment pipeline.
+
+Each article is carried through Phase 1 (early DOI validation), Phase 2
+(multi-API enrichment), Phase 2.5 (SerpAPI publication-string fallback),
+Phase 3 (late DOI discovery), and Phase 4 (trust-based merge and save). The
+stages fill genuine gaps from lower-trust sources while preserving the value
+carried by the most authoritative source, and the save step deduplicates so a
+work is represented exactly once.
+"""
+
 from __future__ import annotations
 
 import os
@@ -365,10 +375,10 @@ def process_article(
             except (OSError, ValueError, TypeError):
                 continue
 
-    # Fixup stale entries loaded from disk before enrichment: the pure entry
-    # field/type rewrites are single-sourced in src/canonicalize.py at the
-    # LOAD_REPAIR stage. The destructive title==venue delete (N22) and the
-    # bare-& rewrite trigger stay here in the pipeline.
+    # Fix up stale entries loaded from disk before enrichment. The pure entry
+    # field and type rewrites are single-sourced in src/canonicalize.py at the
+    # LOAD_REPAIR stage, and the destructive title==venue delete and the
+    # bare-ampersand rewrite trigger stay here in the pipeline.
     if existing_file_loaded and baseline_entry is not None:
         _fixup_written = canonicalize(baseline_entry, stage=CanonicalStage.LOAD_REPAIR)
         _bl_fields = baseline_entry.get("fields") or {}
@@ -416,10 +426,10 @@ def process_article(
                 bib_str = bt.bibtex_from_dict(baseline_entry)
                 safe_write_file(existing_file_path, bib_str)
 
-        # NOTE: the former "@article with a preprint DOI -> @misc" quick-fixup was
-        # removed here as unreachable dead code: _entry_is_complete() (the guard
-        # above) only returns True for a NON-preprint DOI, so is_secondary_doi() on
-        # the same field can never be True on this skip-enrichment path.
+        # No preprint-to-@misc reclassification is needed on this skip-enrichment
+        # path. _entry_is_complete() (the guard above) only returns True for a
+        # non-preprint DOI, so is_secondary_doi() on the same field is never True
+        # here.
 
         logger.info("Entry already complete; skipping enrichment", category=LogCategory.SKIP, source=LogSource.SYSTEM)
         if summary_csv_path and existing_file_path:

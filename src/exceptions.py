@@ -1,3 +1,10 @@
+"""Shared exception groupings.
+
+Centralizes the reusable exception-tuple groupings (network, decode, parse, and
+file errors) and the `DecodeError` type, so ``except`` clauses stay consistent
+across the codebase.
+"""
+
 from __future__ import annotations
 
 import csv

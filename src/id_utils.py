@@ -1,3 +1,11 @@
+"""DOI and arXiv identifier utilities.
+
+Normalizes DOIs and arXiv identifiers, extracts them from HTML and free text,
+and matches external identifiers across sources. Deduplication and enrichment
+rely on these normalized forms to compare records that different APIs report in
+different shapes.
+"""
+
 from __future__ import annotations
 
 import re

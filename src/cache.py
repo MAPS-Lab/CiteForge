@@ -1,3 +1,11 @@
+"""File-based API response cache.
+
+A thread-safe, on-disk cache keyed by namespace and request key, with
+monthly-boundary expiry and confirmation-counted negative caching. Persisting
+responses between runs is what lets cache-hit executions reproduce
+byte-identical output.
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -57,7 +65,7 @@ class ResponseCache:
         """Timestamp of the 1st of the CURRENT month (AST), recomputed on every
         access. A long-lived process that spans a month rollover then starts
         serving fresh data at the boundary instead of a value frozen at
-        construction (C4)."""
+        construction."""
         return _month_boundary()
 
     def _lock_for(self, namespace: str) -> threading.Lock:
@@ -188,7 +196,7 @@ class ResponseCache:
         # ttl_days is accepted for caller intent (and logged in put()), but is
         # intentionally NOT stored or read back: positive-entry freshness is
         # governed solely by the monthly boundary in get(), never a rolling
-        # per-entry TTL (C3).
+        # per-entry TTL.
         entry = {"timestamp": time.time(), "data": value}
         path = self._entry_path(namespace, key)
         try:

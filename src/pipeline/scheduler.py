@@ -1,3 +1,11 @@
+"""Author-level scheduling.
+
+Fetches each author's publications from Google Scholar and DBLP, merges and
+deduplicates the two lists, prioritizes authors with pending work, and drives
+`process_article` across a bounded pool of worker threads with a per-author
+time budget.
+"""
+
 from __future__ import annotations
 
 import os
