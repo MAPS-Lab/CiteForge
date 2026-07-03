@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from src import merge_utils, text_utils
-from src.id_utils import doi_bases_match
+from citeforge import merge_utils, text_utils
+from citeforge.id_utils import doi_bases_match
 
 
 def _count_bib_files(directory: str) -> int:

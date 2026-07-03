@@ -7,6 +7,36 @@ on:
     branches: [ main, master ]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-lint-${{ hashFiles('pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+
+    - name: Lint (ruff)
+      run: ruff check citeforge/ tests/ main.py
+
+    - name: Type check (mypy)
+      run: mypy citeforge/ main.py
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -39,19 +69,29 @@ jobs:
 
     - name: Create API key files
       env:
+        SERPAPI_KEY: ${{ secrets.SERPAPI }}
         SERPLY_KEY: ${{ secrets.SERPLY }}
         SEMANTIC_KEY: ${{ secrets.SEMANTICSCHOLAR }}
         OPENREVIEW_KEY: ${{ secrets.OPENREVIEW }}
         GEMINI_KEY: ${{ secrets.GEMINI }}
       run: |
         mkdir -p keys
+        echo "$SERPAPI_KEY" > keys/SerpAPI.key
         echo "$SERPLY_KEY" > keys/Serply.key
         echo "$SEMANTIC_KEY" > keys/Semantic.key
         echo "$OPENREVIEW_KEY" > keys/OpenReview.key
         echo "$GEMINI_KEY" > keys/Gemini.key
 
-    - name: Run tests
-      run: pytest --tb=short
+    - name: Run tests with coverage
+      run: pytest --cov=citeforge --cov=main --cov-report=term-missing --cov-report=xml --cov-fail-under=55
+
+    - name: Upload coverage report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-${{ matrix.python-version }}
+        path: coverage.xml
+        retention-days: 7
 
     - name: Upload test results on failure
       if: failure()

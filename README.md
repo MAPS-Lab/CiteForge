@@ -6,8 +6,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
   <br>
   <img src="https://img.shields.io/badge/Updated-2026--06-blue.svg" alt="Last Updated">
-  <img src="https://img.shields.io/badge/Queries-8%2C104-8A2BE2.svg" alt="Total Queries">
-  <img src="https://img.shields.io/badge/Cache_Hit_Rate-96.1%25-2ea44f.svg" alt="Cache Hit Rate">
+  <img src="https://img.shields.io/badge/Queries-8446-8A2BE2.svg" alt="Total Queries">
+  <img src="https://img.shields.io/badge/Cache_Hit_Rate-78.9%25-2ea44f.svg" alt="Cache Hit Rate">
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@ CiteForge takes care of this. Point it at a list of authors with their Google Sc
 - Merge fields using a **multi-level trust hierarchy** that prefers authoritative sources; and,
 - Output clean, LaTeX-ready `.bib` files organized by author.
 
-The result is deterministic — on cache-hit runs, CiteForge produces **byte-identical output** across consecutive runs, verified by SHA-256 checksums.
+The result is deterministic. On cache-hit runs, CiteForge produces **byte-identical output** across consecutive runs, verified by SHA-256 checksums.
 
 ## Getting Started
 
@@ -61,7 +61,7 @@ python3 main.py data/custom.csv  # Custom input
 python3 main.py --force          # Force re-enrichment
 ```
 
-The input CSV has three columns — name, Scholar link, and an optional DBLP link:
+The input CSV has three columns (name, Scholar link, and an optional DBLP link):
 
 ```csv
 Name,Scholar Link,DBLP Link
@@ -91,11 +91,11 @@ A trust-based consolidation stage merges the collected records according to sour
 
 The pipeline further corrects recurrent metadata issues, such as fragmented compound words, misclassified publication types, invalid page ranges, and titles written entirely in capital letters. Deterministic caching ensures that cache-hit executions produce byte-identical outputs, verified through SHA-256 checksums.
 
-To maintain efficiency and stability, author queries run in parallel while respecting per-API rate limits. All configurable parameters, including source trust order, similarity thresholds, rate limits, and venue mappings, are centralized in [`src/config.py`](src/config.py).
+To maintain efficiency and stability, author queries run in parallel while respecting per-API rate limits. All configurable parameters, including source trust order, similarity thresholds, rate limits, and venue mappings, are centralized in [`citeforge/config.py`](citeforge/config.py).
 
 ## Data Sources
 
-[SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/) require keys — everything else is free or optional:
+[SerpAPI](https://serpapi.com/) and [Serply](https://serply.io/) require keys. Everything else is free or optional:
 
 - **Required:** [SerpAPI](https://serpapi.com/) (Google Scholar), [Serply](https://serply.io/) (citation details);
 - **Recommended:** [Semantic Scholar](https://www.semanticscholar.org/);
@@ -122,4 +122,4 @@ If you use CiteForge in your research or find it useful, please consider citing 
 
 ## License
 
-This project is licensed under the **MIT [License](LICENSE)** — you're free to use, modify, and distribute it for any purpose.
+This project is licensed under the **MIT [License](LICENSE)**. You're free to use, modify, and distribute it for any purpose.

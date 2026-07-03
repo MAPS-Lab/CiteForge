@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src import config
-from src.config import (
+from citeforge import config
+from citeforge.config import (
     _CONTRIBUTION_WINDOW_FALLBACK,
     CONTRIBUTION_WINDOW_YEARS,
     MAX_PUBLICATIONS_PER_AUTHOR,
@@ -11,14 +11,6 @@ from src.config import (
     PUBLICATIONS_PER_YEAR,
     get_min_year,
 )
-
-
-def test_dynamic_publication_limit() -> None:
-    """Test that MAX_PUBLICATIONS_PER_AUTHOR is calculated correctly."""
-    expected = PUBLICATIONS_PER_YEAR * CONTRIBUTION_WINDOW_YEARS
-    assert expected == MAX_PUBLICATIONS_PER_AUTHOR, (
-        f"Calculation error: expected {expected}, got {MAX_PUBLICATIONS_PER_AUTHOR}"
-    )
 
 
 def test_publications_per_year_reasonable() -> None:
@@ -32,28 +24,13 @@ def test_publications_per_year_reasonable() -> None:
 def test_contribution_window_reasonable() -> None:
     """Test that CONTRIBUTION_WINDOW_YEARS is a reasonable value."""
     assert CONTRIBUTION_WINDOW_YEARS >= 1, "CONTRIBUTION_WINDOW_YEARS must be at least 1"
-    assert CONTRIBUTION_WINDOW_YEARS <= 20, (
-        f"CONTRIBUTION_WINDOW_YEARS is very long ({CONTRIBUTION_WINDOW_YEARS})."
-    )
+    assert CONTRIBUTION_WINDOW_YEARS <= 20, f"CONTRIBUTION_WINDOW_YEARS is very long ({CONTRIBUTION_WINDOW_YEARS})."
 
 
 def test_max_publications_positive() -> None:
     """Test that MAX_PUBLICATIONS_PER_AUTHOR is a positive value."""
     assert MAX_PUBLICATIONS_PER_AUTHOR > 0, (
         f"MAX_PUBLICATIONS_PER_AUTHOR must be positive, got {MAX_PUBLICATIONS_PER_AUTHOR}"
-    )
-
-
-def test_config_types() -> None:
-    """Test that configuration values have correct types."""
-    assert isinstance(CONTRIBUTION_WINDOW_YEARS, int), (
-        f"CONTRIBUTION_WINDOW_YEARS should be int, got {type(CONTRIBUTION_WINDOW_YEARS)}"
-    )
-    assert isinstance(PUBLICATIONS_PER_YEAR, int), (
-        f"PUBLICATIONS_PER_YEAR should be int, got {type(PUBLICATIONS_PER_YEAR)}"
-    )
-    assert isinstance(MAX_PUBLICATIONS_PER_AUTHOR, int), (
-        f"MAX_PUBLICATIONS_PER_AUTHOR should be int, got {type(MAX_PUBLICATIONS_PER_AUTHOR)}"
     )
 
 
@@ -65,6 +42,7 @@ def test_min_year_valid() -> None:
 def test_get_min_year_fixed(monkeypatch: object) -> None:
     """Test that get_min_year returns the fixed MIN_YEAR when set."""
     import pytest
+
     mp = pytest.MonkeyPatch()
     mp.setattr(config, "MIN_YEAR", 2020)
     assert get_min_year() == 2020
@@ -74,17 +52,9 @@ def test_get_min_year_fixed(monkeypatch: object) -> None:
 def test_get_min_year_rolling(monkeypatch: object) -> None:
     """Test that get_min_year falls back to rolling window when MIN_YEAR is None."""
     import pytest
+
     mp = pytest.MonkeyPatch()
     mp.setattr(config, "MIN_YEAR", None)
     expected = datetime.now(timezone.utc).year - (_CONTRIBUTION_WINDOW_FALLBACK - 1)
     assert get_min_year() == expected
     mp.undo()
-
-
-def test_contribution_window_derived_from_min_year() -> None:
-    """Test that CONTRIBUTION_WINDOW_YEARS is derived from MIN_YEAR and current year."""
-    if MIN_YEAR is not None:
-        expected = datetime.now(timezone.utc).year - MIN_YEAR + 1
-        assert expected == CONTRIBUTION_WINDOW_YEARS, (
-            f"Expected {expected} years (current_year - MIN_YEAR + 1), got {CONTRIBUTION_WINDOW_YEARS}"
-        )

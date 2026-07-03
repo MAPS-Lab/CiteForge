@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.publication_parser import parse_publication_string
+from citeforge.publication_parser import parse_publication_string
 
 
 class TestJournalPatterns:
@@ -69,18 +69,14 @@ class TestConferencePatterns:
         assert r.confidence >= 0.7
 
     def test_workshop_no_pages(self) -> None:
-        r = parse_publication_string(
-            "NeurIPS 2022 Workshop: Tackling Climate Change with ML, 2022"
-        )
+        r = parse_publication_string("NeurIPS 2022 Workshop: Tackling Climate Change with ML, 2022")
         assert r is not None
         assert r.venue_type == "conference"
         assert r.year == 2022
         assert r.confidence >= 0.6
 
     def test_symposium(self) -> None:
-        r = parse_publication_string(
-            "2007 IEEE International Parallel and Distributed Processing Symposium, 1-8, 2007"
-        )
+        r = parse_publication_string("2007 IEEE International Parallel and Distributed Processing Symposium, 1-8, 2007")
         assert r is not None
         assert r.venue_type == "conference"
         assert r.pages == "1-8"
@@ -168,9 +164,7 @@ class TestLowConfidenceAndEdgeCases:
 
     def test_book_chapter_pages(self) -> None:
         """Book chapter with page range is parsed with moderate confidence."""
-        r = parse_publication_string(
-            "Handbook of Evolutionary Machine Learning, 205-243, 2023"
-        )
+        r = parse_publication_string("Handbook of Evolutionary Machine Learning, 205-243, 2023")
         assert r is not None
         assert r.pages == "205-243"
         assert r.year == 2023

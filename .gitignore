@@ -35,6 +35,7 @@ ENV/
 # Testing
 htmlcov/
 coverage.xml
+.coverage
 dmypy.json
 
 # User data and API keys
@@ -52,6 +53,10 @@ keys/
 *.tmp
 temp/
 tmp/
+
+# Pipeline run artifacts (generated logs must never be committed)
+output/run.log
+output/**/*.log
 
 # Build artifacts
 third-party/*
