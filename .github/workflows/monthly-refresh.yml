@@ -207,8 +207,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Skip re-trigger if another run is already in progress (prevents cascade)
-          running=$(gh run list --workflow="Monthly Pipeline Refresh" --status=in_progress --json databaseId --jq 'length' --repo "${{ github.repository }}")
+          # Skip re-trigger only if a DIFFERENT run is already in progress
+          # (prevents cascade). Exclude the current run: while this verify job
+          # executes, its own run is still 'in_progress', so counting it would
+          # make a timed-out run always self-skip and stall the chain.
+          running=$(gh run list --workflow="Monthly Pipeline Refresh" --status=in_progress --json databaseId --jq "[.[] | select(.databaseId != ${{ github.run_id }})] | length" --repo "${{ github.repository }}")
           if [ "$running" -gt 0 ]; then
             echo "::notice::Another run is already in progress — skipping re-trigger"
             exit 0
