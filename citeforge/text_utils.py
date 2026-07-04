@@ -557,7 +557,14 @@ def venue_similarity(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> floa
 
 
 def _is_preprint_fields(fields: dict[str, Any]) -> bool:
-    """Check if fields look like a preprint based on DOI prefix or journal name."""
+    """Check if fields look like a preprint based on DOI prefix or journal name.
+
+    Canonical fields-level predicate. Not interchangeable with the DOI-level
+    predicate ``id_utils.is_secondary_doi`` (used by ``merge_utils._is_preprint_doi``):
+    that one also matches ``DATA_DOI_PREFIXES`` (Zenodo, Figshare), while this
+    one keys on ``PREPRINT_DOI_PREFIXES`` only and additionally consults the
+    journal name.
+    """
     doi = str(fields.get("doi") or "").lower()
     if any(doi.startswith(p) for p in PREPRINT_DOI_PREFIXES):
         return True

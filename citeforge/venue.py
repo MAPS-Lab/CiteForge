@@ -8,9 +8,10 @@ when the venue itself is unknown.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Any
 
-from .config import CONFERENCE_AS_JOURNAL, JOURNALS_NAMED_PROCEEDINGS
+from .config import CONFERENCE_AS_JOURNAL, GENERIC_SERIES_NAMES, JOURNALS_NAMED_PROCEEDINGS
 
 _DAGSTUHL_DOI_RE = re.compile(
     r"^10\.4230/(lipics|oasics)\.([a-z0-9]+)\.(\d+)(?:\.\d+)?$",
@@ -56,6 +57,24 @@ _DOI_PREFIX_TO_HOWPUB: tuple[tuple[str, str], ...] = (
     ("10.32920/", "Institutional Repository"),
     ("10.5281/zenodo", "Zenodo"),
 )
+
+
+def first_non_generic_container(values: Iterable[Any]) -> str | None:
+    """Return the first element that is non-empty and not a generic series name.
+
+    Shared selection core for multi-element ``container-title`` arrays
+    (Crossref returns ``[series_name, conference_name]``). Elements are
+    coerced to ``str`` and stripped; membership in ``GENERIC_SERIES_NAMES``
+    is tested case-insensitively. Returns ``None`` when every element is
+    empty or generic. Fallback resolution, event-name upgrades, and logging
+    stay at the call sites (``api_generics._extract_venue`` and
+    ``clients.search_apis.bibtex_from_csl``), whose semantics differ.
+    """
+    for candidate in values:
+        text = str(candidate).strip()
+        if text and text.lower() not in GENERIC_SERIES_NAMES:
+            return text
+    return None
 
 
 def infer_howpublished_from_doi(doi: str) -> str | None:

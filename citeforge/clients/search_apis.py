@@ -64,6 +64,7 @@ from ..text_utils import (
     safe_get_nested,
     trim_title_default,
 )
+from ..venue import first_non_generic_container
 from .helpers import _best_item_by_score, _doi_cache_lookup, _sanitize_dblp_author, title_author_cache_key
 
 if TYPE_CHECKING:
@@ -280,14 +281,7 @@ def bibtex_from_csl(csl: dict[str, Any], keyhint: str) -> str:
     year = extract_year_from_any(csl, fallback=0) or 0
     container_raw = csl.get("container-title")
     if isinstance(container_raw, list) and len(container_raw) > 1:
-        container = None
-        for candidate in container_raw:
-            candidate_str = str(candidate).strip()
-            if candidate_str and candidate_str.lower() not in GENERIC_SERIES_NAMES:
-                container = candidate_str
-                break
-        if not container:
-            container = safe_get_field(csl, "container-title")
+        container = first_non_generic_container(container_raw) or safe_get_field(csl, "container-title")
     else:
         container = safe_get_field(csl, "container-title")
     if container and container.lower().strip() in GENERIC_SERIES_NAMES:

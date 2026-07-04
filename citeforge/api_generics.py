@@ -35,6 +35,7 @@ from .text_utils import (
     safe_get_field,
     safe_get_nested,
 )
+from .venue import first_non_generic_container
 
 
 def _resolve_dotted(obj: dict[str, Any], field: str) -> Any:
@@ -391,14 +392,7 @@ def _extract_venue(
         # Crossref returns container-title as array: [series_name, conference_name]
         # Prefer the non-generic element over generic series names like LNCS
         if isinstance(raw_venue, list) and len(raw_venue) > 1:
-            non_generic = next(
-                (
-                    str(c).strip()
-                    for c in raw_venue
-                    if str(c).strip() and str(c).strip().lower() not in GENERIC_SERIES_NAMES
-                ),
-                None,
-            )
+            non_generic = first_non_generic_container(raw_venue)
             venue = non_generic or _resolve_dotted_str(response, field_name)
             logger.debug(
                 f"{mapping.api_name} | VENUE_ARRAY | elements={len(raw_venue)}"

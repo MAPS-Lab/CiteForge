@@ -61,7 +61,7 @@ from citeforge.exceptions import (
     ALL_API_ERRORS,
     PARSE_ERRORS,
 )
-from citeforge.fsscan import iter_author_bibs
+from citeforge.fsscan import iter_author_bibs, iter_parsed_author_bibs
 from citeforge.http_utils import http_get_text
 from citeforge.io_utils import (
     append_summary_to_csv,
@@ -1257,15 +1257,12 @@ def process_article(
         prefer_doi = _read_doi_from_file(path) if path and os.path.isfile(path) else ""
         check_dois = all_candidate_dois - {prefer_doi} if prefer_doi else all_candidate_dois
         if check_dois:
-            for existing_bib in iter_author_bibs(author_dir):
-                epath = os.path.join(author_dir, existing_bib)
-                if path and os.path.abspath(epath) == os.path.abspath(path):
-                    continue  # skip self
+            for existing_bib, epath, edict in iter_parsed_author_bibs(
+                author_dir,
+                skip_path=path or None,  # skip self
+                read_errors=(OSError, UnicodeDecodeError),
+            ):
                 try:
-                    with open(epath, encoding="utf-8") as ef:
-                        edict = bt.parse_bibtex_to_dict(ef.read())
-                    if not edict:
-                        continue
                     edoi = idu.normalize_doi((edict.get("fields") or {}).get("doi", ""))
                     if not edoi or edoi not in check_dois:
                         continue

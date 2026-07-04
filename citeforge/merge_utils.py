@@ -34,7 +34,7 @@ from .config import (
     TRUST_DIFF_OVERRIDE_THRESHOLD,
     TRUST_ORDER,
 )
-from .fsscan import iter_author_bibs
+from .fsscan import iter_author_bibs, iter_parsed_author_bibs
 from .id_utils import (
     _norm_doi,
     allowlisted_url,
@@ -236,6 +236,11 @@ def _guard_pages(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, 
 
 def _guard_journal(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
     """Never downgrade a published journal to a preprint server."""
+    # Deliberately narrower than the canonical fields-level predicate
+    # text_utils._is_preprint_fields: this guard sees two bare venue strings,
+    # not fields dicts, and must not consult a DOI (DOI preference is
+    # _guard_doi's job; consulting it here would double-apply the DOI rule).
+    # Only the journal-substring branch of that predicate applies.
     cur_is_preprint = any(ps in str(cur).lower() for ps in PREPRINT_SERVERS)
     new_is_preprint = any(ps in str(v).lower() for ps in PREPRINT_SERVERS)
     if not cur_is_preprint and new_is_preprint:
@@ -1101,6 +1106,11 @@ def _is_duplicate_bib_entry(
     if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
         e_journal = existing_fields.get("journal", "").lower()
         n_journal = new_fields.get("journal", "").lower()
+        # Deliberately broader than the canonical fields-level predicate
+        # text_utils._is_preprint_fields: _is_preprint_doi delegates to
+        # id_utils.is_secondary_doi, whose DOI branch also matches
+        # DATA_DOI_PREFIXES (Zenodo, Figshare), which _is_preprint_fields
+        # does not. The journal-substring branch is identical.
         e_preprint = _is_preprint_doi(existing_doi) or any(ps in e_journal for ps in PREPRINT_SERVERS)
         n_preprint = _is_preprint_doi(new_doi) or any(ps in n_journal for ps in PREPRINT_SERVERS)
         if (e_preprint ^ n_preprint) and authors_overlap(existing_fields.get("author"), new_fields.get("author")):
@@ -1171,17 +1181,15 @@ def save_entry_to_file(
     # first would hide a real preprint/published duplicate sitting in another file.
     prefer_basename = os.path.basename(prefer_path) if prefer_path else None
 
-    for existing_filename in all_files:
-        if existing_filename == prefer_basename:
-            continue
-        existing_path = os.path.join(author_dir, existing_filename)
-        try:
-            with open(existing_path, encoding="utf-8") as ef:
-                existing_entry = parse_bibtex_to_dict(ef.read())
-        except OSError:
-            logger.debug(f"FILE_READ_ERROR | file={existing_filename}", category=LogCategory.DEDUP)
-            continue
-        if existing_entry and _is_duplicate_bib_entry(existing_entry, entry, new_doi, existing_filename):
+    def _log_read_error(fname: str) -> None:
+        logger.debug(f"FILE_READ_ERROR | file={fname}", category=LogCategory.DEDUP)
+
+    for existing_filename, existing_path, scanned_entry in iter_parsed_author_bibs(
+        author_dir,
+        skip_basename=prefer_basename,
+        on_read_error=_log_read_error,
+    ):
+        if _is_duplicate_bib_entry(scanned_entry, entry, new_doi, existing_filename):
             duplicate_found = True
             duplicate_path = existing_path
             break
