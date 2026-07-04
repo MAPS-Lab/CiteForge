@@ -239,7 +239,7 @@ jobs:
           GH_TOKEN: ${{ secrets.WEBSITE_SYNC_TOKEN }}
         run: |
           echo "Triggering mapslab-website import-publications workflow..."
-          gh api repos/gabrielspadon/mapslab-website/dispatches \
+          gh api repos/MAPS-Lab/mapslab-website/dispatches \
             --method POST \
             -f event_type=citeforge-refresh
           echo "::notice::Dispatched citeforge-refresh event to mapslab-website"
