@@ -21,7 +21,7 @@ from ..http_utils import handle_api_errors, http_get_json, http_post_json
 from ..id_utils import _norm_doi
 from ..log_utils import LogCategory, LogSource, logger
 from ..text_utils import extract_year_from_any, normalize_title
-from .helpers import _best_item_by_score
+from .helpers import _best_item_by_score, _doi_cache_lookup
 
 # ============ Gemini ============
 
@@ -76,8 +76,14 @@ def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | 
         try:
             data = http_post_json(url, payload, headers=request_headers, timeout=15.0)
             break  # success
-        except _requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 429 and attempt < max_retries:
+        except (*ALL_API_ERRORS, ValueError) as e:
+            retryable_429 = (
+                isinstance(e, _requests.exceptions.HTTPError)
+                and e.response is not None
+                and e.response.status_code == 429
+                and attempt < max_retries
+            )
+            if retryable_429:
                 wait = (2**attempt) + random.uniform(0, 1)
                 logger.debug(
                     f"GEMINI_429 | attempt={attempt} | backoff={wait:.1f}s",
@@ -90,14 +96,6 @@ def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | 
                 )
                 time.sleep(wait)
                 continue
-            logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
-            logger.warn(
-                f"API call failed: {type(e).__name__}",
-                category=LogCategory.ERROR,
-                source=LogSource.SYSTEM,
-            )
-            return None
-        except (*ALL_API_ERRORS, ValueError) as e:
             logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
             logger.warn(
                 f"API call failed: {type(e).__name__}",
@@ -156,14 +154,9 @@ def datacite_search_doi(doi: str) -> dict[str, Any] | None:
     if not doi_norm:
         return None
 
-    cached = response_cache.get("datacite", doi_norm)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"datacite | NEG_HIT | doi={doi_norm}", category=LogCategory.CACHE)
-            return None
-        logger.debug(f"datacite | HIT | doi={doi_norm}", category=LogCategory.CACHE)
+    cached, hit = _doi_cache_lookup("datacite", doi_norm)
+    if hit:
         return cached
-    logger.debug(f"datacite | MISS | doi={doi_norm}", category=LogCategory.CACHE)
 
     encoded_doi = urllib.parse.quote(doi_norm, safe="")
     url = f"{DATACITE_BASE}/{encoded_doi}"

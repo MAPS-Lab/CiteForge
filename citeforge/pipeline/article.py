@@ -98,7 +98,7 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
     doi = fields.get("doi")
     has_venue = any(fields.get(v) and not has_placeholder(str(fields.get(v))) for v in ("journal", "booktitle"))
 
-    # Determine completeness: check essential fields, venue, DOI, and preprint status
+    # Completeness requires the essential fields, a venue, and a non-preprint DOI
     doi_is_preprint = False
     journal_is_preprint = False
 
@@ -183,11 +183,11 @@ def _try_multiple_candidates(
     """Try candidates from an API source in relevance order until one matches the baseline.
 
     When *seen_dois* is provided, every DOI encountered across all candidates
-    (matched or not) is collected.  This enables downstream duplicate detection
+    (matched or not) is collected. This enables downstream duplicate detection
     against files already on disk even when the candidate was rejected by the
     matching gate.
 
-    Returns (matched, matched_candidate) tuple.
+    Returns a (matched, matched_candidate) tuple.
     """
     if not candidates:
         return False, None
@@ -229,6 +229,94 @@ def _try_multiple_candidates(
             logger.info(f"Candidate {idx}: error - {e}", category=LogCategory.DEBUG, source=source_name)
 
     return False, None
+
+
+def _phase2_search(
+    debug_label: str | None,
+    source_name: str,
+    search_fn: Callable[[], Any],
+    build_func: Callable[..., str | None],
+    flag_key: str,
+    title: str,
+    baseline_entry: dict[str, Any],
+    result_id: str,
+    enr_list: list[tuple[str, dict[str, Any]]],
+    flags: dict[str, bool],
+    seen_dois: set[str],
+    err_template: str = "API error - {}",
+) -> Any | None:
+    """Run one Phase 2 / 2.5 source search and validate candidates against the baseline.
+
+    Logs SEARCH_START when *debug_label* is given, calls *search_fn*, and feeds
+    any candidates through :func:`_try_multiple_candidates`. API errors are
+    logged with *err_template* and swallowed. Returns the matched candidate or
+    None.
+    """
+    if debug_label:
+        logger.debug(f"SEARCH_START | source={debug_label} | title={title[:60]}", category=LogCategory.AUDIT)
+    matched_candidate: Any | None = None
+    try:
+        candidates = search_fn()
+        if candidates:
+            _, matched_candidate = _try_multiple_candidates(
+                source_name,
+                candidates,
+                build_func,
+                baseline_entry,
+                result_id,
+                enr_list,
+                flags,
+                flag_key,
+                max_candidates=5,
+                seen_dois=seen_dois,
+            )
+    except ALL_API_ERRORS as e:
+        logger.warn(err_template.format(e), category=LogCategory.ERROR, source=source_name)
+    return matched_candidate
+
+
+def _stash_external_id(baseline_entry: dict[str, Any], api: str, field: str, value: Any) -> None:
+    """Store an external identifier from a matched candidate on the baseline entry."""
+    if value:
+        baseline_entry["fields"][field] = str(value)
+        logger.debug(
+            f"ID_EXTRACT | api={api} | field={field} | value={value}",
+            category=LogCategory.AUDIT,
+        )
+
+
+def _relpath_or(path: str) -> str:
+    """Return *path* relative to CWD, or *path* unchanged when relpath fails."""
+    try:
+        return os.path.relpath(path)
+    except (OSError, ValueError):
+        return path
+
+
+def _record_skip_summary(summary_csv_path: str | None, path: str | None, flags: dict[str, bool]) -> None:
+    """Write a zero-hit summary row for a skipped article, unless a previous run already tracks it."""
+    if not (summary_csv_path and path):
+        return
+    rel = _relpath_or(path)
+    if not is_known_summary_path(rel):
+        append_summary_to_csv(summary_csv_path, rel, 0, flags)
+
+
+def _title_as_venue(fields: dict[str, Any]) -> str | None:
+    """Return the lowered title when it equals the journal or booktitle, else None.
+
+    Marks corrupted Scholar data where the venue leaked into the title field.
+    Deliberately checked at two sites (existing-file fixup and Phase 4
+    post-merge) so corrupt entries are deleted whichever path they take.
+    """
+    title = (fields.get("title") or "").strip().lower()
+    if not title:
+        return None
+    journal = (fields.get("journal") or "").strip().lower()
+    booktitle = (fields.get("booktitle") or "").strip().lower()
+    if (journal and title == journal) or (booktitle and title == booktitle):
+        return title
+    return None
 
 
 def process_article(
@@ -325,11 +413,10 @@ def process_article(
     baseline_entry = None
     existing_file_path = None
 
-    # Try to find existing BibTeX file to use as enrichment seed
-    # If found, load it and use as baseline - enrichment process will update/fix fields
+    # Look for an existing BibTeX file to use as the enrichment seed; when
+    # found it becomes the baseline and enrichment updates its fields
     if SKIP_SCHOLAR_FOR_EXISTING_FILES and os.path.exists(author_dir):
-        # Sort filenames for deterministic iteration order
-        bib_files = iter_author_bibs(author_dir)
+        bib_files = iter_author_bibs(author_dir)  # sorted, for deterministic iteration
         logger.debug(
             f"EXISTING_FILE_SCAN | dir={author_dir} | files_checked={len(bib_files)}",
             category=LogCategory.AUDIT,
@@ -384,20 +471,15 @@ def process_article(
         _bl_fields = baseline_entry.get("fields") or {}
 
         # Delete entries where title equals journal or booktitle (corrupted Scholar data)
-        _bl_title_venue = (_bl_fields.get("title") or "").strip().lower()
-        if _bl_title_venue:
-            _bl_journal_venue = (_bl_fields.get("journal") or "").strip().lower()
-            _bl_booktitle_venue = (_bl_fields.get("booktitle") or "").strip().lower()
-            if (_bl_journal_venue and _bl_title_venue == _bl_journal_venue) or (
-                _bl_booktitle_venue and _bl_title_venue == _bl_booktitle_venue
-            ):
-                logger.debug(
-                    f"EXISTING_FIXUP | title_is_venue | title={_bl_title_venue[:60]} | deleting",
-                    category=LogCategory.CLEANUP,
-                )
-                if existing_file_path and os.path.exists(existing_file_path):
-                    os.remove(existing_file_path)
-                return 0
+        _bl_title_venue = _title_as_venue(_bl_fields)
+        if _bl_title_venue is not None:
+            logger.debug(
+                f"EXISTING_FIXUP | title_is_venue | title={_bl_title_venue[:60]} | deleting",
+                category=LogCategory.CLEANUP,
+            )
+            if existing_file_path and os.path.exists(existing_file_path):
+                os.remove(existing_file_path)
+            return 0
 
         # Escape bare & in field values (bibtex_from_dict handles this on write,
         # but we need to trigger a rewrite for files that were never re-serialized)
@@ -412,7 +494,7 @@ def process_article(
 
     # Skip enrichment entirely if entry is already complete (unless --force)
     if not force_enrich and existing_file_loaded and baseline_entry is not None and _entry_is_complete(baseline_entry):
-        # Quick fixup: strip preprint-only publishers from complete entries.
+        # Quick fixup that strips preprint-only publishers from complete entries.
         # Single-sourced in canonicalize() at the COMPLETE_SKIP_FINALIZE stage; the
         # debug log and write-gating stay here so the skip-path I/O is unchanged.
         bl_fields = baseline_entry.get("fields") or {}
@@ -432,14 +514,7 @@ def process_article(
         # here.
 
         logger.info("Entry already complete; skipping enrichment", category=LogCategory.SKIP, source=LogSource.SYSTEM)
-        if summary_csv_path and existing_file_path:
-            try:
-                rel = os.path.relpath(existing_file_path)
-            except (OSError, ValueError):
-                rel = existing_file_path
-            # Only write a new CSV row if this file has no entry from a previous run
-            if not is_known_summary_path(rel):
-                append_summary_to_csv(summary_csv_path, rel, 0, flags)
+        _record_skip_summary(summary_csv_path, existing_file_path, flags)
         return 1
 
     # If no existing file found, build minimal BibTeX baseline
@@ -548,7 +623,7 @@ def process_article(
             if was_written:
                 logger.success(f"Saved baseline: {path}", category=LogCategory.SAVE, source=LogSource.SYSTEM)
             else:
-                # save_entry_to_file found a duplicate and skipped writing —
+                # save_entry_to_file found a duplicate and skipped writing;
                 # the article is already on disk under a different name.
                 # Skip enrichment entirely to avoid churn.
                 logger.info(
@@ -556,19 +631,13 @@ def process_article(
                     category=LogCategory.SKIP,
                     source=LogSource.SYSTEM,
                 )
-                if summary_csv_path and path:
-                    try:
-                        rel = os.path.relpath(path)
-                    except (OSError, ValueError):
-                        rel = path
-                    if not is_known_summary_path(rel):
-                        append_summary_to_csv(summary_csv_path, rel, 0, flags)
+                _record_skip_summary(summary_csv_path, path, flags)
                 return 1
 
     enr_list: list[tuple[str, dict[str, Any]]] = []
     # Collect DOIs from ALL Phase 2 candidates (matched or not) for
-    # deterministic dedup: if a candidate's DOI already exists on disk,
-    # we skip writing even when the candidate was rejected by the match gate.
+    # deterministic dedup; when a candidate's DOI already exists on disk the
+    # write is skipped even though the match gate rejected the candidate.
     all_candidate_dois: set[str] = set()
 
     # ===== PHASE 1: Early DOI Validation =====
@@ -651,162 +720,112 @@ def process_article(
         else:
             logger.info("No title available; skipped", category=LogCategory.SKIP, source=LogSource.SCHOLAR)
 
-    logger.debug(f"SEARCH_START | source=S2 | title={title[:60]}", category=LogCategory.AUDIT)
-    s2_paper = None
-    if s2_api_key:
-        try:
-            s2_papers = s2_search_papers_multiple(title, rec.name, s2_api_key, max_results=5)
-            if s2_papers:
-                _, s2_paper = _try_multiple_candidates(
-                    LogSource.S2,
-                    s2_papers,
-                    build_bibtex_from_s2,
-                    baseline_entry,
-                    result_id,
-                    enr_list,
-                    flags,
-                    "s2",
-                    max_candidates=5,
-                    seen_dois=all_candidate_dois,
-                )
-                if s2_paper:
-                    s2_id = s2_paper.get("paperId")
-                    if s2_id:
-                        baseline_entry["fields"]["x_s2_paper_id"] = str(s2_id)
-                        logger.debug(
-                            f"ID_EXTRACT | api=S2 | field=x_s2_paper_id | value={s2_id}",
-                            category=LogCategory.AUDIT,
-                        )
-        except ALL_API_ERRORS as e:
-            logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.S2)
+    # Source order is fixed; each search resolves its client function at call
+    # time from module globals so tests can monkeypatch the entry points.
+    s2_paper = _phase2_search(
+        "S2",
+        LogSource.S2,
+        (lambda: s2_search_papers_multiple(title, rec.name, s2_api_key, max_results=5)) if s2_api_key else lambda: None,
+        build_bibtex_from_s2,
+        "s2",
+        title,
+        baseline_entry,
+        result_id,
+        enr_list,
+        flags,
+        all_candidate_dois,
+    )
+    if s2_paper:
+        _stash_external_id(baseline_entry, "S2", "x_s2_paper_id", s2_paper.get("paperId"))
 
-    logger.debug(f"SEARCH_START | source=Crossref | title={title[:60]}", category=LogCategory.AUDIT)
-    cr_item = None
-    try:
-        cr_items = crossref_search_multiple(title, rec.name, max_results=5, year_hint=year_hint)
-        if cr_items:
-            _, cr_item = _try_multiple_candidates(
-                LogSource.CROSSREF,
-                cr_items,
-                build_bibtex_from_crossref,
-                baseline_entry,
-                result_id,
-                enr_list,
-                flags,
-                "crossref",
-                max_candidates=5,
-                seen_dois=all_candidate_dois,
-            )
-    except ALL_API_ERRORS as e:
-        logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.CROSSREF)
+    cr_item = _phase2_search(
+        "Crossref",
+        LogSource.CROSSREF,
+        lambda: crossref_search_multiple(title, rec.name, max_results=5, year_hint=year_hint),
+        build_bibtex_from_crossref,
+        "crossref",
+        title,
+        baseline_entry,
+        result_id,
+        enr_list,
+        flags,
+        all_candidate_dois,
+    )
 
-    logger.debug(f"SEARCH_START | source=OpenReview | title={title[:60]}", category=LogCategory.AUDIT)
-    try:
-        or_notes = openreview_search_papers_multiple(title, rec.name, or_creds, max_results=5)
-        if or_notes:
-            _try_multiple_candidates(
-                LogSource.OPENREVIEW,
-                or_notes,
-                build_bibtex_from_openreview,
-                baseline_entry,
-                result_id,
-                enr_list,
-                flags,
-                "openreview",
-                max_candidates=5,
-                seen_dois=all_candidate_dois,
-            )
-    except ALL_API_ERRORS as e:
-        logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.OPENREVIEW)
+    _phase2_search(
+        "OpenReview",
+        LogSource.OPENREVIEW,
+        lambda: openreview_search_papers_multiple(title, rec.name, or_creds, max_results=5),
+        build_bibtex_from_openreview,
+        "openreview",
+        title,
+        baseline_entry,
+        result_id,
+        enr_list,
+        flags,
+        all_candidate_dois,
+    )
 
-    logger.debug(f"SEARCH_START | source=arXiv | title={title[:60]}", category=LogCategory.AUDIT)
-    arxiv_entry = None
-    try:
-        arxiv_entries = arxiv_search(title, rec.name, year_hint)
-        if arxiv_entries:
-            _, arxiv_entry = _try_multiple_candidates(
-                LogSource.ARXIV,
-                arxiv_entries,
-                build_bibtex_from_arxiv,
-                baseline_entry,
-                result_id,
-                enr_list,
-                flags,
-                "arxiv",
-                max_candidates=5,
-                seen_dois=all_candidate_dois,
-            )
-    except ALL_API_ERRORS as e:
-        logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.ARXIV)
+    arxiv_entry = _phase2_search(
+        "arXiv",
+        LogSource.ARXIV,
+        lambda: arxiv_search(title, rec.name, year_hint),
+        build_bibtex_from_arxiv,
+        "arxiv",
+        title,
+        baseline_entry,
+        result_id,
+        enr_list,
+        flags,
+        all_candidate_dois,
+    )
 
-    logger.debug(f"SEARCH_START | source=OpenAlex | title={title[:60]}", category=LogCategory.AUDIT)
-    oa_work = None
-    try:
-        oa_works = openalex_search_multiple(title, rec.name, max_results=5, year_hint=year_hint)
-        if oa_works:
-            _, oa_work = _try_multiple_candidates(
-                LogSource.OPENALEX,
-                oa_works,
-                build_bibtex_from_openalex,
-                baseline_entry,
-                result_id,
-                enr_list,
-                flags,
-                "openalex",
-                max_candidates=5,
-                seen_dois=all_candidate_dois,
-            )
-            if oa_work:
-                oa_id = oa_work.get("id")
-                if oa_id:
-                    baseline_entry["fields"]["x_openalex_id"] = str(oa_id)
-                    logger.debug(
-                        f"ID_EXTRACT | api=OpenAlex | field=x_openalex_id | value={oa_id}",
-                        category=LogCategory.AUDIT,
-                    )
-    except ALL_API_ERRORS as e:
-        logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.OPENALEX)
-    logger.debug(f"SEARCH_START | source=PubMed | title={title[:60]}", category=LogCategory.AUDIT)
-    pm_article = None
-    try:
-        pm_articles = pubmed_search_papers_multiple(title, rec.name, max_results=5)
-        if pm_articles:
-            _, pm_article = _try_multiple_candidates(
-                LogSource.PUBMED,
-                pm_articles,
-                build_bibtex_from_pubmed,
-                baseline_entry,
-                result_id,
-                enr_list,
-                flags,
-                "pubmed",
-                max_candidates=5,
-                seen_dois=all_candidate_dois,
-            )
-    except ALL_API_ERRORS as e:
-        logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.PUBMED)
-    logger.debug(f"SEARCH_START | source=EuropePMC | title={title[:60]}", category=LogCategory.AUDIT)
-    epmc_article = None
-    try:
-        epmc_articles = europepmc_search_papers_multiple(title, rec.name, max_results=5)
-        if epmc_articles:
-            _, epmc_article = _try_multiple_candidates(
-                LogSource.EUROPEPMC,
-                epmc_articles,
-                build_bibtex_from_europepmc,
-                baseline_entry,
-                result_id,
-                enr_list,
-                flags,
-                "europepmc",
-                max_candidates=5,
-                seen_dois=all_candidate_dois,
-            )
-    except ALL_API_ERRORS as e:
-        logger.warn(f"API error - {e}", category=LogCategory.ERROR, source=LogSource.EUROPEPMC)
+    oa_work = _phase2_search(
+        "OpenAlex",
+        LogSource.OPENALEX,
+        lambda: openalex_search_multiple(title, rec.name, max_results=5, year_hint=year_hint),
+        build_bibtex_from_openalex,
+        "openalex",
+        title,
+        baseline_entry,
+        result_id,
+        enr_list,
+        flags,
+        all_candidate_dois,
+    )
+    if oa_work:
+        _stash_external_id(baseline_entry, "OpenAlex", "x_openalex_id", oa_work.get("id"))
+
+    pm_article = _phase2_search(
+        "PubMed",
+        LogSource.PUBMED,
+        lambda: pubmed_search_papers_multiple(title, rec.name, max_results=5),
+        build_bibtex_from_pubmed,
+        "pubmed",
+        title,
+        baseline_entry,
+        result_id,
+        enr_list,
+        flags,
+        all_candidate_dois,
+    )
+
+    epmc_article = _phase2_search(
+        "EuropePMC",
+        LogSource.EUROPEPMC,
+        lambda: europepmc_search_papers_multiple(title, rec.name, max_results=5),
+        build_bibtex_from_europepmc,
+        "europepmc",
+        title,
+        baseline_entry,
+        result_id,
+        enr_list,
+        flags,
+        all_candidate_dois,
+    )
 
     # ===== PHASE 2.5: Venue-Based Search (SerpAPI publication string) =====
-    # Only attempt when no enrichment matched so far — avoids redundant API calls.
+    # Only attempted when no enrichment matched so far, avoiding redundant API calls.
     if not enr_list:
         pub_string = art.get("publication") or ""
         if pub_string:
@@ -835,60 +854,37 @@ def process_article(
 
                 # Tier 1: venue-based Crossref search (journal/conference only)
                 if parsed_pub.venue_type in ("journal", "conference"):
-                    try:
-                        cr_venue_items = crossref_search_by_venue(
-                            title,
-                            rec.name,
-                            container_title=parsed_pub.venue_name,
-                            max_results=5,
-                        )
-                        if cr_venue_items:
-                            _try_multiple_candidates(
-                                LogSource.CROSSREF,
-                                cr_venue_items,
-                                build_bibtex_from_crossref,
-                                baseline_entry,
-                                result_id,
-                                enr_list,
-                                flags,
-                                "crossref",
-                                max_candidates=5,
-                                seen_dois=all_candidate_dois,
-                            )
-                    except ALL_API_ERRORS as e:
-                        logger.warn(
-                            f"Venue-based Crossref error: {e}",
-                            category=LogCategory.ERROR,
-                            source=LogSource.CROSSREF,
-                        )
+                    venue_name = parsed_pub.venue_name
+                    _phase2_search(
+                        None,
+                        LogSource.CROSSREF,
+                        lambda: crossref_search_by_venue(title, rec.name, container_title=venue_name, max_results=5),
+                        build_bibtex_from_crossref,
+                        "crossref",
+                        title,
+                        baseline_entry,
+                        result_id,
+                        enr_list,
+                        flags,
+                        all_candidate_dois,
+                        err_template="Venue-based Crossref error: {}",
+                    )
 
-                # Tier 1: venue-based OpenAlex search (only if Crossref missed)
-                if not enr_list and parsed_pub.venue_type in ("journal", "conference"):
-                    try:
-                        oa_venue_items = openalex_search_by_venue(
+                    # Tier 1: venue-based OpenAlex search (only if Crossref missed)
+                    if not enr_list:
+                        _phase2_search(
+                            None,
+                            LogSource.OPENALEX,
+                            lambda: openalex_search_by_venue(title, rec.name, venue_name=venue_name, max_results=5),
+                            build_bibtex_from_openalex,
+                            "openalex",
                             title,
-                            rec.name,
-                            venue_name=parsed_pub.venue_name,
-                            max_results=5,
-                        )
-                        if oa_venue_items:
-                            _try_multiple_candidates(
-                                LogSource.OPENALEX,
-                                oa_venue_items,
-                                build_bibtex_from_openalex,
-                                baseline_entry,
-                                result_id,
-                                enr_list,
-                                flags,
-                                "openalex",
-                                max_candidates=5,
-                                seen_dois=all_candidate_dois,
-                            )
-                    except ALL_API_ERRORS as e:
-                        logger.warn(
-                            f"Venue-based OpenAlex error: {e}",
-                            category=LogCategory.ERROR,
-                            source=LogSource.OPENALEX,
+                            baseline_entry,
+                            result_id,
+                            enr_list,
+                            flags,
+                            all_candidate_dois,
+                            err_template="Venue-based OpenAlex error: {}",
                         )
 
     # ===== PHASE 3: Late DOI Discovery =====
@@ -925,7 +921,7 @@ def process_article(
             _add_doi("phase1_stash", unvalidated_doi)
 
             # Infer arXiv DOIs from eprint fields or URLs in baseline and enrichers
-            # (deterministic — no HTTP required)
+            # (deterministic, no HTTP required)
             _bl_eprint = idu.extract_arxiv_eprint(baseline_entry)
             if _bl_eprint:
                 _add_doi("baseline_eprint", f"10.48550/arxiv.{_bl_eprint}")
@@ -985,7 +981,7 @@ def process_article(
                     url_candidates.append(f"https://europepmc.org/article/PMC/{numeric_id}")
 
             # Deterministic DOI extraction from known URL patterns
-            # (no HTTP required — prevents network non-determinism)
+            # (no HTTP required, prevents network non-determinism)
             for u in filter(None, url_candidates):
                 m = _ARXIV_ABS_RE.search(str(u))
                 if m:
@@ -1115,13 +1111,13 @@ def process_article(
         merged = mu.merge_with_policy(baseline_entry, enr_list)
         merged_fields = merged.get("fields") or {}
 
-        # Phase-4 post-merge canonicalization: entry-type reclassification and
-        # text/venue normalization, single-sourced in citeforge/canonicalize.py.
+        # Phase-4 post-merge canonicalization (entry-type reclassification and
+        # text/venue normalization), single-sourced in citeforge/canonicalize.py.
         # POST_MERGE is the terminal stage; absence rules (article/inproceedings
         # missing venue, preprint-DOI downgrade) fire here after enrichment.
         canonicalize(merged, stage=CanonicalStage.POST_MERGE)
 
-        # Annotate bare stubs: no enrichers, no DOI, no venue
+        # Annotate bare stubs (no enrichers, no DOI, no venue)
         is_bare_stub = (
             not enr_list
             and not (merged_fields.get("doi") or "").strip()
@@ -1190,22 +1186,17 @@ def process_article(
 
         # Delete entries where title equals journal or booktitle (corrupted Scholar data).
         # Placed after Tier 2 filling so it catches entries populated from SerpAPI pub strings.
-        _p4_title_lower = (merged_fields.get("title") or "").strip().lower()
-        if _p4_title_lower:
-            _p4_journal_lower = (merged_fields.get("journal") or "").strip().lower()
-            _p4_booktitle_lower = (merged_fields.get("booktitle") or "").strip().lower()
-            if (_p4_journal_lower and _p4_title_lower == _p4_journal_lower) or (
-                _p4_booktitle_lower and _p4_title_lower == _p4_booktitle_lower
-            ):
-                logger.debug(
-                    f"TITLE_IS_VENUE | title={_p4_title_lower[:60]} | skipping entry",
-                    category=LogCategory.AUDIT,
-                )
-                if path and os.path.isfile(path):
-                    os.remove(path)
-                return 0
+        _p4_title_lower = _title_as_venue(merged_fields)
+        if _p4_title_lower is not None:
+            logger.debug(
+                f"TITLE_IS_VENUE | title={_p4_title_lower[:60]} | skipping entry",
+                category=LogCategory.AUDIT,
+            )
+            if path and os.path.isfile(path):
+                os.remove(path)
+            return 0
 
-        # Skip entries with type "book" (proceedings volumes, edited books — not individual papers)
+        # Skip entries with type "book" (proceedings volumes and edited books, not individual papers)
         if merged.get("type") == "book":
             has_file = bool(path and os.path.isfile(path))
             logger.debug(
@@ -1231,7 +1222,7 @@ def process_article(
         )
         if merged_authors and not author_found:
             # Check if enrichment corrupted the author field (misattributed DOI).
-            # If the ORIGINAL file had the correct author, keep it — don't delete.
+            # If the ORIGINAL file had the correct author, keep it rather than delete.
             if path and os.path.isfile(path) and baseline_entry:
                 baseline_authors = bf.get("author", "")
                 if baseline_authors and author_name_matches(rec.name, baseline_authors):
@@ -1251,10 +1242,11 @@ def process_article(
                 os.remove(path)
             return 0
 
-        # Deterministic dedup: check if any DOI (from Phase 2 candidates, Phase 3
+        # Deterministic dedup. When any DOI (from Phase 2 candidates, Phase 3
         # discovery, or the merged entry itself) already exists in a DIFFERENT file
-        # on disk.  This prevents oscillation where a preprint/published pair creates
-        # a file under the preprint title that gets enriched and renamed every run.
+        # on disk, skip the write. This prevents oscillation where a preprint/
+        # published pair creates a file under the preprint title that gets
+        # enriched and renamed every run.
         merged_doi = idu.normalize_doi(merged_fields.get("doi", ""))
         _merged_eprint = idu.extract_arxiv_eprint(merged)
         if _merged_eprint:
@@ -1293,10 +1285,11 @@ def process_article(
                             )
                             _revert_misattributed_doi(merged_fields, edoi, doi_validated, doi_early)
                             continue
-                    # Published supersedes preprint: if the on-disk match is a preprint/
-                    # secondary DOI while the incoming entry carries a genuine published
-                    # DOI, remove the on-disk preprint and keep the published entry rather
-                    # than dropping the published file (mirrors the save-time tiebreak).
+                    # Published supersedes preprint. When the on-disk match is a
+                    # preprint/secondary DOI while the incoming entry carries a genuine
+                    # published DOI, remove the on-disk preprint and keep the published
+                    # entry rather than dropping the published file (mirrors the
+                    # save-time tiebreak).
                     merged_is_published = bool(merged_doi and not idu.is_secondary_doi(merged_doi))
                     if merged_is_published and idu.is_secondary_doi(edoi):
                         logger.debug(
@@ -1322,7 +1315,7 @@ def process_article(
 
         merged["key"] = bt.build_standard_citekey(merged, gemini_api_key=gemini_api_key) or merged.get("key") or "Entry"
 
-        # Year-window guard: reject files whose enriched year falls outside the window
+        # Year-window guard; rejects entries whose enriched year falls below the window minimum
         if min_year > 0:
             final_year = extract_year_from_any(merged.get("fields", {}).get("year"), fallback=0) or 0
             if 0 < final_year < min_year:
@@ -1342,11 +1335,8 @@ def process_article(
             logger.success(f"Enriched and renamed: {path2}", category=LogCategory.SAVE, source=LogSource.SYSTEM)
         else:
             logger.success(f"Enriched: {path2}", category=LogCategory.SAVE, source=LogSource.SYSTEM)
-        # Summary log: relative path and success flags
-        try:
-            rel = os.path.relpath(path2)
-        except (OSError, ValueError):
-            rel = path2
+        # Summary row carries the relative path and per-source flags
+        rel = _relpath_or(path2)
         total_true = sum(1 for v in flags.values() if v)
 
         # ===== Enrichment Summary =====

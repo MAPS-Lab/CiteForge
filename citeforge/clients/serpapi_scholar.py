@@ -7,8 +7,8 @@ results per page) and ``sort=pubdate`` ordering.
 This module handles **author publication retrieval** only.  Per-article
 citation detail lookups remain in ``serply_scholar.py`` (cheaper API).
 
-Thread safety: all calls are stateless HTTP GETs through ``http_fetch_bytes``,
-so no locking is required.
+All calls are stateless HTTP GETs through ``http_fetch_bytes``, so no
+locking is required.
 
 SerpAPI response structure (``/search?engine=google_scholar_author``)::
 
@@ -57,7 +57,7 @@ def _serpapi_get(
         author_id: Google Scholar author profile ID.
         start: Result offset for pagination (0, 100, 200, ...).
         num: Results per page (max 100).
-        sort: Sort order — ``"pubdate"`` (newest first) or ``"citedby"``.
+        sort: Sort order, ``"pubdate"`` (newest first) or ``"citedby"``.
 
     Returns:
         Parsed JSON response dict, or empty dict on failure.
@@ -147,7 +147,7 @@ def serpapi_fetch_author_publications(
         api_key: SerpAPI key.
         author_id: Google Scholar profile ID (e.g., ``"dg7f4K8AAAAJ"``).
         num: Maximum number of articles to return (hard safety cap).
-        sort: Sort order — ``"pubdate"`` or ``"citedby"``.
+        sort: Sort order, ``"pubdate"`` or ``"citedby"``.
         min_year: Minimum publication year to fetch.  When > 0 and *sort*
             is ``"pubdate"``, pagination stops once a full page falls
             below this year.  0 disables year-bounded stopping.

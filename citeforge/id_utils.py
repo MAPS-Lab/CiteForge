@@ -42,10 +42,7 @@ def _norm_doi(doi: str | None) -> str | None:
 
 
 def normalize_doi(doi: str | None) -> str | None:
-    """
-    Provide a public helper that normalizes DOIs into a consistent canonical
-    form suitable for comparison and lookups.
-    """
+    """Normalize a DOI to its canonical comparison form (public alias of ``_norm_doi``)."""
     return _norm_doi(doi)
 
 

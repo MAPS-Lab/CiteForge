@@ -13,6 +13,7 @@ import contextlib
 import html
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 from .bibtex_build import determine_entry_type, get_container_field
@@ -55,11 +56,11 @@ from .text_utils import (
     title_is_truncated_match,
     title_similarity,
 )
+
+# _matches_journal_named_proceedings and infer_howpublished_from_doi are
+# re-exported for canonicalize.py and tests that access them as merge_utils.*.
 from .venue import (  # noqa: F401
     _DAGSTUHL_DOI_RE,
-    _DOI_PREFIX_TO_HOWPUB,
-    _HOWPUB_CANONICAL,
-    _OSF_PREPRINTS,
     _is_conference_journal,
     _matches_journal_named_proceedings,
     _normalize_howpublished,
@@ -70,6 +71,16 @@ _AUTHOR_DIGIT_SUFFIX_RE = re.compile(r"\s+\d{1,4}\s*$")
 _AUTHOR_PAREN_SUFFIX_RE = re.compile(r"\s*\(\d{1,4}\)\s*$")
 _AUTHOR_GLUED_DIGIT_RE = re.compile(r"(?<=[A-Za-z]{2})\d{1,4}$")
 _AUTHOR_INITIAL_RE = re.compile(r"^[A-Z]\.$")
+_AND_AND_RE = re.compile(r"\band\s+And\b")
+
+_LEADING_DIGIT_RE = re.compile(r"^\d")
+_PAGE_PART_SPLIT_RE = re.compile(r"[-\u2013\u2014,\s]+")
+_NON_DIGIT_RE = re.compile(r"\D")
+_PAGE_LEADING_ZERO_RE = re.compile(r"\b0+(\d)")
+_WHITESPACE_RE = re.compile(r"\s+")
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_PREPRINT_JOURNAL_SUFFIX_RE = re.compile(r"\s*:\s*the preprint server for [\w\s]+$", re.IGNORECASE)
+_TITLE_CAP_WORD_RE = re.compile(r"[A-Z][a-z]+")
 
 _JOURNAL_URL_MAP: dict[str, str] = {
     "techrxiv.org": "TechRxiv",
@@ -78,16 +89,32 @@ _JOURNAL_URL_MAP: dict[str, str] = {
 
 _AUTHOR_SEPARATOR = " and "
 
+# URL substrings that mark a stale preprint URL on an entry that gained a
+# published DOI. Checked in merge_with_policy when removing eprint fields.
+_PREPRINT_URL_MARKERS = (
+    "arxiv.org",
+    "biorxiv.org",
+    "medrxiv.org",
+    "ssrn.com",
+    "preprints.org",
+    "techrxiv.org",
+    "researchsquare.com",
+    "10.1101/",
+    "10.2139/",
+    "10.20944/",
+    "10.21203/",
+)
+
 
 def _fix_author_casing(author_val: str) -> tuple[str, bool]:
-    """Fix author name casing: capitalize all-lowercase tokens, convert
-    ALL-CAPS tokens (>2 chars) to title case, fix 2-char ALL-CAPS surnames
-    when preceded by a mixed-case given name, and fix capital 'And' separators.
+    """Fix author name casing. Capitalizes all-lowercase tokens, converts
+    ALL-CAPS tokens (>2 chars) to title case, fixes 2-char ALL-CAPS surnames
+    when preceded by a mixed-case given name, and fixes capital 'And' separators.
 
     Returns (fixed_string, was_modified).
     """
-    # Fix capital "And" separator first (e.g. "and And Duncan" → "and Duncan")
-    val = re.sub(r"\band\s+And\b", "and", author_val)
+    # Fix capital "And" separator first (e.g. "and And Duncan" becomes "and Duncan")
+    val = _AND_AND_RE.sub("and", author_val)
     val = val.replace(" And ", _AUTHOR_SEPARATOR)
     and_was_fixed = val != author_val
     parts = [p.strip() for p in val.split(_AUTHOR_SEPARATOR)]
@@ -146,9 +173,185 @@ def _is_preprint_doi(doi: str) -> bool:
 def _pop_fields(target: dict[str, Any], field_names: set[str] | frozenset[str], log_tag: str) -> None:
     """Remove *field_names* from *target*, logging any that were actually present."""
     _sentinel = object()
-    removed = [f for f in field_names if target.pop(f, _sentinel) is not _sentinel]
+    removed = [f for f in sorted(field_names) if target.pop(f, _sentinel) is not _sentinel]
     if removed:
         logger.debug(f"{log_tag} | fields={removed}", category=LogCategory.CLEANUP)
+
+
+def _invalid_pages_reason(pages_str: str) -> tuple[str, int] | None:
+    """Classify an invalid pages value, or return None when it looks like real pages.
+
+    Pages must start with a digit, must not contain dots (manuscript IDs such as
+    "2025.11.07.685935"), and no component may exceed PAGES_MAX_DIGITS digits
+    (SAGE/Wiley article IDs masquerading as pages). Components are checked
+    individually so ranges like "13905-13917" pass. Returns (code, digits) with
+    code in {"no_leading_digit", "contains_dot", "overflow"}; digits is the
+    digit count of the first overflowing component (0 otherwise).
+    """
+    if not _LEADING_DIGIT_RE.match(pages_str):
+        return ("no_leading_digit", 0)
+    if "." in pages_str:
+        return ("contains_dot", 0)
+    parts = _PAGE_PART_SPLIT_RE.split(pages_str)
+    overflow = [p for p in parts if p.strip() and len(_NON_DIGIT_RE.sub("", p)) > PAGES_MAX_DIGITS]
+    if overflow:
+        return ("overflow", len(_NON_DIGIT_RE.sub("", overflow[0])))
+    return None
+
+
+# Per-field merge guards. Each guard sees the incumbent value, the candidate
+# value, both source names, and the trust ranking, and returns
+#   True  -> accept the candidate regardless of rank,
+#   False -> reject the candidate regardless of rank,
+#   None  -> fall through to the plain rank comparison.
+def _guard_doi(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+    """Prefer published DOIs over preprint DOIs in both directions."""
+    cur_is_preprint = _is_preprint_doi(str(cur))
+    new_is_preprint = _is_preprint_doi(str(v))
+    if cur_is_preprint and not new_is_preprint:
+        logger.debug(
+            f"DOI_UPGRADE | preprint->published | old={cur} | new={v} | src={src}",
+            category=LogCategory.MERGE,
+        )
+        return True
+    if not cur_is_preprint and new_is_preprint:
+        logger.debug(
+            f"DOI_KEEP | published beats preprint | cur={cur} | rejected={v} | src={src}",
+            category=LogCategory.MERGE,
+        )
+        return False
+    return None
+
+
+def _guard_pages(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+    """Reject candidate pages that are not actual page numbers."""
+    reason = _invalid_pages_reason(str(v).strip())
+    if reason is not None:
+        code, digits = reason
+        msg = f"component_too_long({digits}digits)" if code == "overflow" else code
+        logger.debug(f"PAGES_REJECT | val={v} | reason={msg}", category=LogCategory.MERGE)
+        return False
+    return None
+
+
+def _guard_journal(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+    """Never downgrade a published journal to a preprint server."""
+    cur_is_preprint = any(ps in str(cur).lower() for ps in PREPRINT_SERVERS)
+    new_is_preprint = any(ps in str(v).lower() for ps in PREPRINT_SERVERS)
+    if not cur_is_preprint and new_is_preprint:
+        logger.debug(
+            f"JOURNAL_KEEP | published beats preprint | cur={cur} | rejected={v} | src={src}",
+            category=LogCategory.MERGE,
+        )
+        return False
+    return None
+
+
+def _guard_author(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+    """Prefer more complete (less abbreviated) author lists.
+
+    Never drop authors. A truncated (shorter) list must not overwrite a more
+    complete one unless the new source is much more trusted (>= the title
+    rule's TRUST_DIFF_OVERRIDE_THRESHOLD). Mirrors the title-length guard so
+    a source that emits "A. Smith and others" cannot shrink a full list by rank.
+    """
+    cur_parts = parse_authors_any(str(cur))
+    new_parts = parse_authors_any(str(v))
+    if cur_parts and new_parts and len(new_parts) < len(cur_parts):
+        trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
+        if trust_diff < TRUST_DIFF_OVERRIDE_THRESHOLD:
+            logger.debug(
+                f"AUTHOR_KEEP_SUPERSET | cur_n={len(cur_parts)} new_n={len(new_parts)} "
+                f"trust_diff={trust_diff} | src={src} | keeping more complete author list",
+                category=LogCategory.MERGE,
+            )
+            return False
+    if cur_parts and new_parts and len(cur_parts) == len(new_parts):
+        # Count initials-only tokens (e.g. "J." but not "Jr.")
+        cur_inits = sum(1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
+        new_inits = sum(1 for name in new_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
+        if new_inits > cur_inits:
+            logger.debug(
+                f"AUTHOR_KEEP_COMPLETE | cur_initials={cur_inits} new_initials={new_inits} "
+                f"| src={src} | keeping more complete names",
+                category=LogCategory.MERGE,
+            )
+            return False
+        # Also prefer the version with longer total author text
+        # (catches "Samuel" vs "Sam", middle initials dropped, etc.)
+        if new_inits == cur_inits:
+            cur_len = sum(len(n) for n in cur_parts)
+            new_len = sum(len(n) for n in new_parts)
+            if new_len < cur_len:
+                logger.debug(
+                    f"AUTHOR_KEEP_LONGER | cur_len={cur_len} new_len={new_len} "
+                    f"| src={src} | keeping longer author names",
+                    category=LogCategory.MERGE,
+                )
+                return False
+    return None
+
+
+def _guard_title(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+    """Prefer longer, more descriptive titles.
+
+    Compares content length without whitespace so OCR artifacts (e.g. "Un met"
+    vs "Unmet") do not give the broken title a false length advantage. A
+    significantly shorter candidate (< TITLE_LENGTH_KEEP_RATIO of the current
+    length) only replaces when its source is at least
+    TRUST_DIFF_OVERRIDE_THRESHOLD positions higher in trust order.
+    """
+    cur_len = len(_WHITESPACE_RE.sub("", str(cur)))
+    new_len = len(_WHITESPACE_RE.sub("", str(v)))
+    if cur_len > 0 and new_len < (cur_len * TITLE_LENGTH_KEEP_RATIO):
+        trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
+        if trust_diff < TRUST_DIFF_OVERRIDE_THRESHOLD:
+            logger.debug(
+                f"TITLE_KEEP_LONGER | cur_len={cur_len} new_len={new_len} "
+                f"ratio={new_len / cur_len:.2f} trust_diff={trust_diff}",
+                category=LogCategory.MERGE,
+            )
+            return False
+    return None
+
+
+def _guard_booktitle(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+    """Prefer a specific conference name over a generic series name.
+
+    A generic-to-specific upgrade is accepted only when the specific value is
+    not much less trusted than the incumbent, so a low-trust source cannot
+    overwrite a trusted generic by specificity alone. When it is far less
+    trusted, fall through to the rank gate (which keeps the more-trusted
+    generic). The reverse (specific replaced by generic) is always rejected.
+    """
+    cur_lower = str(cur).lower().strip()
+    new_lower = str(v).lower().strip()
+    if cur_lower in GENERIC_SERIES_NAMES and new_lower not in GENERIC_SERIES_NAMES:
+        trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
+        if trust_diff > -TRUST_DIFF_OVERRIDE_THRESHOLD:
+            logger.debug(
+                f"BOOKTITLE_UPGRADE | generic->specific | old={str(cur)[:60]} "
+                f"| new={str(v)[:60]} | src={src} | trust_diff={trust_diff}",
+                category=LogCategory.MERGE,
+            )
+            return True
+    if cur_lower not in GENERIC_SERIES_NAMES and new_lower in GENERIC_SERIES_NAMES:
+        logger.debug(
+            f"BOOKTITLE_KEEP | specific beats generic | cur={str(cur)[:60]} | rejected={str(v)[:60]} | src={src}",
+            category=LogCategory.MERGE,
+        )
+        return False
+    return None
+
+
+_FIELD_GUARDS: dict[str, Callable[[Any, Any, str, str, dict[str, int]], bool | None]] = {
+    "author": _guard_author,
+    "booktitle": _guard_booktitle,
+    "doi": _guard_doi,
+    "journal": _guard_journal,
+    "pages": _guard_pages,
+    "title": _guard_title,
+}
 
 
 def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
@@ -218,156 +421,16 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 )
                 continue
 
-            # special handling for DOI field: prefer published DOIs over preprint DOIs
-            if k == "doi":
-                cur_is_preprint = _is_preprint_doi(str(cur))
-                new_is_preprint = _is_preprint_doi(str(v))
-                # if current is preprint DOI but new one isn't, always prefer published
-                if cur_is_preprint and not new_is_preprint:
-                    logger.debug(
-                        f"DOI_UPGRADE | preprint->published | old={cur} | new={v} | src={src}",
-                        category=LogCategory.MERGE,
-                    )
+            # Field-specific guards (DOI, pages, journal, author, title,
+            # booktitle) may accept or reject the candidate regardless of rank.
+            guard = _FIELD_GUARDS.get(k)
+            if guard is not None:
+                decision = guard(cur, v, cur_src, src, type_rank)
+                if decision is True:
                     merged[k] = v
                     field_sources[k] = src
                     continue
-                # if new is preprint DOI but current isn't, keep current
-                if not cur_is_preprint and new_is_preprint:
-                    logger.debug(
-                        f"DOI_KEEP | published beats preprint | cur={cur} | rejected={v} | src={src}",
-                        category=LogCategory.MERGE,
-                    )
-                    continue
-
-            # special handling for pages field: must be actual page numbers only
-            if k == "pages":
-                new_str = str(v).strip()
-                # Validate: pages must start with a digit (page numbers only)
-                if not re.match(r"^\d", new_str):
-                    logger.debug(f"PAGES_REJECT | val={v} | reason=no_leading_digit", category=LogCategory.MERGE)
-                    continue
-                # Reject manuscript IDs containing dots (e.g., "2025.11.07.685935")
-                if "." in new_str:
-                    logger.debug(f"PAGES_REJECT | val={v} | reason=contains_dot", category=LogCategory.MERGE)
-                    continue
-                # Reject article IDs masquerading as pages (SAGE/Wiley use long numeric IDs)
-                # Check each page component individually so ranges like "13905-13917" pass
-                parts = re.split(r"[-\u2013\u2014,\s]+", new_str)
-                overflow = [p for p in parts if p.strip() and len(re.sub(r"\D", "", p)) > PAGES_MAX_DIGITS]
-                if overflow:
-                    digits = len(re.sub(r"\D", "", overflow[0]))
-                    logger.debug(
-                        f"PAGES_REJECT | val={v} | reason=component_too_long({digits}digits)",
-                        category=LogCategory.MERGE,
-                    )
-                    continue
-
-            # special handling for journal field: never downgrade from published journal to preprint server
-            if k == "journal":
-                cur_journal_lower = str(cur).lower()
-                new_journal_lower = str(v).lower()
-
-                cur_is_preprint = any(ps in cur_journal_lower for ps in PREPRINT_SERVERS)
-                new_is_preprint = any(ps in new_journal_lower for ps in PREPRINT_SERVERS)
-
-                # Never replace a published journal with a preprint server
-                if not cur_is_preprint and new_is_preprint:
-                    logger.debug(
-                        f"JOURNAL_KEEP | published beats preprint | cur={cur} | rejected={v} | src={src}",
-                        category=LogCategory.MERGE,
-                    )
-                    continue
-
-            # special handling for author field: prefer more complete (less abbreviated) names
-            if k == "author":
-                cur_parts = parse_authors_any(str(cur))
-                new_parts = parse_authors_any(str(v))
-                # Never drop authors: a truncated (shorter) list must not overwrite a more
-                # complete one unless the new source is much more trusted (>= the title
-                # rule's TRUST_DIFF_OVERRIDE_THRESHOLD). Mirrors the title-length guard so
-                # a source that emits "A. Smith and others" cannot shrink a full list by rank.
-                if cur_parts and new_parts and len(new_parts) < len(cur_parts):
-                    trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
-                    if trust_diff < TRUST_DIFF_OVERRIDE_THRESHOLD:
-                        logger.debug(
-                            f"AUTHOR_KEEP_SUPERSET | cur_n={len(cur_parts)} new_n={len(new_parts)} "
-                            f"trust_diff={trust_diff} | src={src} | keeping more complete author list",
-                            category=LogCategory.MERGE,
-                        )
-                        continue
-                if cur_parts and new_parts and len(cur_parts) == len(new_parts):
-                    # Count initials-only tokens (e.g. "J." but not "Jr.")
-                    cur_inits = sum(1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
-                    new_inits = sum(1 for name in new_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
-                    if new_inits > cur_inits:
-                        logger.debug(
-                            f"AUTHOR_KEEP_COMPLETE | cur_initials={cur_inits} new_initials={new_inits} "
-                            f"| src={src} | keeping more complete names",
-                            category=LogCategory.MERGE,
-                        )
-                        continue
-                    # Also prefer the version with longer total author text
-                    # (catches "Samuel" vs "Sam", middle initials dropped, etc.)
-                    if new_inits == cur_inits:
-                        cur_len = sum(len(n) for n in cur_parts)
-                        new_len = sum(len(n) for n in new_parts)
-                        if new_len < cur_len:
-                            logger.debug(
-                                f"AUTHOR_KEEP_LONGER | cur_len={cur_len} new_len={new_len} "
-                                f"| src={src} | keeping longer author names",
-                                category=LogCategory.MERGE,
-                            )
-                            continue
-
-            # special handling for title field: prefer longer, more descriptive titles
-            if k == "title":
-                # Compare content length without whitespace so OCR artifacts
-                # (e.g., "Un met" vs "Unmet") don't give the broken title a
-                # false length advantage.
-                cur_len = len(re.sub(r"\s+", "", str(cur)))
-                new_len = len(re.sub(r"\s+", "", str(v)))
-
-                # If new title is significantly shorter (< 70% of current length),
-                # only replace if it comes from a MUCH more trusted source
-                # (at least 3 positions higher in trust order)
-                if cur_len > 0 and new_len < (cur_len * TITLE_LENGTH_KEEP_RATIO):
-                    trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
-                    if trust_diff < TRUST_DIFF_OVERRIDE_THRESHOLD:
-                        # New source isn't significantly more trusted, keep longer title
-                        logger.debug(
-                            f"TITLE_KEEP_LONGER | cur_len={cur_len} new_len={new_len} "
-                            f"ratio={new_len / cur_len:.2f} trust_diff={trust_diff}",
-                            category=LogCategory.MERGE,
-                        )
-                        continue
-
-            # special handling for booktitle: prefer specific conference name over generic series
-            if k == "booktitle":
-                cur_lower = str(cur).lower().strip()
-                new_lower = str(v).lower().strip()
-                # If current is a generic series name and new is more specific, accept the
-                # upgrade -- but only when the specific value is not much less trusted than
-                # the incumbent, so a low-trust source cannot overwrite a trusted generic by
-                # specificity alone. When it is far less trusted, fall through to the rank
-                # gate (which keeps the more-trusted generic).
-                if cur_lower in GENERIC_SERIES_NAMES and new_lower not in GENERIC_SERIES_NAMES:
-                    trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
-                    if trust_diff > -TRUST_DIFF_OVERRIDE_THRESHOLD:
-                        logger.debug(
-                            f"BOOKTITLE_UPGRADE | generic->specific | old={str(cur)[:60]} "
-                            f"| new={str(v)[:60]} | src={src} | trust_diff={trust_diff}",
-                            category=LogCategory.MERGE,
-                        )
-                        merged[k] = v
-                        field_sources[k] = src
-                        continue
-                # Never replace a specific conference name with a generic series
-                if cur_lower not in GENERIC_SERIES_NAMES and new_lower in GENERIC_SERIES_NAMES:
-                    logger.debug(
-                        f"BOOKTITLE_KEEP | specific beats generic | cur={str(cur)[:60]} "
-                        f"| rejected={str(v)[:60]} | src={src}",
-                        category=LogCategory.MERGE,
-                    )
+                if decision is False:
                     continue
 
             # only replace if new source is more trustworthy
@@ -398,7 +461,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         logger.debug("doi_remove | invalid after normalization", category=LogCategory.CLEANUP)
         merged.pop("doi", None)
 
-    # Validate DOI consistency: contradicting DOIs indicate different papers
+    # Contradicting primary/merged DOIs indicate different papers; keep the
+    # primary unless the merge upgraded a preprint DOI to a published one.
     primary_doi = _norm_doi(primary.get("fields", {}).get("doi"))
     has_doi_conflict = False
     merged_doi_norm = _norm_doi(merged.get("doi"))
@@ -457,8 +521,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     merged = normalize_arxiv_metadata(merged)
     _pop_fields(merged, {"keywords", "copyright"}, "unwanted_removed")
 
-    # Sanitize author names: strip trailing digit suffixes (e.g., "Das1" -> "Das")
-    # that leak from Scholar/DBLP author disambiguation markers
+    # Strip trailing digit suffixes leaked from Scholar/DBLP author
+    # disambiguation markers (e.g., "Das1" becomes "Das").
     author_val = merged.get("author", "")
     if author_val:
         author_parts = [p.strip() for p in str(author_val).split(_AUTHOR_SEPARATOR)]
@@ -470,8 +534,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
 
-    # Fix author name casing: capitalize all-lowercase tokens AND convert
-    # ALL-CAPS tokens to title case (catches "darren steeves", "F VARNO").
+    # Fix author name casing, covering all-lowercase tokens and ALL-CAPS
+    # tokens (catches "darren steeves", "F VARNO").
     author_val = merged.get("author", "")
     if author_val:
         fixed_author, author_was_fixed = _fix_author_casing(str(author_val))
@@ -485,19 +549,18 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     pages_val = merged.get("pages", "")
     if pages_val:
         pages_str = str(pages_val).strip()
-        if not re.match(r"^\d", pages_str) or "." in pages_str:
+        invalid = _invalid_pages_reason(pages_str)
+        if invalid is not None and invalid[0] != "overflow":
             logger.debug(f"pages_remove | val={pages_str} | reason=invalid_format", category=LogCategory.CLEANUP)
             merged.pop("pages", None)
+        elif invalid is not None:
+            logger.debug(f"pages_remove | val={pages_str} | reason=digit_overflow", category=LogCategory.CLEANUP)
+            merged.pop("pages", None)
         else:
-            parts = re.split(r"[-\u2013\u2014,\s]+", pages_str)
-            if any(len(re.sub(r"\D", "", p)) > PAGES_MAX_DIGITS for p in parts if p.strip()):
-                logger.debug(f"pages_remove | val={pages_str} | reason=digit_overflow", category=LogCategory.CLEANUP)
-                merged.pop("pages", None)
-            else:
-                cleaned_pages = re.sub(r"\b0+(\d)", r"\1", pages_str)
-                if cleaned_pages != pages_str:
-                    logger.debug(f"pages_leading_zeros | {pages_str}->{cleaned_pages}", category=LogCategory.CLEANUP)
-                    merged["pages"] = cleaned_pages
+            cleaned_pages = _PAGE_LEADING_ZERO_RE.sub(r"\1", pages_str)
+            if cleaned_pages != pages_str:
+                logger.debug(f"pages_leading_zeros | {pages_str}->{cleaned_pages}", category=LogCategory.CLEANUP)
+                merged["pages"] = cleaned_pages
 
     # Remove volume if it equals year (common conference proceedings error)
     year_val = merged.get("year", "")
@@ -512,7 +575,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # Strip " : the preprint server for X" suffixes added by PubMed/Europe PMC
     journal_val = merged.get("journal", "")
     if journal_val:
-        journal_cleaned = re.sub(r"\s*:\s*the preprint server for [\w\s]+$", "", journal_val, flags=re.IGNORECASE)
+        journal_cleaned = _PREPRINT_JOURNAL_SUFFIX_RE.sub("", journal_val)
         if journal_cleaned != journal_val:
             logger.debug(
                 f"journal_preprint_suffix | {journal_val}->{journal_cleaned.strip()}",
@@ -543,7 +606,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             )
         merged["publisher"] = "Cold Spring Harbor Laboratory"
 
-    # Apply journal-specific publisher corrections (e.g. SAGE → Mary Ann Liebert for JCB)
+    # Apply journal-specific publisher corrections (e.g. SAGE to Mary Ann Liebert for JCB)
     if journal_lower:
         for _jnl_key, _correct_pub in PUBLISHER_CORRECTIONS.items():
             if _jnl_key in journal_lower:
@@ -577,7 +640,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         field_val = merged.get(field, "")
         if field_val and isinstance(field_val, str):
             cleaned = html.unescape(field_val)
-            cleaned = re.sub(r"<[^>]+>", "", cleaned)
+            cleaned = _HTML_TAG_RE.sub("", cleaned)
             if cleaned != field_val:
                 logger.debug(f"html_decode | field={field} | changed=True", category=LogCategory.CLEANUP)
                 merged[field] = cleaned.strip()
@@ -612,22 +675,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
         merged.pop("primaryclass", None)
         # Update URL to match the published DOI (remove stale preprint URLs)
         _current_url = (merged.get("url") or "").lower()
-        if _current_url and any(
-            ps in _current_url
-            for ps in (
-                "arxiv.org",
-                "biorxiv.org",
-                "medrxiv.org",
-                "ssrn.com",
-                "preprints.org",
-                "techrxiv.org",
-                "researchsquare.com",
-                "10.1101/",
-                "10.2139/",
-                "10.20944/",
-                "10.21203/",
-            )
-        ):
+        if _current_url and any(ps in _current_url for ps in _PREPRINT_URL_MARKERS):
             merged["url"] = f"https://doi.org/{doi_val}"
             logger.debug(
                 f"url_preprint_replaced | old={_current_url[:60]} | new={merged['url']}",
@@ -643,8 +691,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
             merged.pop("journal", None)
-        # Backfill from enrichers when journal is missing: find the best-ranked
-        # source that carries a real (non-preprint) journal matching the published DOI.
+        # When the journal is missing, backfill it from the best-ranked source
+        # carrying a real (non-preprint) journal matching the published DOI.
         if not merged.get("journal"):
             doi_norm_check = _norm_doi(doi_val)
             best_journal: str | None = None
@@ -705,7 +753,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     # Fix conference proceedings misclassified as @article with journal.
     # Crossref registers some conference proceedings (AAAI, EMNLP, PVLDB,
     # PACMHCI, etc.) as journal volumes. Any venue named "Proceedings of..."
-    # is proceedings, not a journal — reclassify as @inproceedings.
+    # is proceedings, not a journal, so reclassify as @inproceedings.
     if etype == "article" and merged.get("journal") and not merged.get("booktitle"):
         jnl_for_conf = merged["journal"].strip()
         if _is_conference_journal(jnl_for_conf):
@@ -741,8 +789,8 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
         else:
-            # Festschrift or unknown series: conf abbrev not in map but DOI
-            # confirms it's a Dagstuhl proceedings publication (LIPIcs/OASIcs)
+            # Festschrift or unknown series. The conf abbrev is not in the map
+            # but the DOI confirms a Dagstuhl proceedings publication (LIPIcs/OASIcs)
             etype = "inproceedings"
             if old_journal and not merged.get("booktitle"):
                 merged["booktitle"] = old_journal
@@ -876,6 +924,200 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     return {"type": etype, "key": primary.get("key"), "fields": merged}
 
 
+def _is_duplicate_bib_entry(
+    existing_entry: dict[str, Any],
+    entry: dict[str, Any],
+    new_doi: str,
+    existing_filename: str,
+) -> bool:
+    """Decide whether *existing_entry* (from *existing_filename*) and *entry*
+    describe the same publication.
+
+    Match ladder, in order. Exact DOI, DOI version variants, preprint/published
+    DOI pairs (XOR), external IDs, citation-key matches (title- or
+    author-verified), high title similarity, truncated-title prefix, strong
+    author overlap with composite score, and a relaxed preprint/published pair
+    with evidence on the published side. Differing-DOI entries that fail the
+    XOR pair test never fall through to the weaker text heuristics.
+    """
+    new_fields = entry.get("fields", {})
+    existing_fields = existing_entry.get("fields", {})
+    existing_doi = _norm_doi(existing_fields.get("doi")) or ""
+
+    if existing_doi and new_doi and existing_doi == new_doi:
+        logger.debug(
+            f"FILE_MATCH | DOI_EXACT | file={existing_filename} | doi={existing_doi}",
+            category=LogCategory.DEDUP,
+        )
+        return True
+
+    # DOI version variants (e.g. Preprints.org .v1 / .v2)
+    if existing_doi and new_doi and doi_bases_match(existing_doi, new_doi):
+        logger.debug(
+            f"FILE_MATCH | DOI_VERSION | file={existing_filename} | doi_a={existing_doi} | doi_b={new_doi}",
+            category=LogCategory.DEDUP,
+        )
+        return True
+
+    # Different DOIs only match as preprint/published pairs (XOR)
+    if existing_doi and new_doi and existing_doi != new_doi:
+        e_preprint = _is_preprint_doi(existing_doi)
+        n_preprint = _is_preprint_doi(new_doi)
+        if e_preprint != n_preprint:
+            # If both have distinct arXiv eprint IDs, they are
+            # different papers -- skip preprint pair matching.
+            e_eprint = extract_arxiv_eprint(existing_entry)
+            n_eprint = extract_arxiv_eprint(entry)
+            if e_eprint and n_eprint and e_eprint != n_eprint:
+                return False
+            e_title = existing_fields.get("title", "")
+            n_title = new_fields.get("title", "")
+            preprint_sim = title_similarity(e_title, n_title)
+            if preprint_sim >= SIM_PREPRINT_TITLE_THRESHOLD:
+                # The preprint/published (XOR) split is already the
+                # precondition here, so it is excluded from the composite
+                # to avoid double-counting. Excluding it keeps the score
+                # exact and predicate-independent, so a genuine twin whose
+                # published side still carries a leaked preprint journal is
+                # scored correctly.
+                effective_score = compute_dedup_score(existing_fields, new_fields, count_preprint_xor=False)
+                if effective_score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
+                    logger.debug(
+                        f"FILE_MATCH | PREPRINT_PAIR | file={existing_filename}"
+                        f" | sim={preprint_sim:.3f} | effective={effective_score:.3f}"
+                        f" | e_preprint={e_preprint} n_preprint={n_preprint}",
+                        category=LogCategory.DEDUP,
+                    )
+                    return True
+        return False
+
+    if external_ids_match(existing_fields, new_fields):
+        existing_title = existing_fields.get("title", "")
+        new_title = new_fields.get("title", "")
+        sim = title_similarity(existing_title, new_title)
+        if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
+            logger.debug(
+                f"FILE_MATCH | EXTERNAL_ID | file={existing_filename} | sim={sim:.3f}",
+                category=LogCategory.DEDUP,
+            )
+            return True
+
+    existing_title = existing_fields.get("title", "")
+    new_title = new_fields.get("title", "")
+
+    # Citation key match requires title verification to avoid
+    # Gemini generating identical short titles for different papers
+    existing_key = existing_entry.get("key", "").strip()
+    new_key = entry.get("key", "").strip()
+    if existing_key and new_key and existing_key == new_key:
+        key_title_sim = title_similarity(existing_title, new_title)
+        # Also check if shorter title is a prefix of longer (truncated stub)
+        _e_norm = normalize_title(existing_title)
+        _n_norm = normalize_title(new_title)
+        _is_prefix = (_e_norm.startswith(_n_norm) and len(_n_norm) > 20) or (
+            _n_norm.startswith(_e_norm) and len(_e_norm) > 20
+        )
+        if key_title_sim >= SIM_FILE_DUPLICATE_THRESHOLD or _is_prefix:
+            logger.debug(
+                f"FILE_MATCH | KEY_TITLE | file={existing_filename} | key={existing_key} | sim={key_title_sim:.3f}",
+                category=LogCategory.DEDUP,
+            )
+            return True
+        # Keys match but titles differ -- check author overlap.
+        # Same key + strong author overlap = same paper with
+        # title change between preprint and publication.
+        _key_author_overlap = author_overlap_ratio(existing_fields.get("author"), new_fields.get("author"))
+        if _key_author_overlap >= 0.8 and key_title_sim >= 0.55:
+            logger.debug(
+                f"FILE_MATCH | KEY_AUTHOR_OVERLAP | file={existing_filename} "
+                f"| key={existing_key} | sim={key_title_sim:.3f} "
+                f"| author_overlap={_key_author_overlap:.3f}",
+                category=LogCategory.DEDUP,
+            )
+            return True
+
+        # Keys match but titles differ significantly -- check if
+        # this is a preprint/published pair before giving up
+        if existing_doi and new_doi and existing_doi != new_doi:
+            e_preprint = _is_preprint_doi(existing_doi)
+            n_preprint = _is_preprint_doi(new_doi)
+            # Distinct arXiv eprint IDs -> different papers
+            ke_eprint = extract_arxiv_eprint(existing_entry)
+            kn_eprint = extract_arxiv_eprint(entry)
+            if ke_eprint and kn_eprint and ke_eprint != kn_eprint:
+                return False
+            if (
+                (e_preprint ^ n_preprint)
+                and key_title_sim >= SIM_PREPRINT_TITLE_THRESHOLD
+                and authors_overlap(existing_fields.get("author"), new_fields.get("author"))
+            ):
+                key_preprint_score = compute_dedup_score(existing_fields, new_fields, count_preprint_xor=False)
+                logger.debug(
+                    f"FILE_MATCH | KEY_PREPRINT_PAIR | file={existing_filename} "
+                    f"| sim={key_title_sim:.3f} | composite={key_preprint_score:.3f}",
+                    category=LogCategory.DEDUP,
+                )
+                return True
+        return False
+
+    # Compare by title similarity alone
+    sim = title_similarity(existing_title, new_title)
+    if sim >= SIM_FILE_DUPLICATE_THRESHOLD:
+        logger.debug(
+            f"FILE_MATCH | HIGH_TITLE_SIM | file={existing_filename} | sim={sim:.3f}",
+            category=LogCategory.DEDUP,
+        )
+        return True
+
+    # Truncated title fallback where one title is a prefix of the other
+    if title_is_truncated_match(existing_title, new_title) and authors_overlap(
+        existing_fields.get("author"), new_fields.get("author")
+    ):
+        logger.debug(
+            f"FILE_MATCH | TRUNCATED | file={existing_filename} | authors_overlap=True",
+            category=LogCategory.DEDUP,
+        )
+        return True
+
+    # Strong author overlap on a multi-author team with moderate title similarity
+    if sim >= 0.6:
+        e_authors = parse_authors_any(existing_fields.get("author", ""))
+        n_authors = parse_authors_any(new_fields.get("author", ""))
+        if len(e_authors) >= 2 and len(n_authors) >= 2:
+            overlap = author_overlap_ratio(existing_fields.get("author"), new_fields.get("author"))
+            if overlap >= 0.9:
+                score = compute_dedup_score(existing_fields, new_fields)
+                if score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
+                    logger.debug(
+                        f"FILE_MATCH | STRONG_AUTHOR | file={existing_filename} "
+                        f"| overlap={overlap:.3f} | sim={sim:.3f} "
+                        f"| composite={score:.3f} "
+                        f"| n_authors_a={len(e_authors)} n_authors_b={len(n_authors)}",
+                        category=LogCategory.DEDUP,
+                    )
+                    return True
+
+    # Preprint/published pair with evidence on the published side
+    if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
+        e_journal = existing_fields.get("journal", "").lower()
+        n_journal = new_fields.get("journal", "").lower()
+        e_preprint = _is_preprint_doi(existing_doi) or any(ps in e_journal for ps in PREPRINT_SERVERS)
+        n_preprint = _is_preprint_doi(new_doi) or any(ps in n_journal for ps in PREPRINT_SERVERS)
+        if (e_preprint ^ n_preprint) and authors_overlap(existing_fields.get("author"), new_fields.get("author")):
+            published_has_evidence = (e_preprint and (new_doi or n_journal)) or (
+                n_preprint and (existing_doi or e_journal)
+            )
+            if published_has_evidence:
+                logger.debug(
+                    f"FILE_MATCH | PREPRINT_RELAXED | file={existing_filename} | sim={sim:.3f} "
+                    f"| evidence=preprint_published_pair",
+                    category=LogCategory.DEDUP,
+                )
+                return True
+
+    return False
+
+
 def save_entry_to_file(
     out_dir: str,
     author_id: str,
@@ -924,8 +1166,8 @@ def save_entry_to_file(
         category=LogCategory.DEDUP,
     )
 
-    # Skip prefer_path in the duplicate scan: it's the file we're updating and
-    # is already handled by the while-loop's prefer_path check.  Scanning it
+    # Skip prefer_path in the duplicate scan. It is the file being updated and
+    # is already handled by the while-loop's prefer_path check; scanning it
     # first would hide a real preprint/published duplicate sitting in another file.
     prefer_basename = os.path.basename(prefer_path) if prefer_path else None
 
@@ -935,217 +1177,14 @@ def save_entry_to_file(
         existing_path = os.path.join(author_dir, existing_filename)
         try:
             with open(existing_path, encoding="utf-8") as ef:
-                existing_content = ef.read()
-                existing_entry = parse_bibtex_to_dict(existing_content)
-
-                if existing_entry:
-                    existing_fields = existing_entry.get("fields", {})
-                    existing_doi = _norm_doi(existing_fields.get("doi")) or ""
-
-                    if existing_doi and new_doi and existing_doi == new_doi:
-                        logger.debug(
-                            f"FILE_MATCH | DOI_EXACT | file={existing_filename} | doi={existing_doi}",
-                            category=LogCategory.DEDUP,
-                        )
-                        duplicate_found = True
-                        duplicate_path = existing_path
-                        break
-
-                    # DOI version variants (e.g. Preprints.org .v1 / .v2)
-                    if existing_doi and new_doi and doi_bases_match(existing_doi, new_doi):
-                        logger.debug(
-                            f"FILE_MATCH | DOI_VERSION | file={existing_filename}"
-                            f" | doi_a={existing_doi} | doi_b={new_doi}",
-                            category=LogCategory.DEDUP,
-                        )
-                        duplicate_found = True
-                        duplicate_path = existing_path
-                        break
-
-                    # Different DOIs: only match preprint/published pairs (XOR)
-                    if existing_doi and new_doi and existing_doi != new_doi:
-                        e_preprint = _is_preprint_doi(existing_doi)
-                        n_preprint = _is_preprint_doi(new_doi)
-                        if e_preprint != n_preprint:
-                            # If both have distinct arXiv eprint IDs, they are
-                            # different papers -- skip preprint pair matching.
-                            e_eprint = extract_arxiv_eprint(existing_entry)
-                            n_eprint = extract_arxiv_eprint(entry)
-                            if e_eprint and n_eprint and e_eprint != n_eprint:
-                                continue
-                            e_title = existing_fields.get("title", "")
-                            n_title = new_fields.get("title", "")
-                            preprint_sim = title_similarity(e_title, n_title)
-                            if preprint_sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-                                # The preprint/published (XOR) split is already the
-                                # precondition here, so it is excluded from the composite
-                                # to avoid double-counting. Excluding it keeps the score
-                                # exact and predicate-independent, so a genuine twin whose
-                                # published side still carries a leaked preprint journal is
-                                # scored correctly.
-                                effective_score = compute_dedup_score(
-                                    existing_fields, new_fields, count_preprint_xor=False
-                                )
-                                if effective_score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
-                                    logger.debug(
-                                        f"FILE_MATCH | PREPRINT_PAIR | file={existing_filename}"
-                                        f" | sim={preprint_sim:.3f} | effective={effective_score:.3f}"
-                                        f" | e_preprint={e_preprint} n_preprint={n_preprint}",
-                                        category=LogCategory.DEDUP,
-                                    )
-                                    duplicate_found = True
-                                    duplicate_path = existing_path
-                                    break
-                        continue
-
-                    if external_ids_match(existing_fields, new_fields):
-                        existing_title = existing_fields.get("title", "")
-                        new_title = new_fields.get("title", "")
-                        sim = title_similarity(existing_title, new_title)
-                        if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-                            logger.debug(
-                                f"FILE_MATCH | EXTERNAL_ID | file={existing_filename} | sim={sim:.3f}",
-                                category=LogCategory.DEDUP,
-                            )
-                            duplicate_found = True
-                            duplicate_path = existing_path
-                            break
-
-                    existing_title = existing_fields.get("title", "")
-                    new_title = new_fields.get("title", "")
-
-                    # Citation key match requires title verification to avoid
-                    # Gemini generating identical short titles for different papers
-                    existing_key = existing_entry.get("key", "").strip()
-                    new_key = entry.get("key", "").strip()
-                    if existing_key and new_key and existing_key == new_key:
-                        key_title_sim = title_similarity(existing_title, new_title)
-                        # Also check if shorter title is a prefix of longer (truncated stub)
-                        _e_norm = normalize_title(existing_title)
-                        _n_norm = normalize_title(new_title)
-                        _is_prefix = (_e_norm.startswith(_n_norm) and len(_n_norm) > 20) or (
-                            _n_norm.startswith(_e_norm) and len(_e_norm) > 20
-                        )
-                        if key_title_sim >= SIM_FILE_DUPLICATE_THRESHOLD or _is_prefix:
-                            logger.debug(
-                                f"FILE_MATCH | KEY_TITLE | file={existing_filename} "
-                                f"| key={existing_key} | sim={key_title_sim:.3f}",
-                                category=LogCategory.DEDUP,
-                            )
-                            duplicate_found = True
-                            duplicate_path = existing_path
-                            break
-                        # Keys match but titles differ -- check author overlap.
-                        # Same key + strong author overlap = same paper with
-                        # title change between preprint and publication.
-                        _key_author_overlap = author_overlap_ratio(
-                            existing_fields.get("author"), new_fields.get("author")
-                        )
-                        if _key_author_overlap >= 0.8 and key_title_sim >= 0.55:
-                            logger.debug(
-                                f"FILE_MATCH | KEY_AUTHOR_OVERLAP | file={existing_filename} "
-                                f"| key={existing_key} | sim={key_title_sim:.3f} "
-                                f"| author_overlap={_key_author_overlap:.3f}",
-                                category=LogCategory.DEDUP,
-                            )
-                            duplicate_found = True
-                            duplicate_path = existing_path
-                            break
-
-                        # Keys match but titles differ significantly -- check if
-                        # this is a preprint/published pair before giving up
-                        if existing_doi and new_doi and existing_doi != new_doi:
-                            e_preprint = _is_preprint_doi(existing_doi)
-                            n_preprint = _is_preprint_doi(new_doi)
-                            # Distinct arXiv eprint IDs -> different papers
-                            ke_eprint = extract_arxiv_eprint(existing_entry)
-                            kn_eprint = extract_arxiv_eprint(entry)
-                            if ke_eprint and kn_eprint and ke_eprint != kn_eprint:
-                                continue
-                            if (
-                                (e_preprint ^ n_preprint)
-                                and key_title_sim >= SIM_PREPRINT_TITLE_THRESHOLD
-                                and authors_overlap(existing_fields.get("author"), new_fields.get("author"))
-                            ):
-                                key_preprint_score = compute_dedup_score(
-                                    existing_fields, new_fields, count_preprint_xor=False
-                                )
-                                logger.debug(
-                                    f"FILE_MATCH | KEY_PREPRINT_PAIR | file={existing_filename} "
-                                    f"| sim={key_title_sim:.3f} | composite={key_preprint_score:.3f}",
-                                    category=LogCategory.DEDUP,
-                                )
-                                duplicate_found = True
-                                duplicate_path = existing_path
-                                break
-                        continue
-
-                    # Compare by title similarity alone
-                    sim = title_similarity(existing_title, new_title)
-                    if sim >= SIM_FILE_DUPLICATE_THRESHOLD:
-                        logger.debug(
-                            f"FILE_MATCH | HIGH_TITLE_SIM | file={existing_filename} | sim={sim:.3f}",
-                            category=LogCategory.DEDUP,
-                        )
-                        duplicate_found = True
-                        duplicate_path = existing_path
-                        break
-
-                    # Truncated title fallback: one title is a prefix of the other
-                    if title_is_truncated_match(existing_title, new_title) and authors_overlap(
-                        existing_fields.get("author"), new_fields.get("author")
-                    ):
-                        logger.debug(
-                            f"FILE_MATCH | TRUNCATED | file={existing_filename} | authors_overlap=True",
-                            category=LogCategory.DEDUP,
-                        )
-                        duplicate_found = True
-                        duplicate_path = existing_path
-                        break
-
-                    # Strong author overlap: multi-author team with moderate title similarity
-                    if sim >= 0.6:
-                        e_authors = parse_authors_any(existing_fields.get("author", ""))
-                        n_authors = parse_authors_any(new_fields.get("author", ""))
-                        if len(e_authors) >= 2 and len(n_authors) >= 2:
-                            overlap = author_overlap_ratio(existing_fields.get("author"), new_fields.get("author"))
-                            if overlap >= 0.9:
-                                score = compute_dedup_score(existing_fields, new_fields)
-                                if score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
-                                    logger.debug(
-                                        f"FILE_MATCH | STRONG_AUTHOR | file={existing_filename} "
-                                        f"| overlap={overlap:.3f} | sim={sim:.3f} "
-                                        f"| composite={score:.3f} "
-                                        f"| n_authors_a={len(e_authors)} n_authors_b={len(n_authors)}",
-                                        category=LogCategory.DEDUP,
-                                    )
-                                    duplicate_found = True
-                                    duplicate_path = existing_path
-                                    break
-
-                    # Preprint/published pair with evidence on the published side
-                    if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-                        e_journal = existing_fields.get("journal", "").lower()
-                        n_journal = new_fields.get("journal", "").lower()
-                        e_preprint = _is_preprint_doi(existing_doi) or any(ps in e_journal for ps in PREPRINT_SERVERS)
-                        n_preprint = _is_preprint_doi(new_doi) or any(ps in n_journal for ps in PREPRINT_SERVERS)
-                        if (e_preprint ^ n_preprint) and authors_overlap(
-                            existing_fields.get("author"), new_fields.get("author")
-                        ):
-                            published_has_evidence = (e_preprint and (new_doi or n_journal)) or (
-                                n_preprint and (existing_doi or e_journal)
-                            )
-                            if published_has_evidence:
-                                logger.debug(
-                                    f"FILE_MATCH | PREPRINT_RELAXED | file={existing_filename} | sim={sim:.3f} "
-                                    f"| evidence=preprint_published_pair",
-                                    category=LogCategory.DEDUP,
-                                )
-                                duplicate_found = True
-                                duplicate_path = existing_path
-                                break
+                existing_entry = parse_bibtex_to_dict(ef.read())
         except OSError:
             logger.debug(f"FILE_READ_ERROR | file={existing_filename}", category=LogCategory.DEDUP)
+            continue
+        if existing_entry and _is_duplicate_bib_entry(existing_entry, entry, new_doi, existing_filename):
+            duplicate_found = True
+            duplicate_path = existing_path
+            break
 
     dup_filename = os.path.basename(duplicate_path) if duplicate_path else "none"
     logger.debug(
@@ -1157,7 +1196,7 @@ def save_entry_to_file(
     skip_write = False
     dedup_replaced = False
     if duplicate_found and duplicate_path:
-        # Default: reuse duplicate's filename (overridden below when parseable)
+        # Reuse the duplicate's filename by default (overridden below when parseable)
         filename = os.path.basename(duplicate_path)
         try:
             with open(duplicate_path, encoding="utf-8") as ef:
@@ -1182,8 +1221,8 @@ def save_entry_to_file(
 
                 dup_basename = os.path.basename(duplicate_path)
                 if existing_doi and new_doi and existing_doi != new_doi:
-                    # Different DOIs: one is preprint, one is published (dedup already confirmed match)
-                    if not existing_is_preprint and (new_is_preprint or not new_doi):
+                    # DOIs differ on a confirmed match, so one side is preprint
+                    if not existing_is_preprint and new_is_preprint:
                         # Existing is published, new is preprint -> keep published
                         logger.debug(
                             f"DECISION | KEEP_EXISTING | reason=existing_published_new_preprint | file={dup_basename}",
@@ -1389,9 +1428,10 @@ def save_entry_to_file(
     if prefer_path and os.path.abspath(prefer_path) != os.path.abspath(path):
         try:
             if os.path.exists(prefer_path):
-                # Guard: don't remove prefer_path if it's more complete than what
-                # we're about to write (prevents enriched file from being replaced
-                # by an unenriched stub when Scholar returns duplicate entries)
+                # Guard against removing prefer_path when it is more complete
+                # than what we are about to write (prevents an enriched file from
+                # being replaced by an unenriched stub when Scholar returns
+                # duplicate entries)
                 with open(prefer_path, encoding="utf-8") as pf:
                     prefer_entry = parse_bibtex_to_dict(pf.read())
                 if prefer_entry:
@@ -1410,8 +1450,8 @@ def save_entry_to_file(
         except OSError:
             pass
 
-    # Cross-file citation key collision check: scan other files in the
-    # directory for the same key.  If found on a DIFFERENT paper, append
+    # Cross-file citation key collision check. Scan other files in the
+    # directory for the same key; if found on a DIFFERENT paper, append
     # a distinguishing suffix to the key to avoid LaTeX collisions.
     new_key = (entry.get("key") or "").strip()
     if should_write and new_key:
@@ -1423,15 +1463,15 @@ def save_entry_to_file(
                 with open(other_path, encoding="utf-8") as of:
                     other_entry = parse_bibtex_to_dict(of.read())
                 if other_entry and other_entry.get("key", "").strip() == new_key:
-                    # Same key in another file — check if genuinely different
+                    # Same key in another file, so check if genuinely different
                     other_doi = _norm_doi((other_entry.get("fields") or {}).get("doi"))
                     this_doi = _norm_doi(new_fields.get("doi"))
                     if other_doi and this_doi and other_doi == this_doi:
                         continue  # Same paper, key collision is fine
-                    # Different paper — disambiguate key
+                    # Different paper, so disambiguate the key
                     _old_key = new_key
                     # Use first significant title word not in the other key
-                    _title_words = re.findall(r"[A-Z][a-z]+", new_fields.get("title", ""))
+                    _title_words = _TITLE_CAP_WORD_RE.findall(new_fields.get("title", ""))
                     _suffix = next((w for w in _title_words if w not in new_key), "B")
                     entry["key"] = f"{new_key}{_suffix}"
                     logger.debug(

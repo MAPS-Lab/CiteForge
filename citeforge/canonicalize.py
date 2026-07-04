@@ -124,7 +124,7 @@ def _rule_pacm_booktitle_to_article(entry: dict[str, Any], fields: dict[str, Any
 def _rule_named_proceedings_to_article(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
     """@inproceedings with a PNAS/PVLDB-style journal as booktitle -> @article.
 
-    Guard: skip when the booktitle extends the journal name with conference keywords.
+    Skips when the booktitle extends the journal name with conference keywords.
     """
     if entry.get("type") == "inproceedings" and fields.get("booktitle"):
         bt_lower = fields["booktitle"].strip().lower()
@@ -476,22 +476,34 @@ def _rule_add_url_from_doi(entry: dict[str, Any], fields: dict[str, Any]) -> boo
 # ---------------------------------------------------------------------------
 # Site-B-only rules (load repair; existing-file fixup before enrichment)
 # ---------------------------------------------------------------------------
+def _demote_preprint_journal_article(entry: dict[str, Any], fields: dict[str, Any]) -> None:
+    """Relabel an @article carrying a preprint-server journal as @misc.
+
+    A genuine published DOI means the preprint journal is a stale enrichment
+    artifact, so it is dropped WITHOUT asserting a preprint (no
+    ``howpublished=<server>``) and the published DOI is kept. Only when the DOI
+    is itself secondary (or absent) is the entry an actual preprint, and the
+    journal moves to howpublished. Shared by the Site B and Site C rules.
+    """
+    doi = (fields.get("doi") or "").strip()
+    entry["type"] = "misc"
+    if doi and not idu.is_secondary_doi(doi):
+        fields.pop("journal", None)
+    else:
+        fields["howpublished"] = fields.pop("journal")
+
+
 def _rule_strip_preprint_journal_load(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
     """Strip a preprint-server journal on load.
 
-    @article with a genuine published DOI: drop the stale preprint journal but keep it a
-    published work (no ``howpublished=<server>``). @article without a published DOI: @misc
-    (journal -> howpublished). Any other type simply drops the journal.
+    An @article is demoted via ``_demote_preprint_journal_article`` (stale
+    journal dropped when the DOI is published, journal -> howpublished
+    otherwise). Any other type simply drops the journal.
     """
     jnl = (fields.get("journal") or "").strip().lower()
-    if jnl and any(ps == jnl or ps in jnl for ps in PREPRINT_SERVERS):
+    if jnl and any(ps in jnl for ps in PREPRINT_SERVERS):
         if entry.get("type") == "article":
-            doi = (fields.get("doi") or "").strip()
-            entry["type"] = "misc"
-            if doi and not idu.is_secondary_doi(doi):
-                fields.pop("journal", None)
-            else:
-                fields["howpublished"] = fields.pop("journal")
+            _demote_preprint_journal_article(entry, fields)
         else:
             fields.pop("journal", None)
         return True
@@ -581,7 +593,7 @@ def _rule_fix_author_casing_load(entry: dict[str, Any], fields: dict[str, Any]) 
 # Site-C-only rules (Phase-4 post-merge; POST_MERGE is terminal)
 # ---------------------------------------------------------------------------
 def _rule_article_no_journal_to_misc(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """Terminal: @article with no journal (enrichment exhausted) -> @misc."""
+    """Terminal rule. @article with no journal (enrichment exhausted) -> @misc."""
     if entry.get("type") == "article" and not fields.get("journal"):
         entry["type"] = "misc"
         return True
@@ -589,7 +601,7 @@ def _rule_article_no_journal_to_misc(entry: dict[str, Any], fields: dict[str, An
 
 
 def _rule_inproceedings_no_booktitle_to_misc(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """Terminal: @inproceedings without booktitle -> @misc (invalid BibTeX otherwise)."""
+    """Terminal rule. @inproceedings without booktitle -> @misc (invalid BibTeX otherwise)."""
     if entry.get("type") == "inproceedings" and not fields.get("booktitle"):
         entry["type"] = "misc"
         return True
@@ -597,23 +609,16 @@ def _rule_inproceedings_no_booktitle_to_misc(entry: dict[str, Any], fields: dict
 
 
 def _rule_preprint_journal_to_misc(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """@article with a preprint-server journal.
+    """@article with a preprint-server journal -> @misc.
 
-    A genuine *published* DOI means the preprint journal is a stale enrichment artifact,
-    not evidence that the work is a preprint: drop the stale journal WITHOUT asserting a
-    preprint (no ``howpublished=<server>``), keeping the published DOI. Only when the DOI
-    is itself secondary (or absent) is the entry an actual preprint, relabeled @misc with
-    journal -> howpublished.
+    Delegates to ``_demote_preprint_journal_article``, which keeps a published
+    DOI and drops the stale journal, or moves the journal to howpublished when
+    the DOI is secondary or absent.
     """
     if entry.get("type") == "article":
         j_lower = (fields.get("journal") or "").lower().strip()
-        if j_lower and any(ps == j_lower or ps in j_lower for ps in PREPRINT_SERVERS):
-            doi = (fields.get("doi") or "").strip()
-            entry["type"] = "misc"
-            if doi and not idu.is_secondary_doi(doi):
-                fields.pop("journal", None)
-            else:
-                fields["howpublished"] = fields.pop("journal")
+        if j_lower and any(ps in j_lower for ps in PREPRINT_SERVERS):
+            _demote_preprint_journal_article(entry, fields)
             return True
     return False
 
@@ -753,9 +758,7 @@ def _rule_howpublished_to_inproceedings(entry: dict[str, Any], fields: dict[str,
     if entry.get("type") == "misc" and fields.get("howpublished"):
         hp_val = (fields.get("howpublished") or "").strip()
         hp_lower = hp_val.lower()
-        is_preprint_hp = (
-            any(ps == hp_lower or ps in hp_lower for ps in PREPRINT_SERVERS) or hp_lower in _R20_PREPRINT_HOWPUBLISHED
-        )
+        is_preprint_hp = any(ps in hp_lower for ps in PREPRINT_SERVERS) or hp_lower in _R20_PREPRINT_HOWPUBLISHED
         is_repository_hp = any(rj in hp_lower for rj in REPOSITORY_AS_JOURNAL)
         doi = (fields.get("doi") or "").strip()
         inferred = mu.infer_howpublished_from_doi(doi) if doi else None

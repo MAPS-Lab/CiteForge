@@ -46,10 +46,11 @@ class ResponseCache:
     All entries expire on the 1st of each calendar month (AST/UTC-4),
     ensuring a full refresh of every API source at least once per month.
 
-    Negative cache entries use a three-tier confirmation system:
+    Negative cache entries use a three-tier confirmation system.
+
     - Transient errors are never cached (callers simply skip the cache write).
     - Empty API results are stored as unconfirmed negatives (_confirmations < 3)
-      and are NOT served from get() — forcing a retry on the next pipeline run.
+      and are NOT served from get(), forcing a retry on the next pipeline run.
     - After 3 consecutive empty results (CACHE_NEGATIVE_CONFIRM_RUNS), the entry
       is promoted to a safe negative (_safe=True) and served until the next Monday
       or 1st of the following month, whichever comes first.
@@ -86,7 +87,8 @@ class ResponseCache:
     def _safe_negative_expired(entry_ts: float) -> bool:
         """Check if a safe negative has expired.
 
-        Safe negatives expire at the earlier of:
+        Safe negatives expire at the earlier of two boundaries.
+
         - Next Monday 00:00 AST after the entry was created
         - 1st of the next month 00:00 AST after the entry was created
         """
@@ -146,7 +148,7 @@ class ResponseCache:
                     _CACHE_MISSES += 1
                 return None
             ts = entry.get("timestamp", 0)
-            # Monthly boundary: all entries older than the 1st of this month are stale.
+            # All entries written before the 1st of this month are stale.
             if ts < self._month_boundary:
                 with _CACHE_COUNTER_LOCK:
                     _CACHE_MISSES += 1
@@ -154,11 +156,11 @@ class ResponseCache:
             data = entry.get("data", {})
             if data.get("_negative"):
                 if not data.get("_safe"):
-                    # Unconfirmed negative — force API retry.
+                    # Unconfirmed negative, force API retry.
                     with _CACHE_COUNTER_LOCK:
                         _CACHE_MISSES += 1
                     return None
-                # Safe negative — check Monday / month-boundary expiry.
+                # Safe negative, check Monday / month-boundary expiry.
                 if self._safe_negative_expired(ts):
                     with _CACHE_COUNTER_LOCK:
                         _CACHE_MISSES += 1
@@ -190,11 +192,11 @@ class ResponseCache:
         value: dict[str, Any],
         ttl_days: int,
     ) -> None:
-        """Atomic file write — must be called under the namespace lock."""
+        """Atomic file write. Must be called under the namespace lock."""
         ns_dir = self._ns_dir(namespace)
         os.makedirs(ns_dir, exist_ok=True)
-        # ttl_days is accepted for caller intent (and logged in put()), but is
-        # intentionally NOT stored or read back: positive-entry freshness is
+        # ttl_days is accepted for caller intent (and logged in put()) but is
+        # intentionally NOT stored or read back. Positive-entry freshness is
         # governed solely by the monthly boundary in get(), never a rolling
         # per-entry TTL.
         entry = {"timestamp": time.time(), "data": value}

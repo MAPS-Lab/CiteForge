@@ -34,7 +34,7 @@ _HOWPUB_CANONICAL: dict[str, str] = {
     "openrxiv": "openRxiv",
 }
 
-# Map preprint DOI prefixes → canonical howpublished value.
+# Map preprint DOI prefixes to the canonical howpublished value.
 # Used to backfill howpublished on @misc entries with preprint DOIs.
 _DOI_PREFIX_TO_HOWPUB: tuple[tuple[str, str], ...] = (
     ("10.48550/arxiv", "arXiv"),

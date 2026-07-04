@@ -1,9 +1,8 @@
 """Text and author-name normalization and similarity scoring.
 
-Shared helpers for normalizing titles and author names and for scoring the
-similarity between records. The merge, deduplication, and BibTeX-building layers
-all compare records through these functions so the notion of the same paper
-stays consistent across the pipeline.
+Normalizes titles and author names and scores record similarity. The merge,
+deduplication, and BibTeX-building layers all compare records through these
+functions, so any output change here shifts dedup thresholds pipeline-wide.
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ import functools
 import html as html_module
 import re
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Any
 
 from rapidfuzz.fuzz import ratio as fuzz_ratio
@@ -63,11 +63,8 @@ __all__ = [
 
 
 def _name_from_dict(d: dict[str, Any]) -> str:
-    """
-    Build a display name from a dictionary that may contain either a full
-    "name" field or separate given/family (first/last) components.
-    Returns an empty string if nothing usable is present.
-    """
+    """Build a display name from a dict with a "name" field or given/family
+    (first/last) components. Returns "" when nothing usable is present."""
     name = str(d.get("name") or "").strip()
     if name:
         return name
@@ -77,18 +74,14 @@ def _name_from_dict(d: dict[str, Any]) -> str:
 
 
 def build_url(base: str, params: dict[str, Any]) -> str:
-    """
-    Attach query parameters to a base URL and return the fully encoded address as a string.
-    """
+    """Attach URL-encoded query parameters to a base URL."""
     q = urllib.parse.urlencode(params)
     return f"{base}?{q}"
 
 
 def to_text(obj: Any) -> str:
-    """
-    Convert an arbitrary value into a readable string, handling nested
-    dictionaries, lists of authors, and other common metadata shapes from APIs.
-    """
+    """Convert an arbitrary value (nested dicts, author lists, other common
+    API metadata shapes) into a readable string."""
     if obj is None:
         return ""
     if isinstance(obj, str):
@@ -121,42 +114,43 @@ def to_text(obj: Any) -> str:
 
 
 def strip_accents(s: str) -> str:
-    """
-    Remove accents and diacritics from a string so visually similar text from
-    different locales can be compared more reliably.
-
-    Uses unidecode for Unicode-to-ASCII transliteration.
-    """
+    """Transliterate Unicode to ASCII via unidecode, removing accents and
+    diacritics so text from different locales compares reliably."""
     try:
         return unidecode(s)
     except PARSE_ERRORS + DECODE_ERRORS:
         return s
 
 
+_MATH_DELIM_RE = re.compile(r"\$([^$]*)\$")
+_LATEX_FRAC_RE = re.compile(r"\\frac\{([^}]*)\}\{([^}]*)\}")
+_LATEX_CMD_ARG_RE = re.compile(r"\\[a-zA-Z]+\{([^}]*)}")
+_LATEX_CMD_RE = re.compile(r"\\[a-zA-Z]+")
+_TITLE_PUNCT_RE = re.compile(r"[,.;:!?\n\t\r'\"\-\(\)\[\]\{\}~]")
+
+
 @functools.lru_cache(maxsize=4096)
 def normalize_title(t: str | None) -> str:
-    """
-    Normalize a title for comparison by stripping accents, lowercasing, removing
-    punctuation, brackets, LaTeX formatting, and collapsing repeated whitespace.
-    """
+    """Normalize a title for comparison. Strips accents, lowercases, removes
+    punctuation, brackets, and LaTeX formatting, collapses whitespace."""
     if not t:
         return ""
 
     t_str = str(t)
 
     t_str = html_module.unescape(t_str)
-    t_str = re.sub(r"\$([^$]*)\$", r"\1", t_str)
-    t_str = re.sub(r"\\frac\{([^}]*)\}\{([^}]*)\}", r"\1/\2", t_str)
-    t_str = re.sub(r"\\[a-zA-Z]+\{([^}]*)}", r"\1", t_str)
-    t_str = re.sub(r"\\[a-zA-Z]+", "", t_str)
+    t_str = _MATH_DELIM_RE.sub(r"\1", t_str)
+    t_str = _LATEX_FRAC_RE.sub(r"\1/\2", t_str)
+    t_str = _LATEX_CMD_ARG_RE.sub(r"\1", t_str)
+    t_str = _LATEX_CMD_RE.sub("", t_str)
     t2 = strip_accents(t_str).lower()
-    t2 = re.sub(r"[,.;:!?\n\t\r'\"\-\(\)\[\]\{\}~]", " ", t2)
+    t2 = _TITLE_PUNCT_RE.sub(" ", t2)
     result = " ".join(t2.split())
     # If unidecode stripped everything (e.g., CJK-only title), fall back to
     # the original lowercased+collapsed string so similarity can still work.
     if not result and t_str.strip():
         fallback = t_str.lower()
-        fallback = re.sub(r"[,.;:!?\n\t\r'\"\-\(\)\[\]\{\}~]", " ", fallback)
+        fallback = _TITLE_PUNCT_RE.sub(" ", fallback)
         result = " ".join(fallback.split())
     return result
 
@@ -246,10 +240,8 @@ def _fix_allcaps_title(s: str) -> str:
 
 
 def trim_title_default(t: str | None) -> str:
-    """
-    Clean up a raw title by trimming whitespace, removing trailing full stops,
-    preserving genuine ellipses, and normalizing ALL-CAPS titles to title case.
-    """
+    """Trim whitespace, remove trailing full stops (preserving genuine
+    ellipses), and normalize ALL-CAPS titles to title case."""
     if t is None:
         return ""
     s = str(t).strip()
@@ -273,10 +265,8 @@ def trim_title_default(t: str | None) -> str:
 
 
 def has_placeholder(s: str | None) -> bool:
-    """
-    Detect whether a string looks like a placeholder value such as "n/a",
-    "unknown", "et al", or a run of dots instead of real content.
-    """
+    """Detect placeholder values such as "n/a", "unknown", "et al", or a
+    short run of dots instead of real content."""
     if s is None:
         return True
     s2 = str(s).strip()
@@ -290,16 +280,17 @@ def has_placeholder(s: str | None) -> bool:
     return any(bad in low for bad in ("n/a", "tbd", "unknown", "placeholder"))
 
 
+_PERSON_PUNCT_RE = re.compile(r"[^a-z0-9\s]")
+
+
 def normalize_person_name(n: Any | None) -> str:
-    """
-    Normalize a person name for matching by lowercasing it, stripping accents
-    and punctuation, and collapsing extra spaces.
-    """
+    """Normalize a person name for matching. Lowercases, strips accents and
+    punctuation, collapses spaces."""
     if not n:
         return ""
     n_str = to_text(n)
     n2 = strip_accents(n_str).lower()
-    n2 = re.sub(r"[^a-z0-9\s]", " ", n2)
+    n2 = _PERSON_PUNCT_RE.sub(" ", n2)
     return " ".join(n2.split())
 
 
@@ -336,20 +327,37 @@ def _is_initials_token(token: str) -> bool:
     return 1 <= len(clean) <= 4 and clean.isalpha() and clean.isupper() and clean.lower() not in _INITIALS_EXCLUSIONS
 
 
-_RE_NON_ALNUM = r"[^a-z0-9]"
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+_NON_ALPHA_RE = re.compile(r"[^a-z]")
 
 
 def name_signature(n: Any | None) -> dict[str, Any] | None:
-    """
-    Derive a compact signature for a person name that keeps the normalized last
-    name and initials, working with "Last, First", "First Last", and
-    "Lastname INITIALS" (PubMed/Europe PMC) formats.
+    """Derive a compact {last, initials} signature for a person name, handling
+    "Last, First", "First Last", and "Lastname INITIALS" (PubMed/Europe PMC)
+    formats.
 
     Noble particles (van, von, de, etc.) are included in the last name so that
     "Johan van der Waals" and "van der Waals, Johan" produce the same signature.
+
+    String inputs are memoized (dedup loops resolve the same names O(n^2)
+    times); each call still returns a fresh dict.
     """
     if not n:
         return None
+    if isinstance(n, str):
+        sig = _name_signature_cached(n)
+        return dict(sig) if sig is not None else None
+    return _compute_name_signature(n)
+
+
+@functools.lru_cache(maxsize=4096)
+def _name_signature_cached(n: str) -> dict[str, Any] | None:
+    """Cached name_signature core for hashable (string) names."""
+    return _compute_name_signature(n)
+
+
+def _compute_name_signature(n: Any) -> dict[str, Any] | None:
+    """Uncached name_signature core; see name_signature for the contract."""
     n_clean = normalize_person_name(n)
     if not n_clean:
         return None
@@ -359,7 +367,7 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
         rest = parts[1] if len(parts) > 1 else ""
         rest_tokens = [t for t in normalize_person_name(rest).split() if t]
         initials = "".join(t[0] for t in rest_tokens if t)
-        last_norm = re.sub(_RE_NON_ALNUM, "", normalize_person_name(last))
+        last_norm = _NON_ALNUM_RE.sub("", normalize_person_name(last))
         return {"last": last_norm, "initials": initials}
     tokens = n_clean.split()
     if not tokens:
@@ -368,8 +376,8 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
     # by checking if the last token in the original text is all uppercase
     raw_tokens = to_text(n).strip().split()
     if len(tokens) == 2 and len(raw_tokens) == 2 and _is_initials_token(raw_tokens[-1]):
-        last_norm = re.sub(_RE_NON_ALNUM, "", tokens[0])
-        initials = re.sub(r"[^a-z]", "", tokens[1])
+        last_norm = _NON_ALNUM_RE.sub("", tokens[0])
+        initials = _NON_ALPHA_RE.sub("", tokens[1])
         return {"last": last_norm, "initials": initials}
     last_start = len(tokens) - 1
     for i in range(len(tokens) - 2, -1, -1):
@@ -379,17 +387,14 @@ def name_signature(n: Any | None) -> dict[str, Any] | None:
             break
     last_tokens = tokens[last_start:]
     first_tokens = tokens[:last_start]
-    last_norm = re.sub(_RE_NON_ALNUM, "", "".join(last_tokens))
+    last_norm = _NON_ALNUM_RE.sub("", "".join(last_tokens))
     initials = "".join(t[0] for t in first_tokens if t)
     return {"last": last_norm, "initials": initials}
 
 
 def extract_last_name(full_name: str | None) -> str:
-    """
-    Extract the last name from a full name string, preserving original capitalization.
-    Handles both "First Last" and "Last, First" formats.
-    Returns the original name if extraction fails.
-    """
+    """Extract the last name from "First Last" or "Last, First", preserving
+    capitalization. Returns the original name if extraction fails."""
     if not full_name:
         return "Unknown"
 
@@ -406,15 +411,16 @@ def extract_last_name(full_name: str | None) -> str:
     return tokens[-1] if tokens else name_str
 
 
+_DIRNAME_SANITIZE_RE = re.compile(r'[/\\:*?"<>|]+')
+
+
 def format_author_dirname(author_name: str | None, author_id: str) -> str:
-    """
-    Format author directory name as "LastName (author_id)".
-    Falls back to just author_id if name extraction fails.
-    If author_id is empty, uses LastName.
-    """
+    """Format an author directory name as "LastName (author_id)". Falls back
+    to the id alone when name extraction fails, or to LastName when the id is
+    empty."""
     last_name = extract_last_name(author_name)
 
-    sanitized_id = re.sub(r'[/\\:*?"<>|]+', "-", author_id)
+    sanitized_id = _DIRNAME_SANITIZE_RE.sub("-", author_id)
 
     if not sanitized_id:
         if last_name and last_name != "Unknown":
@@ -428,36 +434,36 @@ def format_author_dirname(author_name: str | None, author_id: str) -> str:
 
 
 def parse_authors_any(authors: Any) -> list[str]:
-    """
-    Pull author names out of flexible input formats such as lists, dictionaries
-    with given/family fields, and BibTeX-style strings with different separators.
-
-    This is a convenience wrapper around extract_authors_from_any for simple use cases.
-    """
+    """Extract author names from flexible input formats (lists, dicts with
+    given/family fields, BibTeX-style strings). Convenience wrapper around
+    extract_authors_from_any."""
     return extract_authors_from_any(authors)
 
 
-def title_similarity(a: str | None, b: str | None) -> float:
-    """
-    Compute a similarity score between two titles after normalization, returning
-    a value between 0 and 1 where higher means more similar.
+def _normalized_fuzz(a: str, b: str) -> float:
+    """Fuzzy-ratio score over normalized strings, 0-1, exactly 1.0 on equality.
 
-    Uses rapidfuzz for fast fuzzy-ratio scoring.
+    Shared core of title_similarity and venue_similarity; rapidfuzz returns
+    0-100, rescaled here to 0-1.
     """
-    norm_a = normalize_title(a or "")
-    norm_b = normalize_title(b or "")
+    norm_a = normalize_title(a)
+    norm_b = normalize_title(b)
     if norm_a == norm_b:
         return 1.0
-    # rapidfuzz.fuzz.ratio returns 0-100, normalize to 0-1
     return fuzz_ratio(norm_a, norm_b) / 100.0
 
 
+def title_similarity(a: str | None, b: str | None) -> float:
+    """Similarity score between two titles after normalization, 0-1, higher
+    means more similar."""
+    return _normalized_fuzz(a or "", b or "")
+
+
 def title_is_truncated_match(a: str | None, b: str | None, min_length: int = 15) -> bool:
-    """
-    Check if one title is a truncated version of the other (a strict prefix or
-    suffix after normalization).  Scholar sometimes truncates long titles from
-    either end, producing entries like "Passive Co-presence" (prefix truncation)
-    or "Support Using Semantic GLEAN Workflows" when the full title starts with
+    """Check if one title is a truncated version of the other (a strict prefix
+    or suffix after normalization). Scholar truncates long titles from either
+    end, producing entries like "Passive Co-presence" (prefix truncation) or
+    "Support Using Semantic GLEAN Workflows" when the full title starts with
     "Decentralized Web-Based Clinical Decision" (suffix truncation).
 
     Requires the shorter title to be at least *min_length* characters to avoid
@@ -472,10 +478,8 @@ def title_is_truncated_match(a: str | None, b: str | None, min_length: int = 15)
 
 
 def authors_overlap(authors_a: str | None, authors_b: str | None) -> bool:
-    """
-    Check whether two author lists share at least one person in common by
-    comparing normalized last names and initials and allowing partial matches.
-    """
+    """Check whether two author lists share at least one person, comparing
+    normalized last names and initials with partial matches allowed."""
     names_a = parse_authors_any(authors_a or "")
     names_b = parse_authors_any(authors_b or "")
     if not names_a or not names_b:
@@ -549,11 +553,7 @@ def venue_similarity(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> floa
     b_venue = (fields_b.get("journal") or fields_b.get("booktitle") or fields_b.get("howpublished") or "").strip()
     if not a_venue or not b_venue:
         return 0.0
-    a_norm = normalize_title(a_venue)
-    b_norm = normalize_title(b_venue)
-    if a_norm == b_norm:
-        return 1.0
-    return fuzz_ratio(a_norm, b_norm) / 100.0
+    return _normalized_fuzz(a_venue, b_venue)
 
 
 def _is_preprint_fields(fields: dict[str, Any]) -> bool:
@@ -608,10 +608,8 @@ def compute_dedup_score(fields_a: dict[str, Any], fields_b: dict[str, Any], coun
 
 
 def author_name_matches(target_author: str | None, authors: Any) -> bool:
-    """
-    Check whether a specific author appears in a candidate author list, preferring
-    last name plus initials and falling back to looser substring checks when needed.
-    """
+    """Check whether a specific author appears in a candidate author list,
+    preferring last name plus initials with substring fallbacks."""
     if not target_author:
         return False
     target_sig = name_signature(target_author)
@@ -657,9 +655,8 @@ def author_name_matches(target_author: str | None, authors: Any) -> bool:
 
 
 def author_in_text(target_author: str | None, text: Any) -> bool:
-    """
-    Check whether an author's normalized last name appears as a whole word inside a block of text.
-    """
+    """Check whether an author's normalized last name appears as a whole word
+    in a block of text."""
     if not target_author or not text:
         return False
     sig = name_signature(target_author)
@@ -670,17 +667,18 @@ def author_in_text(target_author: str | None, text: Any) -> bool:
     return re.search(rf"\b{re.escape(last_tok)}\b", txt) is not None
 
 
+_YEAR_RE = re.compile(r"(19|20)\d{2}")
+
+
 def extract_year_from_any(obj: Any, field_names: list[str] | None = None, fallback: int | None = None) -> int | None:
-    """
-    Try to recover a four-digit publication year from many possible formats,
-    including integers, free text, date dictionaries, Crossref-style date parts,
-    and Unix timestamps, falling back when no plausible year is found.
-    """
+    """Recover a four-digit publication year from integers, free text, date
+    dicts, Crossref-style date parts, or Unix timestamps, returning *fallback*
+    when no plausible year is found."""
     if isinstance(obj, int):
         return obj if VALID_YEAR_MIN <= obj <= VALID_YEAR_MAX else fallback
 
     if isinstance(obj, str):
-        m = re.search(r"(19|20)\d{2}", obj)
+        m = _YEAR_RE.search(obj)
         if m:
             try:
                 year = int(m.group(0))
@@ -719,8 +717,6 @@ def extract_year_from_any(obj: Any, field_names: list[str] | None = None, fallba
             ms = obj.get(fname)
             if isinstance(ms, (int, float)):
                 try:
-                    from datetime import datetime, timezone
-
                     year = datetime.fromtimestamp(float(ms) / 1000.0, timezone.utc).year
                     if VALID_YEAR_MIN <= year <= VALID_YEAR_MAX:
                         return year
@@ -733,6 +729,13 @@ def extract_year_from_any(obj: Any, field_names: list[str] | None = None, fallba
     return fallback
 
 
+def _join_given_family(d: dict[str, Any], given_key: str, family_key: str) -> str:
+    """Join explicit given/family fields into "Given Family", or ""."""
+    given = (d.get(given_key) or "").strip()
+    family = (d.get(family_key) or "").strip()
+    return f"{given} {family}".strip() if (given or family) else ""
+
+
 def extract_authors_from_any(
     obj: Any,
     field_names: list[str] | None = None,
@@ -741,10 +744,8 @@ def extract_authors_from_any(
     given_key: str | None = None,
     family_key: str | None = None,
 ) -> list[str]:
-    """
-    Extract a list of author names from flexible metadata structures such as lists,
-    dicts, and formatted strings, optionally cleaning DBLP-specific name artifacts.
-    """
+    """Extract author names from flexible metadata structures (lists, dicts,
+    formatted strings), optionally cleaning DBLP-specific name artifacts."""
     authors: list[str] = []
 
     if obj is None:
@@ -775,12 +776,7 @@ def extract_authors_from_any(
                 if authors:
                     return authors
 
-        if given_key and family_key:
-            given = (obj.get(given_key) or "").strip()
-            family = (obj.get(family_key) or "").strip()
-            nm = f"{given} {family}".strip() if (given or family) else ""
-        else:
-            nm = _name_from_dict(obj)
+        nm = _join_given_family(obj, given_key, family_key) if given_key and family_key else _name_from_dict(obj)
 
         if nm:
             nm = _sanitize(nm) if _sanitize else nm
@@ -798,9 +794,7 @@ def extract_authors_from_any(
                         authors.append(nm)
             elif isinstance(item, dict):
                 if given_key and family_key:
-                    given = (item.get(given_key) or "").strip()
-                    family = (item.get(family_key) or "").strip()
-                    nm = f"{given} {family}".strip() if (given or family) else ""
+                    nm = _join_given_family(item, given_key, family_key)
                 else:
                     nm = (item.get(name_key) or "").strip()
                     if not nm:
@@ -861,10 +855,8 @@ def extract_authors_from_any(
 
 
 def extract_valid_title(obj: Any, field_names: list[str] | None = None, check_placeholder: bool = True) -> str | None:
-    """
-    Pull a title from an object using common field names, discard placeholder-like
-    values, and return a trimmed version or None when no usable title is available.
-    """
+    """Pull a title from an object by common field names, discard
+    placeholder-like values, and return a trimmed version or None."""
     title = None
 
     if isinstance(obj, dict):
@@ -891,10 +883,8 @@ def extract_valid_title(obj: Any, field_names: list[str] | None = None, check_pl
 
 
 def is_valid_value(val: Any, check_placeholder: bool = True) -> bool:
-    """
-    Decide whether a value is worth keeping by rejecting None, empty containers,
-    and placeholder-like strings when placeholder checking is enabled.
-    """
+    """Reject None, empty containers, and (optionally) placeholder-like
+    strings."""
     if val is None:
         return False
 
@@ -911,17 +901,13 @@ def is_valid_value(val: Any, check_placeholder: bool = True) -> bool:
 
 
 def filter_valid_fields(fields: dict[str, Any], check_placeholder: bool = True) -> dict[str, Any]:
-    """
-    Remove keys whose values are empty, None, or placeholder-like so the
-    remaining dictionary contains only useful metadata fields.
-    """
+    """Drop keys whose values are empty, None, or placeholder-like."""
     return {k: v for k, v in fields.items() if is_valid_value(v, check_placeholder=check_placeholder)}
 
 
 def is_truncated(text: str | None) -> bool:
-    """
-    Detect if text is truncated by checking for ellipsis, et al., or other truncation markers.
-    """
+    """Detect truncated text via ellipsis, et al., other truncation markers,
+    or a dangling function-word ending."""
     if not text or not isinstance(text, str):
         return False
 
@@ -935,10 +921,8 @@ def is_truncated(text: str | None) -> bool:
 
 
 def get_truncation_score(article_data: dict[str, Any]) -> float:
-    """
-    Calculate a truncation score for an article by checking key fields, returning
-    a value between 0.0 (complete) and 1.0 (fully truncated).
-    """
+    """Fraction of key fields that look truncated, 0.0 (complete) to 1.0
+    (fully truncated)."""
     candidates = [
         article_data.get("title"),
         article_data.get("author_info"),
@@ -959,10 +943,8 @@ def safe_get_field(
     required: bool = False,
     check_placeholder: bool = False,
 ) -> str | None:
-    """
-    Safely extract and validate a string field from a dictionary, handling None values,
-    lists, whitespace, and optionally checking for placeholders.
-    """
+    """Extract and validate a string field from a dict, handling None values,
+    lists, whitespace, and optional placeholder checks."""
     value = obj.get(field)
 
     if value is None:
@@ -988,10 +970,8 @@ def safe_get_field(
 
 
 def safe_get_nested(obj: Any, *keys: str, default: Any = None) -> Any:
-    """
-    Safely get a nested dictionary value with null-safety, traversing multiple keys
-    and returning a default if any key is missing.
-    """
+    """Traverse nested dict keys null-safely, returning *default* if any key
+    is missing."""
     current = obj
     for key in keys:
         if not isinstance(current, dict):
@@ -1005,8 +985,7 @@ def safe_get_nested(obj: Any, *keys: str, default: Any = None) -> Any:
 def extract_author_names(
     authors_field: Any, *, name_key: str = "name", given_key: str | None = None, family_key: str | None = None
 ) -> list[str]:
-    """
-    Extract author names from various formats including list of dicts, list of strings,
-    comma-separated strings, and single dict or string.
-    """
+    """Extract author names from lists of dicts or strings, comma-separated
+    strings, and single dicts or strings. Keyword wrapper around
+    extract_authors_from_any."""
     return extract_authors_from_any(authors_field, name_key=name_key, given_key=given_key, family_key=family_key)

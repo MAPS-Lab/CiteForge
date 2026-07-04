@@ -12,13 +12,19 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from .bibtex_utils import bibtex_from_dict, make_bibkey
+from .clients.helpers import _score_candidate_generic
 from .config import (
     ABBREVIATED_VENUE_MAP,
     CONFERENCE_KEYWORDS,
     KNOWN_CONFERENCE_VENUES,
     SIM_TITLE_SIM_MIN,
 )
+from .id_utils import _norm_arxiv_id
 from .log_utils import LogCategory, logger
+from .text_utils import author_name_matches, title_similarity
+
+_NON_WORD_RE = re.compile(r"\W+")
 
 _ARTICLE_TYPES = {"journal-article", "journal_article", "article"}
 _CONFERENCE_TYPES = {"proceedings-article", "paper-conference", "inproceedings", "conference"}
@@ -38,11 +44,9 @@ _BOOK_PUBLISHER_KEYWORDS = ("springer", "elsevier", "wiley", "crc press", "cambr
 
 
 def get_container_field(entry_type: str) -> str:
-    """
-    Choose the BibTeX field that should store the venue for this entry type,
-    such as journal for articles, booktitle for conference papers and book
-    chapters, or howpublished for miscellaneous entries.
-    """
+    """Choose the venue field for an entry type. journal for articles,
+    booktitle for conference papers and book chapters, howpublished
+    otherwise."""
     if entry_type == "article":
         return "journal"
     if entry_type in ("inproceedings", "incollection"):
@@ -51,10 +55,8 @@ def get_container_field(entry_type: str) -> str:
 
 
 def format_author_field(authors: list[str]) -> str | None:
-    """
-    Combine a list of author names into the BibTeX author format using " and "
-    between names, or return None when the list is empty.
-    """
+    """Join author names with " and " per BibTeX convention, or None when the
+    list is empty."""
     return " and ".join(authors) if authors else None
 
 
@@ -70,14 +72,9 @@ def build_bibtex_entry(
     arxiv_id: str | None = None,
     extra_fields: dict[str, str] | None = None,
 ) -> str:
-    """
-    Build a complete BibTeX entry from the main publication details and optional
-    identifiers, skipping fields that are missing or empty.
-    """
-    from .bibtex_utils import bibtex_from_dict, make_bibkey
-    from .id_utils import _norm_arxiv_id
-
-    key = make_bibkey(title, authors, year, fallback=re.sub(r"\W+", "", keyhint) or "entry")
+    """Build a complete BibTeX entry from publication details and optional
+    identifiers, skipping missing or empty fields."""
+    key = make_bibkey(title, authors, year, fallback=_NON_WORD_RE.sub("", keyhint) or "entry")
     container_field = get_container_field(entry_type)
     logger.debug(
         f"BUILD_ENTRY | type={entry_type} | key={key} | title={title[:60]}"
@@ -115,20 +112,13 @@ def create_scoring_function(
     year_getter: Callable[[Any], int | None] | None = None,
     author_match_fn: Callable[[str, Any], bool] | None = None,
 ) -> Callable[[Any], float]:
-    """
-    Create a scoring function that ranks search results against a target title,
-    author, and year using the supplied accessors and matching logic.
-    """
-    from .clients.helpers import _score_candidate_generic
-    from .text_utils import author_name_matches, title_similarity
-
+    """Create a scoring function that ranks search results against a target
+    title, author, and year using the supplied accessors and matching logic."""
     author_match_fn = author_match_fn or author_name_matches
 
     def score_fn(candidate: Any) -> float:
-        """
-        Compare a single candidate against the target description and return a
-        score that reflects how well title, author, and year agree.
-        """
+        """Score how well a candidate's title, author, and year agree with
+        the target."""
         cand_title = title_getter(candidate)
         tsim = title_similarity(title, cand_title)
 
@@ -156,10 +146,8 @@ def create_scoring_function(
 
 
 def _classify_type_string(typ: str) -> str | None:
-    """
-    Map a publication type string to a BibTeX entry type, returning None if
-    no match is found.
-    """
+    """Map a publication type string to a BibTeX entry type, or None when no
+    match is found."""
     if "journal" in typ or typ in _ARTICLE_TYPES:
         return "article"
     if "proceed" in typ or typ in _CONFERENCE_TYPES:
@@ -188,11 +176,9 @@ def determine_entry_type(
     publication_types_field: str | None = None,
     venue_hints: dict[str, str] | None = None,
 ) -> str:
-    """
-    Guess whether a publication should be treated as a journal article,
-    conference paper, book chapter, or miscellaneous entry by inspecting type
-    fields and venue hints.
-    """
+    """Classify a publication as a journal article, conference paper, book
+    chapter, book, or miscellaneous entry by inspecting type fields and venue
+    hints."""
     if obj is None:
         return "misc"
 

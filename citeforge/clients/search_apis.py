@@ -17,7 +17,7 @@ import threading
 import time
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..cache import response_cache
 from ..config import (
@@ -64,7 +64,10 @@ from ..text_utils import (
     safe_get_nested,
     trim_title_default,
 )
-from .helpers import _best_item_by_score, _sanitize_dblp_author
+from .helpers import _best_item_by_score, _doi_cache_lookup, _sanitize_dblp_author, title_author_cache_key
+
+if TYPE_CHECKING:
+    from ..api_generics import APISearchConfig
 
 _DBLP_ALLOWED_TAGS = frozenset({"article", "inproceedings", "incollection", "phdthesis", "mastersthesis"})
 _DBLP_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
@@ -72,6 +75,28 @@ _NON_WORD_RE = re.compile(r"\W+")
 
 _QP_AUTHOR = "query.author"
 _QP_BIBLIOGRAPHIC = "query.bibliographic"
+
+
+def _get_cached_list(
+    namespace: str,
+    cache_key: str,
+    log_prefix: str,
+    list_key: str = "results",
+) -> list[dict[str, Any]] | None:
+    """Return a cached candidate list, or ``None`` on a cache miss.
+
+    A confirmed negative entry yields an empty list so callers can short-circuit
+    without re-querying the API.
+    """
+    cached = response_cache.get(namespace, cache_key)
+    if cached is None:
+        return None
+    if cached.get("_negative"):
+        logger.debug(f"{log_prefix} | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
+        return []
+    logger.debug(f"{log_prefix} | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
+    return list(cached.get(list_key, []))
+
 
 # ============ Semantic Scholar ============
 
@@ -108,14 +133,10 @@ def s2_search_papers_multiple(
     """Search Semantic Scholar for multiple paper candidates."""
     if not api_key or not title:
         return []
-    cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
-    cached = response_cache.get("semantic_scholar", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"s2_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return []
-        logger.debug(f"s2_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return list(cached.get("results", []))
+    cache_key = title_author_cache_key(title, author_name, prefix="multi|")
+    cached_list = _get_cached_list("semantic_scholar", cache_key, "s2_multi")
+    if cached_list is not None:
+        return cached_list
     query_parts = [f'"{title}"']
     if author_name:
         query_parts.append(author_name)
@@ -141,12 +162,14 @@ def s2_search_papers_multiple(
 # ============ Crossref ============
 
 
-def crossref_search(title: str, author_name: str | None) -> dict[str, Any] | None:
-    """Look up a publication in Crossref by title and optional author."""
-    if not title:
-        return None
+def _crossref_search_config(title: str, author_name: str | None) -> APISearchConfig:
+    """Return a Crossref search config with title/author query params applied.
+
+    With an author, splits the query into ``query.title`` + ``query.author``;
+    without one, uses the combined ``query.bibliographic`` field. Adds the
+    polite-pool ``mailto`` when ``CROSSREF_MAILTO`` is set.
+    """
     from ..api_configs import CROSSREF_SEARCH_CONFIG
-    from ..api_generics import search_api_generic
 
     config = copy.copy(CROSSREF_SEARCH_CONFIG)
     additional_params = dict(config.additional_params)
@@ -159,7 +182,16 @@ def crossref_search(title: str, author_name: str | None) -> dict[str, Any] | Non
     if mailto:
         additional_params["mailto"] = mailto
     config.additional_params = additional_params
-    return search_api_generic(title, author_name, config)
+    return config
+
+
+def crossref_search(title: str, author_name: str | None) -> dict[str, Any] | None:
+    """Look up a publication in Crossref by title and optional author."""
+    if not title:
+        return None
+    from ..api_generics import search_api_generic
+
+    return search_api_generic(title, author_name, _crossref_search_config(title, author_name))
 
 
 def build_bibtex_from_crossref(item: dict[str, Any], keyhint: str) -> str | None:
@@ -182,20 +214,9 @@ def crossref_search_multiple(
     """
     if not title:
         return []
-    from ..api_configs import CROSSREF_SEARCH_CONFIG
     from ..api_generics import search_api_generic_multiple
 
-    config = copy.copy(CROSSREF_SEARCH_CONFIG)
-    additional_params = dict(config.additional_params)
-    if author_name:
-        additional_params["query.title"] = title
-        additional_params[_QP_AUTHOR] = author_name
-    else:
-        additional_params[_QP_BIBLIOGRAPHIC] = title
-    mailto = os.getenv("CROSSREF_MAILTO")
-    if mailto:
-        additional_params["mailto"] = mailto
-    config.additional_params = additional_params
+    config = _crossref_search_config(title, author_name)
     return search_api_generic_multiple(title, author_name, config, None, max_results, year_hint)
 
 
@@ -208,14 +229,9 @@ def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
     doi_norm = _norm_doi(doi)
     if not doi_norm:
         return None
-    cached = response_cache.get("doi_csl", doi_norm)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"doi_csl | NEG_HIT | doi={doi_norm}", category=LogCategory.CACHE)
-            return None
-        logger.debug(f"doi_csl | HIT | doi={doi_norm}", category=LogCategory.CACHE)
+    cached, hit = _doi_cache_lookup("doi_csl", doi_norm)
+    if hit:
         return cached
-    logger.debug(f"doi_csl | MISS | doi={doi_norm}", category=LogCategory.CACHE)
     url = f"https://doi.org/{doi_norm}"
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["Accept"] = "application/vnd.citationstyles.csl+json"
@@ -234,14 +250,9 @@ def fetch_bibtex_via_doi(doi: str, timeout: float = 20.0) -> str | None:
     doi_norm = _norm_doi(doi)
     if not doi_norm:
         return None
-    cached = response_cache.get("doi_bibtex", doi_norm)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"doi_bibtex | NEG_HIT | doi={doi_norm}", category=LogCategory.CACHE)
-            return None
-        logger.debug(f"doi_bibtex | HIT | doi={doi_norm}", category=LogCategory.CACHE)
-        return cached.get("bibtex")
-    logger.debug(f"doi_bibtex | MISS | doi={doi_norm}", category=LogCategory.CACHE)
+    cached, hit = _doi_cache_lookup("doi_bibtex", doi_norm)
+    if hit:
+        return cached.get("bibtex") if cached is not None else None
     url = f"https://doi.org/{doi_norm}"
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["Accept"] = "application/x-bibtex"
@@ -329,14 +340,10 @@ def arxiv_search(
     """Search arXiv for papers matching the given title and optional author."""
     if not title:
         return []
-    cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
-    cached = response_cache.get("arxiv", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"arxiv | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return []
-        logger.debug(f"arxiv | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return list(cached.get("entries", []))
+    cache_key = title_author_cache_key(title, author_name)
+    cached_list = _get_cached_list("arxiv", cache_key, "arxiv", list_key="entries")
+    if cached_list is not None:
+        return cached_list
     q_parts = [f'ti:"{title}"']
     if author_name:
         q_parts.append(f'au:"{author_name}"')
@@ -593,7 +600,7 @@ def openreview_search_paper(
     """Query OpenReview for notes matching the requested paper."""
     if not title:
         return None
-    cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
+    cache_key = title_author_cache_key(title, author_name)
     cached = response_cache.get("openreview", cache_key)
     if cached is not None:
         if cached.get("_negative"):
@@ -650,14 +657,10 @@ def openreview_search_papers_multiple(
     """Query OpenReview for multiple candidate notes."""
     if not title:
         return []
-    cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
-    cached = response_cache.get("openreview", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"openreview_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return []
-        logger.debug(f"openreview_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return list(cached.get("results", []))
+    cache_key = title_author_cache_key(title, author_name, prefix="multi|")
+    cached_list = _get_cached_list("openreview", cache_key, "openreview_multi")
+    if cached_list is not None:
+        return cached_list
     headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
     candidates = _or_fetch_candidates(title, headers)
     if not candidates:
@@ -887,12 +890,55 @@ def openalex_search_multiple(
 # ============ PubMed ============
 
 
+def _pubmed_query(title: str, author_name: str | None) -> str:
+    """Build a PubMed esearch term with title and optional author field tags."""
+    search_query = f"{title}[Title]"
+    if author_name:
+        search_query += f" AND {author_name}[Author]"
+    return search_query
+
+
+def _pubmed_fetch_articles(
+    search_query: str,
+    retmax: int,
+    timeout: float,
+) -> tuple[list[dict[str, Any]], int] | None:
+    """Run PubMed's two-step esearch/esummary lookup.
+
+    Returns ``(articles, pmid_count)`` with an empty list when the search found
+    nothing, or ``None`` on HTTP failure so transient errors are never
+    negative-cached.
+    """
+    search_url = build_url(
+        f"{PUBMED_BASE}/esearch.fcgi",
+        {"db": "pubmed", "term": search_query, "retmax": retmax, "retmode": "json"},
+    )
+    try:
+        search_data = http_get_json(search_url, timeout=timeout)
+    except NETWORK_ERRORS:
+        return None
+    pmids = (safe_get_nested(search_data, "esearchresult", "idlist", default=[]) or [])[:retmax]
+    if not pmids:
+        return [], 0
+    summary_url = build_url(
+        f"{PUBMED_BASE}/esummary.fcgi",
+        {"db": "pubmed", "id": ",".join(pmids), "retmode": "json"},
+    )
+    try:
+        summary_data = http_get_json(summary_url, timeout=timeout)
+    except NETWORK_ERRORS:
+        return None
+    result = safe_get_nested(summary_data, "result", default={}) or {}
+    articles = [result[pmid] for pmid in pmids if pmid in result and isinstance(result[pmid], dict)]
+    return articles, len(pmids)
+
+
 @handle_api_errors(default_return=None)
 def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] | None:
     """Search PubMed for a publication by title and optional author."""
     if not title:
         return None
-    cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
+    cache_key = title_author_cache_key(title, author_name)
     cached = response_cache.get("pubmed", cache_key)
     if cached is not None:
         if cached.get("_negative"):
@@ -900,31 +946,10 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
             return None
         logger.debug(f"pubmed | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached if cached else None
-    search_query = f"{title}[Title]"
-    if author_name:
-        search_query += f" AND {author_name}[Author]"
-    search_url = build_url(
-        f"{PUBMED_BASE}/esearch.fcgi",
-        {"db": "pubmed", "term": search_query, "retmax": 10, "retmode": "json"},
-    )
-    try:
-        search_data = http_get_json(search_url, timeout=15.0)
-    except NETWORK_ERRORS:
+    fetched = _pubmed_fetch_articles(_pubmed_query(title, author_name), retmax=10, timeout=15.0)
+    if fetched is None:
         return None
-    pmids = (search_data.get("esearchresult") or {}).get("idlist") or []
-    if not pmids:
-        response_cache.put_negative("pubmed", cache_key)
-        return None
-    fetch_url = build_url(
-        f"{PUBMED_BASE}/esummary.fcgi",
-        {"db": "pubmed", "id": ",".join(pmids), "retmode": "json"},
-    )
-    try:
-        fetch_data = http_get_json(fetch_url, timeout=15.0)
-    except NETWORK_ERRORS:
-        return None
-    result = fetch_data.get("result") or {}
-    articles = [result[pmid] for pmid in pmids if pmid in result and isinstance(result[pmid], dict)]
+    articles, pmid_count = fetched
     if not articles:
         response_cache.put_negative("pubmed", cache_key)
         return None
@@ -937,7 +962,7 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
             result = dict(article)
             response_cache.put("pubmed", cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
             logger.debug(
-                f"pubmed | PUT | key={cache_key[:60]} | pmids={len(pmids)}",
+                f"pubmed | PUT | key={cache_key[:60]} | pmids={pmid_count}",
                 category=LogCategory.CACHE,
             )
             return result
@@ -955,7 +980,7 @@ def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] |
     best = _best_item_by_score(articles, score_fn)
     if best is not None:
         response_cache.put("pubmed", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(f"pubmed | PUT | key={cache_key[:60]} | pmids={len(pmids)}", category=LogCategory.CACHE)
+        logger.debug(f"pubmed | PUT | key={cache_key[:60]} | pmids={pmid_count}", category=LogCategory.CACHE)
     else:
         response_cache.put_negative("pubmed", cache_key)
     return best
@@ -1006,39 +1031,14 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
     """Search PubMed for multiple paper candidates."""
     if not title:
         return []
-    cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
-    cached = response_cache.get("pubmed", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"pubmed_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return []
-        logger.debug(f"pubmed_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return list(cached.get("results", []))
-    search_query = f"{title}[Title]"
-    if author_name:
-        search_query += f" AND {author_name}[Author]"
-    search_url = build_url(
-        f"{PUBMED_BASE}/esearch.fcgi",
-        {"db": "pubmed", "term": search_query, "retmax": max_results, "retmode": "json"},
-    )
-    try:
-        search_data = http_get_json(search_url, timeout=20.0)
-    except NETWORK_ERRORS:
+    cache_key = title_author_cache_key(title, author_name, prefix="multi|")
+    cached_list = _get_cached_list("pubmed", cache_key, "pubmed_multi")
+    if cached_list is not None:
+        return cached_list
+    fetched = _pubmed_fetch_articles(_pubmed_query(title, author_name), retmax=max_results, timeout=20.0)
+    if fetched is None:
         return []
-    id_list = safe_get_nested(search_data, "esearchresult", "idlist", default=[])
-    if not id_list:
-        response_cache.put_negative("pubmed", cache_key)
-        return []
-    summary_url = build_url(
-        f"{PUBMED_BASE}/esummary.fcgi",
-        {"db": "pubmed", "id": ",".join(id_list[:max_results]), "retmode": "json"},
-    )
-    try:
-        summary_data = http_get_json(summary_url, timeout=20.0)
-    except NETWORK_ERRORS:
-        return []
-    result = safe_get_nested(summary_data, "result", default={})
-    results_list = [result[uid] for uid in id_list[:max_results] if uid in result and isinstance(result[uid], dict)]
+    results_list, _ = fetched
     if results_list:
         response_cache.put("pubmed", cache_key, {"results": results_list}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         logger.debug(f"pubmed_multi | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
@@ -1050,6 +1050,15 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
 # ============ Europe PMC ============
 
 
+def _europepmc_query(title: str, author_name: str | None) -> str:
+    """Build a Europe PMC fielded query, quoting the title and optional author."""
+    safe_title = title.replace('"', "")
+    query = f'TITLE:"{safe_title}"'
+    if author_name:
+        query += f' AND AUTH:"{author_name}"'
+    return query
+
+
 def europepmc_search_paper(title: str, author_name: str | None) -> dict[str, Any] | None:
     """Search Europe PMC for a publication by title and optional author."""
     if not title:
@@ -1057,12 +1066,11 @@ def europepmc_search_paper(title: str, author_name: str | None) -> dict[str, Any
     from ..api_configs import EUROPEPMC_SEARCH_CONFIG
     from ..api_generics import search_api_generic
 
-    safe_title = title.replace('"', "")
-    query = f'TITLE:"{safe_title}"'
-    if author_name:
-        query += f' AND AUTH:"{author_name}"'
     config = copy.copy(EUROPEPMC_SEARCH_CONFIG)
-    config.additional_params = {**config.additional_params, config.query_param_name: query}
+    config.additional_params = {
+        **config.additional_params,
+        config.query_param_name: _europepmc_query(title, author_name),
+    }
     return search_api_generic(title, author_name, config)
 
 
@@ -1122,22 +1130,18 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
     """Search Europe PMC for multiple paper candidates."""
     if not title:
         return []
-    cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
-    cached = response_cache.get("europepmc", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"europepmc_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return []
-        logger.debug(f"europepmc_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return list(cached.get("results", []))
+    cache_key = title_author_cache_key(title, author_name, prefix="multi|")
+    cached_list = _get_cached_list("europepmc", cache_key, "europepmc_multi")
+    if cached_list is not None:
+        return cached_list
     from ..api_configs import EUROPEPMC_SEARCH_CONFIG
 
-    safe_title = title.replace('"', "")
-    query = f'TITLE:"{safe_title}"'
-    if author_name:
-        query += f' AND AUTH:"{author_name}"'
     config = copy.copy(EUROPEPMC_SEARCH_CONFIG)
-    config.additional_params = {**config.additional_params, "query": query, "pageSize": max_results}
+    config.additional_params = {
+        **config.additional_params,
+        "query": _europepmc_query(title, author_name),
+        "pageSize": max_results,
+    }
     url = build_url(config.base_url, config.additional_params)
     try:
         data = http_get_json(url, timeout=config.timeout)
@@ -1153,6 +1157,61 @@ def europepmc_search_papers_multiple(title: str, author_name: str | None, max_re
 
 
 # ============ Venue-based searches (SerpAPI publication string) ============
+
+
+def _venue_scored_search(
+    namespace: str,
+    title: str,
+    author_name: str | None,
+    venue: str,
+    config: APISearchConfig,
+    params: dict[str, Any],
+    max_results: int,
+) -> list[dict[str, Any]]:
+    """Shared fetch/score/cache scaffold for the venue-filtered searches.
+
+    Candidates are scored against the target title/author and kept when they
+    clear ``SIM_BEST_ITEM_THRESHOLD``. Results are cached under *namespace*
+    with a ``venue|`` key; empty result sets are negative-cached.
+    """
+    from ..api_generics import _build_scoring_function
+
+    cache_key = f"venue|{title_author_cache_key(title, author_name)}|{venue.lower().strip()}"
+    cached_list = _get_cached_list(namespace, cache_key, namespace)
+    if cached_list is not None:
+        return cached_list
+
+    url = build_url(config.base_url, params)
+    logger.debug(f"{namespace} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
+
+    try:
+        data = http_get_json(url, timeout=config.timeout)
+    except ALL_API_ERRORS:
+        return []
+
+    results = safe_get_nested(data, *config.result_path, default=[])
+    if not results:
+        response_cache.put_negative(namespace, cache_key)
+        return []
+
+    score_fn = _build_scoring_function(title, author_name, config)
+    scored = []
+    for item in results:
+        try:
+            score = score_fn(item)
+            if score is not None and score >= SIM_BEST_ITEM_THRESHOLD:
+                scored.append((score, item))
+        except FIELD_ACCESS_ERRORS:
+            continue
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = [item for _, item in scored[:max_results]]
+    if top:
+        cache_value = {"results": [dict(r) for r in top]}
+        response_cache.put(namespace, cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+    else:
+        response_cache.put_negative(namespace, cache_key)
+    return top
 
 
 def crossref_search_by_venue(
@@ -1171,19 +1230,6 @@ def crossref_search_by_venue(
         return []
 
     from ..api_configs import CROSSREF_SEARCH_CONFIG
-    from ..api_generics import _build_scoring_function
-
-    cache_key = (
-        f"venue|{normalize_title(title)}|{(author_name or '').strip().lower()}|{container_title.lower().strip()}"
-    )
-    cached = response_cache.get("crossref_venue", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"crossref_venue | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return []
-        cached_list: list[dict[str, Any]] = cached.get("results", [])
-        logger.debug(f"crossref_venue | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return cached_list
 
     config = copy.copy(CROSSREF_SEARCH_CONFIG)
     params: dict[str, Any] = dict(config.additional_params)
@@ -1196,37 +1242,7 @@ def crossref_search_by_venue(
         params["mailto"] = mailto
     params["rows"] = max(max_results, 10)
 
-    url = build_url(config.base_url, params)
-    logger.debug(f"crossref_venue | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
-
-    try:
-        data = http_get_json(url, timeout=config.timeout)
-    except ALL_API_ERRORS:
-        return []
-
-    results = safe_get_nested(data, *config.result_path, default=[])
-    if not results:
-        response_cache.put_negative("crossref_venue", cache_key)
-        return []
-
-    score_fn = _build_scoring_function(title, author_name, config)
-    scored = []
-    for item in results:
-        try:
-            score = score_fn(item)
-            if score is not None and score >= SIM_BEST_ITEM_THRESHOLD:
-                scored.append((score, item))
-        except FIELD_ACCESS_ERRORS:
-            continue
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = [item for _, item in scored[:max_results]]
-    if top:
-        cv = {"results": [dict(r) for r in top]}
-        response_cache.put("crossref_venue", cache_key, cv, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put_negative("crossref_venue", cache_key)
-    return top
+    return _venue_scored_search("crossref_venue", title, author_name, container_title, config, params, max_results)
 
 
 def openalex_search_by_venue(
@@ -1244,17 +1260,6 @@ def openalex_search_by_venue(
         return []
 
     from ..api_configs import OPENALEX_SEARCH_CONFIG
-    from ..api_generics import _build_scoring_function
-
-    cache_key = f"venue|{normalize_title(title)}|{(author_name or '').strip().lower()}|{venue_name.lower().strip()}"
-    cached = response_cache.get("openalex_venue", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"openalex_venue | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return []
-        cached_list: list[dict[str, Any]] = cached.get("results", [])
-        logger.debug(f"openalex_venue | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return cached_list
 
     config = copy.copy(OPENALEX_SEARCH_CONFIG)
     params: dict[str, Any] = dict(config.additional_params)
@@ -1262,34 +1267,4 @@ def openalex_search_by_venue(
     params["filter"] = f"primary_location.source.display_name.search:{venue_name}"
     params["per-page"] = max(max_results, 10)
 
-    url = build_url(config.base_url, params)
-    logger.debug(f"openalex_venue | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
-
-    try:
-        data = http_get_json(url, timeout=config.timeout)
-    except ALL_API_ERRORS:
-        return []
-
-    results = safe_get_nested(data, *config.result_path, default=[])
-    if not results:
-        response_cache.put_negative("openalex_venue", cache_key)
-        return []
-
-    score_fn = _build_scoring_function(title, author_name, config)
-    scored = []
-    for item in results:
-        try:
-            score = score_fn(item)
-            if score is not None and score >= SIM_BEST_ITEM_THRESHOLD:
-                scored.append((score, item))
-        except FIELD_ACCESS_ERRORS:
-            continue
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = [item for _, item in scored[:max_results]]
-    if top:
-        ov = {"results": [dict(r) for r in top]}
-        response_cache.put("openalex_venue", cache_key, ov, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put_negative("openalex_venue", cache_key)
-    return top
+    return _venue_scored_search("openalex_venue", title, author_name, venue_name, config, params, max_results)

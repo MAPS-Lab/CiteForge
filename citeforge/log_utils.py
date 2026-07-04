@@ -221,7 +221,7 @@ class Logger:
         self._logger.propagate = False
         self._logger.handlers.clear()
 
-        # Console handler -- main thread only
+        # Console handler, main thread only
         self._console_handler = logging.StreamHandler(sys.stdout)
         self._console_handler.setLevel(logging.INFO)
         self._console_handler.addFilter(MainThreadFilter())
@@ -237,21 +237,6 @@ class Logger:
         self._logger.addHandler(self._tl_handler)
 
         self._adapter = CategoryAdapter(self._logger, {})
-        self._add_custom_methods()
-
-    def _add_custom_methods(self) -> None:
-        """Register STEP and SUCCESS level methods on the underlying logger."""
-
-        def step_method(msg: str, *args: Any, **kwargs: Any) -> None:
-            if self._logger.isEnabledFor(STEP_LEVEL):
-                self._logger._log(STEP_LEVEL, msg, args, **kwargs)
-
-        def success_method(msg: str, *args: Any, **kwargs: Any) -> None:
-            if self._logger.isEnabledFor(SUCCESS_LEVEL):
-                self._logger._log(SUCCESS_LEVEL, msg, args, **kwargs)
-
-        self._logger.step = step_method  # type: ignore[attr-defined]
-        self._logger.success = success_method  # type: ignore[attr-defined]
 
     def set_log_file(self, path: str) -> None:
         """Start mirroring all log messages to the specified file for the current thread."""

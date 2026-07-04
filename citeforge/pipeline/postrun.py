@@ -9,7 +9,6 @@ and rewriting `baseline.json` and `badges.json`. The order is load-bearing.
 from __future__ import annotations
 
 import csv
-import json
 import os
 import re
 import time
@@ -34,6 +33,7 @@ from citeforge.io_utils import (
     flush_summary_csv,
     reconcile_summary_csv,
     safe_write_file,
+    safe_write_json,
 )
 from citeforge.log_utils import LogCategory, logger
 from citeforge.models import Record
@@ -124,13 +124,11 @@ def finalize_run(
         # Remove .bib files outside the contribution window
         window_min = get_min_year()
         window_removed = 0
-        for entry in os.listdir(out_dir):
-            d = os.path.join(out_dir, entry)
-            if not os.path.isdir(d) or entry == "a2i2":
+        for entry in iter_output_dirs(out_dir):
+            if entry == "a2i2":
                 continue
-            for fname in os.listdir(d):
-                if not fname.endswith(".bib"):
-                    continue
+            d = os.path.join(out_dir, entry)
+            for fname in iter_author_bibs(d):
                 fpath = os.path.join(d, fname)
                 # Try filename year first
                 m = _FILENAME_YEAR_RE.search(f"/{fname}")
@@ -143,7 +141,7 @@ def finalize_run(
                         os.remove(fpath)
                         window_removed += 1
                     continue
-                # Fallback: read BibTeX year field for non-standard filenames
+                # Fall back to the BibTeX year field for non-standard filenames
                 try:
                     with open(fpath, encoding="utf-8") as bf:
                         parsed = bt.parse_bibtex_to_dict(bf.read())
@@ -163,17 +161,15 @@ def finalize_run(
                 category=LogCategory.CLEANUP,
             )
 
-        # Post-run fixup: apply entry type and field corrections to ALL .bib files
-        # This catches orphans (files not processed during enrichment) and any
+        # Post-run fixup applies entry type and field corrections to ALL .bib
+        # files. This catches orphans (files not processed during enrichment) and
         # entries where Phase 4 corrections were undone by Tier 2 filling.
         postrun_fixed = 0
         for pr_entry_name in iter_output_dirs(out_dir):
-            pr_dir = os.path.join(out_dir, pr_entry_name)
             if pr_entry_name == "a2i2":
                 continue
-            for pr_fname in sorted(os.listdir(pr_dir)):
-                if not pr_fname.endswith(".bib"):
-                    continue
+            pr_dir = os.path.join(out_dir, pr_entry_name)
+            for pr_fname in iter_author_bibs(pr_dir):
                 pr_fpath = os.path.join(pr_dir, pr_fname)
                 try:
                     with open(pr_fpath, encoding="utf-8") as prf:
@@ -208,38 +204,30 @@ def finalize_run(
                 category=LogCategory.CLEANUP,
             )
 
-        # Write per-author baseline counts
+        # Write per-author baseline counts (a2i2 included by design; the
+        # baseline total must equal the on-disk .bib count)
         baseline: dict[str, int] = {}
         for entry in iter_output_dirs(out_dir):
-            d = os.path.join(out_dir, entry)
-            baseline[entry] = len(iter_author_bibs(d))
-        baseline_path = os.path.join(out_dir, "baseline.json")
-        try:
-            with open(baseline_path, "w", encoding="utf-8") as bf:
-                json.dump({"total": sum(baseline.values()), "authors": baseline}, bf, indent=2)
-        except OSError:
-            pass
+            baseline[entry] = len(iter_author_bibs(os.path.join(out_dir, entry)))
+        safe_write_json(
+            os.path.join(out_dir, "baseline.json"),
+            {"total": sum(baseline.values()), "authors": baseline},
+        )
 
         # Write badge data for README workflow updates
-        badges_path = os.path.join(out_dir, "badges.json")
-        try:
-            with open(badges_path, "w", encoding="utf-8") as bf:
-                total = cache_counts["positive"] + cache_counts["negative"] + cache_counts["miss"]
-                hit_rate = ((cache_counts["positive"] + cache_counts["negative"]) / total * 100) if total else 0
-                json.dump(
-                    {
-                        "last_updated": time.strftime("%Y-%m"),
-                        "cache_positive_hits": cache_counts["positive"],
-                        "cache_negative_hits": cache_counts["negative"],
-                        "cache_misses": cache_counts["miss"],
-                        "total_queries": total,
-                        "hit_rate": round(hit_rate, 1),
-                    },
-                    bf,
-                    indent=2,
-                )
-        except OSError:
-            pass
+        total = cache_counts["positive"] + cache_counts["negative"] + cache_counts["miss"]
+        hit_rate = ((cache_counts["positive"] + cache_counts["negative"]) / total * 100) if total else 0
+        safe_write_json(
+            os.path.join(out_dir, "badges.json"),
+            {
+                "last_updated": time.strftime("%Y-%m"),
+                "cache_positive_hits": cache_counts["positive"],
+                "cache_negative_hits": cache_counts["negative"],
+                "cache_misses": cache_counts["miss"],
+                "total_queries": total,
+                "hit_rate": round(hit_rate, 1),
+            },
+        )
 
         logger.info(f"Summary CSV: {summary_csv_path}", category=LogCategory.PLAN)
 
@@ -270,7 +258,7 @@ def _remove_superseded_preprints(out_dir: str) -> int:
     ``SIM_MERGE_DUPLICATE_THRESHOLD``. This generalizes the "published outranks a
     preprint" rule across every author and paper: a standalone preprint with no
     published counterpart is always retained, and published files are never
-    removed. Deterministic (sorted iteration) and idempotent -- once the preprint
+    removed. Deterministic (sorted iteration) and idempotent. Once the preprint
     is gone a later run finds no preprint+published pair and removes nothing.
 
     Returns the number of preprint files removed.

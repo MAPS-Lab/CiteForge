@@ -17,10 +17,41 @@ from .log_utils import LogCategory, LogSource, logger
 from .text_utils import normalize_title, title_similarity
 
 
+def _parse_and_match(
+    raw_bib: str,
+    baseline_entry: dict[str, Any],
+    doi: str,
+    label: str,
+    format_name: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Parse a fetched BibTeX string and strict-match it against the baseline.
+
+    Shared tail of the CSL and BibTeX validators. *label* prefixes the debug
+    log lines and *format_name* names the format in the success message.
+    """
+    entry = bt.parse_bibtex_to_dict(raw_bib)
+    logger.debug(
+        f"{label}_PARSE | entry_ok={entry is not None}",
+        category=LogCategory.DOI_VAL,
+        source=LogSource.DOI,
+    )
+    if entry is None:
+        return False, None
+
+    strict_match = bt.bibtex_entries_match_strict(baseline_entry, entry)
+    logger.debug(f"{label}_MATCH | strict_match={strict_match}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
+    if strict_match:
+        logger.success(
+            f"{doi}: {format_name} format validated and added",
+            category=LogCategory.MATCH,
+            source=LogSource.DOI,
+        )
+        return True, entry
+    return False, None
+
+
 def _validate_csl(doi: str, baseline_entry: dict[str, Any], result_id: str) -> tuple[bool, dict[str, Any] | None, Any]:
-    """
-    Helper to validate DOI using CSL-JSON format.
-    """
+    """Validate a DOI through its CSL-JSON metadata."""
     logger.debug(f"CSL_START | doi={doi}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
     try:
         csl = search_apis.fetch_csl_via_doi(doi)
@@ -37,19 +68,8 @@ def _validate_csl(doi: str, baseline_entry: dict[str, Any], result_id: str) -> t
         if not csl_bib:
             return False, None, None
 
-        csl_entry = bt.parse_bibtex_to_dict(csl_bib)
-        logger.debug(
-            f"CSL_PARSE | entry_ok={csl_entry is not None}",
-            category=LogCategory.DOI_VAL,
-            source=LogSource.DOI,
-        )
-        if csl_entry is None:
-            return False, None, None
-
-        strict_match = bt.bibtex_entries_match_strict(baseline_entry, csl_entry)
-        logger.debug(f"CSL_MATCH | strict_match={strict_match}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
-        if strict_match:
-            logger.success(f"{doi}: CSL format validated and added", category=LogCategory.MATCH, source=LogSource.DOI)
+        matched, csl_entry = _parse_and_match(csl_bib, baseline_entry, doi, "CSL", "CSL")
+        if matched:
             return True, csl_entry, csl
 
     except ALL_API_ERRORS as e:
@@ -64,9 +84,7 @@ def _validate_csl(doi: str, baseline_entry: dict[str, Any], result_id: str) -> t
 
 
 def _validate_bibtex(doi: str, baseline_entry: dict[str, Any]) -> tuple[bool, dict[str, Any] | None, Any]:
-    """
-    Helper to validate DOI using BibTeX format.
-    """
+    """Validate a DOI through its BibTeX metadata."""
     logger.debug(f"BIBTEX_START | doi={doi}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
     try:
         doi_bib = search_apis.fetch_bibtex_via_doi(doi)
@@ -74,23 +92,8 @@ def _validate_bibtex(doi: str, baseline_entry: dict[str, Any]) -> tuple[bool, di
         if not doi_bib:
             return False, None, None
 
-        bibtex_entry = bt.parse_bibtex_to_dict(doi_bib)
-        logger.debug(
-            f"BIBTEX_PARSE | entry_ok={bibtex_entry is not None}",
-            category=LogCategory.DOI_VAL,
-            source=LogSource.DOI,
-        )
-        if bibtex_entry is None:
-            return False, None, None
-
-        strict_match = bt.bibtex_entries_match_strict(baseline_entry, bibtex_entry)
-        logger.debug(f"BIBTEX_MATCH | strict_match={strict_match}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
-        if strict_match:
-            logger.success(
-                f"{doi}: BibTeX format validated and added",
-                category=LogCategory.MATCH,
-                source=LogSource.DOI,
-            )
+        matched, bibtex_entry = _parse_and_match(doi_bib, baseline_entry, doi, "BIBTEX", "BibTeX")
+        if matched:
             return True, bibtex_entry, doi_bib
 
     except ALL_API_ERRORS as e:
