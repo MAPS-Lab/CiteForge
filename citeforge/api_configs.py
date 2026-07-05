@@ -1,9 +1,10 @@
 """Per-source API search configurations.
 
-Holds the `APISearchConfig` and `APIFieldMapping` instances for each scholarly
-source (Semantic Scholar, Crossref, OpenAlex, PubMed, Europe PMC, arXiv,
-OpenReview, DataCite) that `api_generics.py` consumes to run searches and build
-BibTeX entries.
+Holds the `APISearchConfig` and `APIFieldMapping` instances that
+`api_generics.py` consumes to run searches and build BibTeX entries. Sources
+whose protocol or output cannot be expressed here (PubMed's two-step lookup,
+Europe PMC and DataCite entry construction) stay hand-rolled in the client
+modules instead.
 """
 
 from __future__ import annotations
@@ -12,8 +13,7 @@ import os
 from typing import Any
 
 from .api_generics import APIFieldMapping, APISearchConfig
-from .config import CROSSREF_BASE, EUROPEPMC_BASE, OPENALEX_BASE, PUBMED_BASE, S2_BASE
-from .text_utils import extract_year_from_any
+from .config import CROSSREF_BASE, EUROPEPMC_BASE, OPENALEX_BASE, S2_BASE
 
 
 def _year_from_date_parts(source: dict[str, Any]) -> int | None:
@@ -36,12 +36,6 @@ def _extract_crossref_year(item: dict[str, Any]) -> int:
         if year is not None:
             return year
     return 0
-
-
-def _extract_europepmc_year(article: dict[str, Any]) -> int:
-    """Extract year from Europe PMC pubYear field."""
-    year_str = article.get("pubYear") or ""
-    return int(year_str) if year_str.isdigit() else 0
 
 
 S2_SEARCH_CONFIG = APISearchConfig(
@@ -89,16 +83,6 @@ OPENALEX_SEARCH_CONFIG = APISearchConfig(
         for authorship in w.get("authorships") or []
         if authorship.get("author", {}).get("display_name")
     ],
-)
-
-PUBMED_SEARCH_CONFIG = APISearchConfig(
-    api_name="pubmed",
-    base_url=f"{PUBMED_BASE}/esearch.fcgi",
-    query_param_name="term",
-    result_path=["esearchresult", "idlist"],  # Returns PMIDs, need second request
-    title_field="title",
-    author_field="authors",
-    additional_params={"db": "pubmed", "retmax": 10, "retmode": "json"},
 )
 
 EUROPEPMC_SEARCH_CONFIG = APISearchConfig(
@@ -171,40 +155,6 @@ OPENALEX_FIELD_MAPPING = APIFieldMapping(
     custom_year_extractor=lambda work: work.get("publication_year") or 0,
 )
 
-PUBMED_FIELD_MAPPING = APIFieldMapping(
-    api_name="pubmed",
-    title_fields=["title"],
-    author_fields=["authors"],
-    year_fields=["pubdate"],
-    venue_fields=["fulljournalname", "source"],
-    doi_fields=["articleids"],  # Special handling needed
-    url_fields=["uid", "pmid"],  # Will build URL from PMID
-    author_name_key="name",
-    venue_hints={"fulljournalname": "article", "source": "article"},
-    extra_field_mappings={"volume": "volume", "issue": "number", "pages": "pages"},
-    custom_author_extractor=lambda article: [
-        author.get("name", "").strip() for author in article.get("authors") or [] if author.get("name", "").strip()
-    ],
-    custom_year_extractor=lambda article: extract_year_from_any(article.get("pubdate"), fallback=0) or 0,
-)
-
-EUROPEPMC_FIELD_MAPPING = APIFieldMapping(
-    api_name="europepmc",
-    title_fields=["title"],
-    author_fields=["authorString"],
-    year_fields=["pubYear"],
-    venue_fields=["journalTitle", "bookTitle"],
-    doi_fields=["doi"],
-    url_fields=["pmcid", "pmid"],  # Will build URL from PMCID/PMID
-    entry_type_field="pubType",
-    venue_hints={"journalTitle": "article", "bookTitle": "inproceedings"},
-    extra_field_mappings={"journalVolume": "volume", "issue": "number", "pageInfo": "pages"},
-    custom_author_extractor=lambda article: [
-        name.strip() for name in (article.get("authorString") or "").split(",") if name.strip()
-    ],
-    custom_year_extractor=_extract_europepmc_year,
-)
-
 ARXIV_FIELD_MAPPING = APIFieldMapping(
     api_name="arxiv",
     title_fields=["title"],
@@ -234,20 +184,5 @@ OPENREVIEW_FIELD_MAPPING = APIFieldMapping(
             or []
         )
         if str(a).strip()
-    ],
-)
-
-DATACITE_FIELD_MAPPING = APIFieldMapping(
-    api_name="datacite",
-    title_fields=["attributes.titles"],
-    author_fields=["attributes.creators"],
-    year_fields=["attributes.publicationYear"],
-    venue_fields=["attributes.publisher"],
-    doi_fields=["attributes.doi"],
-    url_fields=["attributes.url"],
-    custom_author_extractor=lambda record: [
-        creator.get("name", "").strip()
-        for creator in (record.get("attributes") or {}).get("creators") or []
-        if creator.get("name", "").strip()
     ],
 )

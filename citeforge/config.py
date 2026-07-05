@@ -1,10 +1,8 @@
 """Central configuration for CiteForge.
 
-This module is the single source of truth for every tunable constant, including
-the source trust hierarchy, similarity thresholds, HTTP rate limits and
-timeouts, API endpoints, key-file paths, and the venue and compound-word
-dictionaries. Per the config-driven convention these values live here and are
-never hardcoded elsewhere.
+Single source of truth for tunable constants: trust hierarchy, similarity
+thresholds, HTTP rate limits and timeouts, API endpoints, key-file paths, and
+venue/compound-word dictionaries. Never hardcode these values elsewhere.
 """
 
 from __future__ import annotations
@@ -71,9 +69,7 @@ MAX_PUBLICATIONS_PER_AUTHOR = PUBLICATIONS_PER_YEAR * CONTRIBUTION_WINDOW_YEARS
 # Skip Scholar citation fetch if BibTeX file already exists
 SKIP_SCHOLAR_FOR_EXISTING_FILES = True
 
-# Trust hierarchy for merging metadata from different sources.
-# Sources earlier in the list are more reliable than those later.
-# This ordering reflects data quality, completeness, and standardization.
+# Trust hierarchy for merging metadata; earlier sources win over later ones.
 TRUST_ORDER = [
     "csl",  # DOI → CSL-JSON (highest trust, structured metadata)
     "doi_bibtex",  # DOI → BibTeX (direct from DOI resolver)
@@ -100,14 +96,12 @@ SIM_YEAR_MATCH_WINDOW = 1.0  # max year difference that counts as a match
 SIM_TITLE_SIM_MIN = 0.8  # min title sim to consider a candidate
 SIM_EXACT_PICK_THRESHOLD = 0.9  # auto-accept single strong candidate
 SIM_BEST_ITEM_THRESHOLD = 0.8  # min score for best-of-N selection
-SIM_SCHOLAR_FUZZY_ACCEPT = 0.9  # min sim for noisy Scholar data
 SIM_MERGE_DUPLICATE_THRESHOLD = 0.95  # threshold for merge-level dedup
 
 # DOI regex pattern
 _DOI_REGEX = r"\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b"
 
-# arXiv DOI patterns
-ARXIV_DOI_CHECK_PATTERN = r"10\.48550/arxiv"
+# arXiv DOI extraction pattern
 ARXIV_DOI_EXTRACT_PATTERN = r"(?i)10\.48550/arxiv\.([0-9]{4}\.[0-9]{4,5})"
 
 # HTTP timeouts (seconds)
@@ -152,12 +146,8 @@ CACHE_ENABLED = True
 # File-level dedup threshold (must be >= SIM_MERGE_DUPLICATE_THRESHOLD)
 SIM_FILE_DUPLICATE_THRESHOLD = 0.95
 
-# Minimum title similarity required to trust an EXACT DOI/arXiv identifier match.
-# Guards against mislabeled identifiers: when two records share a DOI or arXiv id
-# but their titles are clearly different papers, the identifier was attached to
-# the wrong work (e.g., a Scholar entry pointing at the wrong arXiv id) and must
-# not be treated as a match. The same paper reformatted across sources scores far
-# above this; only genuinely different titles fall below it.
+# Minimum title similarity required to trust an exact DOI/arXiv identifier match.
+# Guards against mislabeled identifiers (same DOI attached to different papers).
 SIM_IDENTIFIER_TITLE_MIN = 0.55
 
 # Preprint detection
@@ -197,11 +187,9 @@ PREPRINT_DOI_PREFIXES = (
     "10.64898/",  # openRxiv
     "10.36227/techrxiv",  # TechRxiv (IEEE preprints)
     "10.33774/",  # Cambridge UP preprints (Authoria/MIIR)
-    # Grey-literature / preprint sub-prefixes. Keyed on the SPECIFIC sub-prefix
-    # (not the registrant) so a published journal DOI under the same registrant
-    # (e.g. 10.5194/acp) stays published. Kept in sync with
-    # venue._DOI_PREFIX_TO_HOWPUB so every DOI recognized for howpublished
-    # inference is also classified as secondary by is_secondary_doi.
+    # Grey-literature sub-prefixes: keyed on the SPECIFIC sub-prefix, not the
+    # registrant, so published DOIs under the same registrant stay published.
+    # MUST stay in sync with venue._DOI_PREFIX_TO_HOWPUB.
     "10.5194/egusphere",  # EGU preprints (egusphere), NOT published EGU journals
     "10.2172/",  # OSTI technical reports
     "10.31220/agrirxiv",  # agriRxiv
@@ -327,9 +315,8 @@ VENUE_CASE_CORRECTIONS: dict[str, str] = {
     "Genome biology and evolution": "Genome Biology and Evolution",
 }
 
-# Acronym case corrections for title fields (API sources sometimes return
-# incorrect casing for well-known acronyms). Keys are the wrong form, values
-# are the correct form.  Applied via word-boundary regex on title fields.
+# Acronym case corrections for titles: wrong form → correct form.
+# Applied via word-boundary regex on title fields.
 ACRONYM_CASE_CORRECTIONS: dict[str, str] = {
     "Iot": "IoT",
     "Nims": "NIMS",
@@ -365,7 +352,8 @@ CONFERENCE_KEYWORDS: tuple[str, ...] = (
 
 _NIME_FULL = "New Interfaces for Musical Expression"
 
-# Abbreviated venue names → full conference names (for S2/DBLP expansion)
+# Abbreviated venue names → full conference names (for S2/DBLP expansion).
+# WARNING: no em-dashes or accented characters in values; the serializer strips them.
 ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "spire": "String Processing and Information Retrieval",
     "ircdl": "Italian Research Conference on Digital Libraries",
@@ -451,12 +439,9 @@ JOURNAL_ONLY_PREFIXES = (
 # Author name suffixes to strip when extracting last names
 AUTHOR_NAME_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
 
-# Fused compound words: hyphens stripped by Google Scholar.
-# Maps lowercased fused form → correctly hyphenated replacement.
-# Suffixes that reliably form hyphenated compound adjectives in scientific text.
-# Used by _fix_fused_compounds() as a fallback after dictionary lookup.
-# The suffix approach matches words like "Knowledgedriven" → "Knowledge-Driven"
-# when the prefix has ≥3 characters starting with an uppercase letter.
+# Suffixes that form hyphenated compound adjectives ("Knowledgedriven" →
+# "Knowledge-Driven"). Used by _fix_fused_compounds() as a fallback after
+# FUSED_COMPOUND_WORDS lookup; requires a ≥3-char capitalized prefix.
 COMPOUND_SUFFIXES: tuple[str, ...] = (
     "based",
     "driven",
@@ -497,11 +482,10 @@ COMPOUND_SUFFIXES: tuple[str, ...] = (
     "aided",
 )
 
-# Dictionary of fused compound words for cases NOT caught by suffix-based detection:
-# - Acronym prefixes (AI, FM, EEG, 6G, D2D, DNS, etc.)
-# - Short prefixes (In, E, Low, etc.)
-# - Irregular patterns (realtime, objectoriented, etc.)
-# - Multi-word compounds (stateoftheart, endtoend, etc.)
+# Fused compound words (hyphens stripped by Google Scholar) not caught by
+# COMPOUND_SUFFIXES: acronym prefixes, short prefixes, irregular patterns,
+# multi-word compounds. Maps lowercased fused form → hyphenated replacement.
+# WARNING: no em-dashes or accented characters in values; the serializer strips them.
 FUSED_COMPOUND_WORDS: dict[str, str] = {
     # --- Multi-word compounds ---
     "stateoftheart": "State-of-the-Art",

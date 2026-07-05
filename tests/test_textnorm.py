@@ -76,7 +76,7 @@ def test_apply_booktitle_fixups_idempotent(bt_in: str, bt_out: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# _fix_title_text — colon/hyphen spacing and acronym casing
+# _fix_title_text, colon/hyphen spacing and acronym casing
 # ---------------------------------------------------------------------------
 
 # (title_in, title_out) golden pairs captured live from _fix_title_text.

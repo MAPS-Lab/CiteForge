@@ -1,15 +1,17 @@
 """CiteForge command-line entry point.
 
-Loads the API keys and author records, runs the parallel enrichment scheduler
-over every author, then finalizes the run. Accepts an optional input CSV path
-(default ``data/input.csv``) and a ``--force`` flag that re-enriches every
-record regardless of cache completeness.
+Loads the API keys and author records from ``data/input.csv``, runs the
+parallel enrichment scheduler over every author, then finalizes the run.
+Accepts a ``--force`` flag that re-enriches every record regardless of cache
+completeness.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
+from typing import TypeVar
 
 from citeforge.canonicalize import _fixup_bib_entry  # noqa: F401  # re-exported for test imports
 from citeforge.config import (
@@ -38,6 +40,18 @@ from citeforge.pipeline.postrun import finalize_run
 from citeforge.pipeline.scheduler import prioritize_records, run_all
 from citeforge.textnorm import _is_corrupted_title, _is_garbage_title  # noqa: F401  # re-exported for test imports
 
+T = TypeVar("T")
+
+
+def _load_optional_key(reader: Callable[[], T], label: str, miss_note: str) -> T:
+    """Load an optional credential, logging success or the degradation on a miss."""
+    value = reader()
+    if value:
+        logger.success(f"{label} loaded", category=LogCategory.PLAN)
+    else:
+        logger.warn(f"{label} not found; {miss_note}", category=LogCategory.PLAN)
+    return value
+
 
 def main() -> int:
     """Set up the run, load API keys and author records, and process all authors in parallel.
@@ -64,29 +78,26 @@ def main() -> int:
         return 2
     logger.success("SerpAPI key loaded", category=LogCategory.PLAN)
 
-    serply_key = read_serply_api_key(DEFAULT_SERPLY_KEY_FILE)
-    if not serply_key:
-        logger.warn("Serply API key not found; Scholar citation detail will be skipped", category=LogCategory.PLAN)
-    else:
-        logger.success("Serply API key loaded", category=LogCategory.PLAN)
-
-    s2_api_key = read_semantic_api_key(DEFAULT_S2_KEY_FILE)
-    if not s2_api_key:
-        logger.warn("Semantic Scholar key not found; S2 enrichment disabled", category=LogCategory.PLAN)
-    else:
-        logger.success("Semantic Scholar key loaded", category=LogCategory.PLAN)
-
-    or_creds = read_openreview_credentials()
-    if not or_creds:
-        logger.warn("OpenReview credentials not found; OpenReview enrichment may be limited", category=LogCategory.PLAN)
-    else:
-        logger.success("OpenReview credentials loaded", category=LogCategory.PLAN)
-
-    gemini_api_key = read_gemini_api_key()
-    if not gemini_api_key:
-        logger.warn("Gemini API key not found; short titles will use fallback algorithm", category=LogCategory.PLAN)
-    else:
-        logger.success("Gemini API key loaded", category=LogCategory.PLAN)
+    serply_key = _load_optional_key(
+        lambda: read_serply_api_key(DEFAULT_SERPLY_KEY_FILE),
+        "Serply API key",
+        "Scholar citation detail will be skipped",
+    )
+    s2_api_key = _load_optional_key(
+        lambda: read_semantic_api_key(DEFAULT_S2_KEY_FILE),
+        "Semantic Scholar key",
+        "S2 enrichment disabled",
+    )
+    or_creds = _load_optional_key(
+        read_openreview_credentials,
+        "OpenReview credentials",
+        "OpenReview enrichment may be limited",
+    )
+    gemini_api_key = _load_optional_key(
+        read_gemini_api_key,
+        "Gemini API key",
+        "short titles will use fallback algorithm",
+    )
 
     try:
         records = read_records(DEFAULT_INPUT)

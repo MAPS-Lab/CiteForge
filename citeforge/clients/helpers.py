@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
+from ..cache import response_cache
 from ..config import (
     SIM_AUTHOR_BONUS,
     SIM_BEST_ITEM_THRESHOLD,
@@ -19,7 +21,7 @@ from ..config import (
     SIM_YEAR_MATCH_WINDOW,
 )
 from ..log_utils import LogCategory, logger
-from ..text_utils import extract_year_from_any
+from ..text_utils import extract_author_names, extract_year_from_any, normalize_title
 
 _HTML_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -65,6 +67,32 @@ def _score_candidate_generic(
     return s
 
 
+def title_author_cache_key(title: str, author_name: str | None, prefix: str = "") -> str:
+    """Build the shared search-cache key from a normalized title and lowercased author.
+
+    This exact format is load-bearing. Existing entries under data/api_cache/
+    were written with it, so any change would orphan the whole cache.
+    """
+    return f"{prefix}{normalize_title(title)}|{(author_name or '').strip().lower()}"
+
+
+def _doi_cache_lookup(namespace: str, doi_norm: str) -> tuple[dict[str, Any] | None, bool]:
+    """Check the response cache for a DOI-keyed entry, logging the outcome.
+
+    Returns ``(entry, True)`` on a positive hit, ``(None, True)`` on a
+    confirmed negative, and ``(None, False)`` on a miss.
+    """
+    cached = response_cache.get(namespace, doi_norm)
+    if cached is not None:
+        if cached.get("_negative"):
+            logger.debug(f"{namespace} | NEG_HIT | doi={doi_norm}", category=LogCategory.CACHE)
+            return None, True
+        logger.debug(f"{namespace} | HIT | doi={doi_norm}", category=LogCategory.CACHE)
+        return cached, True
+    logger.debug(f"{namespace} | MISS | doi={doi_norm}", category=LogCategory.CACHE)
+    return None, False
+
+
 def _best_item_by_score(
     items: list[Any],
     score_fn: Callable[[Any], float],
@@ -92,8 +120,6 @@ def extract_authors_from_article(art: dict[str, Any]) -> list[str] | None:
     the truncation markers) instead of None so downstream code can still build a
     reasonable baseline entry.
     """
-    from ..text_utils import extract_author_names
-
     authors = art.get("authors")
     if not authors:
         return None
@@ -143,6 +169,5 @@ def _sanitize_dblp_author(name: str) -> str:
 
 
 def get_current_year() -> int:
-    from datetime import datetime, timezone
-
+    """Return the current UTC year."""
     return datetime.now(timezone.utc).year

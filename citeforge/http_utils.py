@@ -288,9 +288,7 @@ def _get_session() -> requests.Session:
 
 
 def handle_api_errors(default_return: Any = None) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """
-    Decorator to handle API errors consistently across all API client functions, returning a default value on error.
-    """
+    """Decorator that returns *default_return* when the wrapped call raises an API error."""
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
@@ -337,15 +335,15 @@ def _http_request(
     timeout: float,
     json_payload: dict[str, Any] | None = None,
 ) -> bytes:
-    """Execute an HTTP request with the full CiteForge infrastructure.
+    """Execute an HTTP request through the shared client infrastructure.
 
-    Applies, in order: namespace classification, API call tracking,
-    per-API rate limiting, header randomization, global concurrency
-    gating, session management with rotation, Retry-After back-off,
-    and exponential retry on transient errors.
+    Applies namespace classification, API call tracking, per-API rate
+    limiting, header randomization, global concurrency gating, session
+    management with rotation, Retry-After back-off, and exponential retry
+    on transient errors, in that order.
 
     Args:
-        method: HTTP method -- ``"GET"`` or ``"POST"``.
+        method: HTTP method, ``"GET"`` or ``"POST"``.
         url: Target URL.
         headers: Base headers (will be copied and randomized).
         timeout: Read timeout in seconds; connect timeout is capped at 10 s.
@@ -406,7 +404,7 @@ def _http_request(
         else:
             time.sleep((2**attempt) + random.uniform(0, 1))
 
-    # Unreachable -- the loop always returns or raises -- but satisfies mypy.
+    # Unreachable (the loop always returns or raises) but satisfies mypy.
     raise requests.exceptions.RequestException(f"Failed to {method} {_scrub_secrets(url)}")
 
 
@@ -432,7 +430,7 @@ def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
         result: dict[str, Any] = json.loads(raw.decode("utf-8"))
         return result
     except json.JSONDecodeError as ex:
-        # include a preview for debugging (scrub the preview too — an upstream
+        # include a preview for debugging (scrub the preview too; an upstream
         # error body may echo request params carrying a key)
         preview = _scrub_secrets(raw[:256].decode("utf-8", errors="replace"))
         safe_url = _scrub_secrets(url)

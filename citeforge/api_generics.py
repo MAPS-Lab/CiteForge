@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .cache import response_cache
+from .clients.helpers import title_author_cache_key
 from .config import (
     CACHE_TTL_SEARCH_DAYS,
     GENERIC_SERIES_NAMES,
@@ -34,6 +35,7 @@ from .text_utils import (
     safe_get_field,
     safe_get_nested,
 )
+from .venue import first_non_generic_container
 
 
 def _resolve_dotted(obj: dict[str, Any], field: str) -> Any:
@@ -75,10 +77,7 @@ def _resolve_dotted_str(obj: dict[str, Any], field: str, *, check_placeholder: b
 
 @dataclass
 class APISearchConfig:
-    """
-    Configuration for API-specific search behavior including endpoint details,
-    query parameters, and custom field extractors.
-    """
+    """Per-API search settings (endpoint, query parameters, response paths, extractors)."""
 
     api_name: str
     base_url: str
@@ -105,10 +104,7 @@ class APISearchConfig:
 
 @dataclass
 class APIFieldMapping:
-    """
-    Configuration for API-specific field mappings when building BibTeX entries,
-    translating diverse field names and structures to a unified BibTeX format.
-    """
+    """Per-API field mappings used when building BibTeX entries from a response."""
 
     api_name: str
 
@@ -179,26 +175,19 @@ def _build_scoring_function(
     )
 
 
-def search_api_generic(
-    title: str, author_name: str | None, config: APISearchConfig, api_key: str | None = None
-) -> dict[str, Any] | None:
-    """
-    Search for academic publications across different API providers using a unified
-    interface with a two-pass matching strategy that attempts exact title matches first
-    and falls back to fuzzy matching when needed.
-    """
-    if not title:
-        return None
+def _fetch_results(
+    title: str,
+    author_name: str | None,
+    config: APISearchConfig,
+    api_key: str | None,
+    cache_key: str,
+) -> list[Any] | None:
+    """Issue the configured search request and extract the raw result list.
 
-    cache_key = f"{normalize_title(title)}|{(author_name or '').strip().lower()}"
-    cached = response_cache.get(config.api_name, cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"{config.api_name} | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return None
-        logger.debug(f"{config.api_name} | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return cached if cached else None
-
+    Returns ``None`` both on HTTP failure (not cached, so transient errors are
+    retried on the next run) and on an empty result set (recorded as a negative
+    cache entry under *cache_key* before returning).
+    """
     params = {config.query_param_name: title, **config.additional_params}
     if author_name and config.author_param_name:
         params[config.author_param_name] = author_name
@@ -214,9 +203,36 @@ def search_api_generic(
     except ALL_API_ERRORS:
         return None
 
-    results = safe_get_nested(data, *config.result_path, default=[])
+    results: list[Any] = safe_get_nested(data, *config.result_path, default=[])
     if not results:
         response_cache.put_negative(config.api_name, cache_key)
+        return None
+    return results
+
+
+def search_api_generic(
+    title: str, author_name: str | None, config: APISearchConfig, api_key: str | None = None
+) -> dict[str, Any] | None:
+    """Search one configured API for the best-matching publication.
+
+    Two-pass matching. An exact normalized-title match (with author check) wins
+    outright; otherwise the highest-scoring fuzzy candidate above the pick
+    threshold is used.
+    """
+    if not title:
+        return None
+
+    cache_key = title_author_cache_key(title, author_name)
+    cached = response_cache.get(config.api_name, cache_key)
+    if cached is not None:
+        if cached.get("_negative"):
+            logger.debug(f"{config.api_name} | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
+            return None
+        logger.debug(f"{config.api_name} | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
+        return cached if cached else None
+
+    results = _fetch_results(title, author_name, config, api_key, cache_key)
+    if results is None:
         return None
 
     logger.debug(
@@ -281,16 +297,15 @@ def search_api_generic_multiple(
     max_results: int = 5,
     year_hint: int | None = None,
 ) -> list[dict[str, Any]]:
-    """
-    Search for academic publications and return multiple candidates sorted by relevance.
+    """Search one configured API and return the top candidates sorted by score.
 
-    Similar to search_api_generic but returns a list of top candidates instead of just
-    the best match, enabling multiple candidates for validation.
+    Like ``search_api_generic`` but keeps every candidate above the tolerance
+    threshold (up to *max_results*) so callers can validate multiple options.
     """
     if not title:
         return []
 
-    cache_key = f"multi|{normalize_title(title)}|{(author_name or '').strip().lower()}"
+    cache_key = title_author_cache_key(title, author_name, prefix="multi|")
     cached = response_cache.get(config.api_name, cache_key)
     if cached is not None:
         if cached.get("_negative"):
@@ -300,24 +315,8 @@ def search_api_generic_multiple(
         logger.debug(f"{config.api_name}_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
         return cached_list
 
-    params = {config.query_param_name: title, **config.additional_params}
-    if author_name and config.author_param_name:
-        params[config.author_param_name] = author_name
-
-    url = build_url(config.base_url, params)
-    logger.debug(f"{config.api_name} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
-
-    try:
-        if api_key and config.api_name == "semantic_scholar":
-            data = s2_http_get_json(url, api_key, timeout=config.timeout)
-        else:
-            data = http_get_json(url, timeout=config.timeout)
-    except ALL_API_ERRORS:
-        return []
-
-    results = safe_get_nested(data, *config.result_path, default=[])
-    if not results:
-        response_cache.put_negative(config.api_name, cache_key)
+    results = _fetch_results(title, author_name, config, api_key, cache_key)
+    if results is None:
         return []
 
     score_fn = _build_scoring_function(title, author_name, config, year_hint)
@@ -393,14 +392,7 @@ def _extract_venue(
         # Crossref returns container-title as array: [series_name, conference_name]
         # Prefer the non-generic element over generic series names like LNCS
         if isinstance(raw_venue, list) and len(raw_venue) > 1:
-            non_generic = next(
-                (
-                    str(c).strip()
-                    for c in raw_venue
-                    if str(c).strip() and str(c).strip().lower() not in GENERIC_SERIES_NAMES
-                ),
-                None,
-            )
+            non_generic = first_non_generic_container(raw_venue)
             venue = non_generic or _resolve_dotted_str(response, field_name)
             logger.debug(
                 f"{mapping.api_name} | VENUE_ARRAY | elements={len(raw_venue)}"
@@ -428,10 +420,7 @@ def _extract_venue(
 
 
 def build_bibtex_from_response(response: dict[str, Any], keyhint: str, mapping: APIFieldMapping) -> str | None:
-    """
-    Build a BibTeX entry from an API response using configured field mappings to handle
-    diverse field naming conventions and data structures across different academic APIs.
-    """
+    """Build a BibTeX entry from an API response using the configured field mappings."""
     from .bibtex_build import build_bibtex_entry, determine_entry_type
 
     title = _first_resolved_str(response, mapping.title_fields, check_placeholder=True)

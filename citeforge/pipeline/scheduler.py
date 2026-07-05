@@ -45,6 +45,11 @@ from citeforge.text_utils import (
 )
 
 
+def _author_dirname(rec: Record) -> str:
+    """Return the output directory name for *rec*, keyed by its Scholar or DBLP id."""
+    return format_author_dirname(rec.name, rec.scholar_id or rec.dblp or "")
+
+
 def process_record(
     serpapi_key: str,
     serply_key: str | None,
@@ -62,11 +67,8 @@ def process_record(
 
     Returns the number of BibTeX files successfully written.
     """
-    # Setup thread-local logging for this author
-    effective_id = rec.scholar_id or rec.dblp or ""
-    author_dirname = format_author_dirname(rec.name, effective_id)
-    author_log_path = os.path.join(out_dir, author_dirname, "author.log")
-
+    # Set up thread-local logging for this author
+    author_log_path = os.path.join(out_dir, _author_dirname(rec), "author.log")
     logger.set_log_file(author_log_path)
 
     try:
@@ -85,7 +87,7 @@ def process_record(
             scholar_articles: list[dict[str, Any]] = []
             max_fetch_retries = 3
 
-            # SerpAPI call — pagination handled internally by serpapi_scholar
+            # SerpAPI call; pagination handled internally by serpapi_scholar
             data = {}
             for attempt in range(1, max_fetch_retries + 1):
                 data = fetch_author_publications(
@@ -96,7 +98,7 @@ def process_record(
                     min_year=min_year,
                 )
                 if data.get("articles"):
-                    break  # Got articles -- valid response
+                    break  # Got articles, valid response
                 if attempt < max_fetch_retries:
                     logger.warn(
                         f"Scholar API returned empty (attempt {attempt}/{max_fetch_retries}), retrying...",
@@ -226,11 +228,8 @@ def process_record(
 
 def count_existing_papers(rec: Record, out_dir: str) -> int:
     """Count existing .bib files in the author's output directory."""
-    effective_id = rec.scholar_id or rec.dblp or ""
-    author_dirname = format_author_dirname(rec.name, effective_id)
-    author_dir = os.path.join(out_dir, author_dirname)
     try:
-        return len(iter_author_bibs(author_dir))
+        return len(iter_author_bibs(os.path.join(out_dir, _author_dirname(rec))))
     except OSError:
         return 0
 
@@ -280,11 +279,12 @@ def run_all(
     total_saved = 0
     processed = 0
 
-    # Prioritize new authors (no existing output dir) so they get browser/API
-    # resources first, before cached authors consume worker slots
+    # Prioritize new authors (no existing output dir) so they get API resources
+    # first, before cached authors consume worker slots. This intentionally
+    # overrides the count-descending order from prioritize_records for new
+    # authors only; the relative order within each group is preserved.
     def _has_output(r: Record) -> bool:
-        eid = r.scholar_id or r.dblp or ""
-        return os.path.isdir(os.path.join(out_dir, format_author_dirname(r.name, eid)))
+        return os.path.isdir(os.path.join(out_dir, _author_dirname(r)))
 
     records_sorted = [r for _, r in sorted(enumerate(records), key=lambda ir: (_has_output(ir[1]), ir[0]))]
 
@@ -302,8 +302,8 @@ def run_all(
 
     threading.excepthook = _thread_excepthook
 
-    # Per-author timeout: 30 minutes per author to handle large publication lists
-    # Each article takes ~60-90s across all API calls, so 24 articles ≈ 36 minutes
+    # Per-author budget of 30 minutes, applied as one whole-pool deadline
+    # (author_timeout * len(records)) on as_completed, not per future
     author_timeout = 1800  # seconds
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:

@@ -1,9 +1,9 @@
 """Title and booktitle text-normalization primitives.
 
 Pure functions over pre-compiled regex tables that repair recurrent metadata
-defects in scholarly titles and booktitles: fused compound words (hyphens
-stripped by Google Scholar), acronym casing, verbose conference metadata,
-non-bibliographic "garbage" titles, and DBLP author-name corruption.
+defects in scholarly titles and booktitles. Covered defects are fused compound
+words (hyphens stripped by Google Scholar), acronym casing, verbose conference
+metadata, non-bibliographic "garbage" titles, and DBLP author-name corruption.
 
 Depends only on stdlib ``re`` and ``citeforge.config`` (no dependency on ``main`` or
 the pipeline), so the canonicalization layer and the orchestrator can both build
@@ -92,7 +92,7 @@ _BOOKTITLE_FIXUPS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"ITiCSE'\d{2}:\s*"), ""),
     # "SEET-Software" → "SEET - Software" (missing spaces around dash)
     (re.compile(r"^SEET-Software"), "SEET - Software"),
-    # Truncated SerpAPI booktitles — complete known conference name suffixes
+    # Truncated SerpAPI booktitles, completed to known conference names
     (re.compile(r"Conference on Innovation$"), "Conference on Innovation and Technology in Computer Science Education"),
     (re.compile(r"Applications of Computer$"), "Applications of Computer Vision"),
     (re.compile(r"Analyzing and Interpreting$"), "Analyzing and Interpreting Neural Networks for NLP"),
@@ -174,7 +174,7 @@ def _fix_fused_compounds(title: str) -> str:
     1. Dictionary lookup for special cases (acronyms, irregular patterns).
     2. Suffix-based detection for common compound adjective suffixes
        (e.g. "Knowledgedriven" → "Knowledge-Driven").
-    3. Dictionary lookup again — catches entries newly exposed by the suffix
+    3. Dictionary lookup again, catching entries newly exposed by the suffix
        pass (e.g. "Doubleedgeassisted" → suffix splits to "Doubleedge-Assisted"
        → dict converts "Doubleedge" to "Double-Edge").
     """

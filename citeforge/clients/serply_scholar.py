@@ -1,15 +1,14 @@
 """Google Scholar access via the Serply REST API (api.serply.io).
 
-A clean REST client for Google Scholar access through the Serply API. It exposes
-two public functions:
+Exposes two public functions.
 
 - ``serply_fetch_citation`` (title and author search for citation detail), the
   entry point used in production by ``scholar.py``
 - ``serply_fetch_author_publications`` (keyword search by author name), a
   secondary entry point exercised by the tests
 
-Thread safety: all calls are stateless HTTP GETs through ``http_fetch_bytes``,
-so no locking is required.
+All calls are stateless HTTP GETs through ``http_fetch_bytes``, so no
+locking is required.
 
 Serply response structure (``/v1/scholar/{query}``)::
 
