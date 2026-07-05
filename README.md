@@ -81,7 +81,7 @@ Set `CROSSREF_MAILTO` to join Crossref's polite pool.
 ## Citation
 
 ```bibtex
-@software{spadon_citeforge,
+@software{CiteForge2026:GSpadon,
   author    = {Spadon, Gabriel},
   title     = {CiteForge: Trust-Based Metadata Aggregation for Scholarly Publications},
   year      = {2026},
