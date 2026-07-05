@@ -181,6 +181,15 @@ jobs:
           echo "runs_completed=$i" >> "$GITHUB_OUTPUT"
           echo "last_api_calls=$last_total" >> "$GITHUB_OUTPUT"
 
+      # Fresh token minted here (not at checkout): the pipeline loop can run for
+      # hours and an app token lives only 1h, so mint it immediately before the push.
+      - name: Generate push token
+        id: push_token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+
       - name: Commit output to main
         run: |
           git config user.name  "github-actions[bot]"
@@ -189,7 +198,8 @@ jobs:
           git add output/
           if ! git diff --cached --quiet; then
             git commit -m "data: monthly pipeline refresh $(date +%Y-%m)"
-            git push origin main
+            # Push as the app (ruleset bypass actor); GITHUB_TOKEN cannot bypass the required-PR rule.
+            git push "https://x-access-token:${{ steps.push_token.outputs.token }}@github.com/${{ github.repository }}.git" HEAD:main
           else
             echo "No output changes to commit"
           fi
