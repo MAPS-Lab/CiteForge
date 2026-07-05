@@ -1,0 +1,8 @@
+# Default owner for everything.
+*                    @gabrielspadon
+
+# CI/CD and dependency locks consume secrets and gate the supply chain.
+/.github/            @gabrielspadon
+/requirements.lock       @gabrielspadon
+/requirements-dev.lock   @gabrielspadon
+/pyproject.toml      @gabrielspadon

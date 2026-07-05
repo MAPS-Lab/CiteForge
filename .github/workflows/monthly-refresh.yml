@@ -20,18 +20,20 @@ jobs:
 
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: main
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install -e .
+        run: |
+          pip install --require-hashes -r requirements.lock
+          pip install -e . --no-deps
 
       - name: Write API keys from secrets
         env:
@@ -49,13 +51,22 @@ jobs:
           echo "$OPENREVIEW_KEY" > keys/OpenReview.key
 
       - name: Restore cache from data-cache branch
+        env:
+          CACHE_ENCRYPTION_KEY: ${{ secrets.CACHE_ENCRYPTION_KEY }}
         run: |
-          if git ls-remote --heads origin data-cache | grep -q data-cache; then
+          if [ -z "$CACHE_ENCRYPTION_KEY" ]; then
+            echo "CACHE_ENCRYPTION_KEY unset — skipping cache restore (fresh start)"
+          elif git ls-remote --heads origin data-cache | grep -q data-cache; then
             git fetch origin data-cache
-            if git show origin/data-cache:api_cache.tar.gz > /tmp/api_cache.tar.gz 2>/dev/null; then
-              mkdir -p data
-              tar xzf /tmp/api_cache.tar.gz -C data/
-              echo "Restored $(find data/api_cache -type f | wc -l) cache entries"
+            if git show origin/data-cache:api_cache.tar.gz.enc > /tmp/api_cache.tar.gz.enc 2>/dev/null; then
+              if openssl enc -d -aes-256-cbc -pbkdf2 -pass env:CACHE_ENCRYPTION_KEY \
+                   -in /tmp/api_cache.tar.gz.enc -out /tmp/api_cache.tar.gz 2>/dev/null; then
+                mkdir -p data
+                tar xzf /tmp/api_cache.tar.gz -C data/
+                echo "Restored $(find data/api_cache -type f | wc -l) cache entries"
+              else
+                echo "Cache decrypt failed (key rotated?) — starting fresh"
+              fi
             fi
           else
             echo "No data-cache branch — starting fresh"
@@ -68,24 +79,31 @@ jobs:
           CITEFORGE_MAX_WORKERS: "16"
           CITEFORGE_CONCURRENCY: "20"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CACHE_ENCRYPTION_KEY: ${{ secrets.CACHE_ENCRYPTION_KEY }}
         run: |
           save_cache() {
+            if [ -z "$CACHE_ENCRYPTION_KEY" ]; then
+              echo "CACHE_ENCRYPTION_KEY unset — skipping cache push (raw API responses must not reach the public data-cache branch)"
+              return 0
+            fi
             if [ -d data/api_cache ] && [ "$(ls -A data/api_cache 2>/dev/null)" ]; then
               entries=$(find data/api_cache -type f -name '*.json' | wc -l)
               tar czf /tmp/api_cache.tar.gz -C data api_cache
-              size=$(du -h /tmp/api_cache.tar.gz | cut -f1)
-              echo "Saving $entries cache entries ($size compressed)"
+              openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:CACHE_ENCRYPTION_KEY \
+                -in /tmp/api_cache.tar.gz -out /tmp/api_cache.tar.gz.enc
+              size=$(du -h /tmp/api_cache.tar.gz.enc | cut -f1)
+              echo "Saving $entries cache entries ($size encrypted)"
 
               # Push cache without disturbing the working tree
               cache_dir=$(mktemp -d)
-              cp /tmp/api_cache.tar.gz "$cache_dir/"
+              cp /tmp/api_cache.tar.gz.enc "$cache_dir/"
               cd "$cache_dir"
               git init -q
               git config user.name "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
               git checkout --orphan data-cache
-              git add api_cache.tar.gz
-              git commit -q -m "cache: $(date +%Y-%m-%d) — $entries entries ($size)"
+              git add api_cache.tar.gz.enc
+              git commit -q -m "cache: $(date +%Y-%m-%d) — $entries entries ($size, encrypted)"
               git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
               for attempt in 1 2 3; do
                 if git push origin data-cache --force -q 2>/dev/null; then
@@ -203,6 +221,15 @@ jobs:
           running=$(gh run list --workflow="Monthly Pipeline Refresh" --status=in_progress --json databaseId --jq "[.[] | select(.databaseId != ${{ github.run_id }})] | length" --repo "${{ github.repository }}")
           if [ "$running" -gt 0 ]; then
             echo "::notice::Another run is already in progress — skipping re-trigger"
+            exit 0
+          fi
+          # Runaway guard: cap total runs per calendar month so a never-converging
+          # month cannot cascade into unbounded Actions minutes / API-quota burn.
+          MAX_MONTHLY_RUNS=12
+          month_start=$(date +%Y-%m-01)
+          month_count=$(gh run list --workflow="Monthly Pipeline Refresh" --created ">=${month_start}" --json databaseId --jq 'length' --repo "${{ github.repository }}")
+          if [ "$month_count" -ge "$MAX_MONTHLY_RUNS" ]; then
+            echo "::warning::Reached ${MAX_MONTHLY_RUNS} runs this month (${month_count}) — not re-triggering to avoid runaway; investigate convergence."
             exit 0
           fi
           echo "Pipeline did not converge — re-triggering with saved cache"
