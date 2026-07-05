@@ -15,9 +15,11 @@ import os
 import re
 import threading
 import time
-import xml.etree.ElementTree as ElementTree
+import xml.etree.ElementTree as ElementTree  # Element types only; parsing uses defusedxml
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+
+from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
 from ..cache import response_cache
 from ..config import (
@@ -355,7 +357,7 @@ def arxiv_search(
     except NETWORK_ERRORS:
         return []
     try:
-        root = ElementTree.fromstring(xml)
+        root = safe_xml_fromstring(xml)
     except XML_PARSE_ERRORS:
         return []
 
@@ -769,7 +771,7 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     except NETWORK_ERRORS:
         return []
     try:
-        root = ElementTree.fromstring(xml)
+        root = safe_xml_fromstring(xml)
     except XML_PARSE_ERRORS:
         return []
     articles: list[dict[str, Any]] = []
