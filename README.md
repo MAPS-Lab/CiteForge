@@ -98,15 +98,17 @@ Run a single test with `pytest tests/test_core.py::test_function_name -v --tb=sh
 
 ## Citation
 
+Citation metadata is also provided in [CITATION.cff](CITATION.cff). If you use CiteForge in your work, please cite it with the BibTeX entry below.
+
 ```bibtex
 @software{CiteForge2026:GSpadon,
   author    = {Spadon, Gabriel},
   title     = {CiteForge: Trust-Based Metadata Aggregation for Scholarly Publications},
   year      = {2026},
   version   = {1.0.0},
-  publisher = {GitHub},
-  url       = {https://github.com/gabrielspadon/CiteForge},
-  license   = {MIT}
+  publisher = {MAPS Lab, Dalhousie University},
+  url       = {https://github.com/MAPS-Lab/CiteForge},
+  license   = {AGPL-3.0}
 }
 ```
 
@@ -116,4 +118,4 @@ CiteForge is one of the research tools from the [MAPS Lab](https://mapslab.tech/
 
 ## License
 
-This project is distributed under the terms of the MIT License. See [LICENSE](LICENSE) for details.
+This project is distributed under the terms of the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE) for details.

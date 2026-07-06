@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this work, please cite it using the metadata below."
+title: "CiteForge: Trust-Based Metadata Aggregation for Scholarly Publications"
+type: software
+authors:
+  - family-names: Spadon
+    given-names: Gabriel
+    affiliation: "MAPS Lab, Dalhousie University"
+version: "1.0.0"
+date-released: "2026-07-06"
+url: "https://github.com/MAPS-Lab/CiteForge"
+repository-code: "https://github.com/MAPS-Lab/CiteForge"
+license: AGPL-3.0-or-later
