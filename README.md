@@ -1,21 +1,32 @@
 # CiteForge
 
-[![Tests](https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml/badge.svg)](https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml)
+[![Tests](https://github.com/MAPS-Lab/CiteForge/actions/workflows/tests.yml/badge.svg)](https://github.com/MAPS-Lab/CiteForge/actions/workflows/tests.yml)
 
-CiteForge builds per-author BibTeX files from scholarly APIs. Given a CSV of authors with Google Scholar profiles, it retrieves their publications, enriches each entry from multiple registries, deduplicates, and merges fields according to source trust.
+CiteForge is a Python tool that builds clean, per-author BibTeX files from scholarly APIs. Given a CSV of authors with Google Scholar profiles, it retrieves each author's publications, enriches every entry against thirteen external registries and services, deduplicates records, and merges fields according to source trust. It runs on Python 3.10 or later with a small dependency footprint (requests, rapidfuzz, unidecode, and a few helpers), and it is developed and maintained by the [MAPS Lab](https://mapslab.tech/) at Dalhousie University.
 
-Google Scholar entries are often incomplete, with missing DOIs, inconsistent venue names, and malformed author lists. Correcting them requires cross-referencing registries such as Crossref, Semantic Scholar, arXiv, and PubMed, which does not scale to a research group. CiteForge automates that cross-referencing and consolidation.
+## Features
+
+- Per-author BibTeX generation from Google Scholar profiles through SerpAPI
+- Multi-API enrichment across thirteen scholarly registries and services (Semantic Scholar, Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DataCite, ORCID, DBLP, OpenReview, and DOI resolvers)
+- Trust-based field merging that ranks thirteen sources and prefers authoritative registries over scraped content
+- Deduplication combining DOI normalization, external-identifier matching, and fuzzy title similarity (rapidfuzz)
+- Metadata correction for fragmented compound words, misclassified publication types, invalid page ranges, and all-capitals titles
+- Deterministic output, with byte-identical results on cache-hit runs
+- Parallel per-author processing under per-API rate limits, backed by a response cache with monthly expiry
+- Config-driven behavior, with trust order, similarity thresholds, rate limits, and venue mappings centralized in [`citeforge/config.py`](citeforge/config.py)
+
+Google Scholar entries are often incomplete, carrying missing DOIs, inconsistent venue names, and malformed author lists. Correcting them by hand requires cross-referencing registries such as Crossref, Semantic Scholar, arXiv, and PubMed, which does not scale to a research group. CiteForge automates that cross-referencing and consolidation.
 
 ## Installation
 
 Requires Python 3.10 or later.
 
 ```bash
-git clone https://github.com/gabrielspadon/CiteForge.git && cd CiteForge
+git clone https://github.com/MAPS-Lab/CiteForge.git && cd CiteForge
 pip install -e .
 ```
 
-Place API keys in the `keys/` directory.
+Place API keys in the `keys/` directory. Only SerpAPI is required; the rest are recommended or optional.
 
 ```bash
 mkdir -p keys
@@ -42,7 +53,7 @@ Name,Scholar Link,DBLP Link
 Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659
 ```
 
-Output is organized per author, with a shared summary and run log.
+Output is organized per author, with a shared summary and run log. API responses are cached under `data/api_cache/` with monthly expiry.
 
 ```
 output/
@@ -55,19 +66,15 @@ output/
     └── ...
 ```
 
-API responses are cached under `data/api_cache/` with monthly expiry.
+## How it works
 
-## How It Works
+CiteForge retrieves each author's publication list from Google Scholar through SerpAPI, then enriches every entry by querying scholarly services including Semantic Scholar, Crossref, arXiv, OpenAlex, and PubMed. A trust-based consolidation stage merges the collected records according to source reliability, prioritizing authoritative registries over scraped content. Duplicate detection combines DOI normalization, external identifier matching, and fuzzy title similarity. The pipeline also corrects recurrent metadata issues such as fragmented compound words, misclassified publication types, invalid page ranges, and all-capitals titles.
 
-CiteForge retrieves each author's publication list from Google Scholar through SerpAPI, then enriches every entry by querying scholarly services including Semantic Scholar, Crossref, arXiv, OpenAlex, and PubMed.
+Cache-hit runs produce byte-identical output, author queries run in parallel under per-API rate limits, and configurable parameters (source trust order, similarity thresholds, rate limits, venue mappings) are centralized in [`citeforge/config.py`](citeforge/config.py).
 
-A trust-based consolidation stage merges the collected records according to source reliability, prioritizing authoritative registries over scraped content. Duplicate detection combines DOI normalization, external identifier matching, and fuzzy title similarity. The pipeline also corrects recurrent metadata issues such as fragmented compound words, misclassified publication types, invalid page ranges, and all-capitals titles.
+## Data sources
 
-Cache-hit runs produce byte-identical output. Author queries run in parallel under per-API rate limits. Configurable parameters (source trust order, similarity thresholds, rate limits, venue mappings) are centralized in [`citeforge/config.py`](citeforge/config.py).
-
-## Data Sources
-
-SerpAPI requires a key; the remaining sources are keyless, recommended, or optional.
+SerpAPI requires a key; the remaining sources are keyless, recommended, or optional. Set `CROSSREF_MAILTO` to join Crossref's polite pool.
 
 | Tier | Sources |
 |------|---------|
@@ -76,7 +83,18 @@ SerpAPI requires a key; the remaining sources are keyless, recommended, or optio
 | Free (no key) | [Crossref](https://www.crossref.org/), [OpenAlex](https://openalex.org/), [arXiv](https://arxiv.org/), [PubMed](https://pubmed.ncbi.nlm.nih.gov/), [Europe PMC](https://europepmc.org/), [DataCite](https://datacite.org/), [ORCID](https://orcid.org/), [DBLP](https://dblp.org/) |
 | Optional (key) | [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/) |
 
-Set `CROSSREF_MAILTO` to join Crossref's polite pool.
+## Development
+
+Install the development extras, then run the three quality gates that must pass before merge.
+
+```bash
+pip install -e .[dev]                        # Install with dev tools
+ruff check citeforge/ tests/ main.py         # Lint (line-length 120)
+mypy citeforge/ main.py                       # Type check (strict, ignore_missing_imports)
+pytest tests/ -v --tb=short                   # Full test suite (Python 3.10-3.13)
+```
+
+Run a single test with `pytest tests/test_core.py::test_function_name -v --tb=short`. The `main.py` entry point is a thin command-line wrapper that loads keys, reads author records, and delegates to the `citeforge/pipeline/` package, where `article.py` handles per-article enrichment, `scheduler.py` handles author-level scheduling, and `postrun.py` handles the post-run finalization.
 
 ## Citation
 
@@ -92,6 +110,10 @@ Set `CROSSREF_MAILTO` to join Crossref's polite pool.
 }
 ```
 
+## Related projects
+
+CiteForge is one of the research tools from the [MAPS Lab](https://mapslab.tech/) at Dalhousie University. Explore the group's other open-source work on the [MAPS-Lab GitHub organization](https://github.com/MAPS-Lab).
+
 ## License
 
-[MIT](LICENSE).
+This project is distributed under the terms of the MIT License. See [LICENSE](LICENSE) for details.
