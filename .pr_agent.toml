@@ -26,9 +26,11 @@ glob = [
     'dist/**',
     '**/*.egg-info/**',
 ]
-regex = [
-    '.*\.key$',
-]
+# No `regex` entry. `.*\.key$` excluded exactly the files a leaked credential
+# would live in, in a PUBLIC repository whose own instructions two sections
+# below say to treat a committed API key as a defect. An earlier commit removed
+# the equivalent glob exclusions from .coderabbit.yaml and greptile.json but
+# missed this one, which is a different key in the same file.
 
 [pr_reviewer]
 require_tests_review = true
