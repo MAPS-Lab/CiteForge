@@ -1,0 +1,54 @@
+name: CodeQL
+
+# CiteForge is the only public repository in this group, so GitHub code
+# scanning is available at no cost here and unavailable on the private
+# siblings. This workflow is the coverage that fact buys.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Weekly, Monday 04:31 UTC. Off the hour to avoid the scheduling stampede,
+    # and it catches newly published queries against unchanged code.
+    - cron: '31 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Required to upload the SARIF results to the code scanning API.
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: python
+          # Python is interpreted, so the database is built from source without
+          # a compile step. No autobuild and no manual build commands.
+          build-mode: none
+          # security-and-quality is a superset of the default security-extended
+          # suite. This is a research tool whose correctness matters as much as
+          # its attack surface, so take the wider set.
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          category: "/language:python"

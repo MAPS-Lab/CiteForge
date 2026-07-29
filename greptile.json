@@ -1,0 +1,72 @@
+{
+  "commentTypes": ["logic", "syntax"],
+  "strictness": 2,
+  "triggerOnUpdates": true,
+  "triggerOnDrafts": false,
+  "shouldUpdateDescription": false,
+  "statusCheck": false,
+  "instructions": "Direct and technical. No praise and no restating the diff. Prose avoids em-dashes, avoids colons inside sentences, and never opens a paragraph with a bolded phrase standing in for a heading. Report a finding only when it is a defect a maintainer would act on; the CI workflow already covers linting, typechecking and a coverage floor, so do not repeat what ruff, mypy or actionlint would say. CI is the gate, this review is advice: never request changes purely on style. This repository is public, so treat anything that could leak an API key, a raw API response, or a contributor's private data as a defect rather than a nit.",
+  "ignorePatterns": "requirements.lock\nrequirements-dev.lock\noutput/**\ndata/api_cache/**\nkeys/**\n**/*.key\n.venv/**\nbuild/**\ndist/**\n**/*.egg-info/**",
+  "ignoreKeywords": "linter\nruff format\ngreptile-ignore",
+  "customContext": {
+    "rules": [
+      {
+        "scope": ["citeforge/**/*.py"],
+        "rule": "Type annotations on every public function and method, enforced by mypy with disallow_untyped_defs and check_untyped_defs. Linting is ruff at line-length 120 with rules E/F/W/I/N/UP/B/C4/SIM/RUF/S. The repository does not run ruff format, so do not propose reformatting."
+      },
+      {
+        "scope": ["citeforge/**/*.py"],
+        "rule": "Config-driven. Thresholds, API endpoints, trust order, rate limits and compound word dictionaries live in citeforge/config.py and are never hardcoded elsewhere. Flag a magic number or a literal endpoint introduced outside that module."
+      },
+      {
+        "scope": ["citeforge/**/*.py"],
+        "rule": "Determinism. The pipeline produces byte-identical output across consecutive cache-hit runs. Directory and file iteration uses sorted(), and nothing that affects output is randomized. Flag an unsorted os.listdir, glob or set iteration whose order reaches the output, and flag any use of random, time or uuid in an output-affecting path."
+      },
+      {
+        "scope": ["citeforge/**/*.py"],
+        "rule": "DOI comparison goes through _norm_doi() from citeforge/id_utils.py and is always paired with a title_similarity >= 0.55 check. An orphan .bib file is never deleted without first verifying it as a duplicate at title_similarity >= 0.95. FUSED_COMPOUND_WORDS and ABBREVIATED_VENUE_MAP must contain no em-dash and no accented characters, because the serializer strips them."
+      },
+      {
+        "scope": ["citeforge/pipeline/**/*.py"],
+        "rule": "Three-Way Fix Pattern, the critical invariant. A fix to entry types, titles or booktitles must be applied in all three places or the output oscillates between consecutive runs: _fixup_bib_entry() on load, the existing-file fixup in process_article() before enrichment, and the Phase 4 post-merge step. The consolidated helpers _fix_title_text() and _apply_booktitle_fixups() are called from all three. Flag a new text or type fix added to fewer than all three call sites."
+      },
+      {
+        "scope": ["citeforge/merge_utils.py"],
+        "rule": "Trust hierarchy. merge_with_policy() merges fields from 13 ranked sources with override rules for DOI (published beats preprint), journal (never downgrade to a preprint), title (prefer the longer), pages (reject invalid) and booktitle (upgrade a generic series to the conference name). A change to the ranking or to any override rule changes published bibliographic output and needs a test that pins the new behaviour."
+      },
+      {
+        "scope": ["citeforge/clients/**/*.py"],
+        "rule": "Scholarly API clients. Keys are read from the gitignored keys/ directory and must never be inlined, logged or written into output. This repository is public, so a raw API response must not be committed. New HTTP calls go through citeforge/http_utils.py rather than calling requests directly, so retry and rate-limit handling stays in one place."
+      },
+      {
+        "scope": ["tests/**/*.py"],
+        "rule": "pytest with plain assert statements, fixtures and parametrize. Shared fixtures live in tests/conftest.py and tests/fixtures.py. HTTP is mocked with monkeypatch and a unit test never makes a real API call; integration tests that need keys auto-skip when the keys are absent. Coverage has a floor of 68 percent enforced by --cov-fail-under in CI. Flag a test skipped or xfailed instead of fixed, and flag an assertion that cannot fail. Do not suggest adding automated audit modules; CLAUDE.md forbids them."
+      },
+      {
+        "scope": [".github/workflows/*.yml"],
+        "rule": "Actions are pinned by commit SHA with the version in a trailing comment, never by tag or branch, and every job carries timeout-minutes. Any job added must also be added to the needs list of the CI job named Required CI in tests.yml, because that aggregate is the single status check branch protection requires. A job outside that list is unprotected. This repository stays on GitHub Actions and must not gain a .circleci directory."
+      },
+      {
+        "scope": ["**/*.md"],
+        "rule": "Prose avoids em-dashes, avoids colons inside sentences, and never opens a paragraph with a bolded pseudo-heading. Do not commit TODO markers or counts that drift with normal pipeline runs."
+      }
+    ],
+    "files": [
+      {
+        "scope": ["citeforge/**", "main.py", "tests/**"],
+        "path": "CLAUDE.md",
+        "description": "Repository conventions and invariants. The Architecture section owns the four-phase pipeline and the post-run ordering, the Three-Way Fix Pattern section owns the oscillation invariant, and Key Conventions owns config-driven values, determinism, DOI normalization and orphan safety."
+      },
+      {
+        "scope": ["**"],
+        "path": "README.md",
+        "description": "Project overview, the trust-based aggregation model, and the scholarly data sources the clients talk to."
+      },
+      {
+        "scope": ["citeforge/**", "main.py"],
+        "path": "pyproject.toml",
+        "description": "Authoritative tool configuration. [tool.ruff] sets line-length 120 and the selected rule set with its ignores, [tool.mypy] sets the strictness flags, and [tool.pytest.ini_options] sets the test discovery paths."
+      }
+    ]
+  }
+}

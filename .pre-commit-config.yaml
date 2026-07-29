@@ -1,0 +1,66 @@
+# Local pre-commit hooks. These mirror the CI quality gates in
+# .github/workflows/tests.yml rather than adding new ones, so a clean local run
+# predicts a clean CI run. Tool versions are pinned to the same releases that
+# requirements-dev.lock installs, so local and CI cannot drift.
+#
+# Install with: pip install pre-commit && pre-commit install
+
+exclude: |
+  (?x)^(
+      output/.*
+    | data/api_cache/.*
+    | requirements\.lock
+    | requirements-dev\.lock
+  )$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+      - id: debug-statements
+      # This repository is public and keys/ is gitignored. This is the last
+      # line of defence if a key file is ever force-added.
+      - id: detect-private-key
+
+  # Matches requirements-dev.lock ruff==0.15.20 and the CI step
+  # `ruff check citeforge/ tests/ main.py`. ruff-format is deliberately absent:
+  # the repository configures ruff for linting only (pyproject.toml [tool.ruff]
+  # sets line-length and a lint rule set, with no formatter section), and CI
+  # never runs `ruff format --check`.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+
+  # mypy runs from the project environment rather than from
+  # pre-commit/mirrors-mypy, which would install it into an isolated virtualenv.
+  # That isolation is the wrong shape here: rapidfuzz and unidecode would be
+  # absent, ignore_missing_imports would type them as Any, and warn_return_any
+  # would then report errors in citeforge/text_utils.py that CI does not see
+  # because CI installs the full lock. Reusing the local environment keeps the
+  # hook and the CI step (`mypy citeforge/ main.py`) on identical inputs, and
+  # the version stays pinned by requirements-dev.lock (mypy==2.1.0) instead of
+  # by a second rev that could drift from it.
+  #
+  # Requires the dev extras to be installed, which CLAUDE.md already documents
+  # as the setup step: pip install -e .[dev]
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: mypy
+        language: system
+        types: [python]
+        args: [citeforge/, main.py]
+        pass_filenames: false
+        require_serial: true
