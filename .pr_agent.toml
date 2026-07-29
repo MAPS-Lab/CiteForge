@@ -21,7 +21,6 @@ glob = [
     'requirements-dev.lock',
     'output/**',
     'data/api_cache/**',
-    'keys/**',
     '.venv/**',
     'build/**',
     'dist/**',

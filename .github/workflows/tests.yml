@@ -139,25 +139,25 @@ jobs:
     steps:
       - name: Check job results
         env:
-          # ${{ needs[shell-var] }} does not work because the templating engine
-          # evaluates the expression before the shell loop runs and can't see
-          # bash variables. Pre-render all required job results into env vars,
-          # then iterate over them in the shell.
-          RESULT_LINT: ${{ needs.lint.result }}
-          RESULT_TEST: ${{ needs.test.result }}
+          # The whole `needs` context as JSON, rather than one env var per job.
+          # Enumerating them meant a job added to `needs` above was still not
+          # checked here unless this script was edited too, which defeats the
+          # point of the gate. Iterating means joining `needs` is sufficient.
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          # A required check must either `success` or skip-on-purpose via its own
+          # A required check must either succeed or skip on purpose via its own
           # `if:` guard. No job in this workflow carries an `if:`, so a `skipped`
           # result means a dependency never ran and is treated as a failure.
+          if [ "$(jq 'length' <<<"$NEEDS")" -eq 0 ]; then
+            echo "FAIL: the gate has no dependencies, so it would pass vacuously"
+            exit 1
+          fi
           FAILED=0
-          check_result() {
-            local job="$1" result="$2"
+          while IFS=$'\t' read -r job result; do
             case "$result" in
               success) echo "OK: $job ($result)" ;;
-              skipped) echo "FAIL: $job was skipped because required checks must run"; FAILED=1 ;;
+              skipped) echo "FAIL: $job was skipped; required checks must run"; FAILED=1 ;;
               *)       echo "FAIL: $job ($result)"; FAILED=1 ;;
             esac
-          }
-          check_result lint "$RESULT_LINT"
-          check_result test "$RESULT_TEST"
+          done < <(jq -r 'to_entries[] | "\(.key)\t\(.value.result)"' <<<"$NEEDS")
           exit $FAILED

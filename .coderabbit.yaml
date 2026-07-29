@@ -51,8 +51,6 @@ reviews:
     - "!requirements-dev.lock"
     - "!output/**"
     - "!data/api_cache/**"
-    - "!keys/**"
-    - "!**/*.key"
     - "!.venv/**"
     - "!build/**"
     - "!dist/**"

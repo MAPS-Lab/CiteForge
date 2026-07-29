@@ -6,7 +6,7 @@
   "shouldUpdateDescription": false,
   "statusCheck": false,
   "instructions": "Direct and technical. No praise and no restating the diff. Prose avoids em-dashes, avoids colons inside sentences, and never opens a paragraph with a bolded phrase standing in for a heading. Report a finding only when it is a defect a maintainer would act on; the CI workflow already covers linting, typechecking and a coverage floor, so do not repeat what ruff, mypy or actionlint would say. CI is the gate, this review is advice: never request changes purely on style. This repository is public, so treat anything that could leak an API key, a raw API response, or a contributor's private data as a defect rather than a nit.",
-  "ignorePatterns": "requirements.lock\nrequirements-dev.lock\noutput/**\ndata/api_cache/**\nkeys/**\n**/*.key\n.venv/**\nbuild/**\ndist/**\n**/*.egg-info/**",
+  "ignorePatterns": "requirements.lock\nrequirements-dev.lock\noutput/**\ndata/api_cache/**\n.venv/**\nbuild/**\ndist/**\n**/*.egg-info/**",
   "ignoreKeywords": "linter\nruff format\ngreptile-ignore",
   "customContext": {
     "rules": [
