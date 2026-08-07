@@ -6,12 +6,26 @@ on:
   pull_request:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  # Supersede stale PR runs, but never cancel an in-progress run on main: a
+  # rapid second merge must not leave a commit on the default branch with
+  # cancelled (never-completed) required checks.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
+    name: Lint and types
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
 
     - name: Set up Python
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -22,7 +36,10 @@ jobs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-lint-${{ hashFiles('pyproject.toml') }}
+        # The lock file is what gets installed, so it belongs in the key.
+        # Keying on pyproject.toml alone leaves the cache stale whenever the
+        # lock is regenerated without a pyproject change.
+        key: ${{ runner.os }}-pip-lint-${{ hashFiles('pyproject.toml', 'requirements-dev.lock') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
@@ -39,7 +56,9 @@ jobs:
       run: mypy citeforge/ main.py
 
   test:
+    name: Test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       max-parallel: 1
       fail-fast: true
@@ -48,6 +67,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
 
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -58,7 +79,7 @@ jobs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'requirements-dev.lock') }}
         restore-keys: |
           ${{ runner.os }}-pip-${{ matrix.python-version }}-
           ${{ runner.os }}-pip-
@@ -103,3 +124,40 @@ jobs:
         path: |
           .pytest_cache/
         retention-days: 7
+
+  # Single aggregate gate. Branch protection requires this one check, so a job
+  # added below is covered as soon as it joins the `needs` list, and a renamed
+  # job cannot silently stop being required.
+  CI:
+    name: Required CI
+    if: always()
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check job results
+        env:
+          # The whole `needs` context as JSON, rather than one env var per job.
+          # Enumerating them meant a job added to `needs` above was still not
+          # checked here unless this script was edited too, which defeats the
+          # point of the gate. Iterating means joining `needs` is sufficient.
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          # A required check must either succeed or skip on purpose via its own
+          # `if:` guard. No job in this workflow carries an `if:`, so a `skipped`
+          # result means a dependency never ran and is treated as a failure.
+          if [ "$(jq 'length' <<<"$NEEDS")" -eq 0 ]; then
+            echo "FAIL: the gate has no dependencies, so it would pass vacuously"
+            exit 1
+          fi
+          FAILED=0
+          while IFS=$'\t' read -r job result; do
+            case "$result" in
+              success) echo "OK: $job ($result)" ;;
+              skipped) echo "FAIL: $job was skipped; required checks must run"; FAILED=1 ;;
+              *)       echo "FAIL: $job ($result)"; FAILED=1 ;;
+            esac
+          done < <(jq -r 'to_entries[] | "\(.key)\t\(.value.result)"' <<<"$NEEDS")
+          exit $FAILED
