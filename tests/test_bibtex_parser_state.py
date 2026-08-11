@@ -4,21 +4,22 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
-import pytest
-from bibtexparser.bibdatabase import UndefinedString
-
 from citeforge.bibtex_utils import parse_bibtex_to_dict
 
 
 def test_sequential_parses_do_not_share_entries_or_string_macros() -> None:
-    """A reused parser must treat each input as an independent database."""
+    """A reused parser must reject undefined macros without poisoning later input."""
     first = parse_bibtex_to_dict('@string{venue = "First Venue"}\n@article{One, title = venue}')
     second = parse_bibtex_to_dict('@string{venue = "Second Venue"}\n@article{Two, title = venue}')
 
     assert first == {"type": "article", "key": "One", "fields": {"title": "First Venue"}}
     assert second == {"type": "article", "key": "Two", "fields": {"title": "Second Venue"}}
-    with pytest.raises(UndefinedString):
-        parse_bibtex_to_dict("@article{Three, title = venue}")
+    assert parse_bibtex_to_dict("@article{Three, title = venue}") is None
+    assert parse_bibtex_to_dict("@article{Four, title={Fourth Venue}}") == {
+        "type": "article",
+        "key": "Four",
+        "fields": {"title": "Fourth Venue"},
+    }
 
 
 def test_concurrent_parses_remain_isolated() -> None:

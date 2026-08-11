@@ -2,8 +2,8 @@
 
 Fetches each author's publications from Google Scholar and DBLP, merges and
 deduplicates the two lists, prioritizes authors with pending work, and drives
-`process_article` across a bounded pool of worker threads with a per-author
-time budget.
+`process_article` across a bounded pool of worker threads with an aggregate
+completion warning threshold.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
 
 from tenacity import Retrying, retry_if_result, stop_after_attempt, wait_exponential
@@ -287,6 +287,27 @@ def run_all(
     """
     total_saved = 0
     processed = 0
+    accounted: set[Future[int]] = set()
+
+    def _account_result(future: Future[int], rec: Record) -> None:
+        nonlocal processed, total_saved
+        if future in accounted:
+            return
+        accounted.add(future)
+        try:
+            saved = future.result()
+            total_saved += saved
+            processed += 1
+            logger.success(
+                f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
+                category=LogCategory.AUTHOR,
+            )
+        except Exception as e:
+            processed += 1
+            logger.error(
+                f"[{processed}/{len(records)}] Error processing {rec.name} ({rec.scholar_id or rec.dblp}): {e}",
+                category=LogCategory.ERROR,
+            )
 
     # Prioritize new authors (no existing output dir) so they get API resources
     # first, before cached authors consume worker slots. This intentionally
@@ -311,13 +332,13 @@ def run_all(
 
     threading.excepthook = _thread_excepthook
 
-    # Per-author budget of 30 minutes, applied as one whole-pool deadline
-    # (author_timeout * len(records)) on as_completed, not per future
-    author_timeout = 1800  # seconds
+    # Log once when aggregate completion exceeds 30 minutes per author. Threads
+    # cannot be terminated safely, so executor shutdown still waits for them.
+    completion_warning_seconds_per_author = 1800
 
+    future_to_author: dict[Future[int], Record] = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         # Submit all tasks and track them
-        future_to_author = {}
         for idx, rec in enumerate(records_sorted, 1):
             effective_id = rec.scholar_id or rec.dblp or "N/A"
             logger.info(f"[{idx}/{len(records)}] Queued: {rec.name} (ID: {effective_id})", category=LogCategory.PLAN)
@@ -341,26 +362,23 @@ def run_all(
         logger.step(f"All {len(records)} authors queued for processing", category=LogCategory.PLAN)
 
         try:
-            for future in as_completed(future_to_author, timeout=author_timeout * len(records)):
-                rec = future_to_author[future]
-                try:
-                    saved = future.result()
-                    total_saved += saved
-                    processed += 1
-                    logger.success(
-                        f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
-                        category=LogCategory.AUTHOR,
-                    )
-                except Exception as e:
-                    processed += 1
-                    logger.error(
-                        f"[{processed}/{len(records)}] Error processing {rec.name} ({rec.scholar_id or rec.dblp}): {e}",
-                        category=LogCategory.ERROR,
-                    )
+            for future in as_completed(
+                future_to_author,
+                timeout=completion_warning_seconds_per_author * len(records),
+            ):
+                _account_result(future, future_to_author[future])
         except TimeoutError:
             remaining = [r.name for f, r in future_to_author.items() if not f.done()]
-            logger.error(
-                f"Pipeline timed out with {len(remaining)} author(s) still pending: " + ", ".join(remaining[:5]),
-                category=LogCategory.ERROR,
+            logger.warn(
+                f"Pipeline completion warning threshold reached with {len(remaining)} author(s) still running: "
+                + ", ".join(remaining[:5])
+                + ". Waiting for worker threads before final accounting.",
+                category=LogCategory.PLAN,
             )
+
+    # ThreadPoolExecutor shutdown waits for every worker. Drain futures not
+    # yielded before the warning threshold so every result is accounted once.
+    for future, rec in future_to_author.items():
+        _account_result(future, rec)
+
     return total_saved, processed

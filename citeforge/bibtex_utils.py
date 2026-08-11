@@ -15,7 +15,7 @@ from functools import lru_cache
 from typing import Any, TypeAlias
 
 import bibtexparser
-from bibtexparser.bibdatabase import BibDatabase
+from bibtexparser.bibdatabase import BibDatabase, UndefinedString
 from bibtexparser.bparser import BibTexParser
 
 from .cache import response_cache
@@ -115,7 +115,7 @@ def _parse_bibtex_immutable(bibtex: str) -> _ParsedBibtex | None:
         parser.bib_database.load_common_strings()
     try:
         entries = bibtexparser.loads(bibtex, parser=parser).entries
-    except (TypeError, ValueError):
+    except (TypeError, UndefinedString, ValueError):
         entries = []
     if not entries:
         return None

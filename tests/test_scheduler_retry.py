@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -141,7 +142,7 @@ def test_completed_future_result_is_retrieved_without_fake_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     result_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    aggregate_timeouts: list[float] = []
+    completion_warning_thresholds: list[float] = []
 
     class RecordingFuture:
         def result(self, *args: object, **kwargs: object) -> int:
@@ -165,7 +166,7 @@ def test_completed_future_result_is_retrieved_without_fake_timeout(
             return self.future
 
     def recording_as_completed(future_to_author: dict[RecordingFuture, Record], *, timeout: float):
-        aggregate_timeouts.append(timeout)
+        completion_warning_thresholds.append(timeout)
         yield next(iter(future_to_author))
 
     monkeypatch.setattr(scheduler, "ThreadPoolExecutor", RecordingExecutor)
@@ -188,4 +189,46 @@ def test_completed_future_result_is_retrieved_without_fake_timeout(
 
     assert result == (3, 1)
     assert result_calls == [((), {})]
-    assert aggregate_timeouts == [1800]
+    assert completion_warning_thresholds == [1800]
+
+
+def test_completion_after_warning_threshold_is_counted_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    threshold_logged = threading.Event()
+    warnings: list[str] = []
+    successes: list[str] = []
+
+    def delayed_result(*_args: object, **_kwargs: object) -> int:
+        assert threshold_logged.wait(timeout=1.0)
+        return 5
+
+    def hit_warning_threshold(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError
+
+    def record_warning(message: str, **_kwargs: object) -> None:
+        warnings.append(message)
+        threshold_logged.set()
+
+    monkeypatch.setattr(scheduler, "process_record", delayed_result)
+    monkeypatch.setattr(scheduler, "as_completed", hit_warning_threshold)
+    monkeypatch.setattr(scheduler.logger, "step", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler.logger, "info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler.logger, "warn", record_warning)
+    monkeypatch.setattr(scheduler.logger, "success", lambda message, **_kwargs: successes.append(message))
+
+    result = scheduler.run_all(
+        "key",
+        None,
+        None,
+        None,
+        None,
+        [Record("Ada", scholar_id="author-id")],
+        str(tmp_path),
+        None,
+        False,
+    )
+
+    assert result == (5, 1)
+    assert len(warnings) == 1
+    assert "completion warning threshold" in warnings[0].lower()
+    assert "wait" in warnings[0].lower()
+    assert len(successes) == 1

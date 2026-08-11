@@ -86,7 +86,7 @@ The following fixes share rule helpers across their applicable stages.
 ## Testing Patterns
 
 - Tests in `tests/` mostly mirror `citeforge/` modules (e.g., `test_canonicalize.py` tests `canonicalize.py`); merge coverage lives in `test_deduplication.py`, `test_save_entry.py`, and `test_core.py`
-- `tests/conftest.py` + `tests/fixtures.py` provide shared fixtures
+- `tests/conftest.py` owns shared fixtures and the independent BibTeX field extractor
 - Integration tests requiring API keys auto-skip when keys unavailable
 - Use `monkeypatch` for HTTP mocking; never make real API calls in unit tests
 - Do NOT create automated audit modules. Fix issues via pipeline code or direct .bib edits.

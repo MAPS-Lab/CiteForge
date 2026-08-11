@@ -40,7 +40,7 @@
       },
       {
         "scope": ["tests/**/*.py"],
-        "rule": "pytest with plain assert statements, fixtures and parametrize. Shared fixtures live in tests/conftest.py and tests/fixtures.py. HTTP is mocked with monkeypatch and a unit test never makes a real API call; integration tests that need keys auto-skip when the keys are absent. Coverage has a floor of 68 percent enforced by --cov-fail-under in CI. Flag a test skipped or xfailed instead of fixed, and flag an assertion that cannot fail. Do not suggest adding automated audit modules; CLAUDE.md forbids them."
+        "rule": "pytest with plain assert statements, fixtures and parametrize. Shared fixtures and the independent BibTeX field extractor live in tests/conftest.py. HTTP is mocked with monkeypatch and a unit test never makes a real API call; integration tests that need keys auto-skip when the keys are absent. Coverage has a floor of 68 percent enforced by --cov-fail-under in CI. Flag a test skipped or xfailed instead of fixed, and flag an assertion that cannot fail. Do not suggest adding automated audit modules; CLAUDE.md forbids them."
       },
       {
         "scope": [".github/workflows/*.yml"],
