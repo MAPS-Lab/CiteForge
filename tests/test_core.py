@@ -201,6 +201,29 @@ def test_bibtex_parsing() -> None:
         assert parsed is None, "Expected None for invalid BibTeX"
 
 
+def test_parser_resolves_macros_concatenation_and_leading_comments() -> None:
+    """A standards-compliant parser resolves BibTeX definitions before returning fields."""
+    parsed = bt.parse_bibtex_to_dict(
+        '@comment{ignored}\n@string{journal_name = "Journal of Tests"}\n'
+        '@article{k, title = {A {Nested} Title}, journal = journal_name, month = jan # " 2024"}'
+    )
+    assert parsed == {
+        "type": "article",
+        "key": "k",
+        "fields": {
+            "title": "A {Nested} Title",
+            "journal": "Journal of Tests",
+            "month": "January 2024",
+        },
+    }
+
+
+def test_parser_uses_first_entry_for_single_entry_contract() -> None:
+    """The stable CiteForge adapter deliberately exposes only the first entry."""
+    parsed = bt.parse_bibtex_to_dict("@article{first,title={One}}\n@book{second,title={Two}}")
+    assert parsed == {"type": "article", "key": "first", "fields": {"title": "One"}}
+
+
 def test_bibtex_building() -> None:
     """Test BibTeX construction."""
     # Minimal BibTeX

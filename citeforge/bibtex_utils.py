@@ -12,6 +12,8 @@ import html
 import re
 from typing import Any
 
+import bibtexparser
+
 from .cache import response_cache
 from .config import (
     AUTHOR_NAME_SUFFIXES,
@@ -51,10 +53,6 @@ _TITLE_STOP_WORDS: frozenset[str] = frozenset(
 # Compiled once at import; the parse/serialize/key helpers below run per entry.
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
 _NON_WORD_RE = re.compile(r"\W+")
-_ENTRY_HEAD_RE = re.compile(r"@\s*([a-zA-Z]+)\s*\{\s*([^,\s]+)\s*,")
-_SINGLE_LINE_ENTRY_RE = re.compile(r"@\s*[a-zA-Z]+\s*\{\s*[^,\s]+\s*,\s*(.+)\s*\}\s*$", re.DOTALL)
-_FIELD_ASSIGN_RE = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*=\s*(.*)$")
-_QUOTED_VALUE_RE = re.compile(r'^"([^"]*)"')
 _FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_\-]+")
 _TITLE_WORD_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
 _CONTROL_CHARS_RE = re.compile(r"[\n\r\t]")
@@ -88,140 +86,22 @@ def build_minimal_bibtex(title: str, authors: list[str], year: int, keyhint: str
     return "\n".join(lines) + "\n"
 
 
-def _parse_bibtex_head(bibtex: str) -> dict[str, str] | None:
-    """Pull the entry type and citation key from the @type{key, opening of a
-    BibTeX entry, or None when the pattern is absent."""
-    m = _ENTRY_HEAD_RE.search(bibtex)
-    if not m:
-        return None
-    return {"type": m.group(1).strip(), "key": m.group(2).strip()}
-
-
-def _extract_balanced_braces(text: str, start: int) -> str | None:
-    """Extract the text inside a balanced brace pair starting at *start*,
-    preserving nested braces."""
-    if start >= len(text) or text[start] != "{":
-        return None
-    depth = 0
-    result: list[str] = []
-    for ch in text[start:]:
-        if ch == "{":
-            depth += 1
-            if depth > 1:  # Don't include the outermost braces
-                result.append(ch)
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return "".join(result)
-            result.append(ch)
-        else:
-            result.append(ch)
-    return None  # unbalanced
-
-
-def _assign_field_value(fields: dict[str, str], field_name: str, full_value: str) -> None:
-    """Assign a parsed value to *fields*, handling brace-wrapped, quoted, and
-    plain text values in one place."""
-    if full_value.startswith("{"):
-        val = _extract_balanced_braces(full_value, 0)
-        fields[field_name] = val.strip() if val is not None else full_value.strip().strip("{}")
-    elif full_value.startswith('"'):
-        m2 = _QUOTED_VALUE_RE.match(full_value)
-        fields[field_name] = m2.group(1).strip() if m2 else full_value.strip()
-    else:
-        fields[field_name] = full_value.strip()
-
-
 def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
-    """Parse a BibTeX string into {type, key, fields}, handling nested braces,
-    multi-line fields, and the single-line entries common in API responses."""
-    head = _parse_bibtex_head(bibtex)
-    if not head:
+    """Parse the first BibTeX entry into CiteForge's stable entry shape."""
+    try:
+        entries = bibtexparser.loads(bibtex).entries
+    except (TypeError, ValueError):
+        entries = []
+    if not entries:
         logger.debug(f"header_fail | input={bibtex[:60]}", category=LogCategory.PARSE)
         return None
-    fields: dict[str, str] = {}
-
-    single_line_pattern = _SINGLE_LINE_ENTRY_RE.search(bibtex)
-
-    if single_line_pattern and "\n" not in bibtex.strip():
-        fields_text = single_line_pattern.group(1).strip()
-
-        brace_depth = 0
-        in_quote = False
-        field_start = 0
-        field_parts = []
-
-        for i, char in enumerate(fields_text):
-            if char == "{" and not in_quote:
-                brace_depth += 1
-            elif char == "}" and not in_quote:
-                brace_depth -= 1
-            elif char == '"' and brace_depth == 0:
-                in_quote = not in_quote
-            elif char == "," and brace_depth == 0 and not in_quote:
-                field_parts.append(fields_text[field_start:i].strip())
-                field_start = i + 1
-
-        if field_start < len(fields_text):
-            last_part = fields_text[field_start:].strip()
-            if last_part:
-                field_parts.append(last_part)
-
-        # Now parse each field
-        for part in field_parts:
-            m = _FIELD_ASSIGN_RE.match(part)
-            if m:
-                field_name = m.group(1).lower()
-                field_value = m.group(2).strip()
-                _assign_field_value(fields, field_name, field_value)
-
-        return {"type": head["type"].lower(), "key": head["key"], "fields": fields}
-
-    # Multi-line format parsing
-    current_field = None
-    accumulator: list[str] = []
-
-    for line in bibtex.split("\n"):
-        m = _FIELD_ASSIGN_RE.match(line)
-
-        if m:
-            if current_field and accumulator:
-                full_value = " ".join(accumulator)
-                _assign_field_value(fields, current_field, full_value)
-
-            current_field = m.group(1).lower()
-            rest = m.group(2).strip()
-            accumulator = [rest]
-
-            if rest.startswith("{"):
-                val = _extract_balanced_braces(rest, 0)
-                if val is not None:
-                    fields[current_field] = val.strip()
-                    current_field = None
-                    accumulator = []
-            elif rest.startswith('"'):
-                m2 = _QUOTED_VALUE_RE.match(rest)
-                if m2:
-                    fields[current_field] = m2.group(1).strip()
-                    current_field = None
-                    accumulator = []
-        elif current_field:
-            stripped = line.strip()
-            if stripped:
-                accumulator.append(stripped)
-                full_value = " ".join(accumulator)
-                if full_value.startswith("{"):
-                    val = _extract_balanced_braces(full_value, 0)
-                    if val is not None:
-                        fields[current_field] = val.strip()
-                        current_field = None
-                        accumulator = []
-
-    if current_field and accumulator:
-        full_value = " ".join(accumulator)
-        _assign_field_value(fields, current_field, full_value)
-
-    return {"type": head["type"].lower(), "key": head["key"], "fields": fields}
+    raw = dict(entries[0])
+    entry_type = str(raw.pop("ENTRYTYPE", "")).lower()
+    key = str(raw.pop("ID", ""))
+    if not entry_type or not key:
+        return None
+    fields = {str(name).lower(): str(value).strip() for name, value in raw.items()}
+    return {"type": entry_type, "key": key, "fields": fields}
 
 
 # Canonical BibTeX field emission order. Fields not listed are appended in
