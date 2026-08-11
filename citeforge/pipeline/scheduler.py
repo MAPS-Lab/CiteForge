@@ -15,6 +15,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from tenacity import Retrying, retry_if_result, stop_after_attempt, wait_exponential
+
 from citeforge.clients.helpers import get_article_year, strip_html_tags
 from citeforge.clients.scholar import (
     fetch_author_publications,
@@ -29,6 +31,9 @@ from citeforge.config import (
     MAX_WORKERS,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
+    SCHOLAR_FETCH_BACKOFF_INITIAL,
+    SCHOLAR_FETCH_BACKOFF_MAX,
+    SCHOLAR_FETCH_MAX_ATTEMPTS,
     SIM_MERGE_DUPLICATE_THRESHOLD,
     get_min_year,
 )
@@ -85,31 +90,35 @@ def process_record(
             logger.info("Request author publications", category=LogCategory.FETCH, source=LogSource.SCHOLAR)
 
             scholar_articles: list[dict[str, Any]] = []
-            max_fetch_retries = 3
-
             # SerpAPI call; pagination handled internally by serpapi_scholar
-            data = {}
-            for attempt in range(1, max_fetch_retries + 1):
-                data = fetch_author_publications(
-                    serpapi_key,
-                    rec.scholar_id,
-                    rec.name,
-                    num=MAX_PUBLICATIONS_PER_AUTHOR,
-                    min_year=min_year,
-                )
-                if data.get("articles"):
-                    break  # Got articles, valid response
-                if attempt < max_fetch_retries:
-                    logger.warn(
-                        f"Scholar API returned empty (attempt {attempt}/{max_fetch_retries}), retrying...",
-                        category=LogCategory.FETCH,
-                        source=LogSource.SCHOLAR,
-                    )
-                    time.sleep(2.0 * attempt)
+            data: dict[str, Any] = Retrying(
+                sleep=time.sleep,
+                stop=stop_after_attempt(SCHOLAR_FETCH_MAX_ATTEMPTS),
+                wait=wait_exponential(
+                    multiplier=SCHOLAR_FETCH_BACKOFF_INITIAL,
+                    min=SCHOLAR_FETCH_BACKOFF_INITIAL,
+                    max=SCHOLAR_FETCH_BACKOFF_MAX,
+                ),
+                retry=retry_if_result(lambda result: not result.get("articles")),
+                before_sleep=lambda state: logger.warn(
+                    f"Scholar API returned empty "
+                    f"(attempt {state.attempt_number}/{SCHOLAR_FETCH_MAX_ATTEMPTS}), retrying...",
+                    category=LogCategory.FETCH,
+                    source=LogSource.SCHOLAR,
+                ),
+                retry_error_callback=lambda state: state.outcome.result() if state.outcome is not None else {},
+            )(
+                fetch_author_publications,
+                serpapi_key,
+                rec.scholar_id,
+                rec.name,
+                num=MAX_PUBLICATIONS_PER_AUTHOR,
+                min_year=min_year,
+            )
 
             if not data.get("articles"):
                 logger.warn(
-                    f"Scholar API failed after {max_fetch_retries} attempts; continuing with DBLP only",
+                    f"Scholar API failed after {SCHOLAR_FETCH_MAX_ATTEMPTS} attempts; continuing with DBLP only",
                     category=LogCategory.ERROR,
                     source=LogSource.SCHOLAR,
                 )

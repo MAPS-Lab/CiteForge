@@ -52,6 +52,7 @@ _NORM_DOI_CASES: list[tuple[str | None, str | None]] = [
     ("  10.1145/3580305  ", "10.1145/3580305"),
     ("10.1145/ABCdef", "10.1145/abcdef"),
     ("10.1000/abc%2Fdef", "10.1000/abc/def"),
+    ("https://doi.org/10.1234%2Ftest", "10.1234/test"),
     (None, None),
     ("", None),
     ("https://doi.org/", None),

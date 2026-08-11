@@ -20,6 +20,7 @@ from citeforge.canonicalize import (
     canonicalize,
 )
 from citeforge.id_utils import is_secondary_doi
+from citeforge.pipeline.article import _entry_is_complete
 from tests.corpus import PREPRINT_SERVER_JOURNALS
 
 # DOI fixtures drawn from tests.corpus.SECONDARY_DOI_CASES. Their classification is
@@ -441,6 +442,30 @@ def test_real_dispatch_article_with_journal_stays_article() -> None:
     result = _canon(_article(journal="Nature", doi="10.1038/s41586-024-00001"))
     assert result["type"] == "article"
     assert result["fields"]["journal"] == "Nature"
+
+
+@pytest.mark.parametrize(
+    ("journal", "expected_type", "expected_complete"),
+    [
+        ("TechRxiv", "misc", False),
+        ("preprints.org", "misc", False),
+        ("preprint", "article", True),
+    ],
+)
+def test_preprint_server_runtime_behavior_and_generic_negative_control(
+    journal: str, expected_type: str, expected_complete: bool
+) -> None:
+    """Configured server names alter both pipeline completeness and canonicalization."""
+    entry = _article(journal=journal, doi=_PUBLISHED_DOI)
+
+    assert _entry_is_complete(entry) is expected_complete
+
+    result = _canon(entry)
+    assert result["type"] == expected_type
+    if expected_type == "misc":
+        assert "journal" not in result["fields"]
+    else:
+        assert result["fields"]["journal"] == journal
 
 
 @pytest.mark.parametrize("journal", PREPRINT_SERVER_JOURNALS)

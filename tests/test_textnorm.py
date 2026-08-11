@@ -3,10 +3,9 @@
 Drives the real title/booktitle normalization primitives over the shared
 adversarial corpus tables. Every expected value here was captured from the live
 functions (see the probe in the assignment log), never hand-derived. The
-fixpoint / idempotence assertions are load-bearing: the pipeline applies these
-fixes in three places across a run (initial fixup, pre-enrichment, post-merge),
-so a spurious rewrite on already-correct input would oscillate between
-consecutive cache-hit runs and break the byte-identical determinism guarantee.
+fixpoint / idempotence assertions are load-bearing because the canonicalization
+stages may apply the same rule on more than one pipeline path. A spurious rewrite
+on already-correct input would break the byte-identical determinism guarantee.
 """
 
 from __future__ import annotations

@@ -20,12 +20,12 @@ from typing import Any
 
 import pytest
 
-from citeforge import bibtex_utils as bt
 from citeforge import id_utils as idu
 from citeforge import merge_utils as mu
 from citeforge import text_utils as tu
 from citeforge.canonicalize import CanonicalStage, canonicalize
 from citeforge.config import SIM_DEDUP_COMPOSITE_THRESHOLD
+from citeforge.identity import IdentityContext, evaluate_identity
 
 
 def _entry(etype: str, **fields: str) -> dict[str, Any]:
@@ -148,7 +148,7 @@ def test_distinct_preprint_published_works_do_not_false_merge(suffix: int) -> No
     # The evidence without the circular XOR credit is genuinely below threshold ...
     assert tu.compute_dedup_score(a["fields"], b["fields"], count_preprint_xor=False) < SIM_DEDUP_COMPOSITE_THRESHOLD
     # ... so the strict matcher (which excludes XOR once the pair gate opens) rejects them.
-    assert bt.bibtex_entries_match_strict(a, b) is False
+    assert evaluate_identity(a, b, context=IdentityContext.ENRICHMENT).verdict is False
 
 
 def test_genuine_twin_with_leaked_preprint_journal_still_clears_threshold() -> None:

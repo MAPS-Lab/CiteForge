@@ -41,12 +41,8 @@ __all__ = [
     "extract_last_name",
     "extract_valid_title",
     "extract_year_from_any",
-    "filter_valid_fields",
     "format_author_dirname",
-    "get_truncation_score",
     "has_placeholder",
-    "is_truncated",
-    "is_valid_value",
     "name_signature",
     "normalize_person_name",
     "normalize_title",
@@ -156,31 +152,6 @@ def normalize_title(t: str | None) -> str:
 
 
 _ARTIFACT_PREFIXES = ("Check for updates ", "Check for Updates ")
-
-_DANGLING_ENDINGS = frozenset(
-    {
-        "a",
-        "an",
-        "the",
-        "of",
-        "in",
-        "on",
-        "at",
-        "to",
-        "for",
-        "from",
-        "with",
-        "by",
-        "and",
-        "or",
-        "but",
-        "via",
-        "using",
-        "based",
-    }
-)
-
-_TRUNCATION_MARKERS = ("...", "\u2026", "et al", _ET_AL, "[truncated]", "[...]")
 
 # Words that should stay uppercase when converting ALL-CAPS titles to title case
 _ACRONYMS = frozenset(
@@ -887,58 +858,6 @@ def extract_valid_title(obj: Any, field_names: list[str] | None = None, check_pl
         return None
 
     return trim_title_default(title)
-
-
-def is_valid_value(val: Any, check_placeholder: bool = True) -> bool:
-    """Reject None, empty containers, and (optionally) placeholder-like
-    strings."""
-    if val is None:
-        return False
-
-    if isinstance(val, str):
-        s = val.strip()
-        if not s:
-            return False
-        return not has_placeholder(s) if check_placeholder else True
-
-    if isinstance(val, (list, dict)):
-        return bool(val)
-
-    return True
-
-
-def filter_valid_fields(fields: dict[str, Any], check_placeholder: bool = True) -> dict[str, Any]:
-    """Drop keys whose values are empty, None, or placeholder-like."""
-    return {k: v for k, v in fields.items() if is_valid_value(v, check_placeholder=check_placeholder)}
-
-
-def is_truncated(text: str | None) -> bool:
-    """Detect truncated text via ellipsis, et al., other truncation markers,
-    or a dangling function-word ending."""
-    if not text or not isinstance(text, str):
-        return False
-
-    text_stripped = text.strip()
-    text_lower = text_stripped.lower()
-    if any(marker in text_lower for marker in _TRUNCATION_MARKERS):
-        return True
-
-    last_word = text_lower.rstrip(".,:;").rsplit(None, 1)[-1] if text_lower.strip() else ""
-    return last_word in _DANGLING_ENDINGS
-
-
-def get_truncation_score(article_data: dict[str, Any]) -> float:
-    """Fraction of key fields that look truncated, 0.0 (complete) to 1.0
-    (fully truncated)."""
-    candidates = [
-        article_data.get("title"),
-        article_data.get("author_info"),
-        article_data.get("publication_info") or article_data.get("snippet"),
-    ]
-    fields_to_check = [str(v) for v in candidates if v]
-    if not fields_to_check:
-        return 0.0
-    return sum(1 for f in fields_to_check if is_truncated(f)) / len(fields_to_check)
 
 
 def safe_get_field(

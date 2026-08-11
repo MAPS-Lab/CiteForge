@@ -33,8 +33,6 @@ from ..config import (
     OPENREVIEW_BASE,
     OPENREVIEW_SESSION_TTL_SECS,
     PUBMED_BASE,
-    SIM_BEST_ITEM_THRESHOLD,
-    SIM_EXACT_PICK_THRESHOLD,
 )
 from ..exceptions import (
     ALL_API_ERRORS,
@@ -52,12 +50,10 @@ from ..http_utils import (
     http_fetch_bytes,
     http_get_json,
     http_get_text,
-    s2_http_get_json,
 )
 from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text
 from ..log_utils import LogCategory, logger
 from ..text_utils import (
-    author_in_text,
     author_name_matches,
     authors_overlap,
     build_url,
@@ -67,7 +63,7 @@ from ..text_utils import (
     trim_title_default,
 )
 from ..venue import first_non_generic_container
-from .helpers import _best_item_by_score, _doi_cache_lookup, _sanitize_dblp_author, title_author_cache_key
+from .helpers import _doi_cache_lookup, _sanitize_dblp_author, title_author_cache_key
 
 if TYPE_CHECKING:
     from ..api_generics import APISearchConfig
@@ -104,29 +100,6 @@ def _get_cached_list(
 # ============ Semantic Scholar ============
 
 
-def s2_search_paper(title: str, author_name: str | None, api_key: str | None) -> dict[str, Any] | None:
-    """Search Semantic Scholar for a paper matching the given title and optional author."""
-    if not api_key or not title:
-        return None
-    query_parts = [f'"{title}"']
-    if author_name:
-        query_parts.append(author_name)
-    from ..api_configs import S2_SEARCH_CONFIG
-    from ..api_generics import search_api_generic
-
-    config = copy.copy(S2_SEARCH_CONFIG)
-    config.additional_params = {**config.additional_params, config.query_param_name: " ".join(query_parts)}
-    return search_api_generic(title, author_name, config, api_key=api_key)
-
-
-def build_bibtex_from_s2(paper: dict[str, Any], keyhint: str) -> str | None:
-    """Convert a Semantic Scholar paper record into a BibTeX entry."""
-    from ..api_configs import S2_FIELD_MAPPING
-    from ..api_generics import build_bibtex_from_response
-
-    return build_bibtex_from_response(paper, keyhint, S2_FIELD_MAPPING)
-
-
 def s2_search_papers_multiple(
     title: str,
     author_name: str | None,
@@ -134,32 +107,10 @@ def s2_search_papers_multiple(
     max_results: int = 5,
 ) -> list[dict[str, Any]]:
     """Search Semantic Scholar for multiple paper candidates."""
-    if not api_key or not title:
-        return []
-    cache_key = title_author_cache_key(title, author_name, prefix="multi|")
-    cached_list = _get_cached_list("semantic_scholar", cache_key, "s2_multi")
-    if cached_list is not None:
-        return cached_list
-    query_parts = [f'"{title}"']
-    if author_name:
-        query_parts.append(author_name)
     from ..api_configs import S2_SEARCH_CONFIG
+    from ..api_generics import search_api_generic_multiple
 
-    config = copy.copy(S2_SEARCH_CONFIG)
-    config.additional_params = {**config.additional_params, "limit": min(max_results * 2, 20)}
-    params = {config.query_param_name: " ".join(query_parts), **config.additional_params}
-    url = build_url(config.base_url, params)
-    try:
-        data = s2_http_get_json(url, api_key, timeout=config.timeout)
-    except ALL_API_ERRORS:
-        return []
-    results = safe_get_nested(data, *config.result_path, default=[])
-    top = list(results[:max_results]) if results else []
-    if top:
-        response_cache.put("semantic_scholar", cache_key, {"results": top}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put_negative("semantic_scholar", cache_key)
-    return top
+    return search_api_generic_multiple(title, author_name, S2_SEARCH_CONFIG, api_key, max_results)
 
 
 # ============ Crossref ============
@@ -186,23 +137,6 @@ def _crossref_search_config(title: str, author_name: str | None) -> APISearchCon
         additional_params["mailto"] = mailto
     config.additional_params = additional_params
     return config
-
-
-def crossref_search(title: str, author_name: str | None) -> dict[str, Any] | None:
-    """Look up a publication in Crossref by title and optional author."""
-    if not title:
-        return None
-    from ..api_generics import search_api_generic
-
-    return search_api_generic(title, author_name, _crossref_search_config(title, author_name))
-
-
-def build_bibtex_from_crossref(item: dict[str, Any], keyhint: str) -> str | None:
-    """Build a BibTeX entry from a Crossref record."""
-    from ..api_configs import CROSSREF_FIELD_MAPPING
-    from ..api_generics import build_bibtex_from_response
-
-    return build_bibtex_from_response(item, keyhint, CROSSREF_FIELD_MAPPING)
 
 
 def crossref_search_multiple(
@@ -438,14 +372,6 @@ def arxiv_search(
     return entries
 
 
-def build_bibtex_from_arxiv(entry: dict[str, Any], keyhint: str) -> str | None:
-    """Turn a parsed arXiv search result into a BibTeX entry."""
-    from ..api_configs import ARXIV_FIELD_MAPPING
-    from ..api_generics import build_bibtex_from_response
-
-    return build_bibtex_from_response(entry, keyhint, ARXIV_FIELD_MAPPING)
-
-
 # ============ OpenReview ============
 
 _OPENREVIEW_SESSION: dict[str, str] | None = None
@@ -586,62 +512,6 @@ def _or_is_exact_match(
         return True
     cand_authors = _or_note_authors(cand)
     return _or_authors_are_ids(cand_authors) or author_name_matches(author_name, cand_authors)
-
-
-def openreview_search_paper(
-    title: str,
-    author_name: str | None,
-    creds: tuple[str, ...] | None,
-) -> dict[str, Any] | None:
-    """Query OpenReview for notes matching the requested paper."""
-    if not title:
-        return None
-    cache_key = title_author_cache_key(title, author_name)
-    cached = response_cache.get("openreview", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"openreview | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return None
-        logger.debug(f"openreview | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return cached if cached else None
-    headers = openreview_login(creds) or DEFAULT_JSON_HEADERS.copy()
-    candidates = _or_fetch_candidates(title, headers)
-    if not candidates:
-        response_cache.put_negative("openreview", cache_key)
-        return None
-
-    target_norm = normalize_title(title)
-    for cand in candidates:
-        if _or_is_exact_match(cand, target_norm, author_name):
-            response_cache.put("openreview", cache_key, dict(cand), ttl_days=CACHE_TTL_SEARCH_DAYS)
-            logger.debug(f"openreview | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return cand
-
-    from ..bibtex_build import create_scoring_function
-
-    score_fn = create_scoring_function(
-        title=title,
-        author_name=author_name,
-        year_hint=None,
-        title_getter=_or_note_title,
-        authors_getter=_or_note_authors,
-        year_getter=_or_note_year,
-    )
-    best = _best_item_by_score(candidates, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
-    if best is not None:
-        response_cache.put("openreview", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(f"openreview | PUT | key={cache_key[:60]}", category=LogCategory.CACHE)
-    else:
-        response_cache.put_negative("openreview", cache_key)
-    return best
-
-
-def build_bibtex_from_openreview(note: dict[str, Any], keyhint: str) -> str | None:
-    """Build a BibTeX entry from an OpenReview note."""
-    from ..api_configs import OPENREVIEW_FIELD_MAPPING
-    from ..api_generics import build_bibtex_from_response
-
-    return build_bibtex_from_response(note, keyhint, OPENREVIEW_FIELD_MAPPING)
 
 
 def openreview_search_papers_multiple(
@@ -850,22 +720,6 @@ def dblp_fetch_for_author(name: str, dblp_hint: str | None, min_year: int | None
 # ============ OpenAlex ============
 
 
-def openalex_search_paper(title: str, author_name: str | None) -> dict[str, Any] | None:
-    """Search OpenAlex for a publication by title and optional author."""
-    from ..api_configs import OPENALEX_SEARCH_CONFIG
-    from ..api_generics import search_api_generic
-
-    return search_api_generic(title, author_name, OPENALEX_SEARCH_CONFIG)
-
-
-def build_bibtex_from_openalex(work: dict[str, Any], keyhint: str) -> str | None:
-    """Build a BibTeX entry from an OpenAlex work record."""
-    from ..api_configs import OPENALEX_FIELD_MAPPING
-    from ..api_generics import build_bibtex_from_response
-
-    return build_bibtex_from_response(work, keyhint, OPENALEX_FIELD_MAPPING)
-
-
 def openalex_search_multiple(
     title: str, author_name: str | None, max_results: int = 5, year_hint: int | None = None
 ) -> list[dict[str, Any]]:
@@ -927,59 +781,6 @@ def _pubmed_fetch_articles(
     result = safe_get_nested(summary_data, "result", default={}) or {}
     articles = [result[pmid] for pmid in pmids if pmid in result and isinstance(result[pmid], dict)]
     return articles, len(pmids)
-
-
-@handle_api_errors(default_return=None)
-def pubmed_search_paper(title: str, author_name: str | None) -> dict[str, Any] | None:
-    """Search PubMed for a publication by title and optional author."""
-    if not title:
-        return None
-    cache_key = title_author_cache_key(title, author_name)
-    cached = response_cache.get("pubmed", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"pubmed | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return None
-        logger.debug(f"pubmed | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return cached if cached else None
-    fetched = _pubmed_fetch_articles(_pubmed_query(title, author_name), retmax=10, timeout=15.0)
-    if fetched is None:
-        return None
-    articles, pmid_count = fetched
-    if not articles:
-        response_cache.put_negative("pubmed", cache_key)
-        return None
-    target_norm = normalize_title(title)
-    for article in articles:
-        article_title = article.get("title") or ""
-        if normalize_title(article_title) == target_norm and (
-            not author_name or author_in_text(author_name, str(article.get("authors") or []))
-        ):
-            result = dict(article)
-            response_cache.put("pubmed", cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
-            logger.debug(
-                f"pubmed | PUT | key={cache_key[:60]} | pmids={pmid_count}",
-                category=LogCategory.CACHE,
-            )
-            return result
-    from ..bibtex_build import create_scoring_function
-
-    score_fn = create_scoring_function(
-        title=title,
-        author_name=author_name,
-        year_hint=None,
-        title_getter=lambda a: a.get("title") or "",
-        authors_getter=lambda a: [auth.get("name") or "" for auth in (a.get("authors") or []) if auth.get("name")],
-        year_getter=lambda a: extract_year_from_any(a.get("pubdate"), fallback=None),
-        author_match_fn=author_name_matches,
-    )
-    best = _best_item_by_score(articles, score_fn)
-    if best is not None:
-        response_cache.put("pubmed", cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
-        logger.debug(f"pubmed | PUT | key={cache_key[:60]} | pmids={pmid_count}", category=LogCategory.CACHE)
-    else:
-        response_cache.put_negative("pubmed", cache_key)
-    return best
 
 
 def build_bibtex_from_pubmed(article: dict[str, Any], keyhint: str) -> str | None:
@@ -1046,30 +847,6 @@ def pubmed_search_papers_multiple(title: str, author_name: str | None, max_resul
 # ============ Europe PMC ============
 
 
-def _europepmc_query(title: str, author_name: str | None) -> str:
-    """Build a Europe PMC fielded query, quoting the title and optional author."""
-    safe_title = title.replace('"', "")
-    query = f'TITLE:"{safe_title}"'
-    if author_name:
-        query += f' AND AUTH:"{author_name}"'
-    return query
-
-
-def europepmc_search_paper(title: str, author_name: str | None) -> dict[str, Any] | None:
-    """Search Europe PMC for a publication by title and optional author."""
-    if not title:
-        return None
-    from ..api_configs import EUROPEPMC_SEARCH_CONFIG
-    from ..api_generics import search_api_generic
-
-    config = copy.copy(EUROPEPMC_SEARCH_CONFIG)
-    config.additional_params = {
-        **config.additional_params,
-        config.query_param_name: _europepmc_query(title, author_name),
-    }
-    return search_api_generic(title, author_name, config)
-
-
 def build_bibtex_from_europepmc(article: dict[str, Any], keyhint: str) -> str | None:
     """Build a BibTeX entry from a Europe PMC article record."""
     from ..bibtex_build import build_bibtex_entry, determine_entry_type
@@ -1124,90 +901,13 @@ def build_bibtex_from_europepmc(article: dict[str, Any], keyhint: str) -> str | 
 
 def europepmc_search_papers_multiple(title: str, author_name: str | None, max_results: int = 5) -> list[dict[str, Any]]:
     """Search Europe PMC for multiple paper candidates."""
-    if not title:
-        return []
-    cache_key = title_author_cache_key(title, author_name, prefix="multi|")
-    cached_list = _get_cached_list("europepmc", cache_key, "europepmc_multi")
-    if cached_list is not None:
-        return cached_list
     from ..api_configs import EUROPEPMC_SEARCH_CONFIG
+    from ..api_generics import search_api_generic_multiple
 
-    config = copy.copy(EUROPEPMC_SEARCH_CONFIG)
-    config.additional_params = {
-        **config.additional_params,
-        "query": _europepmc_query(title, author_name),
-        "pageSize": max_results,
-    }
-    url = build_url(config.base_url, config.additional_params)
-    try:
-        data = http_get_json(url, timeout=config.timeout)
-    except ALL_API_ERRORS:
-        return []
-    results = safe_get_nested(data, *config.result_path, default=[])
-    top = list(results[:max_results])
-    if top:
-        response_cache.put("europepmc", cache_key, {"results": top}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put_negative("europepmc", cache_key)
-    return top
+    return search_api_generic_multiple(title, author_name, EUROPEPMC_SEARCH_CONFIG, max_results=max_results)
 
 
 # ============ Venue-based searches (SerpAPI publication string) ============
-
-
-def _venue_scored_search(
-    namespace: str,
-    title: str,
-    author_name: str | None,
-    venue: str,
-    config: APISearchConfig,
-    params: dict[str, Any],
-    max_results: int,
-) -> list[dict[str, Any]]:
-    """Shared fetch/score/cache scaffold for the venue-filtered searches.
-
-    Candidates are scored against the target title/author and kept when they
-    clear ``SIM_BEST_ITEM_THRESHOLD``. Results are cached under *namespace*
-    with a ``venue|`` key; empty result sets are negative-cached.
-    """
-    from ..api_generics import _build_scoring_function
-
-    cache_key = f"venue|{title_author_cache_key(title, author_name)}|{venue.lower().strip()}"
-    cached_list = _get_cached_list(namespace, cache_key, namespace)
-    if cached_list is not None:
-        return cached_list
-
-    url = build_url(config.base_url, params)
-    logger.debug(f"{namespace} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
-
-    try:
-        data = http_get_json(url, timeout=config.timeout)
-    except ALL_API_ERRORS:
-        return []
-
-    results = safe_get_nested(data, *config.result_path, default=[])
-    if not results:
-        response_cache.put_negative(namespace, cache_key)
-        return []
-
-    score_fn = _build_scoring_function(title, author_name, config)
-    scored = []
-    for item in results:
-        try:
-            score = score_fn(item)
-            if score is not None and score >= SIM_BEST_ITEM_THRESHOLD:
-                scored.append((score, item))
-        except FIELD_ACCESS_ERRORS:
-            continue
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = [item for _, item in scored[:max_results]]
-    if top:
-        cache_value = {"results": [dict(r) for r in top]}
-        response_cache.put(namespace, cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put_negative(namespace, cache_key)
-    return top
 
 
 def crossref_search_by_venue(
@@ -1222,23 +922,16 @@ def crossref_search_by_venue(
     ``query.bibliographic`` for the title, providing a different search vector
     from the standard title-based search.
     """
-    if not title or not container_title:
-        return []
+    from ..api_configs import CROSSREF_VENUE_SEARCH_CONFIG
+    from ..api_generics import search_api_generic_multiple
 
-    from ..api_configs import CROSSREF_SEARCH_CONFIG
-
-    config = copy.copy(CROSSREF_SEARCH_CONFIG)
-    params: dict[str, Any] = dict(config.additional_params)
-    params["query.container-title"] = container_title
-    params[_QP_BIBLIOGRAPHIC] = title
-    if author_name:
-        params[_QP_AUTHOR] = author_name
-    mailto = os.getenv("CROSSREF_MAILTO")
-    if mailto:
-        params["mailto"] = mailto
-    params["rows"] = max(max_results, 10)
-
-    return _venue_scored_search("crossref_venue", title, author_name, container_title, config, params, max_results)
+    return search_api_generic_multiple(
+        title,
+        author_name,
+        CROSSREF_VENUE_SEARCH_CONFIG,
+        max_results=max_results,
+        venue=container_title,
+    )
 
 
 def openalex_search_by_venue(
@@ -1252,15 +945,13 @@ def openalex_search_by_venue(
     Adds ``filter=primary_location.source.display_name.search:<venue>``
     alongside the title search to narrow results to the right journal.
     """
-    if not title or not venue_name:
-        return []
+    from ..api_configs import OPENALEX_VENUE_SEARCH_CONFIG
+    from ..api_generics import search_api_generic_multiple
 
-    from ..api_configs import OPENALEX_SEARCH_CONFIG
-
-    config = copy.copy(OPENALEX_SEARCH_CONFIG)
-    params: dict[str, Any] = dict(config.additional_params)
-    params["search"] = title
-    params["filter"] = f"primary_location.source.display_name.search:{venue_name}"
-    params["per-page"] = max(max_results, 10)
-
-    return _venue_scored_search("openalex_venue", title, author_name, venue_name, config, params, max_results)
+    return search_api_generic_multiple(
+        title,
+        author_name,
+        OPENALEX_VENUE_SEARCH_CONFIG,
+        max_results=max_results,
+        venue=venue_name,
+    )

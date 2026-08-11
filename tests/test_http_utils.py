@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone, tzinfo
 from email.utils import format_datetime
 
@@ -12,6 +13,31 @@ from citeforge.exceptions import DecodeError
 from citeforge.http_utils import _decode_json_bytes, _scrub_secrets
 from tests.corpus import RETRY_AFTER_CASES
 from tests.fakes import FakeResponse, FakeSession
+
+
+class ScriptSession:
+    """Session double that can return responses or raise scripted exceptions."""
+
+    def __init__(self, effects: list[FakeResponse | requests.exceptions.RequestException]) -> None:
+        self.effects = effects
+        self.calls = 0
+        self.closed = False
+
+    def _send(self) -> FakeResponse:
+        effect = self.effects[min(self.calls, len(self.effects) - 1)]
+        self.calls += 1
+        if isinstance(effect, BaseException):
+            raise effect
+        return effect
+
+    def get(self, *args: object, **kwargs: object) -> FakeResponse:
+        return self._send()
+
+    def post(self, *args: object, **kwargs: object) -> FakeResponse:
+        return self._send()
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class TestSecretRedaction:
@@ -57,53 +83,110 @@ class TestSecretRedaction:
 
 
 class TestRetryBounding:
-    """Persistent 5xx must not compound urllib3 x manual retries into ~9 requests,
-    and non-idempotent POST must not be auto-retried by urllib3.
-    429/503 stays single-layer (excluded from urllib3, handled by the manual loop).
-    """
+    """Tenacity is the sole controller and bounds each logical request to three sends."""
 
-    def test_post_excluded_from_urllib3_retry(self) -> None:
-        assert "POST" not in http_utils._RETRY_STRATEGY.allowed_methods
-        assert "GET" in http_utils._RETRY_STRATEGY.allowed_methods
+    def test_requests_adapters_disable_transport_retries(self) -> None:
+        session = http_utils._new_session()
+        assert session.get_adapter("https://").max_retries.total == 0
+        assert session.get_adapter("http://").max_retries.total == 0
 
-    def test_retry_error_not_redriven(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls = {"n": 0}
-
-        class _Sess:
-            def get(self, *args: object, **kwargs: object) -> object:
-                calls["n"] += 1
-                raise requests.exceptions.RetryError("urllib3 exhausted 500s")
-
-        monkeypatch.setattr(http_utils, "_get_session", lambda: _Sess())
-        http_utils._THREAD_LOCAL.session_request_count = 0
-        with pytest.raises(requests.exceptions.RetryError):
-            http_utils._http_request("GET", "https://example.com/x", {"Accept": "*/*"}, 1.0)
-        # One session.get call, not 3 manual iterations (which were 3 urllib3 each = 9).
-        assert calls["n"] == 1
-
-    def test_429_still_retried_by_manual_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        attempts = {"n": 0}
-
-        class _Resp:
-            def __init__(self, status: int) -> None:
-                self.status_code = status
-                self.headers: dict[str, str] = {}
-                self.content = b"ok"
-
-            def raise_for_status(self) -> None:
-                return None
-
-        class _Sess:
-            def get(self, *args: object, **kwargs: object) -> _Resp:
-                attempts["n"] += 1
-                return _Resp(429 if attempts["n"] < 3 else 200)
-
-        monkeypatch.setattr(http_utils, "_get_session", lambda: _Sess())
+    @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+    def test_get_retries_selected_status_to_success(self, monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+        session = FakeSession([FakeResponse(status), FakeResponse(status), FakeResponse(200)])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
         monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
         http_utils._THREAD_LOCAL.session_request_count = 0
-        out = http_utils._http_request("GET", "https://example.com/x", {"Accept": "*/*"}, 1.0)
-        assert out == b"ok"
-        assert attempts["n"] == 3
+        assert http_utils._http_request("GET", "https://example.com/x", {}, 1.0) == b"{}"
+        assert session.get_calls == 3
+
+    @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+    def test_get_exhaustion_raises_final_http_error(self, monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+        final = FakeResponse(status)
+        session = FakeSession([FakeResponse(status), FakeResponse(status), final])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        with pytest.raises(requests.exceptions.HTTPError) as excinfo:
+            http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
+        assert session.get_calls == 3
+        assert excinfo.value.response is final
+
+    @pytest.mark.parametrize(("status", "calls"), [(408, 1), (429, 3), (500, 1), (502, 1), (503, 3), (504, 1)])
+    def test_post_retries_only_explicit_rate_responses(
+        self, monkeypatch: pytest.MonkeyPatch, status: int, calls: int
+    ) -> None:
+        session = FakeSession([FakeResponse(status), FakeResponse(status), FakeResponse(status)])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        with pytest.raises(requests.exceptions.HTTPError):
+            http_utils._http_request("POST", "https://example.com/x", {}, 1.0, json_payload={"q": 1})
+        assert session.post_calls == calls
+
+    @pytest.mark.parametrize("method", ["GET", "POST"])
+    def test_nonretryable_4xx_sent_once(self, monkeypatch: pytest.MonkeyPatch, method: str) -> None:
+        session = FakeSession(FakeResponse(404))
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        with pytest.raises(requests.exceptions.HTTPError):
+            http_utils._http_request(method, "https://example.com/x", {}, 1.0, json_payload={})
+        assert session.get_calls + session.post_calls == 1
+
+
+class TestExceptionRetryPolicy:
+    @pytest.mark.parametrize(
+        "error_type",
+        [requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError],
+    )
+    def test_get_retries_transient_exception_and_reraises_original_type(
+        self, monkeypatch: pytest.MonkeyPatch, error_type: type[requests.exceptions.RequestException]
+    ) -> None:
+        session = ScriptSession([error_type("failed?key=SECRET")])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        with pytest.raises(error_type) as excinfo:
+            http_utils._http_request("GET", "https://example.com/x?key=SECRET", {}, 1.0)
+        assert session.calls == 3
+        assert "SECRET" not in str(excinfo.value)
+        assert "REDACTED" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ],
+    )
+    def test_post_transport_exception_is_never_retried(
+        self, monkeypatch: pytest.MonkeyPatch, error_type: type[requests.exceptions.RequestException]
+    ) -> None:
+        session = ScriptSession([error_type("failed")])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        with pytest.raises(error_type):
+            http_utils._http_request("POST", "https://example.com/x", {}, 1.0, json_payload={})
+        assert session.calls == 1
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [
+            requests.exceptions.InvalidURL,
+            requests.exceptions.MissingSchema,
+            requests.exceptions.InvalidHeader,
+            requests.exceptions.TooManyRedirects,
+        ],
+    )
+    def test_invalid_get_request_is_never_retried(
+        self, monkeypatch: pytest.MonkeyPatch, error_type: type[requests.exceptions.RequestException]
+    ) -> None:
+        session = ScriptSession([error_type("invalid")])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        with pytest.raises(error_type):
+            http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
+        assert session.calls == 1
 
 
 class TestParseRetryAfter:
@@ -178,6 +261,140 @@ class TestBackoffCapAndPostRetry:
         # Manual 429 handling re-sends the POST twice, succeeding on the third call.
         assert session.post_calls == 3
         assert session.get_calls == 0
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            ("4", 4.0),
+            ("0", 1.0),
+            ("-2", 1.0),
+            ("junk", 1.0),
+            ("Wed, 21 Oct 2015 07:28:00 GMT", 1.0),
+            ("1000", HTTP_BACKOFF_MAX),
+        ],
+    )
+    def test_retry_after_and_fallback_waits(
+        self, monkeypatch: pytest.MonkeyPatch, header: str, expected: float
+    ) -> None:
+        sleeps: list[float] = []
+        session = FakeSession([FakeResponse(429, headers={"Retry-After": header}), FakeResponse(200)])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", sleeps.append)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
+        assert sleeps == [expected]
+
+    def test_http_date_retry_after_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        class _FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+                return fixed_now.astimezone(tz) if tz is not None else fixed_now
+
+        sleeps: list[float] = []
+        header = format_datetime(fixed_now + timedelta(seconds=4), usegmt=True)
+        session = FakeSession([FakeResponse(503, headers={"Retry-After": header}), FakeResponse(200)])
+        monkeypatch.setattr(http_utils, "datetime", _FrozenDateTime)
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", sleeps.append)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
+        assert sleeps == [4.0]
+
+    def test_retry_wait_occurs_with_semaphore_free(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        semaphore = threading.Semaphore(1)
+        was_free: list[bool] = []
+        session = FakeSession([FakeResponse(429), FakeResponse(200)])
+
+        def check_sleep(_seconds: float) -> None:
+            acquired = semaphore.acquire(blocking=False)
+            was_free.append(acquired)
+            if acquired:
+                semaphore.release()
+
+        monkeypatch.setattr(http_utils, "_GLOBAL_SEMAPHORE", semaphore)
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", check_sleep)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
+        assert was_free == [True]
+
+    def test_fallback_waits_are_deterministic_exponential_delays(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+        session = FakeSession([FakeResponse(500), FakeResponse(500), FakeResponse(200)])
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(
+            http_utils.random,
+            "uniform",
+            lambda *_a: pytest.fail("retry waits must not use random jitter"),
+        )
+        monkeypatch.setattr(http_utils.time, "sleep", sleeps.append)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
+        assert sleeps == [1.0, 2.0]
+
+
+class TestLogicalAndTransportAccounting:
+    @pytest.mark.parametrize(("timeout", "expected"), [(5.0, (5.0, 5.0)), (20.0, (10.0, 20.0))])
+    def test_timeout_tuple_preserves_connect_cap(
+        self, monkeypatch: pytest.MonkeyPatch, timeout: float, expected: tuple[float, float]
+    ) -> None:
+        seen: dict[str, object] = {}
+
+        class Session:
+            def get(self, _url: str, **kwargs: object) -> FakeResponse:
+                seen.update(kwargs)
+                return FakeResponse(200)
+
+        monkeypatch.setattr(http_utils, "_get_session", lambda: Session())
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        http_utils._http_request("GET", "https://example.com/x", {}, timeout)
+        assert seen["timeout"] == expected
+
+    def test_logical_setup_once_and_session_count_per_send(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session = FakeSession([FakeResponse(500), FakeResponse(500), FakeResponse(200)])
+        limiter_calls = 0
+        header_calls = 0
+
+        class Limiter:
+            def acquire(self) -> None:
+                nonlocal limiter_calls
+                limiter_calls += 1
+
+        def randomize(headers: dict[str, str]) -> dict[str, str]:
+            nonlocal header_calls
+            header_calls += 1
+            return headers
+
+        http_utils.reset_api_call_counts()
+        monkeypatch.setattr(http_utils, "_get_rate_limiter", lambda _namespace: Limiter())
+        monkeypatch.setattr(http_utils, "_randomize_headers", randomize)
+        monkeypatch.setattr(http_utils, "_get_session", lambda: session)
+        monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        http_utils._http_request("GET", "https://api.crossref.org/works", {}, 1.0)
+        assert http_utils.get_api_call_counts()["crossref"] == 1
+        assert limiter_calls == 1
+        assert header_calls == 1
+        assert http_utils._THREAD_LOCAL.session_request_count == 3
+
+    def test_session_can_rotate_between_retry_attempts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = FakeSession(FakeResponse(500))
+        second = FakeSession(FakeResponse(200))
+        monkeypatch.setattr(http_utils, "_new_session", lambda: second)
+        monkeypatch.setattr(http_utils.time, "sleep", lambda *_a: None)
+        try:
+            http_utils._THREAD_LOCAL.session = first
+            http_utils._THREAD_LOCAL.session_request_count = SESSION_ROTATION_THRESHOLD - 1
+            assert http_utils._http_request("GET", "https://example.com/x", {}, 1.0) == b"{}"
+            assert first.get_calls == 1
+            assert first.closed is True
+            assert second.get_calls == 1
+            assert http_utils._THREAD_LOCAL.session_request_count == 1
+        finally:
+            http_utils._THREAD_LOCAL.session = None
+            http_utils._THREAD_LOCAL.session_request_count = 0
 
 
 class TestSessionRotation:

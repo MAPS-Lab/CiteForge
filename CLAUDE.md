@@ -27,21 +27,30 @@ Ruff uses line-length 120 and rules E/F/W/I/N/UP/B/C4/SIM/RUF/S (see pyproject.t
 
 ## Architecture
 
-`main.py` is a thin command-line entry point (~120 LOC) that loads API keys, reads author records, and delegates to the `citeforge/pipeline/` package (`article.py` for per-article enrichment, `scheduler.py` for author-level scheduling, `postrun.py` for the post-run tail). Each article passes through Phase 1 (DOI validation) → Phase 2 (multi-API enrichment) → Phase 2.5 (SerpAPI publication string fallback) → Phase 3 (late DOI inference) → Phase 4 (trust-based merge + save). Post-run steps run in order: flush CSV → reconcile phantoms → remove orphans → year-window cleanup → post-run fixup → build a2i2 → rebuild baseline.json → rebuild badges.json.
+`citeforge/cli.py` owns argument parsing, API-key and author-record loading, and
+pipeline delegation. Root `main.py` is only a compatibility launcher.
+`article.py` handles per-article enrichment, `scheduler.py` handles author-level
+scheduling, and `postrun.py` handles finalization. Each article passes through
+Phase 1 (DOI validation) → Phase 2 (multi-API enrichment) → Phase 2.5
+(SerpAPI publication string fallback) → Phase 3 (late DOI inference) → Phase
+4 (trust-based merge + save). Post-run steps run in order: flush CSV →
+reconcile phantoms → remove orphans → year-window cleanup → post-run fixup
+→ build a2i2 → rebuild baseline.json.
 
-Trust hierarchy in `citeforge/merge_utils.py:merge_with_policy()` merges fields from 13 ranked sources with special override rules for DOI (published > preprint), journal (never downgrade to preprint), title (prefer longer), pages (reject invalid), and booktitle (upgrade generic series to conference name).
+Trust hierarchy in `citeforge/merge_utils.py:merge_with_policy()` merges fields from active configured sources with special override rules for DOI (published > preprint), journal (never downgrade to preprint), title (prefer longer), pages (reject invalid), and booktitle (upgrade generic series to conference name).
 
-## Three-Way Fix Pattern (CRITICAL)
+## Four-Stage Canonicalization Contract (CRITICAL)
 
-Fixes for entry types, titles, and booktitles MUST be applied in three places, or output oscillates between consecutive runs.
+Entry-type and text normalization is single-sourced in `citeforge/canonicalize.py`. Callers select one of four ordered `CanonicalStage` rule sets.
 
-1. `_fixup_bib_entry()` (initial fixup on load)
-2. Existing-file fixup in `process_article()` (before enrichment)
-3. Phase 4 post-merge (after trust-based merge)
+1. `LOAD_REPAIR` runs in `process_article()` after an existing file is loaded and before enrichment.
+2. `COMPLETE_SKIP_FINALIZE` runs in `process_article()` immediately before writing a complete entry that skips enrichment.
+3. `POST_MERGE` runs in `process_article()` after the Phase 4 trust-based merge.
+4. `POSTRUN_ORPHAN_REPAIR` runs during the post-run fixup through `_fixup_bib_entry()`.
 
-Consolidated helpers `_fix_title_text()` and `_apply_booktitle_fixups()` are called from all three. When adding a new text or type fix, grep for these functions and add the fix to all call sites.
+Each rule belongs to every stage whose path can emit the affected entry. Shared behavior must use one `_rule_*` helper referenced by the applicable stage tuples, not copied logic in callers. When changing a rule, inspect all four stage tuples and add tests for each affected path.
 
-The following fixes are also applied in all three locations.
+The following fixes share rule helpers across their applicable stages.
 - Abbreviated venue expansion (`ABBREVIATED_VENUE_MAP`)
 - Venue case correction (`VENUE_CASE_CORRECTIONS`)
 - Publisher-duplicate-container stripping (publisher == journal/booktitle → remove publisher)

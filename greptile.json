@@ -28,7 +28,7 @@
       },
       {
         "scope": ["citeforge/pipeline/**/*.py"],
-        "rule": "Three-Way Fix Pattern, the critical invariant. A fix to entry types, titles or booktitles must be applied in all three places or the output oscillates between consecutive runs: _fixup_bib_entry() on load, the existing-file fixup in process_article() before enrichment, and the Phase 4 post-merge step. The consolidated helpers _fix_title_text() and _apply_booktitle_fixups() are called from all three. Flag a new text or type fix added to fewer than all three call sites."
+        "rule": "Four-Stage Canonicalization Contract, the critical invariant. Entry-type and text normalization is single-sourced in citeforge/canonicalize.py through four ordered CanonicalStage rule sets: LOAD_REPAIR before enrichment, COMPLETE_SKIP_FINALIZE before writing a complete entry that skips enrichment, POST_MERGE after the Phase 4 trust-based merge, and POSTRUN_ORPHAN_REPAIR in the post-run fixup through _fixup_bib_entry(). Flag copied caller logic or a rule missing from a stage whose path can emit the affected entry."
       },
       {
         "scope": ["citeforge/merge_utils.py"],
@@ -55,7 +55,7 @@
       {
         "scope": ["citeforge/**", "main.py", "tests/**"],
         "path": "CLAUDE.md",
-        "description": "Repository conventions and invariants. The Architecture section owns the four-phase pipeline and the post-run ordering, the Three-Way Fix Pattern section owns the oscillation invariant, and Key Conventions owns config-driven values, determinism, DOI normalization and orphan safety."
+        "description": "Repository conventions and invariants. The Architecture section owns the four-phase pipeline and the post-run ordering, the Four-Stage Canonicalization Contract owns normalization routing, and Key Conventions owns config-driven values, determinism, DOI normalization and orphan safety."
       },
       {
         "scope": ["**"],

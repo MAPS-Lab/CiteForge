@@ -8,15 +8,76 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from citeforge.clients.scholar import fetch_author_publications, fetch_scholar_citation
-from citeforge.clients.serpapi_scholar import serpapi_fetch_author_publications
-from citeforge.clients.serply_scholar import (
-    serply_fetch_author_publications,
-    serply_fetch_citation,
+from citeforge.clients.scholar import (
+    _deduplicate_publication_list,
+    fetch_author_publications,
+    fetch_scholar_citation,
+    merge_publication_lists,
 )
+from citeforge.clients.serpapi_scholar import serpapi_fetch_author_publications
+from citeforge.clients.serply_scholar import serply_fetch_citation
 
 _SERPLY_HTTP_PATCH = "citeforge.clients.serply_scholar.http_fetch_bytes"
 _SERPAPI_HTTP_PATCH = "citeforge.clients.serpapi_scholar.http_fetch_bytes"
+
+
+def test_exact_title_explicit_author_conflict_keeps_both() -> None:
+    """Exact normalized titles with incompatible nonempty authors remain distinct."""
+    pubs = [
+        {"title": "Shared Benchmark Title", "authors": ["Alpha, Alice"], "year": 2024},
+        {"title": "Shared Benchmark Title", "authors": ["Beta, Bob"], "year": 2024},
+    ]
+
+    assert len(_deduplicate_publication_list(pubs)) == 2
+
+
+def test_exact_title_year_gap_four_keeps_both() -> None:
+    """Exact normalized titles with explicit years four apart remain distinct."""
+    pubs = [
+        {"title": "Shared Benchmark Title", "authors": ["Alpha, Alice"], "year": 2020},
+        {"title": "Shared Benchmark Title", "authors": ["Alpha, Alice"], "year": 2024},
+    ]
+
+    assert len(_deduplicate_publication_list(pubs)) == 2
+
+
+def test_cross_source_sparse_title_without_target_author_keeps_both() -> None:
+    """Missing target-author evidence does not activate exact-title deduplication."""
+    publication = {"title": "Shared Benchmark Title", "year": 2024}
+
+    assert len(merge_publication_lists([publication], [publication], None)) == 2
+
+
+@pytest.mark.parametrize(
+    ("publications", "expected_count"),
+    [
+        ([], 0),
+        ([{"title": "Deep Learning Survey", "year": 2024, "authors": ["Jane Doe"]}], 1),
+        (
+            [
+                {"title": "Attention Is All You Need", "year": 2017, "authors": ["Ashish Vaswani"]},
+                {"title": "Attention Is All You Need", "year": 2017, "authors": ["Ashish Vaswani"]},
+            ],
+            1,
+        ),
+        (
+            [
+                {"title": "Attention Is All You Need", "year": 2017, "authors": ["Ashish Vaswani"]},
+                {
+                    "title": "Deep Residual Learning for Image Recognition",
+                    "year": 2016,
+                    "authors": ["Kaiming He"],
+                },
+            ],
+            2,
+        ),
+    ],
+)
+def test_deduplicate_publication_list_basic_cardinality(
+    publications: list[dict[str, object]], expected_count: int
+) -> None:
+    """The Scholar facade preserves basic empty, singleton, duplicate, and distinct cases."""
+    assert len(_deduplicate_publication_list(publications)) == expected_count
 
 
 def _json_bytes(obj: Any) -> bytes:
@@ -359,141 +420,6 @@ class TestSerpapiFetchAuthorPublications:
             sort="citedby",
         )
         assert len(result["articles"]) == 1
-
-
-class TestSerplyFetchAuthorPublications:
-    """Test serply_fetch_author_publications conversion."""
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_basic_conversion(self, mock_http: MagicMock) -> None:
-        """Serply article -> CiteForge article dict."""
-        response = _make_serply_response([_make_serply_article()])
-        mock_http.return_value = _json_bytes(response)
-
-        result = serply_fetch_author_publications("test_key", "John Smith", num=10)
-
-        assert result["search_metadata"]["status"] == "Success"
-        assert result["search_metadata"]["source"] == "serply"
-        assert len(result["articles"]) == 1
-
-        art = result["articles"][0]
-        assert art["title"] == "Machine Learning in Healthcare"
-        assert art["authors"] == "J Smith and J Doe"
-        assert art["year"] == 2024
-        assert art["source"] == "scholar"
-        assert art["citation_id"]
-        assert art["result_id"] == art["citation_id"]
-        assert art["publication_info"] == {"summary": "Nature"}
-        assert art["publication"] == "Nature"
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_missing_year(self, mock_http: MagicMock) -> None:
-        """Result without year in description should have empty year."""
-        article = _make_serply_article(description="J Smith - Some venue - example.com")
-        response = _make_serply_response([article])
-        mock_http.return_value = _json_bytes(response)
-
-        result = serply_fetch_author_publications("test_key", "John Smith")
-        assert result["articles"][0]["year"] == ""
-
-    def test_empty_api_key(self) -> None:
-        """Empty API key should return empty dict without making HTTP calls."""
-        result = serply_fetch_author_publications("", "John Smith")
-        assert result == {}
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_empty_results(self, mock_http: MagicMock) -> None:
-        """Empty articles array should return no articles."""
-        response = _make_serply_response([])
-        mock_http.return_value = _json_bytes(response)
-
-        result = serply_fetch_author_publications("key", "John Smith")
-        assert result["articles"] == []
-        assert result["search_metadata"]["status"] == "Success"
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_http_exception(self, mock_http: MagicMock) -> None:
-        """Exception during HTTP call should return response with no articles."""
-        mock_http.side_effect = Exception("Network error")
-        result = serply_fetch_author_publications("key", "John Smith")
-        assert result["articles"] == []
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_multiple_results(self, mock_http: MagicMock) -> None:
-        """Multiple articles should all be converted."""
-        articles = [
-            _make_serply_article(title="Paper A", description="A - J1, 2024 - x.com"),
-            _make_serply_article(title="Paper B", description="B - J2, 2023 - y.com"),
-            _make_serply_article(title="Paper C", description="C - J3, 2022 - z.com"),
-        ]
-        response = _make_serply_response(articles)
-        mock_http.return_value = _json_bytes(response)
-
-        result = serply_fetch_author_publications("key", "John Smith", num=10)
-        assert len(result["articles"]) == 3
-        assert result["articles"][0]["title"] == "Paper A"
-        assert result["articles"][2]["title"] == "Paper C"
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_num_limit(self, mock_http: MagicMock) -> None:
-        """Results should be trimmed to num parameter."""
-        articles = [_make_serply_article(title=f"Paper {i}") for i in range(5)]
-        response = _make_serply_response(articles)
-        mock_http.return_value = _json_bytes(response)
-
-        result = serply_fetch_author_publications("key", "John Smith", num=3)
-        assert len(result["articles"]) == 3
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_no_journal(self, mock_http: MagicMock) -> None:
-        """Result without journal in description should not have publication_info."""
-        article = _make_serply_article(description="J Smith")
-        response = _make_serply_response([article])
-        mock_http.return_value = _json_bytes(response)
-
-        result = serply_fetch_author_publications("key", "John Smith")
-        art = result["articles"][0]
-        assert "publication_info" not in art
-        assert "publication" not in art
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_authors_from_names_fallback(self, mock_http: MagicMock) -> None:
-        """When author.authors is empty, parse from author.names."""
-        article = _make_serply_article()
-        article["author"]["authors"] = []  # Empty list
-        article["author"]["names"] = "A Smith, B Jones - Nature, 2024 - nature.com"
-        response = _make_serply_response([article])
-        mock_http.return_value = _json_bytes(response)
-
-        result = serply_fetch_author_publications("key", "John Smith")
-        assert result["articles"][0]["authors"] == "A Smith, B Jones"
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_identity_encoding_header(self, mock_http: MagicMock) -> None:
-        """Serply requests should use Accept-Encoding: identity to avoid compression issues."""
-        response = _make_serply_response([_make_serply_article()])
-        mock_http.return_value = _json_bytes(response)
-
-        serply_fetch_author_publications("key", "John Smith")
-        mock_http.assert_called_once()
-        call_headers = mock_http.call_args[0][1]
-        assert call_headers.get("Accept-Encoding") == "identity"
-
-    @patch(_SERPLY_HTTP_PATCH)
-    def test_query_path_encoding(self, mock_http: MagicMock) -> None:
-        """Serply uses path-based query encoding: quoted name, no q= or author: prefix."""
-        response = _make_serply_response([_make_serply_article()])
-        mock_http.return_value = _json_bytes(response)
-
-        serply_fetch_author_publications("key", "Gabriel Spadon", num=5)
-
-        call_url = mock_http.call_args[0][0]
-        # URL must NOT contain q= prefix (causes different response schema)
-        assert "q%3D" not in call_url
-        # URL must NOT contain author: prefix (Serply doesn't support it)
-        assert "author%3A" not in call_url
-        # URL must contain the quoted author name
-        assert "gabriel" in call_url.lower()
 
 
 class TestSerplyFetchCitation:

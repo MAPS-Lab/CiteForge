@@ -2,13 +2,13 @@
 
 [![Tests](https://github.com/MAPS-Lab/CiteForge/actions/workflows/tests.yml/badge.svg)](https://github.com/MAPS-Lab/CiteForge/actions/workflows/tests.yml)
 
-CiteForge is a Python tool that builds clean, per-author BibTeX files from scholarly APIs. Given a CSV of authors with Google Scholar profiles, it retrieves each author's publications, enriches every entry against thirteen external registries and services, deduplicates records, and merges fields according to source trust. It runs on Python 3.10 or later with a small dependency footprint (requests, rapidfuzz, unidecode, and a few helpers), and it is developed and maintained by the [MAPS Lab](https://mapslab.tech/) at Dalhousie University.
+CiteForge is a Python tool that builds clean, per-author BibTeX files from scholarly APIs. Given a CSV of authors with Google Scholar profiles, it retrieves each author's publications, enriches every entry against active scholarly registries and services, deduplicates records, and merges fields according to source trust. It runs on Python 3.10 or later with a small dependency footprint (requests, rapidfuzz, unidecode, and a few helpers), and it is developed and maintained by the [MAPS Lab](https://mapslab.tech/) at Dalhousie University.
 
 ## Features
 
 - Per-author BibTeX generation from Google Scholar profiles through SerpAPI
-- Multi-API enrichment across thirteen scholarly registries and services (Semantic Scholar, Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DataCite, ORCID, DBLP, OpenReview, and DOI resolvers)
-- Trust-based field merging that ranks thirteen sources and prefers authoritative registries over scraped content
+- Multi-API enrichment across Semantic Scholar, Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DBLP, OpenReview, and DOI resolvers
+- Trust-based field merging that prioritizes authoritative registries over scraped content
 - Deduplication combining DOI normalization, external-identifier matching, and fuzzy title similarity (rapidfuzz)
 - Metadata correction for fragmented compound words, misclassified publication types, invalid page ranges, and all-capitals titles
 - Deterministic output, with byte-identical results on cache-hit runs
@@ -39,11 +39,13 @@ printf "user\npass" > keys/OpenReview.key     # Optional
 
 ## Usage
 
-Create the input CSV and run the pipeline from the project root.
+Create the input CSV and run the pipeline. Relative paths resolve from the
+current working directory.
 
 ```bash
-python3 main.py           # Input: data/input.csv
-python3 main.py --force   # Force re-enrichment (ignore cache completeness)
+citeforge                                      # data/input.csv -> output/
+citeforge --force                              # Ignore cache completeness
+citeforge --input authors.csv --output results # Explicit paths
 ```
 
 The input CSV has three columns (name, Scholar link, and an optional DBLP link).
@@ -60,6 +62,8 @@ output/
 ├── baseline.json
 ├── run.log
 ├── summary.csv
+├── a2i2/
+│   └── ...
 └── Spadon (bfdGsGUAAAAJ)/
     ├── author.log
     ├── Spadon2024-MaritimeTracking.bib
@@ -80,7 +84,7 @@ SerpAPI requires a key; the remaining sources are keyless, recommended, or optio
 |------|---------|
 | Required (key) | [SerpAPI](https://serpapi.com/) (Google Scholar) |
 | Recommended (key) | [Serply](https://serply.io/) (citation details), [Semantic Scholar](https://www.semanticscholar.org/) |
-| Free (no key) | [Crossref](https://www.crossref.org/), [OpenAlex](https://openalex.org/), [arXiv](https://arxiv.org/), [PubMed](https://pubmed.ncbi.nlm.nih.gov/), [Europe PMC](https://europepmc.org/), [DataCite](https://datacite.org/), [ORCID](https://orcid.org/), [DBLP](https://dblp.org/) |
+| Free (no key) | [Crossref](https://www.crossref.org/), [OpenAlex](https://openalex.org/), [arXiv](https://arxiv.org/), [PubMed](https://pubmed.ncbi.nlm.nih.gov/), [Europe PMC](https://europepmc.org/), [DBLP](https://dblp.org/) |
 | Optional (key) | [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/) |
 
 ## Development
@@ -94,7 +98,11 @@ mypy citeforge/ main.py                       # Type check (strict, ignore_missi
 pytest tests/ -v --tb=short                   # Full test suite (Python 3.10-3.13)
 ```
 
-Run a single test with `pytest tests/test_core.py::test_function_name -v --tb=short`. The `main.py` entry point is a thin command-line wrapper that loads keys, reads author records, and delegates to the `citeforge/pipeline/` package, where `article.py` handles per-article enrichment, `scheduler.py` handles author-level scheduling, and `postrun.py` handles the post-run finalization.
+Run a single test with `pytest tests/test_core.py::test_function_name -v --tb=short`.
+The installed command is implemented in `citeforge/cli.py`; root `main.py` is
+only a compatibility launcher. The CLI loads keys and author records, then
+delegates to `article.py`, `scheduler.py`, and `postrun.py` in
+`citeforge/pipeline/`.
 
 ## Citation
 
@@ -108,7 +116,7 @@ Citation metadata is also provided in [CITATION.cff](CITATION.cff). If you use C
   version   = {1.0.0},
   publisher = {MAPS Lab, Dalhousie University},
   url       = {https://github.com/MAPS-Lab/CiteForge},
-  license   = {AGPL-3.0}
+  license   = {AGPL-3.0-or-later}
 }
 ```
 
@@ -118,4 +126,6 @@ CiteForge is one of the research tools from the [MAPS Lab](https://mapslab.tech/
 
 ## License
 
-This project is distributed under the terms of the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE) for details.
+This project is distributed under the terms of the GNU Affero General Public
+License version 3 or later (AGPL-3.0-or-later). See [LICENSE](LICENSE) for
+details.

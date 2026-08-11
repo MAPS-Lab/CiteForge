@@ -93,13 +93,13 @@ reviews:
         test that pins the new behaviour.
     - path: "citeforge/pipeline/**/*.py"
       instructions: >-
-        CLAUDE.md "Three-Way Fix Pattern" is the critical invariant here. A fix to
-        entry types, titles or booktitles must be applied in all three places, or the
-        output oscillates between consecutive runs: _fixup_bib_entry() on load, the
-        existing-file fixup in process_article() before enrichment, and the Phase 4
-        post-merge step. The consolidated helpers _fix_title_text() and
-        _apply_booktitle_fixups() are called from all three. Flag a new text or type
-        fix added to fewer than all three call sites.
+        CLAUDE.md "Four-Stage Canonicalization Contract" is critical here. Entry-type
+        and text normalization is single-sourced in citeforge/canonicalize.py through
+        four ordered CanonicalStage rule sets: LOAD_REPAIR before enrichment,
+        COMPLETE_SKIP_FINALIZE before writing a complete entry that skips enrichment,
+        POST_MERGE after the Phase 4 trust-based merge, and POSTRUN_ORPHAN_REPAIR in
+        the post-run fixup through _fixup_bib_entry(). Flag copied caller logic or a
+        rule missing from a stage whose path can emit the affected entry.
     - path: "citeforge/clients/**/*.py"
       instructions: >-
         Scholarly API clients. API keys are read from keys/, which is gitignored, and
@@ -132,7 +132,7 @@ reviews:
       instructions: >-
         Prose avoids em-dashes, avoids colons inside sentences, and never opens a
         paragraph with a bolded phrase used as a heading. CLAUDE.md owns the
-        architecture description and the Three-Way Fix Pattern; link to it rather than
+        architecture description and the Four-Stage Canonicalization Contract; link to it rather than
         restating it. Do not commit counts or statistics that drift with normal
         pipeline runs.
 

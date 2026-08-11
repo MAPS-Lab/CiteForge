@@ -266,15 +266,6 @@ API_SPECIFIC_PAPERS = {
         "year": 2012,
         "pmc_id": "PMC6286148",
     },
-    "datacite": {
-        "title": "COVID-19 Open Research Dataset",
-        "doi": "10.5281/zenodo.3715506",
-        "year": 2020,
-    },
-    "orcid": {
-        "orcid_id": "0000-0002-1825-0097",
-        "author_name": "Test User",
-    },
 }
 
 # Test author with known publications (for integration tests)
@@ -282,7 +273,6 @@ TEST_AUTHOR = {
     "name": "Geoffrey Hinton",
     "email": "test@example.com",
     "scholar_id": "JicYPdAAAAAJ",
-    "orcid": "",
     "dblp": "/h/GeoffreyEHinton",
 }
 
@@ -343,16 +333,6 @@ API_CONFIGS = {
         "timeout": 15.0,
     },
     "europepmc": {
-        "required": False,
-        "key_file": None,
-        "timeout": 15.0,
-    },
-    "datacite": {
-        "required": False,
-        "key_file": None,
-        "timeout": 15.0,
-    },
-    "orcid": {
         "required": False,
         "key_file": None,
         "timeout": 15.0,

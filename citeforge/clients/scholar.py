@@ -13,39 +13,16 @@ import logging
 from typing import Any
 
 from ..cache import response_cache
-from ..config import (
-    CACHE_TTL_SEARCH_DAYS,
-    SIM_AUTHOR_BONUS,
-    SIM_MERGE_DUPLICATE_THRESHOLD,
-    SIM_TITLE_SIM_MIN,
-    SIM_TITLE_WEIGHT,
-    SIM_YEAR_BONUS,
-    SIM_YEAR_MATCH_WINDOW,
-)
+from ..config import CACHE_TTL_SEARCH_DAYS
 from ..id_utils import find_doi_in_text
-from ..text_utils import (
-    authors_overlap,
-    extract_year_from_any,
-    normalize_title,
-    title_similarity,
-    trim_title_default,
-)
-from .helpers import (
-    _score_candidate_generic,
-    get_article_year,
-    get_current_year,
-)
+from ..identity import IdentityContext, evaluate_identity
+from ..log_utils import LogCategory, logger
+from ..text_utils import extract_year_from_any, normalize_title, trim_title_default
+from .helpers import get_article_year, get_current_year
 from .serpapi_scholar import serpapi_fetch_author_publications
 from .serply_scholar import serply_fetch_citation
 
 _log = logging.getLogger("CiteForge.scholar")
-
-
-def _authors_as_str(authors: Any) -> str:
-    """Coerce an authors value (list or str) to a comma-separated string."""
-    if isinstance(authors, list):
-        return ", ".join(str(a) for a in authors)
-    return str(authors or "")
 
 
 def _first_author_sortkey(authors: Any) -> str:
@@ -212,34 +189,15 @@ def _deduplicate_publication_list(
 
     sorted_pubs = sorted(pubs, key=sort_key)
     deduplicated: list[dict[str, Any]] = []
-    seen_normalized: set[str] = set()
 
     for pub in sorted_pubs:
         p_title_raw = pub.get("title") or ""
         p_title = trim_title_default(p_title_raw)
-        p_norm = normalize_title(p_title)
-        p_year = pub.get("year")
-        p_authors = pub.get("authors") or []
-
-        if p_norm and p_norm in seen_normalized:
-            continue
 
         is_duplicate = False
         for existing in deduplicated:
-            e_title = existing.get("title") or ""
-            e_year = existing.get("year")
-            e_authors = existing.get("authors") or []
-            tsim = title_similarity(p_title, e_title) if p_title and e_title else 0.0
-            if tsim < SIM_TITLE_SIM_MIN:
-                continue
-            score = SIM_TITLE_WEIGHT * tsim
-            if authors_overlap(_authors_as_str(e_authors), _authors_as_str(p_authors)):
-                score += SIM_AUTHOR_BONUS
-            e_year_int = extract_year_from_any(e_year) if e_year else None
-            p_year_int = extract_year_from_any(p_year) if p_year else None
-            if e_year_int is not None and p_year_int is not None:
-                score += SIM_YEAR_BONUS * (1.0 if abs(e_year_int - p_year_int) <= SIM_YEAR_MATCH_WINDOW else 0.0)
-            if score >= SIM_MERGE_DUPLICATE_THRESHOLD:
+            candidate = dict(pub, title=p_title)
+            if evaluate_identity(existing, candidate, context=IdentityContext.IMPORT_LIST).verdict:
                 is_duplicate = True
                 break
         if not is_duplicate:
@@ -247,8 +205,6 @@ def _deduplicate_publication_list(
             if p_title and p_title != p_title_raw:
                 pub_copy["title"] = p_title
             deduplicated.append(pub_copy)
-            if p_norm:
-                seen_normalized.add(p_norm)
     return deduplicated
 
 
@@ -264,24 +220,21 @@ def merge_publication_lists(
     for sec in secondary_deduped:
         s_title_raw = sec.get("title") or ""
         s_title = trim_title_default(s_title_raw)
-        s_year = sec.get("year")
-        s_authors = sec.get("authors") or []
         is_duplicate = False
         for p in merged:
-            tsim = title_similarity(s_title, p.get("title") or "") if s_title else 0.0
-            if tsim < SIM_TITLE_SIM_MIN:
-                continue
-            score = _score_candidate_generic(
-                target_title=p.get("title") or "",
-                target_author=target_author,
-                target_year=p.get("year"),
-                cand_title=s_title,
-                cand_authors=s_authors,
-                cand_year=s_year,
-                title_sim=title_similarity,
-                author_match=authors_overlap,
+            candidate = dict(sec, title=s_title)
+            evidence = evaluate_identity(
+                p,
+                candidate,
+                context=IdentityContext.IMPORT_LIST,
+                target_author=target_author or "",
             )
-            if score >= SIM_MERGE_DUPLICATE_THRESHOLD:
+            logger.debug(
+                f"CANDIDATE | title_sim={(evidence.title_similarity or 0.0):.3f}"
+                f" | year_diff={evidence.year_gap} | total={(evidence.composite_score or 0.0):.3f}",
+                category=LogCategory.SCORE,
+            )
+            if evidence.verdict:
                 is_duplicate = True
                 break
         if not is_duplicate:

@@ -118,8 +118,8 @@ def test_doi_bases_match_same_without_version() -> None:
     assert not doi_bases_match("10.1234/paper.2024", "10.1234/other.2024")
 
 
-def test_doi_version_dedup_in_save(tmp_path: Path) -> None:
-    """save_entry_to_file should deduplicate DOI version variants (e.g. v1/v2)."""
+def test_doi_base_versions_unrelated_titles_stay_separate(tmp_path: Path) -> None:
+    """DOI version equivalence cannot override an explicit title conflict."""
     out_dir = str(tmp_path)
     author_id = "TestAuthor"
     author_name = "Test Author"
@@ -147,7 +147,41 @@ def test_doi_version_dedup_in_save(tmp_path: Path) -> None:
             "doi": "10.20944/preprints202304.0409.v2",
         },
     }
+    path_v2, was_written = merge_utils.save_entry_to_file(out_dir, author_id, v2, author_name=author_name)
+
+    assert was_written is True
+    assert path_v2 != path_v1
+    assert _count_bib_files(os.path.dirname(path_v1)) == 2
+
+
+def test_doi_base_versions_compatible_titles_deduplicate(tmp_path: Path) -> None:
+    """Compatible titles preserve DOI base-version deduplication."""
+    out_dir = str(tmp_path)
+    author_id = "TestAuthor"
+    author_name = "Test Author"
+    v1 = {
+        "type": "misc",
+        "key": "Author2023:EthicalFrontier",
+        "fields": {
+            "title": "The Ethical Frontier: Navigating the Metaverse in Modern Farming",
+            "author": "Test Author",
+            "year": "2023",
+            "doi": "10.20944/preprints202304.0409.v1",
+        },
+    }
+    v2 = {
+        "type": "misc",
+        "key": "Author2023:EthicalFrontierV2",
+        "fields": {
+            "title": "The Ethical Frontier, Navigating the Metaverse in Modern Farming",
+            "author": "Test Author",
+            "year": "2023",
+            "doi": "10.20944/preprints202304.0409.v2",
+        },
+    }
+    path_v1, _ = merge_utils.save_entry_to_file(out_dir, author_id, v1, author_name=author_name)
+
     path_v2, _ = merge_utils.save_entry_to_file(out_dir, author_id, v2, author_name=author_name)
 
-    assert path_v2 == path_v1, "v2 should be matched to v1 via DOI version matching"
+    assert path_v2 == path_v1
     assert _count_bib_files(os.path.dirname(path_v1)) == 1
