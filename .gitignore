@@ -64,3 +64,6 @@ ruff-report.json
 
 # Agent-isolated implementation worktrees
 .worktrees/
+
+# Agent planning and task-report scratch space
+.superpowers/
