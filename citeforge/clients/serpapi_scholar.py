@@ -30,13 +30,13 @@ SerpAPI response structure (``/search?engine=google_scholar_author``)::
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 from urllib.parse import urlencode
 
 from ..config import HTTP_TIMEOUT_DEFAULT, SERPAPI_BASE
-from ..http_utils import http_fetch_bytes
+from ..exceptions import ALL_API_ERRORS
+from ..http_utils import _decode_json_bytes, http_fetch_bytes
 
 _log = logging.getLogger("CiteForge.serpapi")
 
@@ -78,12 +78,12 @@ def _serpapi_get(
 
     try:
         raw = http_fetch_bytes(url, headers, HTTP_TIMEOUT_DEFAULT)
-        data: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        data = _decode_json_bytes(raw, url)
         if "error" in data:
             _log.warning("SerpAPI returned error for %s: %s", author_id, data["error"])
             return {}
         return data
-    except Exception as exc:
+    except ALL_API_ERRORS as exc:
         _log.warning("SerpAPI request failed for %s: %s", author_id, type(exc).__name__)
         return {}
 

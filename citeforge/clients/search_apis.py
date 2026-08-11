@@ -45,6 +45,7 @@ from ..exceptions import (
 )
 from ..http_utils import (
     DEFAULT_JSON_HEADERS,
+    _cookie_header,
     _get_session,
     handle_api_errors,
     http_fetch_bytes,
@@ -446,10 +447,10 @@ def openreview_login(creds: tuple[str, ...] | None) -> dict[str, str] | None:
         try:
             resp = _get_session().post(url, json=payload, headers=headers, timeout=20)
             resp.raise_for_status()
-            set_cookie = resp.headers.get("Set-Cookie")
-            if set_cookie:
+            cookie_header = _cookie_header(resp.headers.get("Set-Cookie", ""))
+            if cookie_header:
                 headers_with_cookie = DEFAULT_JSON_HEADERS.copy()
-                headers_with_cookie["Cookie"] = set_cookie
+                headers_with_cookie["Cookie"] = cookie_header
                 _OPENREVIEW_SESSION = headers_with_cookie
                 _OPENREVIEW_SESSION_CREATED_AT = time.monotonic()
                 logger.debug(

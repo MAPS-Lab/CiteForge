@@ -10,7 +10,7 @@ import requests
 from citeforge import http_utils
 from citeforge.config import HTTP_BACKOFF_MAX, SESSION_ROTATION_THRESHOLD
 from citeforge.exceptions import DecodeError
-from citeforge.http_utils import _decode_json_bytes, _scrub_secrets
+from citeforge.http_utils import _cookie_header, _decode_json_bytes, _scrub_secrets
 from tests.corpus import RETRY_AFTER_CASES
 from tests.fakes import FakeResponse, FakeSession
 
@@ -80,6 +80,11 @@ class TestSecretRedaction:
 
     def test_decode_json_valid_passthrough(self) -> None:
         assert _decode_json_bytes(b'{"a": 1}', "https://x?key=S") == {"a": 1}
+
+
+def test_cookie_header_uses_only_cookie_pairs() -> None:
+    """Set-Cookie attributes are not forwarded in a request Cookie header."""
+    assert _cookie_header("sid=abc; Path=/; HttpOnly; SameSite=Lax") == "sid=abc"
 
 
 class TestRetryBounding:

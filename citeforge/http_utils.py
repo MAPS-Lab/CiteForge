@@ -12,13 +12,13 @@ import json
 import logging
 import random
 import re
-import socket
 import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
+from http.cookies import SimpleCookie
 from typing import Any, TypeVar
 
 import requests
@@ -40,10 +40,6 @@ from .exceptions import ALL_API_ERRORS, DECODE_ERRORS, NUMERIC_ERRORS, DecodeErr
 
 T = TypeVar("T")
 
-# Safety net: cap all socket operations at 60s to prevent indefinite hangs
-# from DNS resolution, SSL handshake, or connection pool waits
-socket.setdefaulttimeout(60.0)
-
 # Standard HTTP headers for API requests
 DEFAULT_JSON_HEADERS = {"User-Agent": "Mozilla/5.0 (CiteForge Client)", "Accept": "application/json"}
 
@@ -63,6 +59,14 @@ def _scrub_secrets(text: str) -> str:
     committed run logs.
     """
     return _SECRET_QS_RE.sub(r"\1REDACTED", text)
+
+
+def _cookie_header(set_cookie: str) -> str | None:
+    """Convert a Set-Cookie value to pairs suitable for a Cookie request header."""
+    jar = SimpleCookie()
+    jar.load(set_cookie)
+    pairs = [f"{name}={morsel.value}" for name, morsel in jar.items()]
+    return "; ".join(pairs) or None
 
 
 def _generate_user_agent_pool() -> list[str]:

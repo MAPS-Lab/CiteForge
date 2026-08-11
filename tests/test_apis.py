@@ -6,6 +6,7 @@ import pytest
 
 from citeforge import api_configs, api_generics, bibtex_utils, doi_utils
 from citeforge.clients import scholar, search_apis
+from tests.fakes import FakeResponse, FakeSession
 from tests.test_data import API_SPECIFIC_PAPERS, KNOWN_PAPERS, OPENALEX_CANNED_WORK
 
 
@@ -74,6 +75,16 @@ def test_all_multiple_candidate_functions_exist() -> None:
         "openreview_search_papers_multiple",
     ):
         assert callable(getattr(search_apis, func_name, None)), f"Function {func_name} not found or not callable"
+
+
+def test_openreview_login_forwards_cookie_pairs_without_response_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = FakeResponse(200, headers={"Set-Cookie": "sid=abc; Path=/; HttpOnly; SameSite=Lax"})
+    monkeypatch.setattr(search_apis, "_get_session", lambda: FakeSession(response))
+    monkeypatch.setattr(search_apis, "_OPENREVIEW_SESSION", None)
+    monkeypatch.setattr(search_apis, "_OPENREVIEW_SESSION_CREATED_AT", 0.0)
+    headers = search_apis.openreview_login(("user", "password"))
+    assert headers is not None
+    assert headers["Cookie"] == "sid=abc"
 
 
 @pytest.mark.live

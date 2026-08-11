@@ -31,14 +31,14 @@ the Google Scholar format: ``"Authors - Journal/Venue, Year - domain.com"``.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
 from urllib.parse import quote
 
 from ..config import HTTP_TIMEOUT_DEFAULT, SERPLY_BASE
-from ..http_utils import http_fetch_bytes
+from ..exceptions import ALL_API_ERRORS
+from ..http_utils import _decode_json_bytes, http_fetch_bytes
 
 _log = logging.getLogger("CiteForge.serply")
 
@@ -74,9 +74,9 @@ def _serply_get(api_key: str, query: str, start: int = 0) -> dict[str, Any]:
 
     try:
         raw = http_fetch_bytes(url, headers, HTTP_TIMEOUT_DEFAULT)
-        return json.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
-    except Exception as exc:
-        _log.debug("Serply request failed: %s", exc)
+        return _decode_json_bytes(raw, url)
+    except ALL_API_ERRORS as exc:
+        _log.debug("Serply request failed: %s", type(exc).__name__)
         return {}
 
 
