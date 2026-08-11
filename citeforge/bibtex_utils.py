@@ -1,8 +1,8 @@
 """BibTeX parsing, serialization, and matching helpers.
 
 Parses BibTeX into field dictionaries and serializes them back with a stable
-field order, and provides the citation-key, filename, and duplicate-matching
-helpers. The serializer is deterministic so cache-hit runs produce
+field order, and provides citation-key and filename helpers. The serializer is
+deterministic so cache-hit runs produce
 byte-identical `.bib` files.
 """
 
@@ -18,25 +18,12 @@ from .config import (
     BIBTEX_FILENAME_MAX_LENGTH,
     BIBTEX_KEY_MAX_WORDS,
     CACHE_TTL_GEMINI_DAYS,
-    PREPRINT_DOI_PREFIXES,
-    SIM_DEDUP_COMPOSITE_THRESHOLD,
-    SIM_DEDUP_MULTI_SIGNAL_MIN,
-    SIM_FILE_DUPLICATE_THRESHOLD,
-    SIM_IDENTIFIER_TITLE_MIN,
 )
-from .id_utils import _norm_doi, external_ids_match, extract_arxiv_eprint
 from .log_utils import LogCategory, logger
 from .text_utils import (
-    _is_preprint_fields,
-    author_overlap_ratio,
-    authors_overlap,
-    compute_dedup_score,
     extract_year_from_any,
     normalize_title,
-    parse_authors_any,
     strip_accents,
-    title_is_truncated_match,
-    title_similarity,
 )
 
 _TITLE_STOP_WORDS: frozenset[str] = frozenset(
@@ -594,173 +581,3 @@ def short_filename_for_entry(
     filename = _build_filename(20)
     logger.debug(f"filename_ok | {filename}", category=LogCategory.CITEKEY)
     return filename
-
-
-def _years_diverge(af: dict[str, Any], bf: dict[str, Any], max_gap: int = 3) -> bool:
-    """Return True if both entries have years and they differ by more than max_gap."""
-    a_year = extract_year_from_any(af.get("year"), fallback=None)
-    b_year = extract_year_from_any(bf.get("year"), fallback=None)
-    return bool(a_year and b_year and abs(a_year - b_year) > max_gap)
-
-
-def _identifier_title_conflict(af: dict[str, Any], bf: dict[str, Any]) -> bool:
-    """Return True when two records carry clearly different titles.
-
-    "Clearly different" means both titles are present and their similarity is
-    below ``SIM_IDENTIFIER_TITLE_MIN``. Used to veto an exact DOI/arXiv identifier
-    match that stems from a mislabeled identifier (a source attaching the wrong id
-    to a work). When either title is missing there is nothing to contradict the
-    identifier, so the match is allowed to stand (returns False).
-    """
-    a_title = normalize_title(af.get("title"))
-    b_title = normalize_title(bf.get("title"))
-    if not a_title or not b_title:
-        return False
-    return title_similarity(a_title, b_title) < SIM_IDENTIFIER_TITLE_MIN
-
-
-def bibtex_entries_match_strict(entry_a: dict[str, Any], entry_b: dict[str, Any]) -> bool:
-    """Decide whether two BibTeX records refer to the same publication.
-
-    Compares DOI or arXiv identifiers first, then falls back to fuzzy title,
-    year, and author matching. Uses a multi-signal composite score when title
-    similarity alone is insufficient (e.g., preprint/published pairs with
-    rewritten titles).
-    """
-    if not entry_a or not entry_b:
-        return False
-    af = entry_a.get("fields") or {}
-    bf = entry_b.get("fields") or {}
-
-    # Fast path 1: DOI match (exact)
-    # When DOIs differ but one is a preprint, fall through to multi-signal scoring
-    a_doi = _norm_doi(af.get("doi"))
-    b_doi = _norm_doi(bf.get("doi"))
-    if a_doi and b_doi:
-        if a_doi == b_doi:
-            if _identifier_title_conflict(af, bf):
-                logger.debug(
-                    f"ENTRY_REJECT | DOI_EXACT_TITLE_CONFLICT | doi={a_doi} | result=False",
-                    category=LogCategory.DEDUP,
-                )
-                return False
-            logger.debug(f"ENTRY_MATCH | DOI_EXACT | doi={a_doi} | result=True", category=LogCategory.DEDUP)
-            return True
-        a_is_preprint = any(a_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
-        b_is_preprint = any(b_doi.startswith(p) for p in PREPRINT_DOI_PREFIXES)
-        if a_is_preprint == b_is_preprint:
-            # Both same class (both published or both preprint) with different DOIs = different papers
-            label = "DIFF_PREPRINT_DOI" if a_is_preprint else "DIFF_PUBLISHED_DOI"
-            logger.debug(
-                f"ENTRY_REJECT | {label} | a={a_doi} b={b_doi} | result=False",
-                category=LogCategory.DEDUP,
-            )
-            return False
-        # Exactly one DOI is a preprint, so fall through to multi-signal scoring
-        preprint_doi = a_doi if a_is_preprint else b_doi
-        published_doi = b_doi if a_is_preprint else a_doi
-        logger.debug(
-            f"ENTRY_FALLTHROUGH | PREPRINT_PUBLISHED_PAIR | preprint={preprint_doi} published={published_doi}",
-            category=LogCategory.DEDUP,
-        )
-
-    # Fast path 2: arXiv eprint match (exact)
-    a_ax = extract_arxiv_eprint(entry_a)
-    b_ax = extract_arxiv_eprint(entry_b)
-    if a_ax and b_ax:
-        if a_ax == b_ax:
-            if _identifier_title_conflict(af, bf):
-                logger.debug(
-                    f"ENTRY_REJECT | ARXIV_EXACT_TITLE_CONFLICT | id={a_ax} | result=False",
-                    category=LogCategory.DEDUP,
-                )
-                return False
-            logger.debug(f"ENTRY_MATCH | ARXIV_EXACT | id={a_ax} | result=True", category=LogCategory.DEDUP)
-            return True
-        logger.debug(f"ENTRY_REJECT | DIFF_ARXIV | a={a_ax} b={b_ax} | result=False", category=LogCategory.DEDUP)
-        return False
-
-    # Fast path 3: External ID match (cluster_id, S2, OpenAlex)
-    a_title = normalize_title(af.get("title"))
-    b_title = normalize_title(bf.get("title"))
-    if not a_title or not b_title:
-        logger.debug(
-            f"ENTRY_REJECT | MISSING_TITLE | a_has={bool(a_title)} b_has={bool(b_title)} | result=False",
-            category=LogCategory.DEDUP,
-        )
-        return False
-    title_sim = title_similarity(a_title, b_title)
-
-    if external_ids_match(af, bf) and title_sim >= SIM_DEDUP_MULTI_SIGNAL_MIN:
-        logger.debug(f"ENTRY_MATCH | EXTERNAL_ID | sim={title_sim:.3f} | result=True", category=LogCategory.DEDUP)
-        return True
-
-    # Fast path 4: High title similarity (backward-compatible original path)
-    if title_sim >= SIM_FILE_DUPLICATE_THRESHOLD:
-        if _years_diverge(af, bf):
-            logger.debug(
-                f"ENTRY_REJECT | HIGH_SIM_YEAR_MISMATCH | sim={title_sim:.3f} | result=False",
-                category=LogCategory.DEDUP,
-            )
-            return False
-        overlap = authors_overlap(af.get("author"), bf.get("author"))
-        logger.debug(
-            f"ENTRY_MATCH | HIGH_TITLE_SIM | sim={title_sim:.3f} | authors_overlap={overlap} | result={overlap}",
-            category=LogCategory.DEDUP,
-        )
-        return overlap
-
-    # Truncated title path: one title is a strict prefix of the other
-    # (Scholar truncation).  Requires author overlap + year within +/-3
-    # to avoid matching unrelated papers with common title prefixes.
-    if title_is_truncated_match(af.get("title"), bf.get("title")):
-        if _years_diverge(af, bf):
-            logger.debug(
-                "ENTRY_REJECT | TRUNCATED_YEAR_MISMATCH | result=False",
-                category=LogCategory.DEDUP,
-            )
-            return False
-        overlap = authors_overlap(af.get("author"), bf.get("author"))
-        logger.debug(
-            f"ENTRY_MATCH | TRUNCATED_TITLE | authors_overlap={overlap} | result={overlap}",
-            category=LogCategory.DEDUP,
-        )
-        if overlap:
-            return True
-
-    # Multi-signal fallback for moderate title similarity
-    if title_sim < SIM_DEDUP_MULTI_SIGNAL_MIN:
-        logger.debug(f"ENTRY_REJECT | BELOW_MIN_SIM | sim={title_sim:.3f} | result=False", category=LogCategory.DEDUP)
-        return False
-
-    a_preprint = _is_preprint_fields(af)
-    b_preprint = _is_preprint_fields(bf)
-
-    # Allow composite scoring for: preprint/published pairs, external ID matches,
-    # or very strong multi-author overlap with moderate title similarity.
-    # Require 2+ authors on each side to avoid single-author false positives.
-    a_authors = parse_authors_any(af.get("author", ""))
-    b_authors = parse_authors_any(bf.get("author", ""))
-    author_overlap = author_overlap_ratio(af.get("author", ""), bf.get("author", ""))
-    high_author_match = author_overlap >= 0.9 and title_sim >= 0.6 and len(a_authors) >= 2 and len(b_authors) >= 2
-
-    preprint_pair = a_preprint != b_preprint
-    ext_ids = external_ids_match(af, bf)
-
-    if not preprint_pair and not ext_ids and not high_author_match:
-        logger.debug("ENTRY_REJECT | GATE_CLOSED | result=False", category=LogCategory.DEDUP)
-        return False
-
-    # When the composite gate opened *because* this is a preprint/published pair, the XOR
-    # split is the precondition and must not also be banked inside the score (that is the
-    # double-count that tips distinct works over threshold). When the gate opened via an
-    # external-id or strong-author match instead, the split is independent evidence and is
-    # counted once.
-    score = compute_dedup_score(af, bf, count_preprint_xor=not preprint_pair)
-    result = score >= SIM_DEDUP_COMPOSITE_THRESHOLD
-    logger.debug(
-        f"ENTRY_COMPOSITE | score={score:.3f} | threshold={SIM_DEDUP_COMPOSITE_THRESHOLD} "
-        f"| preprint_pair={preprint_pair} | result={result}",
-        category=LogCategory.DEDUP,
-    )
-    return result

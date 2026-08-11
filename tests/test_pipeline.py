@@ -3,12 +3,17 @@ from __future__ import annotations
 import contextlib
 import urllib.error
 from email.message import Message
+from pathlib import Path
 from textwrap import dedent
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from citeforge.clients import search_apis
 from citeforge.doi_utils import process_validated_doi, validate_doi_candidate
+from citeforge.models import Record
+from citeforge.pipeline import article as article_mod
 
 # Shared baseline entries reused across DOI validation tests
 _BASELINE_FULL: dict[str, Any] = {
@@ -61,6 +66,26 @@ _ARXIV_DOI = "10.48550/arXiv.1706.03762"
 _BERT_DOI = "10.18653/v1/N19-1423"
 
 
+@pytest.mark.parametrize(("title", "reaches_baseline"), [("Games", False), ("Good Title", True)])
+def test_process_article_title_word_boundary_stops_before_or_reaches_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, title: str, reaches_baseline: bool
+) -> None:
+    """One word is rejected before enrichment, while two words reach its first boundary."""
+    boundary = MagicMock(side_effect=RuntimeError("baseline boundary reached"))
+    monkeypatch.setattr(article_mod.os.path, "exists", lambda _path: False)
+    monkeypatch.setattr(article_mod.bt, "build_minimal_bibtex", boundary)
+    rec = Record(name="Ada Lovelace", scholar_id="ada-id")
+    art = {"title": title, "authors": "Ada Lovelace", "year": "2024"}
+
+    if reaches_baseline:
+        with pytest.raises(RuntimeError, match="baseline boundary reached"):
+            article_mod.process_article(rec, art, None, str(tmp_path), None, None)
+        boundary.assert_called_once()
+    else:
+        assert article_mod.process_article(rec, art, None, str(tmp_path), None, None) == 0
+        boundary.assert_not_called()
+
+
 def _patch_doi_resolvers(
     *,
     csl: Any = None,
@@ -77,6 +102,55 @@ def _patch_doi_resolvers(
     stack.enter_context(patch.object(search_apis, "fetch_bibtex_via_doi", **bib_kwargs))
     stack.enter_context(patch.object(search_apis, "bibtex_from_csl", return_value=bibtex_from_csl))
     return stack
+
+
+def test_candidate_version_title_conflict_removes_merged_candidate_doi(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Rollback targets the conflicting candidate version, not the disk version."""
+
+    def collect_version_candidate(*args: Any, **kwargs: Any) -> None:
+        baseline_entry = args[6]
+        enr_list = args[8]
+        seen_dois = args[10]
+        seen_dois.add("10.20944/preprints202304.0409.v2")
+        if not enr_list:
+            candidate = {
+                "type": baseline_entry["type"],
+                "key": baseline_entry["key"],
+                "fields": {**baseline_entry["fields"], "doi": "10.20944/preprints202304.0409.v2"},
+            }
+            enr_list.append(("s2", candidate))
+
+    monkeypatch.setattr(article_mod, "_phase2_search", collect_version_candidate)
+
+    rec = Record(name="Ada Lovelace", scholar_id="ABC1234567")
+    author_dir = tmp_path / article_mod.format_author_dirname(rec.name, rec.scholar_id)
+    author_dir.mkdir(parents=True)
+    (author_dir / "unrelated.bib").write_text(
+        dedent("""\
+            @misc{Lovelace2024,
+              title = {The Ethical Frontier Navigating the Metaverse},
+              author = {Ada Lovelace},
+              year = {2024},
+              doi = {10.20944/preprints202304.0409.v1}
+            }
+        """),
+        encoding="utf-8",
+    )
+    art = {
+        "title": "A Completely Unrelated Coastal Radar Study",
+        "authors": "Ada Lovelace and Charles Babbage",
+        "year": "2024",
+        "source": "scholar",
+        "citation_id": "candidate-version-conflict",
+    }
+
+    assert article_mod.process_article(rec, art, None, str(tmp_path), None, None) == 1
+
+    output = "\n".join(path.read_text(encoding="utf-8") for path in author_dir.glob("*.bib"))
+    assert "10.20944/preprints202304.0409.v2" not in output
 
 
 def test_validate_doi_candidate_both_formats_match() -> None:

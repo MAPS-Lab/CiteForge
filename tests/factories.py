@@ -54,7 +54,7 @@ def enricher(source: str, **fields: str) -> Enricher:
     """Build the ``(source_name, entry)`` pair that ``merge_with_policy`` consumes.
 
     ``source`` must be a real name from ``config.TRUST_ORDER`` (e.g. ``crossref``,
-    ``csl``, ``datacite``, ``s2``, ``scholar_min``) so trust ranking is exercised
+    ``csl``, ``s2``, ``scholar_min``) so trust ranking is exercised
     against the production order, not an invented label.
     """
     return (source, entry(**fields))

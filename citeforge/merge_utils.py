@@ -27,9 +27,7 @@ from .config import (
     PREPRINT_ONLY_PUBLISHERS,
     PREPRINT_SERVERS,
     PUBLISHER_CORRECTIONS,
-    SIM_DEDUP_COMPOSITE_THRESHOLD,
     SIM_FILE_DUPLICATE_THRESHOLD,
-    SIM_PREPRINT_TITLE_THRESHOLD,
     TITLE_LENGTH_KEEP_RATIO,
     TRUST_DIFF_OVERRIDE_THRESHOLD,
     TRUST_ORDER,
@@ -38,24 +36,13 @@ from .fsscan import iter_author_bibs, iter_parsed_author_bibs
 from .id_utils import (
     _norm_doi,
     allowlisted_url,
-    doi_bases_match,
-    external_ids_match,
     extract_arxiv_eprint,
     is_secondary_doi,
     normalize_arxiv_metadata,
 )
+from .identity import IdentityContext, evaluate_identity
 from .log_utils import LogCategory, logger
-from .text_utils import (
-    author_overlap_ratio,
-    authors_overlap,
-    compute_dedup_score,
-    format_author_dirname,
-    has_placeholder,
-    normalize_title,
-    parse_authors_any,
-    title_is_truncated_match,
-    title_similarity,
-)
+from .text_utils import format_author_dirname, has_placeholder, parse_authors_any, title_similarity
 
 # _matches_journal_named_proceedings and infer_howpublished_from_doi are
 # re-exported for canonicalize.py and tests that access them as merge_utils.*.
@@ -491,7 +478,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
 
     # Only trust DOIs from registration agencies and authoritative databases
     if merged.get("doi") and not has_doi_conflict:
-        trusted_doi_sources = {"csl", "doi_bibtex", "datacite", "pubmed", "europepmc", "crossref"}
+        trusted_doi_sources = {"csl", "doi_bibtex", "pubmed", "europepmc", "crossref"}
         merged_doi_norm = _norm_doi(merged["doi"])
         doi_trusted_src = next(
             (
@@ -929,205 +916,6 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     return {"type": etype, "key": primary.get("key"), "fields": merged}
 
 
-def _is_duplicate_bib_entry(
-    existing_entry: dict[str, Any],
-    entry: dict[str, Any],
-    new_doi: str,
-    existing_filename: str,
-) -> bool:
-    """Decide whether *existing_entry* (from *existing_filename*) and *entry*
-    describe the same publication.
-
-    Match ladder, in order. Exact DOI, DOI version variants, preprint/published
-    DOI pairs (XOR), external IDs, citation-key matches (title- or
-    author-verified), high title similarity, truncated-title prefix, strong
-    author overlap with composite score, and a relaxed preprint/published pair
-    with evidence on the published side. Differing-DOI entries that fail the
-    XOR pair test never fall through to the weaker text heuristics.
-    """
-    new_fields = entry.get("fields", {})
-    existing_fields = existing_entry.get("fields", {})
-    existing_doi = _norm_doi(existing_fields.get("doi")) or ""
-
-    if existing_doi and new_doi and existing_doi == new_doi:
-        logger.debug(
-            f"FILE_MATCH | DOI_EXACT | file={existing_filename} | doi={existing_doi}",
-            category=LogCategory.DEDUP,
-        )
-        return True
-
-    # DOI version variants (e.g. Preprints.org .v1 / .v2)
-    if existing_doi and new_doi and doi_bases_match(existing_doi, new_doi):
-        logger.debug(
-            f"FILE_MATCH | DOI_VERSION | file={existing_filename} | doi_a={existing_doi} | doi_b={new_doi}",
-            category=LogCategory.DEDUP,
-        )
-        return True
-
-    # Different DOIs only match as preprint/published pairs (XOR)
-    if existing_doi and new_doi and existing_doi != new_doi:
-        e_preprint = _is_preprint_doi(existing_doi)
-        n_preprint = _is_preprint_doi(new_doi)
-        if e_preprint != n_preprint:
-            # If both have distinct arXiv eprint IDs, they are
-            # different papers -- skip preprint pair matching.
-            e_eprint = extract_arxiv_eprint(existing_entry)
-            n_eprint = extract_arxiv_eprint(entry)
-            if e_eprint and n_eprint and e_eprint != n_eprint:
-                return False
-            e_title = existing_fields.get("title", "")
-            n_title = new_fields.get("title", "")
-            preprint_sim = title_similarity(e_title, n_title)
-            if preprint_sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-                # The preprint/published (XOR) split is already the
-                # precondition here, so it is excluded from the composite
-                # to avoid double-counting. Excluding it keeps the score
-                # exact and predicate-independent, so a genuine twin whose
-                # published side still carries a leaked preprint journal is
-                # scored correctly.
-                effective_score = compute_dedup_score(existing_fields, new_fields, count_preprint_xor=False)
-                if effective_score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
-                    logger.debug(
-                        f"FILE_MATCH | PREPRINT_PAIR | file={existing_filename}"
-                        f" | sim={preprint_sim:.3f} | effective={effective_score:.3f}"
-                        f" | e_preprint={e_preprint} n_preprint={n_preprint}",
-                        category=LogCategory.DEDUP,
-                    )
-                    return True
-        return False
-
-    if external_ids_match(existing_fields, new_fields):
-        existing_title = existing_fields.get("title", "")
-        new_title = new_fields.get("title", "")
-        sim = title_similarity(existing_title, new_title)
-        if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-            logger.debug(
-                f"FILE_MATCH | EXTERNAL_ID | file={existing_filename} | sim={sim:.3f}",
-                category=LogCategory.DEDUP,
-            )
-            return True
-
-    existing_title = existing_fields.get("title", "")
-    new_title = new_fields.get("title", "")
-
-    # Citation key match requires title verification to avoid
-    # Gemini generating identical short titles for different papers
-    existing_key = existing_entry.get("key", "").strip()
-    new_key = entry.get("key", "").strip()
-    if existing_key and new_key and existing_key == new_key:
-        key_title_sim = title_similarity(existing_title, new_title)
-        # Also check if shorter title is a prefix of longer (truncated stub)
-        _e_norm = normalize_title(existing_title)
-        _n_norm = normalize_title(new_title)
-        _is_prefix = (_e_norm.startswith(_n_norm) and len(_n_norm) > 20) or (
-            _n_norm.startswith(_e_norm) and len(_e_norm) > 20
-        )
-        if key_title_sim >= SIM_FILE_DUPLICATE_THRESHOLD or _is_prefix:
-            logger.debug(
-                f"FILE_MATCH | KEY_TITLE | file={existing_filename} | key={existing_key} | sim={key_title_sim:.3f}",
-                category=LogCategory.DEDUP,
-            )
-            return True
-        # Keys match but titles differ -- check author overlap.
-        # Same key + strong author overlap = same paper with
-        # title change between preprint and publication.
-        _key_author_overlap = author_overlap_ratio(existing_fields.get("author"), new_fields.get("author"))
-        if _key_author_overlap >= 0.8 and key_title_sim >= 0.55:
-            logger.debug(
-                f"FILE_MATCH | KEY_AUTHOR_OVERLAP | file={existing_filename} "
-                f"| key={existing_key} | sim={key_title_sim:.3f} "
-                f"| author_overlap={_key_author_overlap:.3f}",
-                category=LogCategory.DEDUP,
-            )
-            return True
-
-        # Keys match but titles differ significantly -- check if
-        # this is a preprint/published pair before giving up
-        if existing_doi and new_doi and existing_doi != new_doi:
-            e_preprint = _is_preprint_doi(existing_doi)
-            n_preprint = _is_preprint_doi(new_doi)
-            # Distinct arXiv eprint IDs -> different papers
-            ke_eprint = extract_arxiv_eprint(existing_entry)
-            kn_eprint = extract_arxiv_eprint(entry)
-            if ke_eprint and kn_eprint and ke_eprint != kn_eprint:
-                return False
-            if (
-                (e_preprint ^ n_preprint)
-                and key_title_sim >= SIM_PREPRINT_TITLE_THRESHOLD
-                and authors_overlap(existing_fields.get("author"), new_fields.get("author"))
-            ):
-                key_preprint_score = compute_dedup_score(existing_fields, new_fields, count_preprint_xor=False)
-                logger.debug(
-                    f"FILE_MATCH | KEY_PREPRINT_PAIR | file={existing_filename} "
-                    f"| sim={key_title_sim:.3f} | composite={key_preprint_score:.3f}",
-                    category=LogCategory.DEDUP,
-                )
-                return True
-        return False
-
-    # Compare by title similarity alone
-    sim = title_similarity(existing_title, new_title)
-    if sim >= SIM_FILE_DUPLICATE_THRESHOLD:
-        logger.debug(
-            f"FILE_MATCH | HIGH_TITLE_SIM | file={existing_filename} | sim={sim:.3f}",
-            category=LogCategory.DEDUP,
-        )
-        return True
-
-    # Truncated title fallback where one title is a prefix of the other
-    if title_is_truncated_match(existing_title, new_title) and authors_overlap(
-        existing_fields.get("author"), new_fields.get("author")
-    ):
-        logger.debug(
-            f"FILE_MATCH | TRUNCATED | file={existing_filename} | authors_overlap=True",
-            category=LogCategory.DEDUP,
-        )
-        return True
-
-    # Strong author overlap on a multi-author team with moderate title similarity
-    if sim >= 0.6:
-        e_authors = parse_authors_any(existing_fields.get("author", ""))
-        n_authors = parse_authors_any(new_fields.get("author", ""))
-        if len(e_authors) >= 2 and len(n_authors) >= 2:
-            overlap = author_overlap_ratio(existing_fields.get("author"), new_fields.get("author"))
-            if overlap >= 0.9:
-                score = compute_dedup_score(existing_fields, new_fields)
-                if score >= SIM_DEDUP_COMPOSITE_THRESHOLD:
-                    logger.debug(
-                        f"FILE_MATCH | STRONG_AUTHOR | file={existing_filename} "
-                        f"| overlap={overlap:.3f} | sim={sim:.3f} "
-                        f"| composite={score:.3f} "
-                        f"| n_authors_a={len(e_authors)} n_authors_b={len(n_authors)}",
-                        category=LogCategory.DEDUP,
-                    )
-                    return True
-
-    # Preprint/published pair with evidence on the published side
-    if sim >= SIM_PREPRINT_TITLE_THRESHOLD:
-        e_journal = existing_fields.get("journal", "").lower()
-        n_journal = new_fields.get("journal", "").lower()
-        # Deliberately broader than the canonical fields-level predicate
-        # text_utils._is_preprint_fields: _is_preprint_doi delegates to
-        # id_utils.is_secondary_doi, whose DOI branch also matches
-        # DATA_DOI_PREFIXES (Zenodo, Figshare), which _is_preprint_fields
-        # does not. The journal-substring branch is identical.
-        e_preprint = _is_preprint_doi(existing_doi) or any(ps in e_journal for ps in PREPRINT_SERVERS)
-        n_preprint = _is_preprint_doi(new_doi) or any(ps in n_journal for ps in PREPRINT_SERVERS)
-        if (e_preprint ^ n_preprint) and authors_overlap(existing_fields.get("author"), new_fields.get("author")):
-            published_has_evidence = (e_preprint and (new_doi or n_journal)) or (
-                n_preprint and (existing_doi or e_journal)
-            )
-            if published_has_evidence:
-                logger.debug(
-                    f"FILE_MATCH | PREPRINT_RELAXED | file={existing_filename} | sim={sim:.3f} "
-                    f"| evidence=preprint_published_pair",
-                    category=LogCategory.DEDUP,
-                )
-                return True
-
-    return False
-
-
 def save_entry_to_file(
     out_dir: str,
     author_id: str,
@@ -1189,7 +977,13 @@ def save_entry_to_file(
         skip_basename=prefer_basename,
         on_read_error=_log_read_error,
     ):
-        if _is_duplicate_bib_entry(scanned_entry, entry, new_doi, existing_filename):
+        evidence = evaluate_identity(scanned_entry, entry, context=IdentityContext.DISK_SURVIVOR)
+        logger.debug(
+            f"FILE_IDENTITY | file={existing_filename} | reason={evidence.reason.value}"
+            f" | sim={(evidence.title_similarity or 0.0):.3f} | result={evidence.verdict}",
+            category=LogCategory.DEDUP,
+        )
+        if evidence.verdict:
             duplicate_found = True
             duplicate_path = existing_path
             break

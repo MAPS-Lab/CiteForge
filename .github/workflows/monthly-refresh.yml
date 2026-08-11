@@ -32,8 +32,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --require-hashes -r requirements.lock
-          pip install -e . --no-deps
+          pip install --require-hashes -r requirements-build.lock -r requirements.lock
+          pip install --no-build-isolation --no-deps -e .
 
       - name: Write API keys from secrets
         env:
@@ -58,6 +58,7 @@ jobs:
             echo "CACHE_ENCRYPTION_KEY unset — skipping cache restore (fresh start)"
           elif git ls-remote --heads origin data-cache | grep -q data-cache; then
             git fetch origin data-cache
+            rm -f /tmp/api_cache.tar.gz.enc /tmp/api_cache.tar.gz
             if git show origin/data-cache:api_cache.tar.gz.enc > /tmp/api_cache.tar.gz.enc 2>/dev/null; then
               if openssl enc -d -aes-256-cbc -pbkdf2 -pass env:CACHE_ENCRYPTION_KEY \
                    -in /tmp/api_cache.tar.gz.enc -out /tmp/api_cache.tar.gz 2>/dev/null; then
@@ -86,35 +87,54 @@ jobs:
               echo "CACHE_ENCRYPTION_KEY unset — skipping cache push (raw API responses must not reach the public data-cache branch)"
               return 0
             fi
-            if [ -d data/api_cache ] && [ "$(ls -A data/api_cache 2>/dev/null)" ]; then
-              entries=$(find data/api_cache -type f -name '*.json' | wc -l)
-              tar czf /tmp/api_cache.tar.gz -C data api_cache
+            if [ ! -d data/api_cache ]; then
+              return 0
+            fi
+            first_entry=$(find data/api_cache -mindepth 1 -print -quit) || return 1
+            if [ -z "$first_entry" ]; then
+              return 0
+            fi
+
+            entries=$(find data/api_cache -type f -name '*.json' | wc -l) || return 1
+            cache_tmp=$(mktemp -d) || return 1
+            (
+              trap 'status=$?; rm -rf "$cache_tmp" || status=1; exit "$status"' EXIT
+              archive_path="$cache_tmp/api_cache.tar.gz"
+              encrypted_path="$cache_tmp/api_cache.tar.gz.enc"
+              cache_dir="$cache_tmp/repo"
+              rm -f "$archive_path" "$encrypted_path" || exit 1
+              tar czf "$archive_path" -C data api_cache || exit 1
               openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:CACHE_ENCRYPTION_KEY \
-                -in /tmp/api_cache.tar.gz -out /tmp/api_cache.tar.gz.enc
-              size=$(du -h /tmp/api_cache.tar.gz.enc | cut -f1)
+                -in "$archive_path" -out "$encrypted_path" || exit 1
+              size=$(du -h "$encrypted_path" | cut -f1) || exit 1
               echo "Saving $entries cache entries ($size encrypted)"
 
-              # Push cache without disturbing the working tree
-              cache_dir=$(mktemp -d)
-              cp /tmp/api_cache.tar.gz.enc "$cache_dir/"
-              cd "$cache_dir"
-              git init -q
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git checkout --orphan data-cache
-              git add api_cache.tar.gz.enc
-              git commit -q -m "cache: $(date +%Y-%m-%d) — $entries entries ($size, encrypted)"
-              git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+              # Push cache from an isolated temporary repository without disturbing the working tree.
+              mkdir "$cache_dir" || exit 1
+              cp "$encrypted_path" "$cache_dir/api_cache.tar.gz.enc" || exit 1
+              cd "$cache_dir" || exit 1
+              git init -q || exit 1
+              git config user.name "github-actions[bot]" || exit 1
+              git config user.email "github-actions[bot]@users.noreply.github.com" || exit 1
+              git checkout --orphan data-cache || exit 1
+              git add api_cache.tar.gz.enc || exit 1
+              commit_date=$(date +%Y-%m-%d) || exit 1
+              git commit -q -m "cache: $commit_date — $entries entries ($size, encrypted)" || exit 1
+              git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" || exit 1
+              pushed=false
               for attempt in 1 2 3; do
                 if git push origin data-cache --force -q 2>/dev/null; then
+                  pushed=true
                   break
                 fi
                 echo "Cache push attempt $attempt failed — retrying in ${attempt}0s..."
-                sleep "${attempt}0"
+                sleep "${attempt}0" || exit 1
               done
-              cd -
-              rm -rf "$cache_dir"
-            fi
+              if [ "$pushed" != true ]; then
+                echo "::error::Cache push failed after 3 attempts"
+                exit 1
+              fi
+            )
           }
 
           git config user.name  "github-actions[bot]"
@@ -135,10 +155,14 @@ jobs:
             if [ "$rc" -ne 0 ]; then
               echo "::error::Pipeline run $i failed with exit code $rc"
               echo "Saving cache before exit..."
-              save_cache "$i"
+              cache_rc=0
+              save_cache "$i" || cache_rc=$?
               echo "converged=false" >> "$GITHUB_OUTPUT"
               echo "runs_completed=$i" >> "$GITHUB_OUTPUT"
               echo "last_api_calls=-1" >> "$GITHUB_OUTPUT"
+              if [ "$cache_rc" -ne 0 ]; then
+                echo "::error::Cache save failed while handling pipeline failure"
+              fi
               exit 1
             fi
 
@@ -148,7 +172,10 @@ jobs:
             echo "Run $i — API calls: $total (prev: $prev_total)"
 
             # Save cache after every iteration
-            save_cache "$i"
+            if ! save_cache "$i"; then
+              echo "::error::Cache save failed after successful pipeline run $i"
+              exit 1
+            fi
 
             # Delta-based convergence: stable when API call count changes
             # by at most CONVERGENCE_THRESHOLD across 2 consecutive runs.
@@ -242,15 +269,15 @@ jobs:
             echo "::warning::Reached ${MAX_MONTHLY_RUNS} runs this month (${month_count}) — not re-triggering to avoid runaway; investigate convergence."
             exit 0
           fi
-          echo "Pipeline did not converge — re-triggering with saved cache"
+          echo "Pipeline did not converge — re-triggering; any cache will be reused if persistence succeeded"
           gh workflow run "Monthly Pipeline Refresh" --repo "${{ github.repository }}"
-          echo "::notice::Re-triggered workflow. Cache was saved incrementally — next run resumes from where this one stopped."
+          echo "::notice::Re-triggered workflow. The next run will reuse any cache that was successfully persisted."
 
       - name: Fail if pipeline errored
         if: needs.refresh.result == 'failure'
         run: |
           echo "::error::Pipeline failed with errors. Check the refresh job logs."
-          echo "Cache was saved before failure — manual re-trigger will resume from last good state."
+          echo "Cache persistence was not guaranteed — manual re-trigger will resume from any cache that was successfully saved."
           exit 1
 
   sync-website:

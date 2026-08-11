@@ -1,11 +1,7 @@
 """Google Scholar access via the Serply REST API (api.serply.io).
 
-Exposes two public functions.
-
-- ``serply_fetch_citation`` (title and author search for citation detail), the
-  entry point used in production by ``scholar.py``
-- ``serply_fetch_author_publications`` (keyword search by author name), a
-  secondary entry point exercised by the tests
+Exposes ``serply_fetch_citation`` for title and author citation details. It is
+used in production by ``scholar.py``.
 
 All calls are stateless HTTP GETs through ``http_fetch_bytes``, so no
 locking is required.
@@ -35,7 +31,6 @@ the Google Scholar format: ``"Authors - Journal/Venue, Year - domain.com"``.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -46,9 +41,6 @@ from ..config import HTTP_TIMEOUT_DEFAULT, SERPLY_BASE
 from ..http_utils import http_fetch_bytes
 
 _log = logging.getLogger("CiteForge.serply")
-
-# Maximum pages to fetch when paginating author publications
-_MAX_PAGES = 10
 
 # Matches a 4-digit year (1900-2099) in the description string
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
@@ -86,11 +78,6 @@ def _serply_get(api_key: str, query: str, start: int = 0) -> dict[str, Any]:
     except Exception as exc:
         _log.debug("Serply request failed: %s", exc)
         return {}
-
-
-def _make_citation_id(title: str) -> str:
-    """Generate a synthetic citation ID from a title hash."""
-    return hashlib.sha256(title.lower().encode("utf-8")).hexdigest()[:12]
 
 
 def _parse_description(description: str) -> tuple[str, str]:
@@ -161,82 +148,6 @@ def _extract_authors(item: dict[str, Any]) -> str:
             return author_part
 
     return ""
-
-
-def serply_fetch_author_publications(
-    api_key: str,
-    author_name: str,
-    num: int = 100,
-) -> dict[str, Any]:
-    """Fetch publications for an author via Serply keyword search.
-
-    Since Serply has no author profile endpoint, this searches by
-    ``"{author_name}"`` (quoted name) and paginates to collect up to *num*
-    results.  The ``author:`` prefix is a Google Scholar operator that Serply
-    does not forward, so we omit it.
-
-    Returns a dict matching the CiteForge ``fetch_author_publications()``
-    contract::
-
-        {"articles": [...], "search_metadata": {"status": "Success", "source": "serply"}}
-    """
-    if not api_key:
-        return {}
-
-    query = f'"{author_name}"'
-    articles: list[dict[str, Any]] = []
-    start = 0
-
-    while len(articles) < num and start < _MAX_PAGES * 10:
-        data = _serply_get(api_key, query, start=start)
-        results = data.get("articles") or []
-
-        if not results:
-            break
-
-        for item in results:
-            title = item.get("title") or ""
-            if not title:
-                continue
-
-            authors_str = _extract_authors(item)
-            description = item.get("description") or ""
-            year_str, journal = _parse_description(description)
-
-            year_int: int | str = int(year_str) if year_str.isdigit() else ""
-
-            citation_id = _make_citation_id(title)
-
-            article: dict[str, Any] = {
-                "title": title,
-                "authors": authors_str,
-                "year": year_int,
-                "citation_id": citation_id,
-                "result_id": citation_id,
-                "source": "scholar",
-            }
-
-            if journal:
-                article["publication_info"] = {"summary": journal}
-                article["publication"] = journal
-
-            link = item.get("link") or ""
-            if link:
-                article["url"] = link
-
-            articles.append(article)
-
-        if len(results) < 10 or len(articles) >= num:
-            break
-
-        start += len(results)
-
-    articles = articles[:num]
-
-    return {
-        "articles": articles,
-        "search_metadata": {"status": "Success", "source": "serply"},
-    }
 
 
 def serply_fetch_citation(

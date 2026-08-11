@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from citeforge import bibtex_utils as bt
 from citeforge import id_utils, merge_utils, text_utils
@@ -24,16 +25,13 @@ from citeforge.api_generics import (
 )
 from citeforge.bibtex_build import determine_entry_type
 from citeforge.bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict
-from citeforge.clients.scholar import _deduplicate_publication_list
+from citeforge.canonicalize import _fixup_bib_entry
 from citeforge.clients.search_apis import bibtex_from_csl
-from citeforge.clients.utility_apis import gemini_generate_short_title, orcid_fetch_works
+from citeforge.clients.utility_apis import gemini_generate_short_title
 from citeforge.config import (
     ABBREVIATED_VENUE_MAP,
-    MIN_TITLE_WORDS,
     OPENREVIEW_SESSION_TTL_SECS,
     PAGES_MAX_DIGITS,
-    PREPRINT_SERVERS,
-    SIM_MERGE_DUPLICATE_THRESHOLD,
 )
 from citeforge.doi_utils import validate_doi_candidate
 from citeforge.http_utils import (
@@ -43,9 +41,10 @@ from citeforge.http_utils import (
     _http_request,
     http_post_json,
 )
-from citeforge.io_utils import read_records
+from citeforge.identity import IdentityContext, IdentityEvidence, IdentityReason, evaluate_identity
 from citeforge.merge_utils import merge_with_policy, save_entry_to_file
 from citeforge.text_utils import author_name_matches, author_overlap_ratio
+from citeforge.textnorm import _is_corrupted_title, _is_garbage_title
 from tests.conftest import extract_bibtex_field
 
 
@@ -249,7 +248,10 @@ class TestDoiValidationSkipsBibtexWhenCslMatches:
             "}\n"
         )
 
-        with patch("citeforge.doi_utils.bt.bibtex_entries_match_strict", return_value=True):
+        with patch(
+            "citeforge.doi_utils.evaluate_identity",
+            return_value=IdentityEvidence(True, IdentityReason.DOI_EXACT),
+        ):
             csl_matched, bibtex_matched, _, _ = validate_doi_candidate(
                 doi="10.1234/test",
                 baseline_entry=baseline_entry,
@@ -259,62 +261,6 @@ class TestDoiValidationSkipsBibtexWhenCslMatches:
         assert csl_matched is True
         mock_fetch_bibtex.assert_not_called()
         assert bibtex_matched is False
-
-
-class TestDeduplicatePublicationList:
-    """Test _deduplicate_publication_list from citeforge/clients/scholar.py."""
-
-    def test_empty_list(self) -> None:
-        """Empty input should return empty output."""
-        result = _deduplicate_publication_list([])
-        assert result == []
-
-    def test_single_item(self) -> None:
-        """A single publication should pass through unchanged."""
-        pubs = [{"title": "Deep Learning Survey", "year": 2024, "authors": ["Jane Doe"]}]
-        result = _deduplicate_publication_list(pubs)
-        assert len(result) == 1
-        assert result[0]["title"] == "Deep Learning Survey"
-
-    def test_exact_duplicate_titles_reduced(self) -> None:
-        """Two entries with identical titles should collapse to one."""
-        pubs = [
-            {"title": "Attention Is All You Need", "year": 2017, "authors": ["Ashish Vaswani"]},
-            {"title": "Attention Is All You Need", "year": 2017, "authors": ["Ashish Vaswani"]},
-        ]
-        result = _deduplicate_publication_list(pubs)
-        assert len(result) == 1
-
-    def test_different_titles_both_kept(self) -> None:
-        """Two entries with clearly different titles should both be kept."""
-        pubs = [
-            {"title": "Attention Is All You Need", "year": 2017, "authors": ["Ashish Vaswani"]},
-            {"title": "Deep Residual Learning for Image Recognition", "year": 2016, "authors": ["Kaiming He"]},
-        ]
-        result = _deduplicate_publication_list(pubs)
-        assert len(result) == 2
-
-
-class TestIsSecondaryDoi:
-    """Fix 1: is_secondary_doi classifies preprint and data DOIs."""
-
-    def test_arxiv_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.48550/arxiv.2401.12345")
-
-    def test_psyarxiv_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.31234/osf.io/abcde")
-
-    def test_figshare_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.6084/m9.figshare.12345678")
-
-    def test_zenodo_doi(self) -> None:
-        assert id_utils.is_secondary_doi("10.5281/zenodo.7654321")
-
-    def test_published_doi(self) -> None:
-        assert not id_utils.is_secondary_doi("10.1145/1234567.1234568")
-
-    def test_nature_doi(self) -> None:
-        assert not id_utils.is_secondary_doi("10.1038/s41586-024-00001-1")
 
 
 class TestPagesMaxDigits:
@@ -398,34 +344,6 @@ class TestTrimTitleArtifacts:
         """'Check' in the middle of a title should not be affected."""
         result = text_utils.trim_title_default("How to Check for Updates in Software")
         assert result == "How to Check for Updates in Software"
-
-
-class TestMinTitleWords:
-    """Fix 6: Single-word titles rejected as Scholar artifacts."""
-
-    def test_single_word_below_minimum(self) -> None:
-        """A single-word title has fewer words than MIN_TITLE_WORDS threshold."""
-        title = "Games"
-        word_count = len(title.split())
-        assert word_count < MIN_TITLE_WORDS, (
-            f"Single-word title should be below MIN_TITLE_WORDS={MIN_TITLE_WORDS}, got {word_count}"
-        )
-
-    def test_two_word_title_meets_minimum(self) -> None:
-        """A two-word title should meet the MIN_TITLE_WORDS threshold."""
-        title = "Good Title"
-        word_count = len(title.split())
-        assert word_count >= MIN_TITLE_WORDS, (
-            f"Two-word title should meet MIN_TITLE_WORDS={MIN_TITLE_WORDS}, got {word_count}"
-        )
-
-    def test_normal_title_well_above_minimum(self) -> None:
-        """Normal academic title should be well above the minimum word threshold."""
-        title = "A Comprehensive Survey on Machine Learning"
-        word_count = len(title.split())
-        assert word_count >= MIN_TITLE_WORDS, (
-            f"Normal title should be above MIN_TITLE_WORDS={MIN_TITLE_WORDS}, got {word_count}"
-        )
 
 
 class TestArxivJournalConsistency:
@@ -513,7 +431,7 @@ class TestStrongAuthorDedupGate:
         assert 0.6 <= sim < 0.95, f"Expected moderate title sim (0.6-0.95), got {sim}"
 
         # Fix 8: the strict matcher should detect this as a duplicate
-        result = bt.bibtex_entries_match_strict(entry_a, entry_b)
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
         assert result is True, "Same authors + moderate title sim should match via composite scoring"
 
     def test_different_authors_not_matched(self) -> None:
@@ -536,7 +454,7 @@ class TestStrongAuthorDedupGate:
                 "year": "2024",
             },
         }
-        result = bt.bibtex_entries_match_strict(entry_a, entry_b)
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
         assert result is False
 
 
@@ -923,14 +841,6 @@ class TestJournalUrlNormalization:
 class TestTokenBucketRateLimiter:
     """Tests for the TokenBucketRateLimiter in http_utils."""
 
-    def test_acquire_respects_rate(self) -> None:
-        """Acquire should block when tokens are exhausted."""
-        limiter = TokenBucketRateLimiter(rate=100.0, burst=1)
-        start = time.monotonic()
-        limiter.acquire()
-        elapsed = time.monotonic() - start
-        assert elapsed < 0.1
-
     def test_burst_allows_multiple_immediate(self) -> None:
         """Burst > 1 should allow multiple immediate acquires."""
         limiter = TokenBucketRateLimiter(rate=100.0, burst=3)
@@ -1128,39 +1038,6 @@ class TestOpenReviewSessionExpiry:
         _reset_openreview_session()
 
 
-class TestBaselineThresholdConsistency:
-    """Baseline file matching should use >= (not >) for threshold comparison."""
-
-    def test_at_threshold_loads_existing_file(self) -> None:
-        """Titles with similarity exactly at SIM_MERGE_DUPLICATE_THRESHOLD should match."""
-        title = "Exact Same Title For Testing"
-        sim = text_utils.title_similarity(title, title)
-        assert sim >= SIM_MERGE_DUPLICATE_THRESHOLD
-
-    def test_slightly_below_threshold_does_not_match(self) -> None:
-        """Clearly different titles should have similarity below the threshold."""
-        sim = text_utils.title_similarity(
-            "Machine Learning for Healthcare",
-            "Quantum Computing Applications",
-        )
-        assert sim < SIM_MERGE_DUPLICATE_THRESHOLD
-
-
-class TestOrcidUsesHttpGetJson:
-    """ORCID should go through http_get_json (shared HTTP infrastructure)."""
-
-    @patch("citeforge.clients.utility_apis.http_get_json")
-    def test_orcid_calls_http_get_json(self, mock_get: MagicMock) -> None:
-        """orcid_fetch_works should use http_get_json, not urllib."""
-        mock_get.return_value = {"group": []}
-        with patch("citeforge.clients.utility_apis.response_cache") as mock_cache:
-            mock_cache.get.return_value = None
-            orcid_fetch_works("0000-0001-2345-6789")
-        mock_get.assert_called_once()
-        url = mock_get.call_args[0][0]
-        assert "pub.orcid.org" in url
-
-
 class TestGeminiUsesHttpPostJson:
     """Gemini should go through http_post_json (shared HTTP infrastructure)."""
 
@@ -1192,6 +1069,19 @@ class TestGeminiUsesHttpPostJson:
         mock_post.side_effect = ValueError("No JSON object could be decoded")
         result = gemini_generate_short_title("Some Title", "fake-key")
         assert result is None
+
+    @patch("citeforge.clients.utility_apis.http_post_json")
+    def test_gemini_does_not_redrive_final_429_from_shared_helper(self, mock_post: MagicMock) -> None:
+        """The shared helper owns 429 transport retries, so Gemini calls it only once."""
+        response = requests.Response()
+        response.status_code = 429
+        mock_post.side_effect = requests.exceptions.HTTPError("429 exhausted", response=response)
+
+        with patch("time.sleep"):
+            result = gemini_generate_short_title("Some Title", "fake-key")
+
+        assert result is None
+        mock_post.assert_called_once()
 
 
 class TestHttpRequestPostDispatch:
@@ -1230,20 +1120,6 @@ class TestHttpRequestPostDispatch:
             mock_session.get.assert_called_once()
             mock_session.post.assert_not_called()
             assert result == b'{"ok": true}'
-
-
-class TestRateLimiterEntries:
-    """ORCID and DataCite should have rate limiter entries in config."""
-
-    def test_orcid_rate_limiter_exists(self) -> None:
-        """_get_rate_limiter should return a limiter for 'orcid' namespace."""
-        limiter = _get_rate_limiter("orcid")
-        assert limiter is not None
-
-    def test_datacite_rate_limiter_exists(self) -> None:
-        """_get_rate_limiter should return a limiter for 'datacite' namespace."""
-        limiter = _get_rate_limiter("datacite")
-        assert limiter is not None
 
 
 class TestOpenReviewTTLBoundary:
@@ -1359,41 +1235,6 @@ class TestAbbreviatedVenueExpansion:
         }
         result = merge_with_policy(primary, [])
         assert result["fields"]["journal"] == "Nature Machine Intelligence"
-
-
-class TestBiorxivDoiPrefix:
-    """bioRxiv DOIs with any 10.1101/ prefix should be classified as preprint."""
-
-    def test_biorxiv_old_numeric_doi(self) -> None:
-        """Pre-2020 bioRxiv DOI (no date prefix) should be secondary."""
-        assert id_utils.is_secondary_doi("10.1101/123456")
-
-    def test_biorxiv_date_prefixed_doi(self) -> None:
-        """Post-2020 bioRxiv DOI (date prefix) should be secondary."""
-        assert id_utils.is_secondary_doi("10.1101/2021.01.01.123456")
-
-    def test_medrxiv_doi(self) -> None:
-        """medRxiv DOIs also use 10.1101/ prefix."""
-        assert id_utils.is_secondary_doi("10.1101/2022.05.15.492001")
-
-    def test_non_biorxiv_doi(self) -> None:
-        """Regular published DOI should NOT be classified as secondary."""
-        assert not id_utils.is_secondary_doi("10.1038/s41586-024-00001-1")
-
-
-class TestDoiUrlDecoding:
-    """_norm_doi should URL-decode percent-encoded characters."""
-
-    def test_percent_encoded_slash(self) -> None:
-        """DOI with %2F should normalize to match plain slash version."""
-        d1 = id_utils.normalize_doi("10.1000/xyz%2Fabc")
-        d2 = id_utils.normalize_doi("10.1000/xyz/abc")
-        assert d1 == d2
-
-    def test_double_encoded(self) -> None:
-        """URL-formatted DOI with encoding should normalize correctly."""
-        d = id_utils.normalize_doi("https://doi.org/10.1234%2Ftest")
-        assert d == "10.1234/test"
 
 
 class TestNobleParticleMatching:
@@ -1600,7 +1441,7 @@ class TestBothPreprintDoiDedup:
                 "journal": "arXiv e-prints",
             },
         }
-        result = bt.bibtex_entries_match_strict(entry_a, entry_b)
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
         assert result is False
 
 
@@ -1631,7 +1472,7 @@ class TestYearGapWidened:
                 "journal": "ACM Computing Surveys",
             },
         }
-        result = bt.bibtex_entries_match_strict(entry_a, entry_b)
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
         assert result is True
 
     def test_5_year_gap_rejected(self) -> None:
@@ -1658,7 +1499,7 @@ class TestYearGapWidened:
                 "journal": "ACM Computing Surveys",
             },
         }
-        result = bt.bibtex_entries_match_strict(entry_a, entry_b)
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
         assert result is False
 
 
@@ -1863,25 +1704,6 @@ class TestCslArticleTypePreserved:
         assert "journal" not in merged["fields"]
 
 
-class TestPreprintServersNoFalsePositives:
-    """Journals with 'preprint' substring should not be misclassified."""
-
-    def test_preprint_not_in_servers(self) -> None:
-        """The generic word 'preprint' should not be in PREPRINT_SERVERS."""
-        assert "preprint" not in PREPRINT_SERVERS
-
-    def test_specific_preprint_servers_present(self) -> None:
-        """Specific preprint servers should still be in the set."""
-        assert "arxiv" in PREPRINT_SERVERS
-        assert "biorxiv" in PREPRINT_SERVERS
-        assert "medrxiv" in PREPRINT_SERVERS
-        assert "techrxiv" in PREPRINT_SERVERS
-
-    def test_preprints_dot_org_present(self) -> None:
-        """preprints.org entry should be present."""
-        assert "preprints.org" in PREPRINT_SERVERS
-
-
 class TestMergeDuplicateThresholdRaised:
     """Two clearly different papers by the same authors must not be merged."""
 
@@ -1911,76 +1733,8 @@ class TestMergeDuplicateThresholdRaised:
         sim = text_utils.title_similarity(entry_a["fields"]["title"], entry_b["fields"]["title"])
         assert sim < 0.6, f"Title similarity {sim:.3f} should be well below threshold to test rejection"
         # The strict matcher should NOT consider these as duplicates
-        result = bt.bibtex_entries_match_strict(entry_a, entry_b)
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
         assert result is False, "Distinct papers with low title similarity should not be matched"
-
-
-class TestSemaphoreReleasedDuring429:
-    """Global semaphore should be released before sleeping on 429."""
-
-    def test_429_sleep_outside_semaphore(self) -> None:
-        """Verify the semaphore is not held during 429 retry sleep."""
-        _THREAD_LOCAL.session_request_count = 0
-
-        mock_resp_429 = MagicMock(status_code=429, headers={}, content=b"")
-        mock_resp_200 = MagicMock(status_code=200, content=b'{"ok": true}')
-        mock_resp_200.raise_for_status = MagicMock()
-
-        mock_session = MagicMock()
-        mock_session.get.side_effect = [mock_resp_429, mock_resp_200]
-
-        with (
-            patch("citeforge.http_utils._get_session", return_value=mock_session),
-            patch("citeforge.http_utils._get_rate_limiter", return_value=None),
-            patch("citeforge.http_utils.time") as mock_time,
-        ):
-            mock_time.monotonic.return_value = 1000.0
-            mock_time.sleep = MagicMock()
-            result = _http_request("GET", "https://example.com/api", {}, 10.0)
-            assert mock_time.sleep.called
-            assert result == b'{"ok": true}'
-
-
-class TestTokenBucketJitter:
-    """TokenBucketRateLimiter.acquire() should include jitter in sleep."""
-
-    def test_acquire_sleeps_with_jitter_component(self) -> None:
-        """When tokens are exhausted, sleep should include a jitter component."""
-        # Very slow rate = 0.1 tokens/sec, so after burst=1 exhausted,
-        # next acquire needs to wait ~10 seconds
-        limiter = TokenBucketRateLimiter(rate=0.1, burst=1)
-        limiter.acquire()  # exhaust burst token
-
-        sleep_values: list[float] = []
-
-        def capture_sleep(duration: float) -> None:
-            sleep_values.append(duration)
-            # Don't actually sleep
-
-        with patch("citeforge.http_utils.time.sleep", side_effect=capture_sleep):
-            limiter.acquire()
-
-        # Should have slept at least once
-        assert len(sleep_values) >= 1
-        # Verify the sleep was not exactly 10.0 (jitter should offset it)
-        # Due to jitter, the actual sleep will be wait + random.uniform(0, wait*0.3)
-        # so it should be > 0
-        assert sleep_values[0] > 0
-
-
-class TestEmptyNameSkipped:
-    """Records with empty Name but valid IDs should be skipped."""
-
-    def test_empty_name_with_scholar_id_skipped(self, tmp_path: Any) -> None:
-        """Record with Scholar ID but no Name should be skipped."""
-        csv_content = "Name,Scholar Link,DBLP Link\n,https://scholar.google.com/citations?user=abc123,\nJohn Smith,https://scholar.google.com/citations?user=xyz789,\n"
-        csv_file = tmp_path / "test_input.csv"
-        csv_file.write_text(csv_content)
-
-        records = read_records(str(csv_file))
-        # Should only have John Smith, empty name record should be skipped
-        assert len(records) == 1
-        assert records[0].name == "John Smith"
 
 
 class TestCslEventNameFallback:
@@ -2614,8 +2368,6 @@ class TestGarbageTitleDetection:
 
     @staticmethod
     def _is_garbage(title: str) -> bool:
-        from main import _is_garbage_title
-
         return _is_garbage_title(title)
 
     def test_email_address(self) -> None:
@@ -2647,14 +2399,10 @@ class TestStaleFileValidation:
     """Stale files with now-invalid titles should be detected."""
 
     def test_garbage_title_detected(self) -> None:
-        from main import _is_garbage_title
-
         title = "Dalhousie University, Halifax, NS B3H 4R2, Canada {travis. gagie, michael. stdenis}@ dal. ca"
         assert _is_garbage_title(title)
 
     def test_corrupted_title_detected(self) -> None:
-        from main import _is_corrupted_title
-
         assert _is_corrupted_title("Li2 () Wang3 () Chen1 ()")
 
 
@@ -2663,8 +2411,6 @@ class TestProceedingsVolumeDetection:
 
     @staticmethod
     def _is_garbage(title: str) -> bool:
-        from main import _is_garbage_title
-
         return _is_garbage_title(title)
 
     def test_proceedings_volume_year_prefix(self) -> None:
@@ -2748,18 +2494,14 @@ class TestJournalNamedProceedingsWordBoundary:
         assert not merge_utils._is_conference_journal("Proceedings of the National Academy of Sciences")
 
 
-class TestThreeWayFixConsistency:
-    """Regression tests for three-way fix pattern consistency.
+class TestCanonicalizationConsistency:
+    """Regression tests for post-run orphan canonicalization.
 
-    Ensures _fixup_bib_entry (Place 1), existing-file fixup logic, and
-    Phase 4 post-merge apply identical reclassification rules so entries
-    don't oscillate between runs.
+    The owning module routes this helper through POSTRUN_ORPHAN_REPAIR.
     """
 
     def test_jnp_suffix_guard_ieee_conference_stays_inproceedings(self) -> None:
         """IEEE/CVF conference booktitle must NOT be reclassified to @article."""
-        from main import _fixup_bib_entry
-
         entry: dict[str, Any] = {
             "type": "inproceedings",
             "fields": {
@@ -2776,8 +2518,6 @@ class TestThreeWayFixConsistency:
 
     def test_jnp_suffix_guard_pnas_becomes_article(self) -> None:
         """PNAS (Proceedings of the National Academy of Sciences) IS a journal."""
-        from main import _fixup_bib_entry
-
         entry: dict[str, Any] = {
             "type": "inproceedings",
             "fields": {
@@ -2794,8 +2534,6 @@ class TestThreeWayFixConsistency:
 
     def test_jnp_suffix_guard_proc_ieee_plain(self) -> None:
         """Plain 'Proceedings of the IEEE' is a journal."""
-        from main import _fixup_bib_entry
-
         entry: dict[str, Any] = {
             "type": "inproceedings",
             "fields": {
@@ -2811,8 +2549,6 @@ class TestThreeWayFixConsistency:
 
     def test_jnp_suffix_guard_proc_ieee_with_symposium(self) -> None:
         """'Proceedings of the IEEE Symposium ...' must stay @inproceedings."""
-        from main import _fixup_bib_entry
-
         entry: dict[str, Any] = {
             "type": "inproceedings",
             "fields": {
@@ -2828,8 +2564,6 @@ class TestThreeWayFixConsistency:
 
     def test_pacm_stays_article(self) -> None:
         """PACM journals must not be reclassified to @inproceedings."""
-        from main import _fixup_bib_entry
-
         entry: dict[str, Any] = {
             "type": "article",
             "fields": {
@@ -2846,8 +2580,6 @@ class TestThreeWayFixConsistency:
 
     def test_publisher_dedup(self) -> None:
         """Publisher that duplicates journal/booktitle must be stripped."""
-        from main import _fixup_bib_entry
-
         entry: dict[str, Any] = {
             "type": "article",
             "fields": {
@@ -2863,8 +2595,6 @@ class TestThreeWayFixConsistency:
 
     def test_university_journal_becomes_phdthesis(self) -> None:
         """@article with 'university' in journal → @phdthesis."""
-        from main import _fixup_bib_entry
-
         entry: dict[str, Any] = {
             "type": "article",
             "fields": {
@@ -2882,8 +2612,6 @@ class TestThreeWayFixConsistency:
 
     def test_abbreviated_venue_expanded(self) -> None:
         """ABBREVIATED_VENUE_MAP entries must be expanded in _fixup_bib_entry."""
-        from main import _fixup_bib_entry
-
         # Pick a real entry from the map
         sample_key = next(iter(ABBREVIATED_VENUE_MAP))
         sample_val = ABBREVIATED_VENUE_MAP[sample_key]
@@ -3111,8 +2839,8 @@ class TestDecodeValueErrorContainment:
         with pytest.raises(DecodeError):
             _decode_json_bytes(b"<html>not json</html>", "https://api.openalex.org/works?q=x")
 
-    def test_generic_search_swallows_decode_error(self) -> None:
-        # The primary enrichment path (OpenAlex/Crossref/S2) must return None,
+    def test_generic_search_multiple_swallows_decode_error(self) -> None:
+        # The primary enrichment path (OpenAlex/Crossref/S2) must return [],
         # not propagate, when an upstream serves an HTML 200 body.
         from citeforge import api_generics
         from citeforge.api_configs import OPENALEX_SEARCH_CONFIG
@@ -3123,27 +2851,7 @@ class TestDecodeValueErrorContainment:
             patch.object(api_generics.response_cache, "put"),
             patch.object(api_generics, "http_get_json", side_effect=DecodeError("Invalid JSON from 'https://x'")),
         ):
-            assert api_generics.search_api_generic("A Title", "Author", OPENALEX_SEARCH_CONFIG) is None
-
-    def test_datacite_swallows_decode_error(self) -> None:
-        from citeforge.clients import utility_apis
-        from citeforge.exceptions import DecodeError
-
-        with (
-            patch.object(utility_apis.response_cache, "get", return_value=None),
-            patch.object(utility_apis, "http_get_json", side_effect=DecodeError("Invalid JSON from 'https://x'")),
-        ):
-            assert utility_apis.datacite_search_doi("10.5281/zenodo.123") is None
-
-    def test_orcid_swallows_decode_error(self) -> None:
-        from citeforge.clients import utility_apis
-        from citeforge.exceptions import DecodeError
-
-        with (
-            patch.object(utility_apis.response_cache, "get", return_value=None),
-            patch.object(utility_apis, "http_get_json", side_effect=DecodeError("Invalid JSON")),
-        ):
-            assert utility_apis.orcid_fetch_works("0000-0001-2345-6789") == []
+            assert api_generics.search_api_generic_multiple("A Title", "Author", OPENALEX_SEARCH_CONFIG) == []
 
 
 class TestOpenReviewSessionThreadSafety:

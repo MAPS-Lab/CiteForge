@@ -19,8 +19,6 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.
 OPENALEX_BASE = "https://api.openalex.org/works"
 PUBMED_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 EUROPEPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-DATACITE_BASE = "https://api.datacite.org/dois"
-ORCID_BASE = "https://pub.orcid.org/v3.0"
 SERPLY_BASE = "https://api.serply.io/v1/scholar"
 SERPAPI_BASE = "https://serpapi.com/search"
 
@@ -73,13 +71,11 @@ SKIP_SCHOLAR_FOR_EXISTING_FILES = True
 TRUST_ORDER = [
     "csl",  # DOI → CSL-JSON (highest trust, structured metadata)
     "doi_bibtex",  # DOI → BibTeX (direct from DOI resolver)
-    "datacite",  # DataCite DOIs (datasets/software, structured)
     "pubmed",  # PubMed/NIH (biomedical, highly curated)
     "europepmc",  # Europe PMC (biomedical + broader coverage)
     "crossref",  # Crossref API (broad academic coverage)
     "openalex",  # OpenAlex (open metadata)
     "s2",  # Semantic Scholar (ML-enhanced metadata)
-    "orcid",  # ORCID works (author-verified)
     "openreview",  # OpenReview (peer review platforms)
     "arxiv",  # arXiv (preprints, self-reported)
     "scholar_page",  # Scholar article page (web-scraped)
@@ -923,8 +919,6 @@ RATE_LIMITS: dict[str, tuple[float, int]] = {
     "s2": (1.0, 3),  # S2 with API key
     "doi": (1.0, 2),  # DOI resolver
     "gemini": (0.5, 2),  # Gemini rate limit (burst=2 for retry headroom)
-    "orcid": (1.0, 2),  # ORCID public API
-    "datacite": (1.0, 2),  # DataCite API
     "dblp": (1.0, 2),  # DBLP search/person API
     "serply": (1.0, 2),  # Serply REST API (conservative: 1 req/s, burst 2)
     "serpapi": (1.0, 2),  # SerpAPI (conservative: 1 req/s, burst 2)

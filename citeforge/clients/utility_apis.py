@@ -1,27 +1,13 @@
-"""Auxiliary enrichment services.
-
-Wraps the optional helper services. Gemini generates CamelCase citation-key
-titles, DataCite resolves dataset and software DOIs, and ORCID validates
-authorship. Each fills a specific gap and degrades gracefully when its key is
-absent.
-"""
+"""Auxiliary enrichment services."""
 
 from __future__ import annotations
 
-import random
 import re
-import time
-import urllib.parse
-from typing import Any
 
-from ..cache import response_cache
-from ..config import CACHE_TTL_DOI_DAYS, CACHE_TTL_SEARCH_DAYS, DATACITE_BASE, GEMINI_BASE, ORCID_BASE
-from ..exceptions import ALL_API_ERRORS, ALL_FETCH_ERRORS
-from ..http_utils import handle_api_errors, http_get_json, http_post_json
-from ..id_utils import _norm_doi
+from ..config import GEMINI_BASE
+from ..exceptions import ALL_API_ERRORS
+from ..http_utils import http_post_json
 from ..log_utils import LogCategory, LogSource, logger
-from ..text_utils import extract_year_from_any, normalize_title
-from .helpers import _best_item_by_score, _doi_cache_lookup
 
 # ============ Gemini ============
 
@@ -64,45 +50,16 @@ def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | 
         },
     }
 
-    import requests as _requests
-
-    data: dict[str, Any] | None = None
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        logger.debug(
-            f"GEMINI_ATTEMPT | attempt={attempt} | title={full_title[:50]}",
-            category=LogCategory.CITEKEY,
+    try:
+        data = http_post_json(url, payload, headers=request_headers, timeout=15.0)
+    except (*ALL_API_ERRORS, ValueError) as e:
+        logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
+        logger.warn(
+            f"API call failed: {type(e).__name__}",
+            category=LogCategory.ERROR,
+            source=LogSource.SYSTEM,
         )
-        try:
-            data = http_post_json(url, payload, headers=request_headers, timeout=15.0)
-            break  # success
-        except (*ALL_API_ERRORS, ValueError) as e:
-            retryable_429 = (
-                isinstance(e, _requests.exceptions.HTTPError)
-                and e.response is not None
-                and e.response.status_code == 429
-                and attempt < max_retries
-            )
-            if retryable_429:
-                wait = (2**attempt) + random.uniform(0, 1)
-                logger.debug(
-                    f"GEMINI_429 | attempt={attempt} | backoff={wait:.1f}s",
-                    category=LogCategory.CITEKEY,
-                )
-                logger.info(
-                    f"Gemini 429 (attempt {attempt}/{max_retries}), retrying in {wait:.1f}s",
-                    category=LogCategory.DEBUG,
-                    source=LogSource.SYSTEM,
-                )
-                time.sleep(wait)
-                continue
-            logger.debug(f"GEMINI_FAIL | error={type(e).__name__}", category=LogCategory.CITEKEY)
-            logger.warn(
-                f"API call failed: {type(e).__name__}",
-                category=LogCategory.ERROR,
-                source=LogSource.SYSTEM,
-            )
-            return None
+        return None
 
     if data is None:
         logger.debug("GEMINI_FAIL | reason=no_response", category=LogCategory.CITEKEY)
@@ -139,201 +96,3 @@ def gemini_generate_short_title(full_title: str, api_key: str, max_words: int | 
         source=LogSource.SYSTEM,
     )
     return short_title
-
-
-# ============ DataCite ============
-
-
-@handle_api_errors(default_return=None)
-def datacite_search_doi(doi: str) -> dict[str, Any] | None:
-    """Look up a DOI in DataCite to get dataset or software metadata."""
-    if not doi:
-        return None
-
-    doi_norm = _norm_doi(doi)
-    if not doi_norm:
-        return None
-
-    cached, hit = _doi_cache_lookup("datacite", doi_norm)
-    if hit:
-        return cached
-
-    encoded_doi = urllib.parse.quote(doi_norm, safe="")
-    url = f"{DATACITE_BASE}/{encoded_doi}"
-
-    try:
-        data = http_get_json(url, timeout=15.0)
-    except ALL_FETCH_ERRORS:
-        return None
-
-    result = data.get("data")
-    if result is not None:
-        response_cache.put("datacite", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
-    else:
-        response_cache.put_negative("datacite", doi_norm)
-    logger.debug(
-        f"datacite | RESULT | doi={doi_norm} | found={result is not None}",
-        category=LogCategory.SCORE,
-    )
-    return result
-
-
-def build_bibtex_from_datacite(record: dict[str, Any], keyhint: str) -> str | None:
-    """Build a BibTeX entry from a DataCite record (typically for datasets/software)."""
-    from ..bibtex_build import build_bibtex_entry, determine_entry_type
-    from ..text_utils import safe_get_field
-
-    attributes = record.get("attributes") or {}
-
-    titles = attributes.get("titles") or []
-    if not titles:
-        return None
-    title = safe_get_field(titles[0], "title")
-
-    if not title:
-        return None
-
-    authors: list[str] = [
-        name for creator in attributes.get("creators") or [] if (name := safe_get_field(creator, "name"))
-    ]
-
-    year = extract_year_from_any(attributes.get("publicationYear"), fallback=0) or 0
-
-    venue = safe_get_field(attributes, "publisher")
-
-    resource_type = attributes.get("types") or {}
-    resource_type_general = (safe_get_field(resource_type, "resourceTypeGeneral") or "").lower()
-    entry_type = determine_entry_type(resource_type_general or attributes)
-
-    doi = safe_get_field(attributes, "doi")
-    url = safe_get_field(attributes, "url")
-
-    extra_fields: dict[str, str] = {}
-    note_parts = [
-        part
-        for part in [
-            f"Type: {resource_type_general}" if resource_type_general else "",
-            f"Version: {attributes['version']}" if attributes.get("version") else "",
-        ]
-        if part
-    ]
-    if note_parts:
-        extra_fields["note"] = ", ".join(note_parts)
-    if venue:
-        extra_fields["howpublished"] = venue
-
-    return build_bibtex_entry(
-        entry_type=entry_type,
-        title=title,
-        authors=authors,
-        year=year,
-        keyhint=keyhint,
-        venue="",
-        doi=doi,
-        url=url,
-        extra_fields=extra_fields,
-    )
-
-
-# ============ ORCID ============
-
-
-@handle_api_errors(default_return=[])
-def orcid_fetch_works(orcid_id: str) -> list[dict[str, Any]]:
-    """Fetch a list of works for an ORCID author."""
-    if not orcid_id:
-        return []
-
-    orcid_id = orcid_id.replace("https://orcid.org/", "")
-
-    cache_key = f"orcid_works|{orcid_id}"
-    cached = response_cache.get("orcid", cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"orcid | NEG_HIT | id={orcid_id}", category=LogCategory.CACHE)
-            return []
-        logger.debug(f"orcid | HIT | id={orcid_id}", category=LogCategory.CACHE)
-        return list(cached.get("works", []))
-    logger.debug(f"orcid | MISS | id={orcid_id}", category=LogCategory.CACHE)
-
-    url = f"{ORCID_BASE}/{orcid_id}/works"
-
-    try:
-        data = http_get_json(url, timeout=15.0)
-    except ALL_FETCH_ERRORS:
-        return []
-
-    works = []
-    for work_group in data.get("group") or []:
-        work_summary = work_group.get("work-summary") or []
-        if not work_summary:
-            continue
-
-        work = work_summary[0]
-        title_obj = work.get("title") or {}
-        title = (title_obj.get("title") or {}).get("value") or ""
-        if not title:
-            continue
-
-        pub_date = work.get("publication-date") or {}
-        year = pub_date.get("year") or {}
-        year_val = year.get("value") if isinstance(year, dict) else None
-
-        works.append(
-            {
-                "title": title,
-                "year": year_val,
-                "type": work.get("type"),
-                "external-ids": work.get("external-ids") or {},
-                "url": work.get("url") or {},
-            }
-        )
-
-    logger.debug(
-        f"orcid | WORKS | id={orcid_id} | count={len(works)}",
-        category=LogCategory.SCORE,
-    )
-    if works:
-        response_cache.put("orcid", cache_key, {"works": works}, ttl_days=CACHE_TTL_SEARCH_DAYS)
-    else:
-        response_cache.put_negative("orcid", cache_key)
-    return works
-
-
-def orcid_search_work_by_title(orcid_id: str, title: str, _author_name: str | None = None) -> dict[str, Any] | None:
-    """Search ORCID works for a specific paper by title to validate authorship."""
-    works = orcid_fetch_works(orcid_id)
-    if not works:
-        return None
-
-    target_norm = normalize_title(title)
-
-    for work in works:
-        work_title = work.get("title") or ""
-        if normalize_title(work_title) == target_norm:
-            logger.debug(
-                f"orcid | TITLE_MATCH | title={title[:50]} | exact=True | best_score=1.000 | result=found",
-                category=LogCategory.SCORE,
-            )
-            return dict(work)
-
-    from ..bibtex_build import create_scoring_function
-
-    # NOTE: ORCID work-summary responses do not include contributor lists,
-    # so we skip author matching (author_name=None) to avoid rejecting all
-    # candidates when cand_authors is always empty.
-    score_fn = create_scoring_function(
-        title=title,
-        author_name=None,
-        year_hint=None,
-        title_getter=lambda w: w.get("title") or "",
-        authors_getter=lambda w: w.get("contributors") or [],
-        year_getter=lambda w: extract_year_from_any(w.get("year"), fallback=None),
-    )
-
-    result = _best_item_by_score(works, score_fn)
-    logger.debug(
-        f"orcid | TITLE_MATCH | title={title[:50]} | exact=False | result={'found' if result else 'none'}",
-        category=LogCategory.SCORE,
-    )
-    return result

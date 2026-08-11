@@ -39,15 +39,18 @@ jobs:
         # The lock file is what gets installed, so it belongs in the key.
         # Keying on pyproject.toml alone leaves the cache stale whenever the
         # lock is regenerated without a pyproject change.
-        key: ${{ runner.os }}-pip-lint-${{ hashFiles('pyproject.toml', 'requirements-dev.lock') }}
+        key: ${{ runner.os }}-pip-lint-${{ hashFiles('pyproject.toml', 'requirements-build.lock', 'requirements-dev.lock') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install --require-hashes -r requirements-dev.lock
-        pip install -e . --no-deps
+        pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
+        pip install --no-build-isolation --no-deps -e .
+
+    - name: Build wheel with locked backend
+      run: python -m pip wheel --no-build-isolation --no-deps --wheel-dir /tmp/citeforge-wheel .
 
     - name: Lint (ruff)
       run: ruff check citeforge/ tests/ main.py
@@ -79,7 +82,7 @@ jobs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'requirements-dev.lock') }}
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'requirements-build.lock', 'requirements-dev.lock') }}
         restore-keys: |
           ${{ runner.os }}-pip-${{ matrix.python-version }}-
           ${{ runner.os }}-pip-
@@ -87,26 +90,11 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install --require-hashes -r requirements-dev.lock
-        pip install -e . --no-deps
-
-    - name: Create API key files
-      env:
-        SERPAPI_KEY: ${{ secrets.SERPAPI }}
-        SERPLY_KEY: ${{ secrets.SERPLY }}
-        SEMANTIC_KEY: ${{ secrets.SEMANTICSCHOLAR }}
-        OPENREVIEW_KEY: ${{ secrets.OPENREVIEW }}
-        GEMINI_KEY: ${{ secrets.GEMINI }}
-      run: |
-        mkdir -p keys
-        echo "$SERPAPI_KEY" > keys/SerpAPI.key
-        echo "$SERPLY_KEY" > keys/Serply.key
-        echo "$SEMANTIC_KEY" > keys/Semantic.key
-        echo "$OPENREVIEW_KEY" > keys/OpenReview.key
-        echo "$GEMINI_KEY" > keys/Gemini.key
+        pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
+        pip install --no-build-isolation --no-deps -e .
 
     - name: Run tests with coverage
-      run: pytest --cov=citeforge --cov=main --cov-report=term-missing --cov-report=xml --cov-fail-under=68
+      run: pytest -m 'not live' --cov=citeforge --cov=main --cov-report=term-missing --cov-report=xml --cov-fail-under=68
 
     - name: Upload coverage report
       if: always()

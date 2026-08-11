@@ -3,7 +3,7 @@
 Runs the deterministic sequence that closes out a run, flushing the summary CSV,
 reconciling phantom rows, removing duplicate orphan files, applying the
 year-window cleanup, running the post-run fixup pass, building the a2i2 folder,
-and rewriting `baseline.json` and `badges.json`. The order is load-bearing.
+and rewriting `baseline.json`. The order is load-bearing.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import csv
 import os
 import re
-import time
 from typing import Any
 
 from citeforge import bibtex_utils as bt
@@ -57,8 +56,8 @@ def finalize_run(
 
     Logs run stats, then (when the summary CSV exists) flushes it, reconciles
     phantom rows, removes duplicate orphans, deletes out-of-window files, applies
-    the post-run fixup, builds the a2i2 folder, and rewrites baseline.json and
-    badges.json. Order is load-bearing.
+    the post-run fixup, builds the a2i2 folder, and rewrites baseline.json.
+    Order is load-bearing.
     """
     counts = get_api_call_counts()
     logger.step("Run complete", category=LogCategory.PLAN)
@@ -212,21 +211,6 @@ def finalize_run(
         safe_write_json(
             os.path.join(out_dir, "baseline.json"),
             {"total": sum(baseline.values()), "authors": baseline},
-        )
-
-        # Write badge data for README workflow updates
-        total = cache_counts["positive"] + cache_counts["negative"] + cache_counts["miss"]
-        hit_rate = ((cache_counts["positive"] + cache_counts["negative"]) / total * 100) if total else 0
-        safe_write_json(
-            os.path.join(out_dir, "badges.json"),
-            {
-                "last_updated": time.strftime("%Y-%m"),
-                "cache_positive_hits": cache_counts["positive"],
-                "cache_negative_hits": cache_counts["negative"],
-                "cache_misses": cache_counts["miss"],
-                "total_queries": total,
-                "hit_rate": round(hit_rate, 1),
-            },
         )
 
         logger.info(f"Summary CSV: {summary_csv_path}", category=LogCategory.PLAN)

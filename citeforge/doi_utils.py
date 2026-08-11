@@ -13,6 +13,7 @@ from typing import Any
 from . import bibtex_utils as bt
 from .clients import search_apis
 from .exceptions import ALL_API_ERRORS
+from .identity import IdentityContext, evaluate_identity
 from .log_utils import LogCategory, LogSource, logger
 from .text_utils import normalize_title, title_similarity
 
@@ -38,7 +39,7 @@ def _parse_and_match(
     if entry is None:
         return False, None
 
-    strict_match = bt.bibtex_entries_match_strict(baseline_entry, entry)
+    strict_match = evaluate_identity(baseline_entry, entry, context=IdentityContext.ENRICHMENT).verdict
     logger.debug(f"{label}_MATCH | strict_match={strict_match}", category=LogCategory.DOI_VAL, source=LogSource.DOI)
     if strict_match:
         logger.success(

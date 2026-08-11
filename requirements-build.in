@@ -1,0 +1,2 @@
+# CI build backend input. Keep its minimum aligned with pyproject.toml.
+setuptools>=61.0

@@ -8,6 +8,7 @@ import pytest
 
 from citeforge import bibtex_utils as bt
 from citeforge import config, exceptions, http_utils, id_utils, io_utils, merge_utils, text_utils
+from citeforge.identity import IdentityContext, evaluate_identity
 from tests.conftest import extract_bibtex_field
 
 
@@ -381,7 +382,7 @@ def test_bibtex_matching() -> None:
     parsed_bib1 = bt.parse_bibtex_to_dict(bib1)
     parsed_bib2 = bt.parse_bibtex_to_dict(bib2)
     assert parsed_bib1 is not None and parsed_bib2 is not None
-    assert bt.bibtex_entries_match_strict(parsed_bib1, parsed_bib2), "Exact entries should match"
+    assert evaluate_identity(parsed_bib1, parsed_bib2, context=IdentityContext.ENRICHMENT).verdict
 
     # With normalization
     bib3 = dedent("""
@@ -393,7 +394,7 @@ def test_bibtex_matching() -> None:
     """).strip()
     parsed_bib3 = bt.parse_bibtex_to_dict(bib3)
     assert parsed_bib3 is not None
-    assert bt.bibtex_entries_match_strict(parsed_bib1, parsed_bib3), "Case/punctuation differences should match"
+    assert evaluate_identity(parsed_bib1, parsed_bib3, context=IdentityContext.ENRICHMENT).verdict
 
     # Abbreviated authors
     bib4 = dedent("""
@@ -413,7 +414,7 @@ def test_bibtex_matching() -> None:
     parsed_bib4 = bt.parse_bibtex_to_dict(bib4)
     parsed_bib5 = bt.parse_bibtex_to_dict(bib5)
     assert parsed_bib4 is not None and parsed_bib5 is not None
-    assert bt.bibtex_entries_match_strict(parsed_bib4, parsed_bib5), "Abbreviated authors should match"
+    assert evaluate_identity(parsed_bib4, parsed_bib5, context=IdentityContext.ENRICHMENT).verdict
 
     # Should NOT match
     bib6 = dedent("""
@@ -433,7 +434,7 @@ def test_bibtex_matching() -> None:
     parsed_bib6 = bt.parse_bibtex_to_dict(bib6)
     parsed_bib7 = bt.parse_bibtex_to_dict(bib7)
     assert parsed_bib6 is not None and parsed_bib7 is not None
-    assert not bt.bibtex_entries_match_strict(parsed_bib6, parsed_bib7), "Different titles should NOT match"
+    assert not evaluate_identity(parsed_bib6, parsed_bib7, context=IdentityContext.ENRICHMENT).verdict
 
 
 def test_bibtex_extra_fields() -> None:
@@ -458,7 +459,7 @@ def test_bibtex_extra_fields() -> None:
     parsed_minimal = bt.parse_bibtex_to_dict(minimal)
     parsed_enriched = bt.parse_bibtex_to_dict(enriched)
     assert parsed_minimal is not None and parsed_enriched is not None
-    assert bt.bibtex_entries_match_strict(parsed_minimal, parsed_enriched), "Extra fields should not prevent matching"
+    assert evaluate_identity(parsed_minimal, parsed_enriched, context=IdentityContext.ENRICHMENT).verdict
 
 
 def test_bibtex_mislabeled_arxiv_id_does_not_match() -> None:
@@ -488,7 +489,7 @@ def test_bibtex_mislabeled_arxiv_id_does_not_match() -> None:
     p_movelet = bt.parse_bibtex_to_dict(movelet)
     p_faster = bt.parse_bibtex_to_dict(faster)
     assert p_movelet is not None and p_faster is not None
-    assert not bt.bibtex_entries_match_strict(p_movelet, p_faster), (
+    assert not evaluate_identity(p_movelet, p_faster, context=IdentityContext.ENRICHMENT).verdict, (
         "same arXiv id but clearly different titles must be treated as a mislabeled id, not a match"
     )
 
@@ -518,7 +519,7 @@ def test_bibtex_same_arxiv_id_reformatted_title_still_matches() -> None:
     p_a = bt.parse_bibtex_to_dict(canonical)
     p_b = bt.parse_bibtex_to_dict(reformatted)
     assert p_a is not None and p_b is not None
-    assert bt.bibtex_entries_match_strict(p_a, p_b), "same arXiv id with a reformatted title must still match"
+    assert evaluate_identity(p_a, p_b, context=IdentityContext.ENRICHMENT).verdict
 
 
 def test_config() -> None:

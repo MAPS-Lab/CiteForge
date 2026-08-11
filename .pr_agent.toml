@@ -56,7 +56,7 @@ Invariants a change must not break:
 - An orphan .bib file is never deleted without verifying it as a duplicate at title_similarity >= 0.95.
 - FUSED_COMPOUND_WORDS and ABBREVIATED_VENUE_MAP contain no em-dash and no accented characters, because the serializer strips them.
 
-Under citeforge/pipeline/, the Three-Way Fix Pattern is critical. A fix to entry types, titles or booktitles must be applied in all three places or the output oscillates between consecutive runs: _fixup_bib_entry() on load, the existing-file fixup in process_article() before enrichment, and the Phase 4 post-merge step. Flag a new text or type fix added to fewer than all three call sites.
+Under citeforge/pipeline/, the Four-Stage Canonicalization Contract is critical. Entry-type and text normalization is single-sourced in citeforge/canonicalize.py through four ordered CanonicalStage rule sets: LOAD_REPAIR before enrichment, COMPLETE_SKIP_FINALIZE before writing a complete entry that skips enrichment, POST_MERGE after the Phase 4 trust-based merge, and POSTRUN_ORPHAN_REPAIR in the post-run fixup through _fixup_bib_entry(). Flag copied caller logic or a rule missing from a stage whose path can emit the affected entry.
 
 Under citeforge/merge_utils.py, merge_with_policy() ranks 13 sources with override rules for DOI, journal, title, pages and booktitle. A change to the ranking or to an override rule changes published bibliographic output and needs a test that pins the new behaviour.
 

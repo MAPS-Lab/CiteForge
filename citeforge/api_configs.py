@@ -3,13 +3,13 @@
 Holds the `APISearchConfig` and `APIFieldMapping` instances that
 `api_generics.py` consumes to run searches and build BibTeX entries. Sources
 whose protocol or output cannot be expressed here (PubMed's two-step lookup,
-Europe PMC and DataCite entry construction) stay hand-rolled in the client
-modules instead.
+Europe PMC) stay hand-rolled in the client modules instead.
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import Any
 
 from .api_generics import APIFieldMapping, APISearchConfig
@@ -84,6 +84,9 @@ OPENALEX_SEARCH_CONFIG = APISearchConfig(
         if authorship.get("author", {}).get("display_name")
     ],
 )
+
+CROSSREF_VENUE_SEARCH_CONFIG = replace(CROSSREF_SEARCH_CONFIG, api_name="crossref_venue")
+OPENALEX_VENUE_SEARCH_CONFIG = replace(OPENALEX_SEARCH_CONFIG, api_name="openalex_venue")
 
 EUROPEPMC_SEARCH_CONFIG = APISearchConfig(
     api_name="europepmc",

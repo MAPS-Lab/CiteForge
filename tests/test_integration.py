@@ -9,9 +9,10 @@ from typing import Any
 
 import pytest
 
-from citeforge import bibtex_utils, merge_utils
+from citeforge import api_configs, api_generics, bibtex_utils, merge_utils
 from citeforge.clients import scholar, search_apis
 from citeforge.config import get_min_year
+from citeforge.identity import IdentityContext, evaluate_identity
 from citeforge.models import Record
 from tests.fixtures import load_api_keys
 from tests.test_data import KNOWN_PAPERS, REQUIRED_FIELDS, TEST_AUTHOR
@@ -22,6 +23,7 @@ def api_keys() -> dict[str, Any]:
     return load_api_keys()
 
 
+@pytest.mark.live
 def test_fetch_and_merge(api_keys: dict[str, Any]) -> None:
     """
     Validate end-to-end publication fetching from Scholar and DBLP followed
@@ -43,19 +45,15 @@ def test_fetch_and_merge(api_keys: dict[str, Any]) -> None:
     )
 
     scholar_pubs = scholar_data.get("articles", [])
-    if not scholar_pubs:
-        pytest.skip("Scholar returned no results (key expired or rate-limited)")
+    assert scholar_pubs, "Scholar returned no usable publications"
 
-    dblp_pubs: list[dict[str, Any]] = []
-    try:
-        min_year = get_min_year()
-        dblp_pubs = search_apis.dblp_fetch_for_author(
-            rec.name,
-            rec.dblp,
-            min_year,
-        )
-    except Exception as e:
-        print(f"DBLP fetch failed: {e}")
+    min_year = get_min_year()
+    dblp_pubs = search_apis.dblp_fetch_for_author(
+        rec.name,
+        rec.dblp,
+        min_year,
+    )
+    assert dblp_pubs, "DBLP returned no usable publications"
 
     merged = scholar.merge_publication_lists(
         scholar_pubs,
@@ -63,35 +61,48 @@ def test_fetch_and_merge(api_keys: dict[str, Any]) -> None:
         rec.name,
     )
 
-    assert isinstance(merged, list)
+    assert merged, "Scholar and DBLP returned no mergeable publications"
 
 
-def _try_enrich(
+def _require_enrichment(
     source_name: str,
     fetch_bibtex: Callable[[], str | None],
     baseline_entry: dict[str, Any],
     enrichers: list[tuple[str, dict[str, Any]]],
 ) -> None:
-    """Try a single enrichment source: fetch BibTeX, parse, match, and append."""
-    try:
-        bib = fetch_bibtex()
-        if bib is None:
-            return
-        entry = bibtex_utils.parse_bibtex_to_dict(bib)
-        if entry and bibtex_utils.bibtex_entries_match_strict(baseline_entry, entry):
-            enrichers.append((source_name, entry))
-    except Exception as e:
-        print(f"{source_name} enrichment failed: {e}")
+    """Require one live enrichment source to return a matching BibTeX entry."""
+    bib = fetch_bibtex()
+    assert bib, f"{source_name} returned no usable BibTeX"
+    entry = bibtex_utils.parse_bibtex_to_dict(bib)
+    assert entry, f"{source_name} returned invalid BibTeX"
+    identity = evaluate_identity(baseline_entry, entry, context=IdentityContext.ENRICHMENT)
+    assert identity.verdict, f"{source_name} returned a non-matching paper"
+    enrichers.append((source_name, entry))
 
 
-def _fetch_and_build(
-    search_fn: Callable[[], Any],
-    build_fn: Callable[[Any, str], str | None],
+def _require_candidate_enrichment(
+    source_name: str,
+    search_fn: Callable[[], list[dict[str, Any]]],
+    build_fn: Callable[[dict[str, Any], str], str | None],
     first_author: str,
-) -> str | None:
-    """Search for a paper and build BibTeX if found."""
-    result = search_fn()
-    return build_fn(result, first_author) if result else None
+    baseline_entry: dict[str, Any],
+    enrichers: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """Admit the first candidate that passes the enrichment identity gate."""
+    candidates = search_fn()
+    assert candidates, f"{source_name} returned no usable candidates"
+    for candidate in candidates:
+        bib = build_fn(candidate, first_author)
+        if not bib:
+            continue
+        entry = bibtex_utils.parse_bibtex_to_dict(bib)
+        if not entry:
+            continue
+        identity = evaluate_identity(baseline_entry, entry, context=IdentityContext.ENRICHMENT)
+        if identity.verdict:
+            enrichers.append((source_name, entry))
+            return
+    pytest.fail(f"{source_name} returned no candidate matching the enrichment identity gate")
 
 
 def _try_enrichment_sources(
@@ -105,35 +116,39 @@ def _try_enrichment_sources(
     title = paper["title"]
 
     if api_keys.get("semantic"):
-        _try_enrich(
+        _require_candidate_enrichment(
             "s2",
-            lambda: _fetch_and_build(
-                lambda: search_apis.s2_search_paper(title, first_author, api_keys["semantic"]),
-                search_apis.build_bibtex_from_s2,
-                first_author,
+            lambda: search_apis.s2_search_papers_multiple(title, first_author, api_keys["semantic"], max_results=5),
+            lambda record, keyhint: api_generics.build_bibtex_from_response(
+                record, keyhint, api_configs.S2_FIELD_MAPPING
             ),
+            first_author,
             baseline_entry,
             enrichers,
         )
 
-    _try_enrich(
+    _require_candidate_enrichment(
         "crossref",
-        lambda: _fetch_and_build(
-            lambda: search_apis.crossref_search(title, first_author),
-            search_apis.build_bibtex_from_crossref,
-            first_author,
+        lambda: search_apis.crossref_search_multiple(title, first_author, max_results=5),
+        lambda record, keyhint: api_generics.build_bibtex_from_response(
+            record, keyhint, api_configs.CROSSREF_FIELD_MAPPING
         ),
+        first_author,
         baseline_entry,
         enrichers,
     )
 
     if paper["arxiv_id"]:
-
-        def fetch_arxiv() -> str | None:
-            entries = search_apis.arxiv_search(title, first_author, paper["year"])
-            return search_apis.build_bibtex_from_arxiv(entries[0], first_author) if entries else None
-
-        _try_enrich("arxiv", fetch_arxiv, baseline_entry, enrichers)
+        _require_candidate_enrichment(
+            "arxiv",
+            lambda: search_apis.arxiv_search(title, first_author, paper["year"]),
+            lambda record, keyhint: api_generics.build_bibtex_from_response(
+                record, keyhint, api_configs.ARXIV_FIELD_MAPPING
+            ),
+            first_author,
+            baseline_entry,
+            enrichers,
+        )
 
     if paper["doi"]:
 
@@ -141,17 +156,18 @@ def _try_enrichment_sources(
             csl = search_apis.fetch_csl_via_doi(paper["doi"])
             return search_apis.bibtex_from_csl(csl, first_author) if csl else None
 
-        _try_enrich("csl", fetch_csl, baseline_entry, enrichers)
+        _require_enrichment("csl", fetch_csl, baseline_entry, enrichers)
 
     return enrichers
 
 
+@pytest.mark.live
 def test_full_enrichment_pipeline(api_keys: dict[str, Any]) -> None:
     """
     Execute the complete enrichment workflow for a known paper.
     """
-    if not api_keys.get("serply"):
-        pytest.skip("Serply key not available")
+    if not api_keys.get("semantic"):
+        pytest.skip("Semantic Scholar key not available")
 
     paper = KNOWN_PAPERS[0]
 
@@ -272,14 +288,11 @@ def test_csv_summary_integration(tmp_path: Path) -> None:
         assert actual == expected_hits, f"Row {i}: expected trust_hits={expected_hits}, got {actual}"
 
 
-def test_complex_paper_enrichment(api_keys: dict[str, Any]) -> None:
+def test_complex_paper_enrichment() -> None:
     """
     Test enrichment pipeline with a complex paper (AlphaFold) that has
     many authors and complex metadata.
     """
-    if not api_keys.get("serply"):
-        pytest.skip("Serply key not available")
-
     paper = next(p for p in KNOWN_PAPERS if p["name"] == "alphafold")
 
     baseline_entry: dict[str, Any] = {

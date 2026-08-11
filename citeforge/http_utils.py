@@ -23,11 +23,10 @@ from typing import Any, TypeVar
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from tenacity import RetryCallState, Retrying, retry_if_exception_type, retry_if_result, stop_after_attempt
 
 from .config import (
     GLOBAL_CONCURRENCY_LIMIT,
-    HTTP_BACKOFF_INITIAL,
     HTTP_BACKOFF_MAX,
     HTTP_MAX_RETRIES,
     HTTP_RETRY_STATUS_CODES,
@@ -151,8 +150,6 @@ _URL_NAMESPACE_MAP = {
     "eutils.ncbi.nlm.nih.gov": "pubmed",
     "www.ebi.ac.uk/europepmc": "europepmc",
     "doi.org": "doi",
-    "api.datacite.org": "datacite",
-    "pub.orcid.org": "orcid",
     "generativelanguage.googleapis.com": "gemini",
     "dblp.org": "dblp",
     "api.serply.io": "serply",
@@ -183,23 +180,6 @@ def reset_api_call_counts() -> None:
 
 
 _THREAD_LOCAL = threading.local()
-
-_RETRY_STRATEGY = Retry(
-    total=HTTP_MAX_RETRIES,
-    backoff_factor=HTTP_BACKOFF_INITIAL,
-    backoff_max=HTTP_BACKOFF_MAX,
-    # Exclude 429/503 from urllib3 status_forcelist to avoid double-backoff
-    # with our manual Retry-After handling in _http_request
-    status_forcelist=tuple(c for c in HTTP_RETRY_STATUS_CODES if c not in (429, 503)),
-    # Only auto-retry idempotent GET. POST is intentionally excluded so urllib3
-    # never silently re-sends a non-idempotent request body. POSTs still
-    # get manual 429/503 handling in _http_request.
-    allowed_methods=["GET"],
-    # Disable urllib3's own Retry-After handling so it doesn't sleep for
-    # minutes when a server sends a long Retry-After header.  CiteForge's
-    # _http_request already handles Retry-After with a capped backoff.
-    respect_retry_after_header=False,
-)
 
 _GLOBAL_SEMAPHORE = threading.Semaphore(GLOBAL_CONCURRENCY_LIMIT)
 
@@ -263,7 +243,7 @@ def _get_rate_limiter(namespace: str) -> TokenBucketRateLimiter | None:
 def _new_session() -> requests.Session:
     """Create a fresh requests.Session with retry/adapter config."""
     session = requests.Session()
-    adapter = HTTPAdapter(max_retries=_RETRY_STRATEGY)
+    adapter = HTTPAdapter(max_retries=0)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
@@ -325,7 +305,38 @@ def _parse_retry_after(ra: str | None) -> float:
             return 0.0
 
 
-_MAX_RATE_LIMIT_RETRIES = 3
+_TRANSIENT_GET_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _retry_wait(retry_state: RetryCallState) -> float:
+    """Return the capped Retry-After or exponential delay for one retry."""
+    if retry_state.outcome is not None and not retry_state.outcome.failed:
+        response: requests.Response = retry_state.outcome.result()
+        if response.status_code in (429, 503):
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            if retry_after > 0:
+                return min(retry_after, HTTP_BACKOFF_MAX)
+    return float(min((2 ** (retry_state.attempt_number - 1)) + random.uniform(0, 1), HTTP_BACKOFF_MAX))
+
+
+def _send_once(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout: tuple[float, float],
+    json_payload: dict[str, Any] | None,
+) -> requests.Response:
+    """Send once, with session rotation and only the transport under the semaphore."""
+    session = _get_session()
+    _THREAD_LOCAL.session_request_count += 1
+    with _GLOBAL_SEMAPHORE:
+        if method == "POST":
+            return session.post(url, json=json_payload, headers=headers, timeout=timeout)
+        return session.get(url, headers=headers, timeout=timeout)
 
 
 def _http_request(
@@ -359,53 +370,26 @@ def _http_request(
     headers = _randomize_headers(headers)
     connect_timeout = min(timeout, 10.0)
 
-    for attempt in range(_MAX_RATE_LIMIT_RETRIES):
-        rate_limited = False
-        rate_wait = 0.0
-
-        with _GLOBAL_SEMAPHORE:
-            try:
-                session = _get_session()
-                _THREAD_LOCAL.session_request_count += 1
-
-                if method == "POST":
-                    resp = session.post(
-                        url,
-                        json=json_payload,
-                        headers=headers,
-                        timeout=(connect_timeout, timeout),
-                    )
-                else:
-                    resp = session.get(
-                        url,
-                        headers=headers,
-                        timeout=(connect_timeout, timeout),
-                    )
-            except requests.exceptions.RetryError:
-                # urllib3 already exhausted its own retries for a forced status
-                # (persistent 500/502/504). Do not re-drive it through the manual
-                # loop, which would compound to ~9 requests for one failure.
-                raise
-            except requests.exceptions.RequestException:
-                if attempt == _MAX_RATE_LIMIT_RETRIES - 1:
-                    raise
-            else:
-                if resp.status_code in (429, 503) and attempt < _MAX_RATE_LIMIT_RETRIES - 1:
-                    retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-                    rate_wait = retry_after if retry_after > 0 else (2**attempt) + random.uniform(0, 1)
-                    rate_limited = True
-                else:
-                    resp.raise_for_status()
-                    return resp.content
-
-        # All sleeps happen outside the semaphore
-        if rate_limited:
-            time.sleep(min(rate_wait, HTTP_BACKOFF_MAX))
-        else:
-            time.sleep((2**attempt) + random.uniform(0, 1))
-
-    # Unreachable (the loop always returns or raises) but satisfies mypy.
-    raise requests.exceptions.RequestException(f"Failed to {method} {_scrub_secrets(url)}")
+    statuses = (429, 503) if method == "POST" else HTTP_RETRY_STATUS_CODES
+    retry = retry_if_result(lambda response: response.status_code in statuses) | retry_if_exception_type(
+        _TRANSIENT_GET_ERRORS if method == "GET" else ()
+    )
+    try:
+        response: requests.Response = Retrying(
+            sleep=time.sleep,
+            stop=stop_after_attempt(HTTP_MAX_RETRIES + 1),
+            wait=_retry_wait,
+            retry=retry,
+            reraise=True,
+            retry_error_callback=lambda state: state.outcome.result() if state.outcome is not None else None,
+        )(_send_once, method, url, headers, (connect_timeout, timeout), json_payload)
+        response.raise_for_status()
+        return bytes(response.content)
+    except requests.exceptions.RequestException as exc:
+        exc.args = tuple(_scrub_secrets(str(arg)) for arg in exc.args)
+        if exc.request is not None and exc.request.url:
+            exc.request.url = _scrub_secrets(str(exc.request.url))
+        raise
 
 
 def http_fetch_bytes(

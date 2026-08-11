@@ -8,6 +8,7 @@ source shares one matching and construction path.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +18,7 @@ from .clients.helpers import title_author_cache_key
 from .config import (
     CACHE_TTL_SEARCH_DAYS,
     GENERIC_SERIES_NAMES,
+    SIM_BEST_ITEM_THRESHOLD,
     SIM_EXACT_PICK_THRESHOLD,
     SIM_THRESHOLD_TOLERANCE,
 )
@@ -25,13 +27,10 @@ from .http_utils import http_get_json, s2_http_get_json
 from .id_utils import find_arxiv_in_text, find_doi_in_text
 from .log_utils import LogCategory, logger
 from .text_utils import (
-    author_in_text,
-    author_name_matches,
     build_url,
     extract_author_names,
     extract_year_from_any,
     has_placeholder,
-    normalize_title,
     safe_get_field,
     safe_get_nested,
 )
@@ -181,6 +180,8 @@ def _fetch_results(
     config: APISearchConfig,
     api_key: str | None,
     cache_key: str,
+    *,
+    params: dict[str, Any] | None = None,
 ) -> list[Any] | None:
     """Issue the configured search request and extract the raw result list.
 
@@ -188,15 +189,16 @@ def _fetch_results(
     retried on the next run) and on an empty result set (recorded as a negative
     cache entry under *cache_key* before returning).
     """
-    params = {config.query_param_name: title, **config.additional_params}
-    if author_name and config.author_param_name:
-        params[config.author_param_name] = author_name
+    if params is None:
+        params = {config.query_param_name: title, **config.additional_params}
+        if author_name and config.author_param_name:
+            params[config.author_param_name] = author_name
 
     url = build_url(config.base_url, params)
     logger.debug(f"{config.api_name} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
 
     try:
-        if api_key and config.api_name == "semantic_scholar":
+        if api_key and config.requires_api_key:
             data = s2_http_get_json(url, api_key, timeout=config.timeout)
         else:
             data = http_get_json(url, timeout=config.timeout)
@@ -210,83 +212,55 @@ def _fetch_results(
     return results
 
 
-def search_api_generic(
-    title: str, author_name: str | None, config: APISearchConfig, api_key: str | None = None
-) -> dict[str, Any] | None:
-    """Search one configured API for the best-matching publication.
-
-    Two-pass matching. An exact normalized-title match (with author check) wins
-    outright; otherwise the highest-scoring fuzzy candidate above the pick
-    threshold is used.
-    """
-    if not title:
-        return None
-
-    cache_key = title_author_cache_key(title, author_name)
-    cached = response_cache.get(config.api_name, cache_key)
-    if cached is not None:
-        if cached.get("_negative"):
-            logger.debug(f"{config.api_name} | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-            return None
-        logger.debug(f"{config.api_name} | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return cached if cached else None
-
-    results = _fetch_results(title, author_name, config, api_key, cache_key)
-    if results is None:
-        return None
-
-    logger.debug(
-        f"{config.api_name} | RESULTS | count={len(results)} | path={config.result_path}",
-        category=LogCategory.SCORE,
-    )
-
-    # Try exact title match first
-    target_norm = normalize_title(title)
-    get_title = config.title_getter or (lambda it: safe_get_field(it, config.title_field) or "")
-    get_authors = config.authors_getter or (lambda it: it.get(config.author_field))
-
-    for item in results:
-        item_title = get_title(item)
-        norm_match = normalize_title(item_title) == target_norm
-        if norm_match and author_name:
-            item_authors = get_authors(item)
-            author_ok = author_name_matches(author_name, item_authors) or author_in_text(author_name, item_authors)
+def _candidate_query_params(
+    title: str,
+    author_name: str | None,
+    config: APISearchConfig,
+    max_results: int,
+    venue: str | None = None,
+) -> dict[str, Any]:
+    """Build the four supported source query shapes without mutating *config*."""
+    params = dict(config.additional_params)
+    if config.api_name == "semantic_scholar":
+        params["query"] = " ".join([f'"{title}"', *([author_name] if author_name else [])])
+        params["limit"] = min(max_results * 2, 20)
+    elif config.api_name == "europepmc":
+        safe_title = title.replace('"', "")
+        query = f'TITLE:"{safe_title}"'
+        params["query"] = query + (f' AND AUTH:"{author_name}"' if author_name else "")
+        params["pageSize"] = max_results
+    elif config.api_name == "crossref_venue":
+        if not venue:
+            return {}
+        params.update({"query.container-title": venue, "query.bibliographic": title, "rows": max(max_results, 10)})
+        if author_name:
+            params["query.author"] = author_name
+        mailto = os.getenv("CROSSREF_MAILTO")
+        if mailto:
+            params["mailto"] = mailto
+    elif config.api_name == "openalex_venue":
+        if not venue:
+            return {}
+        params.update(
+            {
+                "search": title,
+                "filter": f"primary_location.source.display_name.search:{venue}",
+                "per-page": max(max_results, 10),
+            }
+        )
+    elif config.api_name == "crossref":
+        if author_name:
+            params.update({"query.title": title, "query.author": author_name})
         else:
-            author_ok = True
-        logger.debug(
-            f"{config.api_name} | EXACT_CHECK | item_title={item_title[:50]}"
-            f" | normalized_match={norm_match} | author_check={bool(author_name)}"
-            f" | author_match={author_ok}",
-            category=LogCategory.SCORE,
-        )
-        if not (norm_match and author_ok):
-            continue
-        logger.debug(
-            f"{config.api_name} | EXACT_MATCH | title={title[:50]}",
-            category=LogCategory.SCORE,
-        )
-        result = dict(item)
-        response_cache.put(config.api_name, cache_key, result, ttl_days=CACHE_TTL_SEARCH_DAYS)
-        return result
-
-    # Fuzzy match using scoring function
-    from .clients.helpers import _best_item_by_score
-
-    score_fn = _build_scoring_function(title, author_name, config)
-    best = _best_item_by_score(results, score_fn, threshold=SIM_EXACT_PICK_THRESHOLD)
-
-    # _best_item_by_score logs BEST_ITEM internally; here we add API-specific context.
-    best_score = max((score_fn(it) for it in results), default=0.0) if results else 0.0
-    logger.debug(
-        f"{config.api_name} | FUZZY_RESULT | best_score={best_score:.3f}"
-        f" | threshold={SIM_EXACT_PICK_THRESHOLD} | accepted={best is not None}",
-        category=LogCategory.SCORE,
-    )
-    if best is not None:
-        response_cache.put(config.api_name, cache_key, dict(best), ttl_days=CACHE_TTL_SEARCH_DAYS)
+            params["query.bibliographic"] = title
+        mailto = os.getenv("CROSSREF_MAILTO")
+        if mailto:
+            params["mailto"] = mailto
     else:
-        response_cache.put_negative(config.api_name, cache_key)
-    return best
+        params[config.query_param_name] = title
+        if author_name and config.author_param_name:
+            params[config.author_param_name] = author_name
+    return params
 
 
 def search_api_generic_multiple(
@@ -296,16 +270,25 @@ def search_api_generic_multiple(
     api_key: str | None = None,
     max_results: int = 5,
     year_hint: int | None = None,
+    *,
+    venue: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search one configured API and return the top candidates sorted by score.
+    """Search one configured API and return candidates in its declared order.
 
-    Like ``search_api_generic`` but keeps every candidate above the tolerance
-    threshold (up to *max_results*) so callers can validate multiple options.
+    Scored sources retain every candidate above their configured threshold.
+    API-ordered sources preserve their source ranking. Both return at most
+    *max_results* raw records for later pipeline admission.
     """
-    if not title:
+    if not title or (config.api_name == "semantic_scholar" and not api_key):
         return []
 
-    cache_key = title_author_cache_key(title, author_name, prefix="multi|")
+    if config.api_name.endswith("_venue") and not venue:
+        return []
+    cache_key = (
+        f"venue|{title_author_cache_key(title, author_name)}|{(venue or '').lower().strip()}"
+        if config.api_name.endswith("_venue")
+        else title_author_cache_key(title, author_name, prefix="multi|")
+    )
     cached = response_cache.get(config.api_name, cache_key)
     if cached is not None:
         if cached.get("_negative"):
@@ -313,40 +296,62 @@ def search_api_generic_multiple(
             return []
         cached_list: list[dict[str, Any]] = cached.get("results", [])
         logger.debug(f"{config.api_name}_multi | HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
-        return cached_list
+        return [dict(item) for item in cached_list[:max_results]]
 
-    results = _fetch_results(title, author_name, config, api_key, cache_key)
+    params = _candidate_query_params(title, author_name, config, max_results, venue)
+    if not params:
+        return []
+    results = _fetch_results(
+        title,
+        author_name,
+        config,
+        api_key,
+        cache_key,
+        params=params,
+    )
     if results is None:
         return []
 
-    score_fn = _build_scoring_function(title, author_name, config, year_hint)
-
-    scored_results = []
-    effective_threshold = SIM_EXACT_PICK_THRESHOLD - SIM_THRESHOLD_TOLERANCE
-
-    for item in results:
-        try:
-            score = score_fn(item)
-        except FIELD_ACCESS_ERRORS:
-            continue
-        accepted = score is not None and score >= effective_threshold
-        logger.debug(
-            f"{config.api_name} | ITEM_SCORE | score={score:.3f}"
-            f" | threshold={effective_threshold:.3f} | accepted={accepted}",
-            category=LogCategory.SCORE,
+    if config.api_name in {"semantic_scholar", "europepmc"}:
+        top_results = [dict(item) for item in results[:max_results]]
+        scored_count = len(results)
+    else:
+        score_fn = _build_scoring_function(title, author_name, config, year_hint)
+        scored_results = []
+        effective_threshold = (
+            SIM_BEST_ITEM_THRESHOLD
+            if config.api_name.endswith("_venue")
+            else SIM_EXACT_PICK_THRESHOLD - SIM_THRESHOLD_TOLERANCE
         )
-        if accepted:
-            scored_results.append((score, item))
 
-    scored_results.sort(key=lambda x: x[0], reverse=True)
-    top_results = [item for _, item in scored_results[:max_results]]
+        for item in results:
+            try:
+                score = score_fn(item)
+            except FIELD_ACCESS_ERRORS:
+                continue
+            accepted = score is not None and score >= effective_threshold
+            logger.debug(
+                f"{config.api_name} | ITEM_SCORE | score={score:.3f}"
+                f" | threshold={effective_threshold:.3f} | accepted={accepted}",
+                category=LogCategory.SCORE,
+            )
+            if accepted:
+                scored_results.append((score, item))
+
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        top_results = [dict(item) for _, item in scored_results[:max_results]]
+        scored_count = len(scored_results)
     logger.debug(
-        f"{config.api_name}_multi | RESULT | scored={len(scored_results)}/{len(results)} | top={len(top_results)}",
+        f"{config.api_name}_multi | RESULT | scored={scored_count}/{len(results)} | top={len(top_results)}",
         category=LogCategory.SCORE,
     )
     if top_results:
-        cache_value: dict[str, Any] = {"results": [dict(r) for r in top_results]}
-        response_cache.put(config.api_name, cache_key, cache_value, ttl_days=CACHE_TTL_SEARCH_DAYS)
+        response_cache.put(
+            config.api_name,
+            cache_key,
+            {"results": [dict(r) for r in top_results]},
+            ttl_days=CACHE_TTL_SEARCH_DAYS,
+        )
     else:
         response_cache.put_negative(config.api_name, cache_key)
     return top_results

@@ -3,7 +3,7 @@
 ``citeforge.pipeline.postrun.finalize_run`` owns the irreversible on-disk data
 safety guarantees of the whole pipeline: it is the only place that deletes
 ``.bib`` files (duplicate orphans and out-of-window files) and the place that
-rewrites ``baseline.json`` / ``badges.json``. It had zero direct tests. These
+rewrites ``baseline.json``. It had zero direct tests. These
 exercise the real function against a hermetic ``tmp_path`` output tree with real
 factory-serialized ``.bib`` files and a real io_utils summary CSV, and assert
 the load-bearing guards by inspecting the filesystem after the call:
@@ -14,7 +14,7 @@ the load-bearing guards by inspecting the filesystem after the call:
   anything under ``a2i2/`` are untouched.
 * PHANTOM-WRITE -- a second identical run rewrites no ``.bib`` bytes and bumps no
   mtime (content-comparison guard holds).
-* baseline.json / badges.json are created under ``out_dir`` and are valid JSON.
+* baseline.json is created under ``out_dir`` and is valid JSON.
 
 No network is touched. The a2i2 build is neutralized by pointing its input CSV
 at a nonexistent path so build_a2i2_folder returns early without clearing the
@@ -403,13 +403,11 @@ def test_second_run_is_a_no_op_on_bib_files(tmp_path: Path, no_a2i2: None) -> No
     assert after == before, "second finalize_run rewrote .bib files (phantom-write churn)"
 
 
-# --- baseline.json / badges.json --------------------------------------------
+# --- baseline.json ----------------------------------------------------------
 
 
-def test_writes_valid_baseline_and_badges_json(tmp_path: Path, no_a2i2: None) -> None:
-    """finalize_run writes baseline.json and badges.json under out_dir, and both
-    are valid JSON with the expected shape.
-    """
+def test_writes_valid_baseline_json(tmp_path: Path, no_a2i2: None) -> None:
+    """finalize_run writes a valid baseline.json under out_dir."""
     out_dir = tmp_path / "out"
     author = _author_dir(out_dir)
 
@@ -422,22 +420,16 @@ def test_writes_valid_baseline_and_badges_json(tmp_path: Path, no_a2i2: None) ->
     finalize_run(str(out_dir), _records(), total_saved=2, processed=2, summary_csv_path=str(csv_path))
 
     baseline_path = out_dir / "baseline.json"
-    badges_path = out_dir / "badges.json"
     assert baseline_path.exists(), "baseline.json must be written under out_dir"
-    assert badges_path.exists(), "badges.json must be written under out_dir"
 
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     assert baseline["total"] == 2, "baseline total must reflect the two surviving files"
     assert baseline["authors"]["Doe (abc123)"] == 2
 
-    badges = json.loads(badges_path.read_text(encoding="utf-8"))
-    for field in ("total_queries", "cache_positive_hits", "cache_negative_hits", "cache_misses", "hit_rate"):
-        assert field in badges, f"badges.json missing {field}"
-
 
 def test_no_summary_csv_writes_nothing(tmp_path: Path, no_a2i2: None) -> None:
     """When the summary CSV path is None or missing, finalize_run performs no
-    cleanup and writes no baseline/badges files (guarded by the CSV-exists check).
+    cleanup and writes no baseline file (guarded by the CSV-exists check).
     """
     out_dir = tmp_path / "out"
     author = _author_dir(out_dir)
@@ -447,4 +439,3 @@ def test_no_summary_csv_writes_nothing(tmp_path: Path, no_a2i2: None) -> None:
 
     assert survivor.exists(), "no CSV means no cleanup: the file must remain"
     assert not (out_dir / "baseline.json").exists(), "baseline.json is only written when the CSV exists"
-    assert not (out_dir / "badges.json").exists(), "badges.json is only written when the CSV exists"

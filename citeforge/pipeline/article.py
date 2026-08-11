@@ -13,14 +13,22 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from citeforge import bibtex_utils as bt
 from citeforge import id_utils as idu
 from citeforge import merge_utils as mu
+from citeforge.api_configs import (
+    ARXIV_FIELD_MAPPING,
+    CROSSREF_FIELD_MAPPING,
+    OPENALEX_FIELD_MAPPING,
+    OPENREVIEW_FIELD_MAPPING,
+    S2_FIELD_MAPPING,
+)
+from citeforge.api_generics import build_bibtex_from_response
 from citeforge.canonicalize import (
     CanonicalStage,
-    _fixup_bib_entry,  # noqa: F401  # re-exported for test imports
     canonicalize,
 )
 from citeforge.clients.helpers import extract_authors_from_article, get_article_year, strip_html_tags
@@ -30,13 +38,8 @@ from citeforge.clients.scholar import (
 )
 from citeforge.clients.search_apis import (
     arxiv_search,
-    build_bibtex_from_arxiv,
-    build_bibtex_from_crossref,
     build_bibtex_from_europepmc,
-    build_bibtex_from_openalex,
-    build_bibtex_from_openreview,
     build_bibtex_from_pubmed,
-    build_bibtex_from_s2,
     crossref_search_by_venue,
     crossref_search_multiple,
     europepmc_search_papers_multiple,
@@ -53,7 +56,6 @@ from citeforge.config import (
     PUB_PARSE_TIER1_MIN_CONFIDENCE,
     PUB_PARSE_TIER2_MIN_CONFIDENCE,
     SIM_MERGE_DUPLICATE_THRESHOLD,
-    SIM_PREPRINT_TITLE_THRESHOLD,
     SKIP_SCHOLAR_FOR_EXISTING_FILES,
 )
 from citeforge.doi_utils import process_validated_doi
@@ -63,6 +65,7 @@ from citeforge.exceptions import (
 )
 from citeforge.fsscan import iter_author_bibs, iter_parsed_author_bibs
 from citeforge.http_utils import http_get_text
+from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
 from citeforge.io_utils import (
     append_summary_to_csv,
     is_known_summary_path,
@@ -82,6 +85,11 @@ from citeforge.text_utils import (
 from citeforge.textnorm import _is_corrupted_title, _is_garbage_title
 
 _ARXIV_ABS_RE = re.compile(r"arxiv\.org/abs/(\d{4}\.\d{4,5})", re.IGNORECASE)
+_S2_BUILDER = partial(build_bibtex_from_response, mapping=S2_FIELD_MAPPING)
+_CROSSREF_BUILDER = partial(build_bibtex_from_response, mapping=CROSSREF_FIELD_MAPPING)
+_ARXIV_BUILDER = partial(build_bibtex_from_response, mapping=ARXIV_FIELD_MAPPING)
+_OPENREVIEW_BUILDER = partial(build_bibtex_from_response, mapping=OPENREVIEW_FIELD_MAPPING)
+_OPENALEX_BUILDER = partial(build_bibtex_from_response, mapping=OPENALEX_FIELD_MAPPING)
 
 
 def _entry_is_complete(entry: dict[str, Any]) -> bool:
@@ -210,7 +218,12 @@ def _try_multiple_candidates(
                 if cand_doi:
                     seen_dois.add(cand_doi)
 
-            match = bt.bibtex_entries_match_strict(baseline_entry, candidate_dict)
+            evidence = evaluate_identity(baseline_entry, candidate_dict, context=IdentityContext.ENRICHMENT)
+            match = evidence.verdict
+            logger.debug(
+                f"ENTRY_IDENTITY | reason={evidence.reason.value} | result={match}",
+                category=LogCategory.DEDUP,
+            )
             if match:
                 enr_list.append((flag_key, candidate_dict))
                 flags[flag_key] = True
@@ -697,7 +710,14 @@ def process_article(
                     sch_page_bib = build_bibtex_from_scholar_fields(fields, keyhint=result_id)
                     if sch_page_bib:
                         sch_page_dict = bt.parse_bibtex_to_dict(sch_page_bib)
-                        if sch_page_dict and bt.bibtex_entries_match_strict(baseline_entry, sch_page_dict):
+                        if (
+                            sch_page_dict
+                            and evaluate_identity(
+                                baseline_entry,
+                                sch_page_dict,
+                                context=IdentityContext.ENRICHMENT,
+                            ).verdict
+                        ):
                             enr_list.append(("scholar_page", sch_page_dict))
                             flags["scholar_page"] = True
                             logger.success(
@@ -726,7 +746,7 @@ def process_article(
         "S2",
         LogSource.S2,
         (lambda: s2_search_papers_multiple(title, rec.name, s2_api_key, max_results=5)) if s2_api_key else lambda: None,
-        build_bibtex_from_s2,
+        _S2_BUILDER,
         "s2",
         title,
         baseline_entry,
@@ -742,7 +762,7 @@ def process_article(
         "Crossref",
         LogSource.CROSSREF,
         lambda: crossref_search_multiple(title, rec.name, max_results=5, year_hint=year_hint),
-        build_bibtex_from_crossref,
+        _CROSSREF_BUILDER,
         "crossref",
         title,
         baseline_entry,
@@ -756,7 +776,7 @@ def process_article(
         "OpenReview",
         LogSource.OPENREVIEW,
         lambda: openreview_search_papers_multiple(title, rec.name, or_creds, max_results=5),
-        build_bibtex_from_openreview,
+        _OPENREVIEW_BUILDER,
         "openreview",
         title,
         baseline_entry,
@@ -770,7 +790,7 @@ def process_article(
         "arXiv",
         LogSource.ARXIV,
         lambda: arxiv_search(title, rec.name, year_hint),
-        build_bibtex_from_arxiv,
+        _ARXIV_BUILDER,
         "arxiv",
         title,
         baseline_entry,
@@ -784,7 +804,7 @@ def process_article(
         "OpenAlex",
         LogSource.OPENALEX,
         lambda: openalex_search_multiple(title, rec.name, max_results=5, year_hint=year_hint),
-        build_bibtex_from_openalex,
+        _OPENALEX_BUILDER,
         "openalex",
         title,
         baseline_entry,
@@ -859,7 +879,7 @@ def process_article(
                         None,
                         LogSource.CROSSREF,
                         lambda: crossref_search_by_venue(title, rec.name, container_title=venue_name, max_results=5),
-                        build_bibtex_from_crossref,
+                        _CROSSREF_BUILDER,
                         "crossref",
                         title,
                         baseline_entry,
@@ -876,7 +896,7 @@ def process_article(
                             None,
                             LogSource.OPENALEX,
                             lambda: openalex_search_by_venue(title, rec.name, venue_name=venue_name, max_results=5),
-                            build_bibtex_from_openalex,
+                            _OPENALEX_BUILDER,
                             "openalex",
                             title,
                             baseline_entry,
@@ -1264,24 +1284,35 @@ def process_article(
             ):
                 try:
                     edoi = idu.normalize_doi((edict.get("fields") or {}).get("doi", ""))
-                    if not edoi or edoi not in check_dois:
+                    if not edoi:
                         continue
-                    # Guard: verify the DOI match is genuine by comparing titles.
-                    # Phase-2 candidate DOIs can be false matches (API returned
-                    # the wrong DOI for the query title).
-                    e_title = (edict.get("fields") or {}).get("title", "")
-                    m_title = merged_fields.get("title", "")
-                    if e_title and m_title:
-                        doi_sim = title_similarity(e_title, m_title)
-                        if doi_sim < SIM_PREPRINT_TITLE_THRESHOLD:
+                    identity = None
+                    conflict = None
+                    for candidate_doi in sorted(check_dois):
+                        evidence = evaluate_identity(
+                            edict,
+                            merged,
+                            context=IdentityContext.CANDIDATE_DOI_NET,
+                            candidate_doi=candidate_doi,
+                        )
+                        if evidence.verdict:
+                            identity = evidence
+                            break
+                        if evidence.reason is IdentityReason.IDENTIFIER_TITLE_CONFLICT:
+                            conflict = evidence
+                            break
+                    if identity is None:
+                        if conflict is not None:
                             logger.debug(
                                 f"CANDIDATE_DOI_DEDUP_REJECTED | doi={edoi}"
+                                f" | candidate={conflict.matched_candidate_doi}"
                                 f" | existing={existing_bib}"
-                                f" | sim={doi_sim:.3f} | titles_differ",
+                                f" | sim={(conflict.title_similarity or 0.0):.3f} | titles_differ",
                                 category=LogCategory.DEDUP,
                             )
-                            _revert_misattributed_doi(merged_fields, edoi, doi_validated, doi_early)
-                            continue
+                            bad_doi = conflict.matched_candidate_doi or edoi
+                            _revert_misattributed_doi(merged_fields, bad_doi, doi_validated, doi_early)
+                        continue
                     # Published supersedes preprint. When the on-disk match is a
                     # preprint/secondary DOI while the incoming entry carries a genuine
                     # published DOI, remove the on-disk preprint and keep the published
@@ -1297,7 +1328,8 @@ def process_article(
                         os.remove(epath)
                         continue
                     logger.debug(
-                        f"CANDIDATE_DOI_DEDUP | doi={edoi} | existing={existing_bib} | skipping_write=True",
+                        f"CANDIDATE_DOI_DEDUP | doi={edoi} | candidate={identity.matched_candidate_doi}"
+                        f" | existing={existing_bib} | skipping_write=True",
                         category=LogCategory.DEDUP,
                     )
                     if path and os.path.isfile(path):

@@ -169,23 +169,98 @@ def test_distinct_works_same_title_kept_as_two_files(tmp_path: Path) -> None:
 # --- DOI url-vs-bare normalization ------------------------------------------
 
 
-def test_same_doi_url_and_bare_dedup_to_one_file(tmp_path: Path) -> None:
-    """Two different-title entries sharing one DOI (url form vs bare) => one file.
-
-    Dedup runs through ``_norm_doi``, which strips the ``https://doi.org/``
-    wrapper, so the DOIs compare equal despite the different titles/keys.
-    """
+def test_same_normalized_doi_unrelated_titles_stay_separate(tmp_path: Path) -> None:
+    """A normalized DOI match cannot override an explicit title conflict."""
     author_dir = _author_dir(tmp_path)
     as_url = factories.article(title="Title One", author="Alpha, A", doi="https://doi.org/10.1145/3580305", key="K1")
-    as_bare = factories.article(title="Completely Different Title", author="Beta, B", doi="10.1145/3580305", key="K2")
+    as_bare = factories.article(title="Completely Different Title", author="Alpha, A", doi="10.1145/3580305", key="K2")
+    factories.write_bib(author_dir, as_url, "one.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, as_bare)
+
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+
+
+def test_same_doi_url_and_bare_compatible_titles_deduplicate(tmp_path: Path) -> None:
+    """URL and bare forms of one DOI deduplicate when titles are compatible."""
+    author_dir = _author_dir(tmp_path)
+    as_url = factories.article(
+        title="Graph Learning for Maritime Traffic",
+        author="Alpha, A",
+        doi="https://doi.org/10.1145/3580305",
+        key="K1",
+    )
+    as_bare = factories.article(
+        title="Graph Learning for Maritime Traffic.",
+        author="Alpha, A",
+        doi="10.1145/3580305",
+        key="K2",
+    )
     factories.write_bib(author_dir, as_url, "one.bib")
 
     path, _was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, as_bare)
 
-    remaining = _bib_files(author_dir)
-    assert len(remaining) == 1
-    assert Path(path).name in remaining
-    assert PUBLISHED_DOI in _read(author_dir, remaining[0]).lower()
+    assert _bib_files(author_dir) == [Path(path).name]
+
+
+def test_doiless_high_title_distinct_authors_stay_separate(tmp_path: Path) -> None:
+    """A DOI-less exact title cannot collapse records with explicit author conflict."""
+    author_dir = _author_dir(tmp_path)
+    first = factories.article(title=BOUNDARY_TITLE, author="Alpha, Alice", year="2024", key="K1")
+    second = factories.article(title=BOUNDARY_TITLE, author="Beta, Bob", year="2024", key="K2")
+    factories.write_bib(author_dir, first, "first.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, second)
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+
+    from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
+
+    evidence = evaluate_identity(first, second, context=IdentityContext.DISK_SURVIVOR)
+    assert evidence.verdict is False
+    assert evidence.reason is IdentityReason.AUTHOR_CONFLICT
+
+
+def test_doiless_high_title_year_gap_four_stays_separate(tmp_path: Path) -> None:
+    """A DOI-less exact title cannot collapse records with a four-year gap."""
+    author_dir = _author_dir(tmp_path)
+    first = factories.article(title=BOUNDARY_TITLE, author="Alpha, Alice", year="2020", key="K1")
+    second = factories.article(title=BOUNDARY_TITLE, author="Alpha, Alice", year="2024", key="K2")
+    factories.write_bib(author_dir, first, "first.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, second)
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+
+    from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
+
+    evidence = evaluate_identity(first, second, context=IdentityContext.DISK_SURVIVOR)
+    assert evidence.verdict is False
+    assert evidence.reason is IdentityReason.YEAR_CONFLICT
+
+
+def test_doiless_truncated_title_year_gap_four_stays_separate(tmp_path: Path) -> None:
+    """A DOI-less truncated title obeys the same explicit year veto."""
+    author_dir = _author_dir(tmp_path)
+    first = factories.article(
+        title="Passive Co-presence for Reliable Maritime Decision Support",
+        author="Alpha, Alice",
+        year="2020",
+        key="K1",
+    )
+    second = factories.article(title="Passive Co-presence", author="Alpha, Alice", year="2024", key="K2")
+    factories.write_bib(author_dir, first, "first.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, second)
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+
+    from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
+
+    evidence = evaluate_identity(first, second, context=IdentityContext.DISK_SURVIVOR)
+    assert evidence.verdict is False
+    assert evidence.reason is IdentityReason.YEAR_CONFLICT
 
 
 # --- OSError scan branch -----------------------------------------------------
