@@ -27,6 +27,7 @@ from tenacity import RetryCallState, Retrying, retry_if_exception_type, retry_if
 
 from .config import (
     GLOBAL_CONCURRENCY_LIMIT,
+    HTTP_BACKOFF_INITIAL,
     HTTP_BACKOFF_MAX,
     HTTP_MAX_RETRIES,
     HTTP_RETRY_STATUS_CODES,
@@ -320,7 +321,8 @@ def _retry_wait(retry_state: RetryCallState) -> float:
             retry_after = _parse_retry_after(response.headers.get("Retry-After"))
             if retry_after > 0:
                 return min(retry_after, HTTP_BACKOFF_MAX)
-    return float(min((2 ** (retry_state.attempt_number - 1)) + random.uniform(0, 1), HTTP_BACKOFF_MAX))
+    delay = HTTP_BACKOFF_INITIAL * (2 ** (retry_state.attempt_number - 1))
+    return float(min(delay, HTTP_BACKOFF_MAX))
 
 
 def _send_once(

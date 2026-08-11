@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from citeforge.clients.scholar import _deduplicate_publication_list, fetch_author_publications, fetch_scholar_citation
+from citeforge.clients.scholar import (
+    _deduplicate_publication_list,
+    fetch_author_publications,
+    fetch_scholar_citation,
+    merge_publication_lists,
+)
 from citeforge.clients.serpapi_scholar import serpapi_fetch_author_publications
 from citeforge.clients.serply_scholar import serply_fetch_citation
 
@@ -34,6 +39,13 @@ def test_exact_title_year_gap_four_keeps_both() -> None:
     ]
 
     assert len(_deduplicate_publication_list(pubs)) == 2
+
+
+def test_cross_source_sparse_title_without_target_author_keeps_both() -> None:
+    """Missing target-author evidence does not activate exact-title deduplication."""
+    publication = {"title": "Shared Benchmark Title", "year": 2024}
+
+    assert len(merge_publication_lists([publication], [publication], None)) == 2
 
 
 @pytest.mark.parametrize(

@@ -103,8 +103,16 @@ def _title_score(left: _RecordView, right: _RecordView) -> float:
     return txt.title_similarity(left.normalized_title, right.normalized_title)
 
 
-def _title_conflicts(left: _RecordView, right: _RecordView, score: float) -> bool:
-    return bool(left.normalized_title and right.normalized_title and score < cfg.SIM_IDENTIFIER_TITLE_MIN)
+def _identifier_title_rejection(
+    left: _RecordView,
+    right: _RecordView,
+    score: float,
+) -> IdentityReason | None:
+    if not left.normalized_title or not right.normalized_title:
+        return IdentityReason.MISSING_TITLE
+    if score < cfg.SIM_IDENTIFIER_TITLE_MIN:
+        return IdentityReason.IDENTIFIER_TITLE_CONFLICT
+    return None
 
 
 def _import_identity(
@@ -144,11 +152,7 @@ def _enrichment_identity(left: _RecordView, right: _RecordView) -> IdentityEvide
     score = _title_score(left, right)
     if left.doi and right.doi:
         if left.doi == right.doi:
-            reason = (
-                IdentityReason.IDENTIFIER_TITLE_CONFLICT
-                if _title_conflicts(left, right, score)
-                else IdentityReason.DOI_EXACT
-            )
+            reason = _identifier_title_rejection(left, right, score) or IdentityReason.DOI_EXACT
             return _evidence(left, right, reason is IdentityReason.DOI_EXACT, reason, title_score=score)
         left_preprint = any(left.doi.startswith(prefix) for prefix in cfg.PREPRINT_DOI_PREFIXES)
         right_preprint = any(right.doi.startswith(prefix) for prefix in cfg.PREPRINT_DOI_PREFIXES)
@@ -157,11 +161,7 @@ def _enrichment_identity(left: _RecordView, right: _RecordView) -> IdentityEvide
     if left.arxiv_id and right.arxiv_id:
         if left.arxiv_id != right.arxiv_id:
             return _evidence(left, right, False, IdentityReason.ARXIV_CONFLICT, title_score=score)
-        reason = (
-            IdentityReason.IDENTIFIER_TITLE_CONFLICT
-            if _title_conflicts(left, right, score)
-            else IdentityReason.ARXIV_EXACT
-        )
+        reason = _identifier_title_rejection(left, right, score) or IdentityReason.ARXIV_EXACT
         return _evidence(left, right, reason is IdentityReason.ARXIV_EXACT, reason, title_score=score)
     if not left.normalized_title or not right.normalized_title:
         return _evidence(left, right, False, IdentityReason.MISSING_TITLE, title_score=score)
@@ -212,12 +212,13 @@ def _candidate_identity(left: _RecordView, right: _RecordView, candidate_doi: st
     reason = IdentityReason.DOI_EXACT if left.doi == candidate else IdentityReason.DOI_VERSION
     if reason is IdentityReason.DOI_VERSION and not doi_bases_match(left.doi, candidate):
         return _evidence(left, right, False, IdentityReason.NO_MATCH, title_score=score)
-    if _title_conflicts(left, right, score):
+    rejection = _identifier_title_rejection(left, right, score)
+    if rejection is not None:
         return _evidence(
             left,
             right,
             False,
-            IdentityReason.IDENTIFIER_TITLE_CONFLICT,
+            rejection,
             title_score=score,
             candidate_doi=candidate,
         )
@@ -229,8 +230,9 @@ def _disk_identity(left: _RecordView, right: _RecordView) -> IdentityEvidence:
     if left.doi and right.doi:
         if left.doi == right.doi or doi_bases_match(left.doi, right.doi):
             reason = IdentityReason.DOI_EXACT if left.doi == right.doi else IdentityReason.DOI_VERSION
-            if _title_conflicts(left, right, score):
-                return _evidence(left, right, False, IdentityReason.IDENTIFIER_TITLE_CONFLICT, title_score=score)
+            rejection = _identifier_title_rejection(left, right, score)
+            if rejection is not None:
+                return _evidence(left, right, False, rejection, title_score=score)
             return _evidence(left, right, True, reason, title_score=score)
         left_preprint = is_secondary_doi(left.doi)
         right_preprint = is_secondary_doi(right.doi)

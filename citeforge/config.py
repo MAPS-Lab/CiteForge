@@ -105,10 +105,15 @@ HTTP_TIMEOUT_FAST = 5.0
 HTTP_TIMEOUT_DEFAULT = 10.0
 
 # Exponential backoff
-HTTP_BACKOFF_INITIAL = 0.25
+HTTP_BACKOFF_INITIAL = 1.0
 HTTP_BACKOFF_MAX = 16.0
 HTTP_MAX_RETRIES = 2
 HTTP_RETRY_STATUS_CODES = (408, 429, 500, 502, 503, 504)
+
+# Scholar empty-result retries
+SCHOLAR_FETCH_MAX_ATTEMPTS = 3
+SCHOLAR_FETCH_BACKOFF_INITIAL = 2.0
+SCHOLAR_FETCH_BACKOFF_MAX = 4.0
 
 # Query-string parameter names whose values must be redacted before any URL or
 # exception text is logged, preventing API-key leakage into committed run logs.

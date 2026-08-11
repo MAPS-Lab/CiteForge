@@ -31,6 +31,9 @@ from citeforge.config import (
     MAX_WORKERS,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
+    SCHOLAR_FETCH_BACKOFF_INITIAL,
+    SCHOLAR_FETCH_BACKOFF_MAX,
+    SCHOLAR_FETCH_MAX_ATTEMPTS,
     SIM_MERGE_DUPLICATE_THRESHOLD,
     get_min_year,
 )
@@ -90,11 +93,16 @@ def process_record(
             # SerpAPI call; pagination handled internally by serpapi_scholar
             data: dict[str, Any] = Retrying(
                 sleep=time.sleep,
-                stop=stop_after_attempt(3),
-                wait=wait_exponential(multiplier=2, min=2, max=4),
+                stop=stop_after_attempt(SCHOLAR_FETCH_MAX_ATTEMPTS),
+                wait=wait_exponential(
+                    multiplier=SCHOLAR_FETCH_BACKOFF_INITIAL,
+                    min=SCHOLAR_FETCH_BACKOFF_INITIAL,
+                    max=SCHOLAR_FETCH_BACKOFF_MAX,
+                ),
                 retry=retry_if_result(lambda result: not result.get("articles")),
                 before_sleep=lambda state: logger.warn(
-                    f"Scholar API returned empty (attempt {state.attempt_number}/3), retrying...",
+                    f"Scholar API returned empty "
+                    f"(attempt {state.attempt_number}/{SCHOLAR_FETCH_MAX_ATTEMPTS}), retrying...",
                     category=LogCategory.FETCH,
                     source=LogSource.SCHOLAR,
                 ),
@@ -110,7 +118,7 @@ def process_record(
 
             if not data.get("articles"):
                 logger.warn(
-                    "Scholar API failed after 3 attempts; continuing with DBLP only",
+                    f"Scholar API failed after {SCHOLAR_FETCH_MAX_ATTEMPTS} attempts; continuing with DBLP only",
                     category=LogCategory.ERROR,
                     source=LogSource.SCHOLAR,
                 )

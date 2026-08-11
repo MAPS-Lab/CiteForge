@@ -266,10 +266,10 @@ class TestBackoffCapAndPostRetry:
         ("header", "expected"),
         [
             ("4", 4.0),
-            ("0", 1.25),
-            ("-2", 1.25),
-            ("junk", 1.25),
-            ("Wed, 21 Oct 2015 07:28:00 GMT", 1.25),
+            ("0", 1.0),
+            ("-2", 1.0),
+            ("junk", 1.0),
+            ("Wed, 21 Oct 2015 07:28:00 GMT", 1.0),
             ("1000", HTTP_BACKOFF_MAX),
         ],
     )
@@ -279,7 +279,6 @@ class TestBackoffCapAndPostRetry:
         sleeps: list[float] = []
         session = FakeSession([FakeResponse(429, headers={"Retry-After": header}), FakeResponse(200)])
         monkeypatch.setattr(http_utils, "_get_session", lambda: session)
-        monkeypatch.setattr(http_utils.random, "uniform", lambda *_a: 0.25)
         monkeypatch.setattr(http_utils.time, "sleep", sleeps.append)
         http_utils._THREAD_LOCAL.session_request_count = 0
         http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
@@ -321,15 +320,19 @@ class TestBackoffCapAndPostRetry:
         http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
         assert was_free == [True]
 
-    def test_fallback_waits_are_one_then_two_seconds_plus_jitter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_fallback_waits_are_deterministic_exponential_delays(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sleeps: list[float] = []
         session = FakeSession([FakeResponse(500), FakeResponse(500), FakeResponse(200)])
         monkeypatch.setattr(http_utils, "_get_session", lambda: session)
-        monkeypatch.setattr(http_utils.random, "uniform", lambda *_a: 0.25)
+        monkeypatch.setattr(
+            http_utils.random,
+            "uniform",
+            lambda *_a: pytest.fail("retry waits must not use random jitter"),
+        )
         monkeypatch.setattr(http_utils.time, "sleep", sleeps.append)
         http_utils._THREAD_LOCAL.session_request_count = 0
         http_utils._http_request("GET", "https://example.com/x", {}, 1.0)
-        assert sleeps == [1.25, 2.25]
+        assert sleeps == [1.0, 2.0]
 
 
 class TestLogicalAndTransportAccounting:

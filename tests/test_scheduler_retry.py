@@ -97,6 +97,35 @@ def test_scholar_result_policy_does_not_retry_exceptions(monkeypatch: pytest.Mon
     assert calls == 1
 
 
+def test_scholar_result_retry_uses_configured_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = 0
+    sleeps: list[float] = []
+    warnings: list[str] = []
+
+    def fetch(*args: object, **kwargs: object) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"articles": []}
+
+    monkeypatch.setattr(scheduler, "SCHOLAR_FETCH_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(scheduler, "SCHOLAR_FETCH_BACKOFF_INITIAL", 0.5)
+    monkeypatch.setattr(scheduler, "SCHOLAR_FETCH_BACKOFF_MAX", 0.5)
+    monkeypatch.setattr(scheduler, "fetch_author_publications", fetch)
+    monkeypatch.setattr(scheduler, "dblp_fetch_for_author", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(scheduler.time, "sleep", sleeps.append)
+    monkeypatch.setattr(scheduler.logger, "warn", lambda message, **_kwargs: warnings.append(message))
+    monkeypatch.setattr(scheduler, "get_min_year", lambda: 2020)
+    monkeypatch.setattr(scheduler, "merge_publication_lists", lambda scholar, _dblp, **_kwargs: scholar)
+    monkeypatch.setattr(scheduler, "sort_articles_by_year_current_first", lambda articles: articles)
+
+    scheduler.process_record("key", None, Record("Ada", scholar_id="author-id"), str(tmp_path), max_pubs=0)
+
+    assert calls == 2
+    assert sleeps == [0.5]
+    assert "attempt 1/2" in warnings[0]
+    assert any("failed after 2 attempts" in message for message in warnings)
+
+
 def test_nonempty_scholar_error_status_still_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     response = {
         "articles": [{"title": "Ready", "year": "2026"}],
