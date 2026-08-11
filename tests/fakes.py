@@ -1,14 +1,7 @@
-"""Local protocol fakes so HTTP, client, and cache tests never touch a socket.
-
-These stand in for ``requests.Session`` and the JSON-fetch helpers with scripted,
-deterministic responses. ``block_network`` proves a test opened no real
-connection, which is what keeps the deterministic E2E oracle honest.
-"""
+"""Local protocol fakes for deterministic HTTP, client, and cache tests."""
 
 from __future__ import annotations
 
-import socket
-from collections.abc import Iterator
 from typing import Any
 
 import requests
@@ -62,40 +55,3 @@ class FakeSession:
 
     def close(self) -> None:
         self.closed = True
-
-
-def fake_http_json(url_map: dict[str, dict[str, Any]]):  # type: ignore[no-untyped-def]
-    """Return a drop-in for ``http_get_json`` that serves canned payloads.
-
-    ``url_map`` maps a substring of the request URL to the JSON dict to return,
-    so a client test can supply a realistic API payload without any network.
-    A URL matching no key raises, surfacing an unstubbed call rather than
-    silently hitting the wire.
-    """
-
-    def _get(url: str, timeout: float = 0.0) -> dict[str, Any]:
-        for needle, payload in url_map.items():
-            if needle in url:
-                return payload
-        raise AssertionError(f"unstubbed URL in test: {url}")
-
-    return _get
-
-
-class _NoNetworkSocket(socket.socket):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        raise AssertionError("network access is blocked in this test")
-
-
-def install_block_network(monkeypatch: Any) -> None:
-    """Patch ``socket.socket`` so any real connection attempt fails loudly.
-
-    Call from a test (or an autouse fixture) that must prove it stays offline.
-    """
-    monkeypatch.setattr(socket, "socket", _NoNetworkSocket)
-
-
-def scripted_statuses(*statuses: int, body: bytes = b"{}") -> Iterator[FakeResponse]:
-    """Yield a FakeResponse per status code, for building a FakeSession script."""
-    for code in statuses:
-        yield FakeResponse(code, body=body)

@@ -6,13 +6,7 @@ import pytest
 
 from citeforge import api_configs, api_generics, bibtex_utils, doi_utils
 from citeforge.clients import scholar, search_apis
-from tests.fixtures import load_api_keys
 from tests.test_data import API_SPECIFIC_PAPERS, KNOWN_PAPERS, OPENALEX_CANNED_WORK
-
-
-@pytest.fixture(scope="module")
-def api_keys() -> dict[str, Any]:
-    return load_api_keys()
 
 
 @pytest.mark.live

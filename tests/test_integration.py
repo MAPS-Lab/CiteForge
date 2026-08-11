@@ -14,13 +14,7 @@ from citeforge.clients import scholar, search_apis
 from citeforge.config import get_min_year
 from citeforge.identity import IdentityContext, evaluate_identity
 from citeforge.models import Record
-from tests.fixtures import load_api_keys
 from tests.test_data import KNOWN_PAPERS, REQUIRED_FIELDS, TEST_AUTHOR
-
-
-@pytest.fixture(scope="module")
-def api_keys() -> dict[str, Any]:
-    return load_api_keys()
 
 
 @pytest.mark.live

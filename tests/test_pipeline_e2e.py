@@ -10,8 +10,8 @@ cold re-run and a cache-hit re-run. The post-run finalization safety guarantees
 (orphan-only deletion, contamination guard, year-window, phantom-write) are
 covered in test_finalize_run.py.
 
-No socket is ever opened (asserted), so a leaked real call would fail loudly
-rather than make the oracle flaky.
+The suite-wide socket guard rejects any leaked real call, keeping the oracle
+offline and deterministic.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ import pytest
 
 from citeforge.models import Record
 from citeforge.pipeline import article as article_mod
-from tests.fakes import install_block_network
 
 # Every article-module name that would otherwise reach the network. Each is
 # replaced with a stub returning the empty result its caller expects, so the
@@ -66,7 +65,6 @@ def _art() -> dict[str, Any]:
 
 def _run_once(out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> int:
     _stub_all_network(monkeypatch)
-    install_block_network(monkeypatch)  # any real connection attempt now fails loudly
     rec = Record(name="Ada Lovelace", scholar_id="ABC1234567")
     return article_mod.process_article(
         rec,

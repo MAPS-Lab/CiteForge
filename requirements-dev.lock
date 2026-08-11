@@ -463,9 +463,14 @@ pytest==9.1.1 \
     # via
     #   citeforge (pyproject.toml)
     #   pytest-cov
+    #   pytest-socket
 pytest-cov==7.1.0 \
     --hash=sha256:30674f2b5f6351aa09702a9c8c364f6a01c27aae0c1366ae8016160d1efc56b2 \
     --hash=sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678
+    # via citeforge (pyproject.toml)
+pytest-socket==0.8.0 \
+    --hash=sha256:81821ba59f07d7600fe2b551d8714f40b068bd46e8b6704c48664e9d60cdacb8 \
+    --hash=sha256:af9bb5f487da72be63573a6194cfac033b6c7a1c1561e150521105970f9e99f2
     # via citeforge (pyproject.toml)
 rapidfuzz==3.14.5 \
     --hash=sha256:0084b687b02b4e569b46d8d6d4ad25659528e6081cd6d067ca453a69035f07e4 \

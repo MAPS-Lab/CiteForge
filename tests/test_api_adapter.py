@@ -21,7 +21,6 @@ from citeforge.api_generics import APISearchConfig
 from citeforge.cache import ResponseCache
 from citeforge.clients import search_apis
 from citeforge.pipeline import article
-from tests.fakes import install_block_network
 
 TITLE = "Ocean Forecasting"
 AUTHOR = "Ada Lovelace"
@@ -105,7 +104,6 @@ MIGRATED_CONTRACTS = [
 @pytest.fixture(autouse=True)
 def adapter_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ResponseCache:
     """Give every adapter contract an isolated offline response cache."""
-    install_block_network(monkeypatch)
     cache = ResponseCache(str(tmp_path / "cache"))
     monkeypatch.setattr(api_generics, "response_cache", cache)
     return cache

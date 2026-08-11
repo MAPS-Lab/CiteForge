@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.0",
+    "pytest-socket>=0.8.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.11.0",
     "mypy>=1.15.0",
@@ -38,7 +39,7 @@ include-package-data = false
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --disable-socket"
 markers = [
     "live: requires external scholarly services and is excluded from required CI",
 ]
