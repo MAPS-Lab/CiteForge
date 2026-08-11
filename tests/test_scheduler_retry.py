@@ -135,3 +135,57 @@ def test_nonempty_scholar_error_status_still_raises(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(scheduler, "fetch_author_publications", lambda *args, **kwargs: response)
     with pytest.raises(RuntimeError, match="quota exhausted"):
         scheduler.process_record("key", None, Record("Ada", scholar_id="author-id"), str(tmp_path), max_pubs=0)
+
+
+def test_completed_future_result_is_retrieved_without_fake_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    aggregate_timeouts: list[float] = []
+
+    class RecordingFuture:
+        def result(self, *args: object, **kwargs: object) -> int:
+            result_calls.append((args, kwargs))
+            return 3
+
+        def done(self) -> bool:
+            return True
+
+    class RecordingExecutor:
+        def __init__(self, **_kwargs: object) -> None:
+            self.future = RecordingFuture()
+
+        def __enter__(self) -> RecordingExecutor:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def submit(self, *_args: object, **_kwargs: object) -> RecordingFuture:
+            return self.future
+
+    def recording_as_completed(future_to_author: dict[RecordingFuture, Record], *, timeout: float):
+        aggregate_timeouts.append(timeout)
+        yield next(iter(future_to_author))
+
+    monkeypatch.setattr(scheduler, "ThreadPoolExecutor", RecordingExecutor)
+    monkeypatch.setattr(scheduler, "as_completed", recording_as_completed)
+    monkeypatch.setattr(scheduler.logger, "step", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler.logger, "info", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scheduler.logger, "success", lambda *_args, **_kwargs: None)
+
+    result = scheduler.run_all(
+        "key",
+        None,
+        None,
+        None,
+        None,
+        [Record("Ada", scholar_id="author-id")],
+        str(tmp_path),
+        None,
+        False,
+    )
+
+    assert result == (3, 1)
+    assert result_calls == [((), {})]
+    assert aggregate_timeouts == [1800]

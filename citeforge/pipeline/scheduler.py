@@ -344,18 +344,12 @@ def run_all(
             for future in as_completed(future_to_author, timeout=author_timeout * len(records)):
                 rec = future_to_author[future]
                 try:
-                    saved = future.result(timeout=30)
+                    saved = future.result()
                     total_saved += saved
                     processed += 1
                     logger.success(
                         f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
                         category=LogCategory.AUTHOR,
-                    )
-                except TimeoutError:
-                    processed += 1
-                    logger.error(
-                        f"[{processed}/{len(records)}] Timeout retrieving result for {rec.name}",
-                        category=LogCategory.ERROR,
                     )
                 except Exception as e:
                     processed += 1

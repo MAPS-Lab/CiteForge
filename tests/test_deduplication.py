@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import pytest
-
 from citeforge import merge_utils, text_utils
 from citeforge.id_utils import doi_bases_match
 
@@ -85,10 +83,7 @@ def test_allow_duplicate_save_medium_similarity(tmp_path: Path) -> None:
 
     sim = text_utils.title_similarity(entry_a["fields"]["title"], entry_b["fields"]["title"])
 
-    if sim >= 0.95:
-        pytest.skip(f"Generated similarity {sim} was too high (>= 0.95)")
-    if sim <= 0.90:
-        pytest.skip(f"Generated similarity {sim} was too low (<= 0.90)")
+    assert 0.90 < sim < 0.95
 
     path_b, _ = merge_utils.save_entry_to_file(out_dir, author_id, entry_b, author_name=author_name)
 
