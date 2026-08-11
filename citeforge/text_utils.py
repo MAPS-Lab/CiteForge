@@ -25,6 +25,7 @@ from .config import (
 )
 from .exceptions import DECODE_ERRORS, NUMERIC_ERRORS, PARSE_ERRORS
 from .id_utils import external_ids_match
+from .latex_utils import latex_to_ascii
 
 _ET_AL = "et al."
 _ABBREVIATED_AUTHOR_PATTERN = re.compile(r"^[A-Z]\.?[ \t]*[A-Z]?\.?[ \t]*[A-Z]?\.?[ \t]+[A-Z][a-z]+", re.IGNORECASE)
@@ -118,10 +119,6 @@ def strip_accents(s: str) -> str:
         return s
 
 
-_MATH_DELIM_RE = re.compile(r"\$([^$]*)\$")
-_LATEX_FRAC_RE = re.compile(r"\\frac\{([^}]*)\}\{([^}]*)\}")
-_LATEX_CMD_ARG_RE = re.compile(r"\\[a-zA-Z]+\{([^}]*)}")
-_LATEX_CMD_RE = re.compile(r"\\[a-zA-Z]+")
 _TITLE_PUNCT_RE = re.compile(r"[,.;:!?\n\t\r'\"\-\(\)\[\]\{\}~]")
 
 
@@ -134,12 +131,8 @@ def normalize_title(t: str | None) -> str:
 
     t_str = str(t)
 
-    t_str = html_module.unescape(t_str)
-    t_str = _MATH_DELIM_RE.sub(r"\1", t_str)
-    t_str = _LATEX_FRAC_RE.sub(r"\1/\2", t_str)
-    t_str = _LATEX_CMD_ARG_RE.sub(r"\1", t_str)
-    t_str = _LATEX_CMD_RE.sub("", t_str)
-    t2 = strip_accents(t_str).lower()
+    t_str = latex_to_ascii(html_module.unescape(t_str), math_mode="remove")
+    t2 = t_str.lower()
     t2 = _TITLE_PUNCT_RE.sub(" ", t2)
     result = " ".join(t2.split())
     # If unidecode stripped everything (e.g., CJK-only title), fall back to

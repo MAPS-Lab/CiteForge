@@ -55,6 +55,16 @@ def test_serializer_emits_exact_golden_bytes() -> None:
     assert bibtex_from_dict(_RICH_ENTRY) == GOLDEN
 
 
+def test_serializer_preserves_tildes_in_urls() -> None:
+    """LaTeX whitespace handling must not corrupt a literal URL path segment."""
+    entry = {
+        "type": "misc",
+        "key": "UrlTilde",
+        "fields": {"url": "https://example.org/~researcher/article"},
+    }
+    assert bibtex_from_dict(entry) == "@misc{UrlTilde,\n  url = {https://example.org/~researcher/article}\n}\n"
+
+
 def test_preferred_fields_precede_sorted_tail() -> None:
     """Preferred citation fields come first in canonical order; every remaining
     field follows in sorted() order."""

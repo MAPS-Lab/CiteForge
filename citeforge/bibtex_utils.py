@@ -21,6 +21,7 @@ from .config import (
     BIBTEX_KEY_MAX_WORDS,
     CACHE_TTL_GEMINI_DAYS,
 )
+from .latex_utils import latex_to_ascii
 from .log_utils import LogCategory, logger
 from .text_utils import (
     extract_year_from_any,
@@ -127,46 +128,10 @@ PREFERRED_FIELD_ORDER: tuple[str, ...] = (
 )
 
 
-# Serializer cleanup tables, compiled once at import. bibtex_from_dict runs
-# per entry, so these must not be rebuilt inside the call.
-_LATEX_FORMAT_CMD_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(r"\\" + cmd + r"\s*\{")
-    for cmd in (
-        "textit",
-        "textbf",
-        "emph",
-        "textsc",
-        "texttt",
-        "textrm",
-        "textsf",
-        "underline",
-        "uppercase",
-        "lowercase",
-        "mbox",
-        "hbox",
-        "text",
-    )
-)
-# For each old-style command, match {\xx content} first, then {\xx{content}}.
-_OLD_STYLE_CMD_PATTERNS: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] = tuple(
-    (
-        re.compile(r"\{\\" + cmd + r"\s+([^}]+)\}"),
-        re.compile(r"\{\\" + cmd + r"\s*\{([^}]+)\}\}"),
-    )
-    for cmd in ("it", "bf", "em", "sc", "tt", "rm", "sf", "sl")
-)
-_LATEX_SPECIAL_CHARS = {
-    r"\&": "&",
-    r"\%": "%",
-    r"\$": "$",
-    r"\#": "#",
-    r"\_": "_",
-    r"\{": "{",
-    r"\}": "}",
-}
-_TILDE_RE = re.compile(r"(?<![:/])~")
 _MULTI_SPACE_RE = re.compile(r"  +")
 _APOS_YEAR_RE = re.compile(r"\s+'(\d{2})\b")
+_URL_TILDE_RE = re.compile(r"(?<=[:/])~")
+_URL_TILDE_SENTINEL = "CITEFORGEURLTILDE"
 _UNICODE_TO_ASCII = {
     "\u2019": "'",  # Right single quotation mark → apostrophe
     "\u2018": "'",  # Left single quotation mark → apostrophe
@@ -179,65 +144,6 @@ _UNICODE_TO_ASCII = {
 }
 
 
-def _strip_latex_formatting(val: str) -> str:
-    r"""Remove LaTeX formatting commands while preserving their content.
-
-    Handles \command{...} (textit, textbf, emph, etc.), old-style {\xx ...}
-    commands (it, bf, em, etc.), escaped special characters
-    (\&, \%, \$, \#, \_, \{, \}), tildes, and dashes (-- / ---).
-    """
-    # Fast path: every transform below requires a backslash (commands and
-    # escaped specials), a tilde, a "--" run, or a double space. If none are
-    # present the function is a no-op, so skip the whole command scan.
-    if "\\" not in val and "~" not in val and "--" not in val and "  " not in val:
-        return val
-
-    prev_val = None
-    while prev_val != val:
-        prev_val = val
-        for cmd_pattern in _LATEX_FORMAT_CMD_PATTERNS:
-            # Match \command{...} with balanced braces
-            while True:
-                match = cmd_pattern.search(val)
-                if not match:
-                    break
-                # Find the matching closing brace
-                start = match.end() - 1  # Position of opening brace
-                depth = 0
-                end = start
-                for i in range(start, len(val)):
-                    if val[i] == "{":
-                        depth += 1
-                    elif val[i] == "}":
-                        depth -= 1
-                        if depth == 0:
-                            end = i
-                            break
-                if depth == 0:
-                    # Extract content and replace
-                    content = val[start + 1 : end]
-                    val = val[: match.start()] + content + val[end + 1 :]
-                else:
-                    # Unbalanced braces, skip this match
-                    break
-
-    for pattern, pattern2 in _OLD_STYLE_CMD_PATTERNS:
-        val = pattern.sub(r"\1", val)
-        val = pattern2.sub(r"\1", val)
-
-    for latex_char, plain_char in _LATEX_SPECIAL_CHARS.items():
-        val = val.replace(latex_char, plain_char)
-
-    val = _TILDE_RE.sub(" ", val)
-
-    val = val.replace("---", "--")
-    val = val.replace("--", "-")
-
-    val = _MULTI_SPACE_RE.sub(" ", val)
-
-    return val
-
-
 def _normalize_to_ascii(val: str) -> str:
     """Normalize Unicode to ASCII for BibTeX compatibility.
 
@@ -247,7 +153,13 @@ def _normalize_to_ascii(val: str) -> str:
     # html.unescape only changes a string containing an '&' entity.
     if "&" in val:
         val = html.unescape(val)
-    val = _strip_latex_formatting(val)
+    val = val.replace("---", "--")
+    val = val.replace("--", "-")
+    val = _URL_TILDE_RE.sub(_URL_TILDE_SENTINEL, val)
+    val = latex_to_ascii(val, math_mode="verbatim")
+    val = val.replace(_URL_TILDE_SENTINEL, "~")
+
+    val = _MULTI_SPACE_RE.sub(" ", val)
 
     # strip_accents and every _UNICODE_TO_ASCII key are non-ASCII, so both
     # are no-ops on an already-ASCII string; skip them in that common case.

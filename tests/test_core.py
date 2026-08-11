@@ -31,7 +31,7 @@ def test_title_normalization() -> None:
         ("Café Society", "cafe society"),
         ("Naïve Bayes", "naive bayes"),
         # Complex/Edge Cases
-        ("On the $\\sqrt{2}$ approximation", "on the 2 approximation"),
+        ("On the $\\sqrt{2}$ approximation", "on the approximation"),
         ("A very long title that goes on and on", "a very long title that goes on and on"),
         # Empty
         ("", ""),
