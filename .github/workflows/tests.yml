@@ -49,8 +49,25 @@ jobs:
         pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
         pip install --no-build-isolation --no-deps -e .
 
+    - name: Verify generated locks are current
+      run: |
+        uv pip compile pyproject.toml --universal --python-version 3.10 --generate-hashes -o requirements.lock
+        uv pip compile pyproject.toml --extra dev --universal --python-version 3.10 --generate-hashes -o requirements-dev.lock
+        uv pip compile requirements-build.in --universal --python-version 3.10 --generate-hashes -o requirements-build.lock
+        git diff --exit-code -- requirements.lock requirements-dev.lock requirements-build.lock
+
     - name: Build wheel with locked backend
       run: python -m pip wheel --no-build-isolation --no-deps --wheel-dir /tmp/citeforge-wheel .
+
+    - name: Smoke-test installed wheel
+      run: |
+        smoke_dir="$(mktemp -d)"
+        python -m venv "$smoke_dir/venv"
+        "$smoke_dir/venv/bin/pip" install --require-hashes -r requirements.lock
+        "$smoke_dir/venv/bin/pip" install --no-deps /tmp/citeforge-wheel/*.whl
+        cd "$smoke_dir"
+        "$smoke_dir/venv/bin/python" -c "import citeforge, citeforge.cli"
+        "$smoke_dir/venv/bin/citeforge" --help
 
     - name: Lint (ruff)
       run: ruff check citeforge/ tests/ main.py
@@ -66,7 +83,7 @@ jobs:
       max-parallel: 1
       fail-fast: true
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

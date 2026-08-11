@@ -89,13 +89,28 @@ SerpAPI requires a key; the remaining sources are keyless, recommended, or optio
 
 ## Development
 
-Install the development extras, then run the three quality gates that must pass before merge.
+For reproducible installs, use the checked-in hash-locked requirements files.
+`requirements-build.lock` pins the build backend and the `uv` lock compiler,
+`requirements.lock` pins runtime dependencies, and `requirements-dev.lock`
+pins the runtime and development toolchain. Use the runtime lock for ordinary
+use, or the development lock when contributing.
 
 ```bash
-pip install -e .[dev]                        # Install with dev tools
+# Runtime setup
+python -m pip install --require-hashes -r requirements-build.lock -r requirements.lock
+python -m pip install --no-build-isolation --no-deps -e .
+
+# Development setup
+python -m pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
+python -m pip install --no-build-isolation --no-deps -e .
+```
+
+Then run the three quality gates that must pass before merge.
+
+```bash
 ruff check citeforge/ tests/ main.py         # Lint (line-length 120)
 mypy citeforge/ main.py                       # Type check (strict, ignore_missing_imports)
-pytest tests/ -v --tb=short                   # Full test suite (Python 3.10-3.13)
+pytest tests/ -v --tb=short                   # Full test suite (Python 3.10-3.14)
 ```
 
 Run a single test with `pytest tests/test_core.py::test_function_name -v --tb=short`.

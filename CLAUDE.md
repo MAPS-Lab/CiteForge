@@ -11,6 +11,16 @@ python3 main.py           # Run pipeline (input: data/input.csv)
 python3 main.py --force   # Force re-enrichment (ignore cache completeness)
 ```
 
+For reproducible setup, install the three locked dependency sets instead of
+resolving unpinned extras. `requirements-build.lock` pins the build backend and
+`uv` compiler, `requirements.lock` pins runtime dependencies, and
+`requirements-dev.lock` pins the runtime plus development toolchain.
+
+```bash
+python -m pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
+python -m pip install --no-build-isolation --no-deps -e .
+```
+
 ## Quality Gates
 
 All three must pass before merge.
@@ -18,7 +28,7 @@ All three must pass before merge.
 ```bash
 ruff check citeforge/ tests/ main.py      # Lint
 mypy citeforge/ main.py                    # Type check (strict, ignore_missing_imports)
-pytest tests/ -v --tb=short          # Tests (full suite, Python 3.10-3.13)
+pytest tests/ -v --tb=short          # Tests (full suite, Python 3.10-3.14)
 ```
 
 Run a single test with `pytest tests/test_core.py::test_function_name -v --tb=short`.
