@@ -61,3 +61,6 @@ output/**/*.log
 # Build artifacts
 third-party/*
 ruff-report.json
+
+# Agent-isolated implementation worktrees
+.worktrees/
