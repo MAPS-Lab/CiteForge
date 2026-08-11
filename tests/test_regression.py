@@ -11,6 +11,7 @@ import os
 import time
 from typing import Any
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
 
 import pytest
 import requests
@@ -1049,7 +1050,7 @@ class TestGeminiUsesHttpPostJson:
         assert result == "MachineLearning"
         mock_post.assert_called_once()
         url = mock_post.call_args[0][0]
-        assert "generativelanguage.googleapis.com" in url
+        assert urlparse(url).hostname == "generativelanguage.googleapis.com"
 
     @patch("citeforge.clients.utility_apis.http_post_json")
     def test_gemini_key_travels_in_header_not_url(self, mock_post: MagicMock) -> None:
