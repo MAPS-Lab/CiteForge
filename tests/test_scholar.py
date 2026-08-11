@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from citeforge.clients import serpapi_scholar
+from citeforge.clients import serpapi_scholar, serply_scholar
 from citeforge.clients.scholar import (
     _deduplicate_publication_list,
     fetch_author_publications,
@@ -23,14 +23,29 @@ _SERPLY_HTTP_PATCH = "citeforge.clients.serply_scholar.http_fetch_bytes"
 _SERPAPI_HTTP_PATCH = "citeforge.clients.serpapi_scholar.http_fetch_bytes"
 
 
-def test_serpapi_programming_error_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("client_module", "getter_name", "call_args"),
+    [
+        (serpapi_scholar, "_serpapi_get", ("key", "author")),
+        (serply_scholar, "_serply_get", ("key", "query")),
+    ],
+)
+@pytest.mark.parametrize("error_type", [AssertionError, AttributeError, RuntimeError])
+def test_scholar_programming_errors_are_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+    client_module: object,
+    getter_name: str,
+    call_args: tuple[str, str],
+    error_type: type[Exception],
+) -> None:
+    """Scholar clients must not hide implementation faults as API failures."""
     monkeypatch.setattr(
-        serpapi_scholar,
+        client_module,
         "http_fetch_bytes",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("bug")),
+        lambda *_a, **_k: (_ for _ in ()).throw(error_type("bug")),
     )
-    with pytest.raises(AssertionError, match="bug"):
-        serpapi_scholar._serpapi_get("key", "author")
+    with pytest.raises(error_type, match="bug"):
+        getattr(client_module, getter_name)(*call_args)
 
 
 def test_exact_title_explicit_author_conflict_keeps_both() -> None:

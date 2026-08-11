@@ -37,8 +37,8 @@ from typing import Any
 from urllib.parse import quote
 
 from ..config import HTTP_TIMEOUT_DEFAULT, SERPLY_BASE
-from ..exceptions import ALL_API_ERRORS
 from ..http_utils import _decode_json_bytes, http_fetch_bytes
+from ._http_errors import SCHOLAR_HTTP_ERRORS
 
 _log = logging.getLogger("CiteForge.serply")
 
@@ -75,7 +75,7 @@ def _serply_get(api_key: str, query: str, start: int = 0) -> dict[str, Any]:
     try:
         raw = http_fetch_bytes(url, headers, HTTP_TIMEOUT_DEFAULT)
         return _decode_json_bytes(raw, url)
-    except ALL_API_ERRORS as exc:
+    except SCHOLAR_HTTP_ERRORS as exc:
         _log.debug("Serply request failed: %s", type(exc).__name__)
         return {}
 

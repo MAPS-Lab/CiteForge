@@ -35,8 +35,8 @@ from typing import Any
 from urllib.parse import urlencode
 
 from ..config import HTTP_TIMEOUT_DEFAULT, SERPAPI_BASE
-from ..exceptions import ALL_API_ERRORS
 from ..http_utils import _decode_json_bytes, http_fetch_bytes
+from ._http_errors import SCHOLAR_HTTP_ERRORS
 
 _log = logging.getLogger("CiteForge.serpapi")
 
@@ -83,7 +83,7 @@ def _serpapi_get(
             _log.warning("SerpAPI returned error for %s: %s", author_id, data["error"])
             return {}
         return data
-    except ALL_API_ERRORS as exc:
+    except SCHOLAR_HTTP_ERRORS as exc:
         _log.warning("SerpAPI request failed for %s: %s", author_id, type(exc).__name__)
         return {}
 
