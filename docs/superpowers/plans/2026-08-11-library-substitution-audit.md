@@ -488,7 +488,7 @@ license = "AGPL-3.0-or-later"
 ```
 
 Set `setuptools>=77.0` in `requirements-build.in`.
-Pin `uv==0.11.7` in `requirements-build.in` so the existing hashed build lock also supplies the lock generator used by CI.
+Pin `uv==0.11.15` in `requirements-build.in` so the existing hashed build lock also supplies the lock generator used by CI.
 
 - [ ] **Step 2: Add lock freshness and wheel smoke steps**
 
@@ -511,7 +511,7 @@ Pin `uv==0.11.7` in `requirements-build.in` so the existing hashed build lock al
     "$smoke_dir/venv/bin/citeforge" --help
 ```
 
-Run the freshness step in the lint job after its existing hashed build and development lock installation, which now installs `uv==0.11.7`. Add Python `3.14` to the test matrix.
+Run the freshness step in the lint job after its existing hashed build and development lock installation, which now installs `uv==0.11.15`. Add Python `3.14` to the test matrix.
 
 - [ ] **Step 3: Regenerate the build lock and align documentation**
 

@@ -10,15 +10,20 @@ from __future__ import annotations
 
 import html
 import re
-from typing import Any
+import threading
+from functools import lru_cache
+from typing import Any, TypeAlias
 
 import bibtexparser
+from bibtexparser.bibdatabase import BibDatabase
+from bibtexparser.bparser import BibTexParser
 
 from .cache import response_cache
 from .config import (
     AUTHOR_NAME_SUFFIXES,
     BIBTEX_FILENAME_MAX_LENGTH,
     BIBTEX_KEY_MAX_WORDS,
+    BIBTEX_PARSE_CACHE_SIZE,
     CACHE_TTL_GEMINI_DAYS,
 )
 from .latex_utils import latex_to_ascii
@@ -58,6 +63,10 @@ _FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_\-]+")
 _TITLE_WORD_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
 _CONTROL_CHARS_RE = re.compile(r"[\n\r\t]")
 
+_PARSER_LOCAL = threading.local()
+
+_ParsedBibtex: TypeAlias = tuple[str, str, tuple[tuple[str, str], ...]]
+
 
 def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entry") -> str:
     """Build a compact citation key from the first author's surname, the year,
@@ -87,22 +96,46 @@ def build_minimal_bibtex(title: str, authors: list[str], year: int, keyhint: str
     return "\n".join(lines) + "\n"
 
 
-def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
-    """Parse the first BibTeX entry into CiteForge's stable entry shape."""
+def _parser_for_thread() -> BibTexParser:
+    """Return one prepared parser per worker thread."""
+    parser = getattr(_PARSER_LOCAL, "parser", None)
+    if parser is None:
+        parser = BibTexParser()
+        parser.expect_multiple_parse = True
+        _PARSER_LOCAL.parser = parser
+    return parser
+
+
+@lru_cache(maxsize=BIBTEX_PARSE_CACHE_SIZE)
+def _parse_bibtex_immutable(bibtex: str) -> _ParsedBibtex | None:
+    """Parse into an immutable value safe to share through the LRU cache."""
+    parser = _parser_for_thread()
+    parser.bib_database = BibDatabase()
+    if parser.common_strings:
+        parser.bib_database.load_common_strings()
     try:
-        entries = bibtexparser.loads(bibtex).entries
+        entries = bibtexparser.loads(bibtex, parser=parser).entries
     except (TypeError, ValueError):
         entries = []
     if not entries:
-        logger.debug(f"header_fail | input={bibtex[:60]}", category=LogCategory.PARSE)
         return None
     raw = dict(entries[0])
     entry_type = str(raw.pop("ENTRYTYPE", "")).lower()
     key = str(raw.pop("ID", ""))
     if not entry_type or not key:
         return None
-    fields = {str(name).lower(): str(value).strip() for name, value in raw.items()}
-    return {"type": entry_type, "key": key, "fields": fields}
+    fields = tuple((str(name).lower(), str(value).strip()) for name, value in raw.items())
+    return entry_type, key, fields
+
+
+def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
+    """Parse the first BibTeX entry into CiteForge's stable entry shape."""
+    parsed = _parse_bibtex_immutable(bibtex)
+    if parsed is None:
+        logger.debug(f"header_fail | input={bibtex[:60]}", category=LogCategory.PARSE)
+        return None
+    entry_type, key, fields = parsed
+    return {"type": entry_type, "key": key, "fields": dict(fields)}
 
 
 # Canonical BibTeX field emission order. Fields not listed are appended in
@@ -130,6 +163,7 @@ PREFERRED_FIELD_ORDER: tuple[str, ...] = (
 
 _MULTI_SPACE_RE = re.compile(r"  +")
 _APOS_YEAR_RE = re.compile(r"\s+'(\d{2})\b")
+_BARE_AMP_RE = re.compile(r"(?<!\\)&")
 _URL_TILDE_RE = re.compile(r"(?<=[:/])~")
 _URL_TILDE_SENTINEL = "CITEFORGEURLTILDE"
 _UNICODE_TO_ASCII = {
@@ -153,6 +187,9 @@ def _normalize_to_ascii(val: str) -> str:
     # html.unescape only changes a string containing an '&' entity.
     if "&" in val:
         val = html.unescape(val)
+        # pylatexenc treats a bare ampersand as a TeX alignment marker and
+        # drops it. Protect decoded HTML ampersands as ordinary text first.
+        val = _BARE_AMP_RE.sub(r"\\&", val)
     val = val.replace("---", "--")
     val = val.replace("--", "-")
     val = _URL_TILDE_RE.sub(_URL_TILDE_SENTINEL, val)

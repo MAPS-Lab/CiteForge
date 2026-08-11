@@ -63,10 +63,7 @@ def _converter(math_mode: MathMode) -> LatexNodes2Text:
     )
 
 
-_CONVERTERS = {
-    mode: _converter(mode)
-    for mode in _MATH_MODES
-}
+_CONVERTERS = {mode: _converter(mode) for mode in _MATH_MODES}
 
 
 def latex_to_ascii(text: str, *, math_mode: MathMode) -> str:

@@ -10,7 +10,7 @@ from citeforge.latex_utils import latex_to_ascii
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        (r'M{\"u}ller', "Muller"),
+        (r"M{\"u}ller", "Muller"),
         (r"Fran\c{c}ois", "Francois"),
         (r"\textbf{Nested \emph{Title}}", "Nested Title"),
         (r"{\it Signal} and \& Noise", "Signal and & Noise"),
