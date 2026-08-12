@@ -1605,21 +1605,38 @@ class Ledger:
                 ):
                     raise ValueError("dominance evidence must reference succeeded observations")
                 lower_observation = connection.execute(
-                    "SELECT request_key, provider, disposition, response_json FROM observations "
-                    "WHERE generation_id = ? AND request_key = ?",
+                    "SELECT observation.request_key, observation.provider, observation.disposition, "
+                    "observation.response_json, request.identity_json FROM observations AS observation "
+                    "JOIN requests AS request ON request.generation_id = observation.generation_id "
+                    "AND request.request_key = observation.request_key "
+                    "WHERE observation.generation_id = ? AND observation.request_key = ?",
                     (generation_id, evidence.dominated_observation_key),
                 ).fetchone()
                 if lower_observation is None or lower_observation["disposition"] != TaskDisposition.SUCCEEDED.value:
                     raise ValueError("dominance evidence requires a succeeded dominated observation")
                 request_identity = connection.execute(
-                    "SELECT request.identity_json, task.provider FROM tasks AS task JOIN requests AS request ON "
+                    "SELECT request.identity_json, task.request_key, task.provider, task.author_key, "
+                    "task.publication_key, task.operation FROM tasks AS task JOIN requests AS request ON "
                     "request.generation_id = task.generation_id AND request.request_key = task.request_key "
                     "WHERE task.generation_id = ? AND task.task_key = ?",
                     (generation_id, task_key),
                 ).fetchone()
                 if request_identity is None:
                     raise ValueError("dominated task requires a persisted exact request")
-                requested_fields = tuple(json.loads(request_identity[0])["requested_fields"])
+                lower_request_identity = json.loads(lower_observation["identity_json"])
+                if (
+                    evidence.dominated_observation_key != request_identity["request_key"]
+                    or lower_observation["provider"] != request_identity["provider"]
+                    or lower_request_identity["provider"] != request_identity["provider"]
+                    or lower_request_identity["operation"] != request_identity["operation"]
+                    or connection.execute(
+                        "SELECT 1 FROM request_consumers WHERE generation_id = ? AND request_key = ? AND task_key = ?",
+                        (generation_id, evidence.dominated_observation_key, task_key),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ValueError("dominated observation must be the terminalized logical task request")
+                requested_fields = tuple(json.loads(request_identity["identity_json"])["requested_fields"])
                 if tuple(sorted(evidence.covered_fields)) != tuple(sorted(requested_fields)):
                     raise ValueError("dominance covered fields must exactly match dominated requested fields")
                 if not _merge_proves_dominance(

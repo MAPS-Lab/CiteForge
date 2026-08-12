@@ -1134,7 +1134,7 @@ def test_dominance_rejects_unprovable_scholar_observation(tmp_path: Path) -> Non
         )
         dominated_claim = ledger.claim_due("weak", NOW, timedelta(minutes=1))
         assert dominated_claim
-        with pytest.raises(ValueError, match="live merge policy"):
+        with pytest.raises(ValueError, match="task request"):
             ledger.finish_task(
                 dominated_claim.key,
                 "weak",
@@ -1233,6 +1233,72 @@ def test_published_over_preprint_requires_actual_values_and_live_merge_selection
         task_states = {item["task_key"]: item["state"] for item in manifest["tasks"]}
         assert task_states[dominated.key] == "dominated"
         assert manifest["dominance_evidence"][0]["dominated_observation_key"] == lower_key
+
+
+@pytest.mark.parametrize("foreign_publication", ["pub-other", "pub-target"])
+def test_dominance_rejects_same_provider_observation_from_another_logical_request(
+    tmp_path: Path, foreign_publication: str
+) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        fields = ("doi", "journal")
+        stronger_request = RequestSpec(
+            "crossref", "lookup", "GET", {"query": "published"}, fields, "1", "epoch", "public"
+        )
+        target_request = RequestSpec(
+            "scholar_min", "lookup", "GET", {"query": "target"}, fields, "1", "epoch", "scholar"
+        )
+        foreign_request = RequestSpec(
+            "scholar_min", "lookup", "GET", {"query": "foreign"}, fields, "1", "epoch", "scholar"
+        )
+        stronger = TaskSpec("author-ada", "pub-published", "crossref", "lookup", stronger_request)
+        target = TaskSpec("author-ada", "pub-target", "scholar_min", "lookup", target_request)
+        foreign = TaskSpec("author-ada", foreign_publication, "scholar_min", "lookup", foreign_request)
+        tasks = [stronger, target, foreign]
+        for task in tasks:
+            ledger.plan_task(task)
+        _seal_and_run(ledger, tasks)
+        by_key = {task.key: task for task in tasks}
+        held_target = None
+        observations = {}
+        for index in range(3):
+            owner = f"worker-{index}"
+            claim = ledger.claim_due(owner, NOW, timedelta(minutes=1))
+            assert claim
+            task = by_key[claim.key]
+            if task is target:
+                held_target = (claim, owner)
+                continue
+            request_claim = ledger.claim_request(claim.key, owner, NOW, timedelta(minutes=1))
+            assert request_claim
+            response = (
+                {"doi": "10.1000/published", "journal": "Journal of Sound Results"}
+                if task is stronger
+                else {"doi": "10.48550/arxiv.2601.12345", "journal": "arXiv e-prints"}
+            )
+            ledger.finish_request(
+                request_claim.key,
+                owner,
+                TaskDisposition.SUCCEEDED,
+                NOW,
+                observation=ProviderObservation(task.provider, "1", response),
+            )
+            ledger.finish_task(claim.key, owner, TaskDisposition.SUCCEEDED, NOW)
+            observations[task.key] = request_claim.key
+        assert held_target
+        target_claim, target_owner = held_target
+        with pytest.raises(ValueError, match="task request"):
+            ledger.finish_task(
+                target_claim.key,
+                target_owner,
+                TaskDisposition.DOMINATED,
+                NOW,
+                evidence=DominanceEvidence(
+                    (observations[stronger.key],),
+                    DominanceRule.PUBLISHED_OVER_PREPRINT,
+                    fields,
+                    observations[foreign.key],
+                ),
+            )
 
 
 @pytest.mark.parametrize(
