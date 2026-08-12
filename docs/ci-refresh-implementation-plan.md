@@ -125,31 +125,40 @@
 - [ ] Run focused adapter and transport tests on Python 3.10 and 3.14, Ruff, mypy, and `git diff --check`.
 - [ ] Commit as `feat: persist classified provider work` and verify `git log -1`.
 
-### Task 5: Replace swallowed scheduling with resumable generation execution
+### Task 5: Add phased discovery and resumable generation execution
 
 **Files:**
 - Create: `citeforge/refresh/engine.py`
+- Modify: `citeforge/refresh/ledger.py`
+- Modify: `citeforge/refresh/types.py`
 - Modify: `citeforge/pipeline/scheduler.py`
 - Modify: `citeforge/pipeline/article.py`
 - Modify: `citeforge/cli.py`
 - Modify: `main.py`
+- Test: `tests/test_refresh_ledger.py`
 - Test: `tests/test_refresh_engine.py`
 - Test: `tests/test_scheduler_retry.py`
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
 - Produces `RefreshEngine.run(spec, credentials, stop_requested) -> RunResult`.
-- CLI adds `refresh`, `--state-dir`, `--generation`, `--stage-root`, and `--no-publish` while preserving a compatibility invocation.
-- `RunResult` distinguishes complete, continuation, blocked, and invalid configuration.
+- CLI adds `refresh`, `--state-dir`, and `--generation` while preserving a compatibility invocation. Task 7 adds staging options.
+- `RunResult` distinguishes ready-to-materialize, continuation, blocked, and invalid configuration. Task 5 never marks a generation complete.
 
-- [ ] Add a failing end-to-end fixture with two authors, shared exact work, complete and incomplete existing entries, successful and failing articles, and one explicitly excluded input row.
-- [ ] Prove an exhausted provider, malformed response, article exception, or failed author blocks completion and yields nonzero status without losing successful tasks.
+- [ ] Replace the one-shot plan seal with a fixed forward-only phase machine backed by append-only immutable rounds. Exact requests remain generation-global and logical tasks remain author- and publication-scoped.
+- [ ] Add an atomic reduction commit which rechecks an immutable snapshot digest, persists reduction evidence and publications, inserts and seals the complete next round, and is idempotent across crashes and resume.
+- [ ] Add a final discovery-closure transaction. Inventory-only terminal work must never satisfy generation completeness. Closure proves every applicable inventory, union member, publication, policy-required operation, reduction input, round, and final zero-unseen-task planner pass.
+- [ ] Separate logical evidence source from physical transport provider through typed adapter capabilities. Every planner-emittable operation must have exactly one durable adapter and reducer contract.
+- [ ] Add a failing end-to-end fixture with two authors, shared exact work, complete and incomplete existing entries, successful and failing provider work, and one explicitly excluded input row.
+- [ ] Prove an exhausted provider, malformed response, reducer exception, or failed author blocks readiness and yields nonzero status without losing successful tasks.
 - [ ] Prove complete existing DOI records receive current-generation inventory and authoritative revalidation.
-- [ ] Implement planner phases for census, applicable author inventories, per-author union/dedup, publication work, and authoritative revalidation.
+- [ ] Implement version-bound planner phases for census, applicable author inventories, per-author union/dedup, publication work, late identifiers, and authoritative revalidation. Expansion outside the fixed graph or policy bound blocks.
+- [ ] Extract pure, socket-free inventory and publication planners and reducers from article processing. Reducers consume only immutable normalized observations and existing entries, and return typed publication sets or materialization intents without writing files.
 - [ ] Convert scheduler execution to claim ledger tasks and persist classified outcomes. Failed futures are never counted as completed.
-- [ ] Invoke existing article logic against a supplied stage path with full-refresh semantics.
+- [ ] Stop leasing on `stop_requested`, drain bounded in-flight work, close every shared consumer from durable request evidence, and resume without repeating success.
 - [ ] Remove the old `(saved, processed)` completion authority and reverse tests that approved swallowed failure.
-- [ ] Run engine, scheduler, CLI, and pipeline end-to-end tests plus Ruff, mypy, and `git diff --check`.
+- [ ] Prove planners and reducers cannot open sockets or mutate committed output. Task 7 alone applies materialization intents to a stage and transitions through validation to complete.
+- [ ] Run ledger, engine, scheduler, CLI, provider, and pipeline end-to-end tests on Python 3.10 and 3.14 plus the full hermetic suite, Ruff, mypy, and `git diff --check`.
 - [ ] Commit as `feat: execute resumable refresh generations` and verify `git log -1`.
 
 ### Task 6: Add authenticated checkpoints and interrupted resume
