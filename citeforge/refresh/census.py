@@ -38,8 +38,13 @@ def _validated_url(link: str, row_number: int, field: str) -> tuple[str, str, st
         port = parsed.port
     except ValueError as exc:
         raise ValueError(f"row {row_number}: {field} is malformed") from exc
-    if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None or port is not None:
-        raise ValueError(f"row {row_number}: {field} must be an uncredentialed HTTPS URL without a port")
+    if (
+        parsed.scheme != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+    ):
+        raise ValueError(f"row {row_number}: {field} must be an uncredentialed HTTPS URL on the default port")
     if parsed.fragment:
         raise ValueError(f"row {row_number}: {field} must not contain a fragment")
     return parsed.hostname or "", parsed.path, parsed.query
@@ -57,9 +62,10 @@ def _scholar_id(link: str, row_number: int) -> str:
         query_items = parse_qsl(query, keep_blank_values=True, strict_parsing=True)
     except ValueError as exc:
         raise ValueError(f"row {row_number}: Scholar Link query is malformed") from exc
-    if len(query_items) != 1 or query_items[0][0] != "user" or not _SCHOLAR_ID_RE.fullmatch(query_items[0][1]):
+    user_values = [value for key, value in query_items if key == "user"]
+    if len(user_values) != 1 or not _SCHOLAR_ID_RE.fullmatch(user_values[0]):
         raise ValueError(f"row {row_number}: Scholar Link requires exactly one safe user ID")
-    return query_items[0][1]
+    return user_values[0]
 
 
 def _dblp_id(link: str, row_number: int) -> str:
@@ -75,8 +81,15 @@ def _dblp_id(link: str, row_number: int) -> str:
         if not path.startswith("/pid/"):
             raise ValueError(f"row {row_number}: DBLP Link must use the /pid/ path")
         identifier = path.removeprefix("/pid/")
-        if identifier.endswith(".html"):
-            identifier = identifier.removesuffix(".html")
+        stem, dot, suffix = identifier.rpartition(".")
+        if dot:
+            if suffix not in {"html", "xml"}:
+                raise ValueError(f"row {row_number}: DBLP Link has an unsupported profile suffix")
+            identifier = stem
+    elif identifier.startswith("pid:"):
+        identifier = identifier.removeprefix("pid:")
+        if identifier.endswith((".html", ".xml")):
+            raise ValueError(f"row {row_number}: bare DBLP Link person ID must not contain a profile suffix")
     if not _DBLP_ID_RE.fullmatch(identifier):
         raise ValueError(f"row {row_number}: DBLP Link does not contain a safe supported person ID")
     return identifier

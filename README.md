@@ -48,11 +48,16 @@ citeforge --force                              # Ignore cache completeness
 citeforge --input authors.csv --output results # Explicit paths
 ```
 
-The input CSV has three columns (name, Scholar link, and an optional DBLP link).
+The input CSV has five columns. Every physical author row must explicitly set
+`Enabled` to `true` or `false`. An enabled row needs at least one valid Google
+Scholar or DBLP profile. A disabled row needs a non-empty `Exclusion Reason`.
+Enabled rows cannot carry an exclusion reason. Invalid, unclassified, blank,
+or ambiguous profile rows stop the run before any API work.
 
 ```csv
-Name,Scholar Link,DBLP Link
-Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659
+Name,Scholar Link,DBLP Link,Enabled,Exclusion Reason
+Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659,true,
+Example Excluded Author,,,false,No Scholar or DBLP profile configured
 ```
 
 Output is organized per author, with a shared summary and run log. API responses are cached under `data/api_cache/` with monthly expiry. A cache hit establishes only response-cache freshness. It does not establish entry completeness or refresh completion.
