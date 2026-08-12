@@ -259,6 +259,15 @@ def test_dblp_url_canonicalization_matches_downstream_pid_extraction(tmp_path: P
     assert dblp_extract_pid(census_id) == census_id
 
 
+@pytest.mark.parametrize("prefix", ["", "pid:"])
+@pytest.mark.parametrize("suffix", ["html", "xml", "bib", "nt", "rdf", "rss", "ris"])
+def test_rejects_export_suffixes_on_every_bare_dblp_identifier(tmp_path: Path, prefix: str, suffix: str) -> None:
+    path = _write_census(tmp_path / "authors.csv", [f"Ada Lovelace,,{prefix}12/3456.{suffix},true,"])
+
+    with pytest.raises(ValueError, match="DBLP Link"):
+        load_census(path)
+
+
 @pytest.mark.parametrize("provider", ["scholar", "dblp"])
 def test_rejects_same_author_overlapping_provider_identity(tmp_path: Path, provider: str) -> None:
     if provider == "scholar":

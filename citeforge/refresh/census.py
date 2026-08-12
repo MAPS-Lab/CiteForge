@@ -91,7 +91,9 @@ def _dblp_id(link: str, row_number: int) -> str:
             identifier = stem
     elif identifier.startswith("pid:"):
         identifier = identifier.removeprefix("pid:")
-        if identifier.endswith((".html", ".xml")):
+    if not ("://" in link or link.startswith("//")):
+        _, dot, suffix = identifier.rpartition(".")
+        if dot and suffix in _DBLP_EXPORT_SUFFIXES:
             raise ValueError(f"row {row_number}: bare DBLP Link person ID must not contain a profile suffix")
     if not _DBLP_ID_RE.fullmatch(identifier):
         raise ValueError(f"row {row_number}: DBLP Link does not contain a safe supported person ID")
