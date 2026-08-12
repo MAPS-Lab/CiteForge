@@ -336,13 +336,34 @@ def _send_once(
     timeout: tuple[float, float],
     json_payload: dict[str, Any] | None,
 ) -> requests.Response:
-    """Send once, with session rotation and only the transport under the semaphore."""
+    """Send one physical attempt through rate, pool, and concurrency controls."""
     session = _get_session()
     _THREAD_LOCAL.session_request_count += 1
     with _GLOBAL_SEMAPHORE:
         if method == "POST":
             return session.post(url, json=json_payload, headers=headers, timeout=timeout)
+        if method == "HEAD":
+            return session.head(url, headers=headers, timeout=timeout)
         return session.get(url, headers=headers, timeout=timeout)
+
+
+def send_http_once(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    json_payload: dict[str, Any] | None = None,
+) -> requests.Response:
+    """Send exactly one physical HTTP attempt for the durable refresh transport."""
+    method = method.upper()
+    if method not in {"GET", "HEAD", "POST"}:
+        raise ValueError("unsupported HTTP method")
+    namespace = _classify_url(url)
+    track_api_call(namespace)
+    limiter = _get_rate_limiter(namespace)
+    if limiter is not None:
+        limiter.acquire()
+    return _send_once(method, url, _randomize_headers(headers), (min(timeout, 10.0), timeout), json_payload)
 
 
 def _http_request(

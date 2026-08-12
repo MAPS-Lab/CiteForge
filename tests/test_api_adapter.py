@@ -21,6 +21,8 @@ from citeforge.api_generics import APISearchConfig
 from citeforge.cache import ResponseCache
 from citeforge.clients import search_apis
 from citeforge.pipeline import article
+from citeforge.refresh.transport import OutcomeClass, ProviderResponse, ScriptedTransport
+from citeforge.refresh.types import TaskDisposition
 
 TITLE = "Ocean Forecasting"
 AUTHOR = "Ada Lovelace"
@@ -120,6 +122,85 @@ def _adapter_payload(case: _AdapterCase, records: list[dict[str, object]]) -> di
     if case.source_id == "openalex-venue":
         return {"results": records}
     raise AssertionError(f"unsupported adapter case: {case.source_id}")
+
+
+@pytest.mark.parametrize(
+    ("case", "payload"),
+    [
+        pytest.param(SEMANTIC_SCHOLAR, {"unexpected": []}, id="s2-missing-data"),
+        pytest.param(EUROPEPMC, {"resultList": []}, id="europepmc-wrong-envelope"),
+        pytest.param(CROSSREF_VENUE, {"message": {"items": {}}}, id="crossref-items-not-list"),
+        pytest.param(OPENALEX_VENUE, {"results": None}, id="openalex-results-null"),
+    ],
+)
+def test_adapter_schema_drift_is_not_authoritative_empty(
+    monkeypatch: pytest.MonkeyPatch, case: _AdapterCase, payload: dict[str, object]
+) -> None:
+    _install_adapter_stub(monkeypatch, payload)
+    with pytest.raises(api_generics.ProviderSchemaError):
+        api_generics.search_api_generic_multiple(TITLE, AUTHOR, case.config, case.api_key, venue=case.venue)
+
+
+@pytest.mark.parametrize("case", [SEMANTIC_SCHOLAR, EUROPEPMC, CROSSREF_VENUE, OPENALEX_VENUE])
+def test_every_generic_json_adapter_is_callable_through_provider_transport(
+    case: _AdapterCase, adapter_env: ResponseCache
+) -> None:
+    candidate = dict(case.candidate)
+    transport = ScriptedTransport(
+        [ProviderResponse(TaskDisposition.SUCCEEDED, OutcomeClass.SUCCESS, {"results": [candidate]}, 200)]
+    )
+    result = api_generics.search_api_generic_multiple(
+        TITLE,
+        AUTHOR,
+        case.config,
+        case.api_key,
+        venue=case.venue,
+        transport=transport,
+        freshness_epoch="2026-08",
+        adapter_version="test-v1",
+    )
+    assert transport.physical_calls == 1
+    assert result
+
+
+def test_classified_empty_from_provider_transport_is_not_schema_failure() -> None:
+    transport = ScriptedTransport(
+        [ProviderResponse(TaskDisposition.CONFIRMED_EMPTY, OutcomeClass.AUTHORITATIVE_EMPTY, {}, 200)]
+    )
+    assert (
+        api_generics.search_api_generic_multiple(
+            TITLE,
+            AUTHOR,
+            S2_SEARCH_CONFIG,
+            "s2-secret",
+            transport=transport,
+            freshness_epoch="2026-08",
+        )
+        == []
+    )
+
+
+def test_search_operation_identity_is_order_stable_and_excludes_query_credentials() -> None:
+    left = api_generics.search_operation(
+        "https://api.example.test/search?b=2&api_key=secret&a=1",
+        S2_SEARCH_CONFIG,
+        author_scope="author-ada",
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        api_key="header-secret",
+    )
+    right = api_generics.search_operation(
+        "https://api.example.test/search?a=1&b=2&api_key=other-secret",
+        S2_SEARCH_CONFIG,
+        author_scope="author-ada",
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        api_key="different-header-secret",
+    )
+    assert left.request.key == right.request.key
+    assert left.request.provider == "s2"
+    assert left.request.quota_scope == "s2"
+    assert "secret" not in str(left.request.canonical_content()).casefold()
 
 
 def _install_adapter_stub(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> dict[str, object]:

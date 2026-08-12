@@ -12,12 +12,14 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from .cache import response_cache
 from .clients.helpers import title_author_cache_key
 from .config import (
     CACHE_TTL_SEARCH_DAYS,
     GENERIC_SERIES_NAMES,
+    REDACT_QUERY_PARAM_NAMES,
     SIM_BEST_ITEM_THRESHOLD,
     SIM_EXACT_PICK_THRESHOLD,
     SIM_THRESHOLD_TOLERANCE,
@@ -26,13 +28,14 @@ from .exceptions import ALL_API_ERRORS, FIELD_ACCESS_ERRORS
 from .http_utils import http_get_json, s2_http_get_json
 from .id_utils import find_arxiv_in_text, find_doi_in_text
 from .log_utils import LogCategory, logger
+from .refresh.ledger import RequestSpec
+from .refresh.transport import ProviderTransport, SchemaChangedError, SendOperation, consume_response
 from .text_utils import (
     build_url,
     extract_author_names,
     extract_year_from_any,
     has_placeholder,
     safe_get_field,
-    safe_get_nested,
 )
 from .venue import first_non_generic_container
 
@@ -99,6 +102,75 @@ class APISearchConfig:
     title_getter: Callable[[dict[str, Any]], str] | None = None
     year_getter: Callable[[dict[str, Any]], int | None] | None = None
     authors_getter: Callable[[dict[str, Any]], Any] | None = None
+
+
+class ProviderSchemaError(ValueError):
+    """A provider response no longer satisfies its configured result envelope."""
+
+
+_TRANSPORT_PROVIDER = {"semantic_scholar": "s2", "crossref_venue": "crossref", "openalex_venue": "openalex"}
+_SECRET_QUERY_NAMES = {item.casefold() for item in REDACT_QUERY_PARAM_NAMES}
+
+
+def _semantic_url_identity(url: str) -> dict[str, object]:
+    """Return ordered non-secret URL semantics for durable request identity."""
+    parsed = urlsplit(url)
+    query: dict[str, list[str]] = {}
+    for name, value in sorted(parse_qsl(parsed.query, keep_blank_values=True)):
+        if name.casefold() in _SECRET_QUERY_NAMES:
+            continue
+        query.setdefault(name, []).append(value)
+    return {"host": parsed.hostname or "", "path": parsed.path, "query": query}
+
+
+def validate_result_envelope(data: dict[str, Any], config: APISearchConfig) -> list[Any]:
+    """Return the configured result list, rejecting missing or wrong-shaped envelopes."""
+    current: object = data
+    for component in config.result_path:
+        if not isinstance(current, dict) or component not in current:
+            raise ProviderSchemaError(f"{config.api_name} response is missing {'.'.join(config.result_path)}")
+        current = current[component]
+    if not isinstance(current, list):
+        raise ProviderSchemaError(f"{config.api_name} result envelope is not a list")
+    return current
+
+
+def _normalized_result_envelope(data: dict[str, object], config: APISearchConfig) -> dict[str, object]:
+    try:
+        return {"results": validate_result_envelope(data, config)}
+    except ProviderSchemaError as exc:
+        raise SchemaChangedError(str(exc)) from exc
+
+
+def search_operation(
+    url: str,
+    config: APISearchConfig,
+    *,
+    author_scope: str,
+    freshness_epoch: str,
+    adapter_version: str,
+    api_key: str | None = None,
+) -> SendOperation:
+    """Build the canonical fuzzy-search operation without persisting credentials."""
+    headers = {"x-api-key": api_key} if api_key and config.requires_api_key else None
+    request = RequestSpec(
+        _TRANSPORT_PROVIDER.get(config.api_name, config.api_name),
+        "fuzzy_search",
+        "GET",
+        {"author_scope": author_scope, "request": _semantic_url_identity(url)},
+        ("results",),
+        adapter_version,
+        freshness_epoch,
+        _TRANSPORT_PROVIDER.get(config.api_name, config.api_name),
+    )
+    return SendOperation(
+        request,
+        url,
+        config.timeout,
+        validator=lambda data: _normalized_result_envelope(data, config),
+        empty_validator=lambda data: not _normalized_result_envelope(data, config)["results"],
+        headers=headers,
+    )
 
 
 @dataclass
@@ -182,6 +254,9 @@ def _fetch_results(
     cache_key: str,
     *,
     params: dict[str, Any] | None = None,
+    transport: ProviderTransport | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
 ) -> list[Any] | None:
     """Issue the configured search request and extract the raw result list.
 
@@ -197,15 +272,31 @@ def _fetch_results(
     url = build_url(config.base_url, params)
     logger.debug(f"{config.api_name} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
 
-    try:
-        if api_key and config.requires_api_key:
-            data = s2_http_get_json(url, api_key, timeout=config.timeout)
-        else:
-            data = http_get_json(url, timeout=config.timeout)
-    except ALL_API_ERRORS:
-        return None
-
-    results: list[Any] = safe_get_nested(data, *config.result_path, default=[])
+    if transport is not None:
+        normalized = consume_response(
+            transport.send(
+                search_operation(
+                    url,
+                    config,
+                    author_scope=author_name or "anonymous",
+                    freshness_epoch=freshness_epoch,
+                    adapter_version=adapter_version,
+                    api_key=api_key,
+                )
+            )
+        )
+        results = normalized.get("results", [])
+        if not isinstance(results, list):
+            raise ProviderSchemaError(f"{config.api_name} normalized results are not a list")
+    else:
+        try:
+            if api_key and config.requires_api_key:
+                data = s2_http_get_json(url, api_key, timeout=config.timeout)
+            else:
+                data = http_get_json(url, timeout=config.timeout)
+        except ALL_API_ERRORS:
+            return None
+        results = validate_result_envelope(data, config)
     if not results:
         response_cache.put_negative(config.api_name, cache_key)
         return None
@@ -272,6 +363,9 @@ def search_api_generic_multiple(
     year_hint: int | None = None,
     *,
     venue: str | None = None,
+    transport: ProviderTransport | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
 ) -> list[dict[str, Any]]:
     """Search one configured API and return candidates in its declared order.
 
@@ -308,6 +402,9 @@ def search_api_generic_multiple(
         api_key,
         cache_key,
         params=params,
+        transport=transport,
+        freshness_epoch=freshness_epoch,
+        adapter_version=adapter_version,
     )
     if results is None:
         return []

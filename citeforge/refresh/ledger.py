@@ -1543,6 +1543,16 @@ class Ledger:
         response = MappingProxyType(json.loads(row[1])) if row[1] is not None else None
         return RequestResult(request_key, TaskDisposition(row[0]), response, row[2])
 
+    def request_attempt_count(self, request_key: str) -> int:
+        """Return the durable physical-attempt count for one exact request."""
+        request_key = _digest_text(request_key, "request key")
+        return int(
+            self._connection.execute(
+                "SELECT COUNT(*) FROM attempts WHERE generation_id = ? AND request_key = ?",
+                (self._generation_id(), request_key),
+            ).fetchone()[0]
+        )
+
     def finish_task(
         self,
         task_key: str,

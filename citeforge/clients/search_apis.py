@@ -47,7 +47,6 @@ from ..http_utils import (
     DEFAULT_JSON_HEADERS,
     _cookie_header,
     _get_session,
-    handle_api_errors,
     http_fetch_bytes,
     http_get_json,
     http_get_text,
@@ -161,7 +160,6 @@ def crossref_search_multiple(
 # ============ DOI / CSL ============
 
 
-@handle_api_errors(default_return=None)
 def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
     """Resolve a DOI using content negotiation and return the associated CSL-JSON metadata."""
     doi_norm = _norm_doi(doi)
@@ -582,7 +580,6 @@ def dblp_extract_pid(val: str | None) -> str | None:
     return m.group(2) if m else None
 
 
-@handle_api_errors(default_return=None)
 def dblp_find_author_pid(name: str) -> str | None:
     """Look up a DBLP person identifier for an author name."""
     if not name:
