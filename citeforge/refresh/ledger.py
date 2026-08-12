@@ -2826,6 +2826,12 @@ class Ledger:
         generation_id = self._generation_id()
         with self._transaction(immediate=True) as connection:
             self._assert_owner("tasks", "task_key", claim.key, claim.owner, now)
+            stored_lease = connection.execute(
+                "SELECT lease_expires_at FROM tasks WHERE generation_id = ? AND task_key = ?",
+                (generation_id, claim.key),
+            ).fetchone()
+            if stored_lease is None or stored_lease[0] != _timestamp(claim.lease_expires):
+                raise ValueError("stale claim fencing token")
             row = connection.execute(
                 "SELECT task.request_key, obligation.round_sequence FROM tasks AS task "
                 "JOIN plan_obligations AS obligation ON obligation.generation_id = task.generation_id "

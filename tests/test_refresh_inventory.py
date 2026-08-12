@@ -57,7 +57,10 @@ def test_capability_separates_logical_scholar_from_wire_serpapi() -> None:
 def test_scholar_decoder_is_strict_and_derives_trusted_next_offset() -> None:
     body = json.dumps(
         {
-            "search_metadata": {"status": "Success", "google_scholar_author_url": "user=Scholar123"},
+            "search_metadata": {
+                "status": "Success",
+                "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+            },
             "search_parameters": {
                 "engine": "google_scholar_author",
                 "author_id": "Scholar123",
@@ -97,12 +100,13 @@ def test_scholar_decoder_is_strict_and_derives_trusted_next_offset() -> None:
 
 def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> None:
     xml = b"""<dblpperson key="homepages/12/345"><person key="homepages/12/345"><author>Ada Lovelace</author></person>
-    <r><article key="journals/x/1"><author>Ada Lovelace</author>
+    <r><article key="journals/x/1"><author>Ada Lovelace 0001</author>
     <title>Computing Machinery</title><year>2024</year><journal>Science</journal>
     <ee>https://doi.org/10.1000/example</ee></article></r><coauthors/></dblpperson>"""
     normalized, empty = decode_dblp_inventory(xml, "12/345")
     assert not empty
     assert normalized["articles"][0]["doi"] == "10.1000/example"
+    assert normalized["articles"][0]["authors"] == ["Ada Lovelace"]
     assert normalized["articles"][0]["record_key"] == "journals/x/1"
     with pytest.raises(ValueError, match="PID"):
         decode_dblp_inventory(xml, "99/wrong")
@@ -114,6 +118,10 @@ def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> No
             b'<dblpperson pid="12/345">&xxe;</dblpperson>',
             "12/345",
         )
+    relative = b"""<dblpperson key="homepages/12/345"><r><article key="conf/x/one">
+    <title>Relative URL</title><year>2024</year><url>db/conf/x/one.html</url></article></r></dblpperson>"""
+    relative_normalized, _ = decode_dblp_inventory(relative, "12/345")
+    assert relative_normalized["articles"][0]["url"] == "https://dblp.org/rec/conf/x/one"
 
 
 def test_pure_union_is_order_independent_and_seeds_every_publication() -> None:

@@ -830,6 +830,22 @@ def test_schema_pragmas_and_generation_resume_are_fail_closed(tmp_path: Path) ->
         Ledger.open(path)
 
 
+def test_reconstruct_claimed_task_rejects_same_owner_stale_reclaimed_lease(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "fence.sqlite3") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        task = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        ledger.commit_initial_round([PlannedTask(task, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW)
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        old = ledger.claim_due("same-owner", NOW, timedelta(minutes=1))
+        assert old is not None
+        reclaimed = ledger.claim_due("same-owner", NOW + timedelta(minutes=2), timedelta(minutes=5))
+        assert reclaimed is not None
+        with pytest.raises(ValueError, match="fencing"):
+            ledger.reconstruct_claimed_task(old, NOW + timedelta(minutes=3))
+        assert ledger.reconstruct_claimed_task(reclaimed, NOW + timedelta(minutes=3)).key == task.key
+
+
 def test_retains_every_census_disposition_and_enforces_foreign_keys(tmp_path: Path) -> None:
     enabled = _census().rows[0]
     excluded = AuthorCensusRow(

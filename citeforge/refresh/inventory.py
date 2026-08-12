@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
+from ..clients.helpers import _sanitize_dblp_author
 from ..config import DBLP_PERSON_BASE, HTTP_TIMEOUT_DEFAULT, PREPRINT_SERVERS, SERPAPI_BASE
 from ..id_utils import find_doi_in_text, is_secondary_doi, normalize_doi
 from ..identity import IdentityContext, evaluate_identity
@@ -322,6 +323,20 @@ def decode_scholar_inventory(
     pagination = value.get("serpapi_pagination", {})
     if not isinstance(metadata, dict) or metadata.get("status") != "Success":
         raise SchemaChangedError("Scholar response lacks successful metadata")
+    profile_url = metadata.get("google_scholar_author_url")
+    if not isinstance(profile_url, str):
+        raise SchemaChangedError("Scholar response lacks exact profile URL evidence")
+    parsed_profile = urlsplit(profile_url)
+    profile_query = parse_qs(parsed_profile.query)
+    if (
+        parsed_profile.scheme != "https"
+        or parsed_profile.hostname not in {"scholar.google.com", "scholar.google.ca"}
+        or parsed_profile.path not in {"/citations", "/citations/"}
+        or parsed_profile.username
+        or parsed_profile.password
+        or profile_query.get("user") != [profile_id]
+    ):
+        raise SchemaChangedError("Scholar response profile URL does not match requested author")
     parameter_offset = parameters.get("cstart") if isinstance(parameters, dict) else None
     if parameter_offset is not None and (
         isinstance(parameter_offset, bool) or not isinstance(parameter_offset, int) or parameter_offset != offset
@@ -436,11 +451,11 @@ def decode_dblp_inventory(body: bytes, pid: str) -> tuple[Mapping[str, object], 
         year_text = (record.findtext("year") or "").strip()
         if year_text and not _YEAR.fullmatch(year_text):
             raise SchemaChangedError("DBLP record has malformed year")
-        authors = ["".join(node.itertext()).strip() for node in record.findall("author")]
-        editors = ["".join(node.itertext()).strip() for node in record.findall("editor")]
+        authors = [_sanitize_dblp_author("".join(node.itertext()).strip()) for node in record.findall("author")]
+        editors = [_sanitize_dblp_author("".join(node.itertext()).strip()) for node in record.findall("editor")]
         ee = (record.findtext("ee") or "").strip()
         url = (record.findtext("url") or "").strip()
-        safe_record_url = f"https://dblp.org/rec/{url}" if url and not urlsplit(url).scheme else url
+        safe_record_url = f"https://dblp.org/rec/{record.attrib['key']}" if url and not urlsplit(url).scheme else url
         doi = normalize_doi(find_doi_in_text(ee) or find_doi_in_text(url))
         articles.append(
             {

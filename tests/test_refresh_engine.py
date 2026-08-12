@@ -98,7 +98,10 @@ def test_resume_rejects_policy_change_before_physical_work(tmp_path: Path) -> No
 def test_engine_executes_exact_inventory_and_commits_union_seed(tmp_path: Path) -> None:
     spec = _spec()
     body = {
-        "search_metadata": {"status": "Success"},
+        "search_metadata": {
+            "status": "Success",
+            "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+        },
         "search_parameters": {
             "engine": "google_scholar_author",
             "author_id": "Scholar123",
@@ -145,7 +148,10 @@ def test_engine_paginates_in_durable_waves_without_repeating_success(tmp_path: P
         start = dict(request.normalized_payload)["start"]
         calls.append(start)
         envelope = {
-            "search_metadata": {"status": "Success"},
+            "search_metadata": {
+                "status": "Success",
+                "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+            },
             "search_parameters": {
                 "engine": "google_scholar_author",
                 "author_id": "Scholar123",
@@ -190,7 +196,10 @@ def test_engine_paginates_in_durable_waves_without_repeating_success(tmp_path: P
 def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> None:
     spec = _spec()
     envelope = {
-        "search_metadata": {"status": "Success"},
+        "search_metadata": {
+            "status": "Success",
+            "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+        },
         "search_parameters": {
             "engine": "google_scholar_author",
             "author_id": "Scholar123",

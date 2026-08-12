@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
@@ -35,6 +36,7 @@ class RefreshEngine:
         self._ledger = ledger
         self._policy = policy
         self._transport = transport
+        self._owner = f"inventory-{secrets.token_hex(12)}"
 
     def run(
         self,
@@ -86,7 +88,7 @@ class RefreshEngine:
                     break
                 if stop_requested():
                     break
-                claim = self._ledger.claim_due("inventory-engine", datetime.now(timezone.utc), timedelta(minutes=5))
+                claim = self._ledger.claim_due(self._owner, datetime.now(timezone.utc), timedelta(minutes=5))
                 if claim is None:
                     break
                 operation = build_claimed_inventory_operation(
