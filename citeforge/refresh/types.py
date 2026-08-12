@@ -47,6 +47,17 @@ class GenerationState(str, Enum):
     SUPERSEDED = "superseded"
 
 
+class PlanPhase(str, Enum):
+    """Fixed forward planning phases, not a general workflow graph."""
+
+    INVENTORIES = "inventories"
+    DISCOVERY = "discovery"
+    AUTHORITATIVE = "authoritative"
+    LATE_IDENTIFIERS = "late_identifiers"
+    REDUCERS = "reducers"
+    CLOSED = "closed"
+
+
 class RunStatus(str, Enum):
     """Process-level result of one bounded refresh execution."""
 

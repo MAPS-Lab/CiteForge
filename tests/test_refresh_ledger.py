@@ -19,6 +19,7 @@ from citeforge.refresh.ledger import (
     FaultInjectedError,
     Ledger,
     MaterializationEvidence,
+    PlannedTask,
     ProvenanceRule,
     ProviderObservation,
     PublicationMetadata,
@@ -27,7 +28,7 @@ from citeforge.refresh.ledger import (
     ValidationSpec,
     inventory_tasks,
 )
-from citeforge.refresh.types import GenerationSpec, GenerationState, TaskDisposition
+from citeforge.refresh.types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
 
@@ -172,12 +173,511 @@ def _record_dominance_observations(
     return strong_request_key, dominated_request_key, dominated_claim_key, dominated_owner
 
 
+def test_initial_phased_round_runs_before_structural_closure_and_blocks_completeness(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        round_one = ledger.commit_initial_round(
+            [PlannedTask(inventory, expands_plan=True)],
+            source_evidence_digest="a" * 64,
+            now=NOW,
+        )
+        assert round_one.sequence == 1 and round_one.phase is PlanPhase.INVENTORIES
+        assert ledger.plan_status().revision == 1
+        assert not ledger.plan_status().closed
+        assert not ledger.all_required_satisfied()
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        assert ledger.claim_due("worker", NOW, timedelta(minutes=1)) is not None
+        with pytest.raises(ValueError, match="closed"):
+            ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
+
+
+def test_initial_round_exact_replay_and_conflict(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        declared = [PlannedTask(inventory, expands_plan=True)]
+        first = ledger.commit_initial_round(declared, source_evidence_digest="a" * 64, now=NOW)
+        assert ledger.commit_initial_round(declared, source_evidence_digest="a" * 64, now=NOW) == first
+        with pytest.raises(ValueError, match="conflicting"):
+            ledger.commit_initial_round(declared, source_evidence_digest="b" * 64, now=NOW)
+
+
+def test_initial_round_rejects_missing_or_forged_mandatory_inventory(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        with pytest.raises(ValueError, match="canonical inventory"):
+            ledger.commit_initial_round([], source_evidence_digest="a" * 64, now=NOW)
+        canonical = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        assert canonical.request is not None
+        forged_request = replace(canonical.request, normalized_payload={"profile_id": "WrongProfile"})
+        forged = replace(canonical, request=forged_request)
+        with pytest.raises(ValueError, match="canonical inventory"):
+            ledger.commit_initial_round(
+                [PlannedTask(forged, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW
+            )
+
+
+def test_unbound_compatibility_task_is_inert_before_seal(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        ledger.plan_task(_task())
+        with pytest.raises(ValueError, match="initial round"):
+            ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+
+
+def test_schema_v2_is_rejected_without_mutation(tmp_path: Path) -> None:
+    path = tmp_path / "v2.db"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    connection.execute("INSERT INTO schema_meta VALUES ('schema_version', '2')")
+    connection.commit()
+    before = path.read_bytes()
+    connection.close()
+    with pytest.raises(ValueError, match="schema version: 2"):
+        Ledger.open(path)
+    assert path.read_bytes() == before
+
+
+def test_structurally_inconsistent_schema_v3_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "broken-v3.db"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    connection.execute("INSERT INTO schema_meta VALUES ('schema_version', '3')")
+    connection.commit()
+    connection.close()
+    with pytest.raises(ValueError, match="structurally inconsistent"):
+        Ledger.open(path)
+
+
+def test_schema_v3_fingerprint_rejects_unrecognized_structure_without_mutation(tmp_path: Path) -> None:
+    path = tmp_path / "altered-v3.db"
+    with Ledger.open(path):
+        pass
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE unexpected_extension(value TEXT)")
+    connection.commit()
+    connection.close()
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="fingerprint"):
+        Ledger.open(path)
+    assert path.read_bytes() == before
+
+
+def _canonical_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+
+
+def test_empty_reduction_receipt_enables_structural_closure(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        ledger.commit_initial_round(
+            [PlannedTask(inventory, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW
+        )
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        claim = ledger.claim_due("worker", NOW, timedelta(minutes=1))
+        assert claim is not None
+        request_claim = ledger.claim_request(claim.key, "worker", NOW, timedelta(minutes=1))
+        assert request_claim is not None
+        observation = ProviderObservation("scholar", "1", {}, authoritative_empty=True)
+        ledger.finish_request(
+            request_claim.key, "worker", TaskDisposition.CONFIRMED_EMPTY, NOW, observation=observation
+        )
+        ledger.finish_task(claim.key, "worker", TaskDisposition.CONFIRMED_EMPTY, NOW)
+        receipt = ledger.commit_reduction(
+            inventory.key,
+            source_evidence_digest=observation.digest,
+            publications=(),
+            tasks=(),
+            now=NOW,
+        )
+        assert receipt.source_task_keys == (inventory.key,)
+        assert (
+            ledger.commit_reduction(
+                inventory.key,
+                source_evidence_digest=observation.digest,
+                publications=(),
+                tasks=(),
+                now=NOW,
+            )
+            == receipt
+        )
+        assert ledger.plan_status().open_expanders == 0
+        closure_digest = _canonical_digest(dict(ledger.closure_content()))
+        status = ledger.close_plan(expected_closure_digest=closure_digest, now=NOW)
+        assert status.closed and status.authority_mode == "phased_structural"
+        assert ledger.close_plan(expected_closure_digest=closure_digest, now=NOW) == status
+        with pytest.raises(ValueError, match="conflicting"):
+            ledger.close_plan(expected_closure_digest="b" * 64, now=NOW)
+        with pytest.raises(ValueError, match="open running plan"):
+            ledger.commit_reduction(
+                inventory.key,
+                source_evidence_digest=observation.digest,
+                publications=(),
+                tasks=(),
+                now=NOW,
+            )
+        assert ledger.all_required_satisfied()
+        ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
+
+
+def test_reduction_rejects_wrong_evidence_and_nonexpanding_source(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        ledger.commit_initial_round(
+            [PlannedTask(inventory, expands_plan=False)], source_evidence_digest="a" * 64, now=NOW
+        )
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        with pytest.raises(ValueError, match="expanding"):
+            ledger.commit_reduction(
+                inventory.key,
+                source_evidence_digest="b" * 64,
+                publications=(),
+                tasks=(),
+                now=NOW,
+            )
+
+
+def test_reduction_rejects_disallowed_phase_edge(tmp_path: Path) -> None:
+    with Ledger.open(tmp_path / "invalid-edge.db") as ledger:
+        inventory, observation = _ready_expanding_inventory(ledger)
+        with pytest.raises(ValueError, match="phase edge"):
+            ledger.commit_reduction(
+                inventory.key,
+                source_evidence_digest=observation.digest,
+                publications=(),
+                tasks=(),
+                phase=PlanPhase.REDUCERS,
+                now=NOW,
+            )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "after_initial_round_publications",
+        "after_initial_round_tasks",
+        "after_initial_round_obligations",
+        "after_initial_round_round",
+    ],
+)
+def test_initial_round_fault_rolls_back_atomically(tmp_path: Path, fault: str) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / f"{fault}.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        ledger.set_fault(fault)
+        with pytest.raises(FaultInjectedError):
+            ledger.commit_initial_round(
+                [PlannedTask(inventory, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW
+            )
+        assert ledger.plan_status().revision == 0
+        manifest = ledger.manifest().data
+        assert manifest["tasks"] == []
+        assert manifest["plan_rounds"] == []
+
+
+def test_initial_round_postcommit_interruption_exposes_complete_round(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "initial-postcommit.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        ledger.set_fault("after_initial_round_commit")
+        with pytest.raises(FaultInjectedError):
+            ledger.commit_initial_round(
+                [PlannedTask(inventory, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW
+            )
+        assert ledger.plan_status().revision == 1
+        assert len(ledger.manifest().data["plan_rounds"]) == 1
+
+
+def _ready_expanding_inventory(ledger: Ledger) -> tuple[TaskSpec, ProviderObservation]:
+    census = _census()
+    ledger.create_or_resume(_generation(census), census)
+    inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+    ledger.commit_initial_round([PlannedTask(inventory, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW)
+    ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+    claim = ledger.claim_due("worker", NOW, timedelta(minutes=1))
+    assert claim is not None
+    request_claim = ledger.claim_request(claim.key, "worker", NOW, timedelta(minutes=1))
+    assert request_claim is not None
+    observation = ProviderObservation("scholar", "1", {}, authoritative_empty=True)
+    ledger.finish_request(request_claim.key, "worker", TaskDisposition.CONFIRMED_EMPTY, NOW, observation=observation)
+    ledger.finish_task(claim.key, "worker", TaskDisposition.CONFIRMED_EMPTY, NOW)
+    return inventory, observation
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "after_reduction_publications",
+        "after_reduction_tasks",
+        "after_reduction_obligations",
+        "after_reduction_round",
+        "after_reduction_receipt",
+    ],
+)
+def test_reduction_fault_exposes_only_old_round(tmp_path: Path, fault: str) -> None:
+    with Ledger.open(tmp_path / f"{fault}.db") as ledger:
+        inventory, observation = _ready_expanding_inventory(ledger)
+        ledger.set_fault(fault)
+        with pytest.raises(FaultInjectedError):
+            ledger.commit_reduction(
+                inventory.key,
+                source_evidence_digest=observation.digest,
+                publications=(),
+                tasks=(),
+                now=NOW,
+            )
+        assert ledger.plan_status().revision == 1
+        manifest = ledger.manifest().data
+        assert len(manifest["plan_rounds"]) == 1
+        assert manifest["reduction_receipts"] == []
+
+
+def test_reduction_postcommit_interruption_exposes_complete_new_round(tmp_path: Path) -> None:
+    with Ledger.open(tmp_path / "reduction-postcommit.db") as ledger:
+        inventory, observation = _ready_expanding_inventory(ledger)
+        ledger.set_fault("after_reduction_commit")
+        with pytest.raises(FaultInjectedError):
+            ledger.commit_reduction(
+                inventory.key,
+                source_evidence_digest=observation.digest,
+                publications=(),
+                tasks=(),
+                now=NOW,
+            )
+        assert ledger.plan_status().revision == 2
+        manifest = ledger.manifest().data
+        assert len(manifest["plan_rounds"]) == 2
+        assert len(manifest["reduction_receipts"]) == 1
+
+
+def test_reduction_replay_rejects_changed_phase_version_publication_task_or_expansion(tmp_path: Path) -> None:
+    with Ledger.open(tmp_path / "replay-conflict.db") as ledger:
+        inventory, observation = _ready_expanding_inventory(ledger)
+        derived = TaskSpec("author-ada", None, "crossref", "discovery", replace(_request(), operation="discovery"))
+        base_tasks = (PlannedTask(derived, expands_plan=True),)
+        ledger.commit_reduction(
+            inventory.key,
+            source_evidence_digest=observation.digest,
+            publications=(),
+            tasks=base_tasks,
+            now=NOW,
+        )
+        conflicts = (
+            {"phase": PlanPhase.AUTHORITATIVE},
+            {"reducer_version": "2"},
+            {"reducer_id": "alternate_reducer"},
+            {"tasks": ()},
+            {"tasks": (PlannedTask(derived, expands_plan=False),)},
+            {
+                "publications": (
+                    PublicationMetadata("author-ada", "pub-new", "scholar", "New publication", 2026, {}, "", "monthly"),
+                )
+            },
+        )
+        for changed in conflicts:
+            arguments = {
+                "source_evidence_digest": observation.digest,
+                "publications": (),
+                "tasks": base_tasks,
+                "now": NOW,
+                **changed,
+            }
+            with pytest.raises(ValueError, match="conflicting"):
+                ledger.commit_reduction(inventory.key, **arguments)
+
+
+def test_close_postcommit_interruption_exposes_closed_plan(tmp_path: Path) -> None:
+    with Ledger.open(tmp_path / "close-postcommit.db") as ledger:
+        inventory, observation = _ready_expanding_inventory(ledger)
+        ledger.commit_reduction(
+            inventory.key,
+            source_evidence_digest=observation.digest,
+            publications=(),
+            tasks=(),
+            now=NOW,
+        )
+        digest = _canonical_digest(dict(ledger.closure_content()))
+        ledger.set_fault("after_plan_close_commit")
+        with pytest.raises(FaultInjectedError):
+            ledger.close_plan(expected_closure_digest=digest, now=NOW)
+        assert ledger.plan_status().closed
+        assert ledger.all_required_satisfied()
+
+
+def test_close_precommit_interruption_rolls_back_validation_declaration(tmp_path: Path) -> None:
+    with Ledger.open(tmp_path / "close-precommit.db") as ledger:
+        inventory, observation = _ready_expanding_inventory(ledger)
+        ledger.commit_reduction(
+            inventory.key,
+            source_evidence_digest=observation.digest,
+            publications=(),
+            tasks=(),
+            now=NOW,
+        )
+        required = (ValidationSpec("corpus"),)
+        digest = _canonical_digest(dict(ledger.closure_content(required)))
+        ledger.set_fault("after_plan_close_validations")
+        with pytest.raises(FaultInjectedError):
+            ledger.close_plan(expected_closure_digest=digest, required_validations=required, now=NOW)
+        assert not ledger.plan_status().closed
+        assert ledger.manifest().data["validation_obligations"] == []
+
+
+def test_aggregate_reduction_consumes_each_inventory_source_exactly_once(tmp_path: Path) -> None:
+    row = replace(_census().rows[0], dblp_id="dblp/ada")
+    census = AuthorCensus((row,))
+    generation = GenerationSpec(census, "policy-v1", {"scholar": "1", "dblp": "1"}, "abc123")
+    with Ledger.open(tmp_path / "aggregate.db") as ledger:
+        ledger.create_or_resume(generation, census)
+        inventories = inventory_tasks(census, {"scholar": "1", "dblp": "1"}, "2026-08")
+        ledger.commit_initial_round(
+            [PlannedTask(task, expands_plan=True) for task in inventories],
+            source_evidence_digest="a" * 64,
+            now=NOW,
+        )
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        evidence: dict[str, str] = {}
+        for index in range(2):
+            owner = f"worker-{index}"
+            claim = ledger.claim_due(owner, NOW, timedelta(minutes=1))
+            assert claim is not None
+            request_claim = ledger.claim_request(claim.key, owner, NOW, timedelta(minutes=1))
+            assert request_claim is not None
+            provider = next(task.provider for task in inventories if task.key == claim.key)
+            observation = ProviderObservation(provider, "1", {}, authoritative_empty=True)
+            ledger.finish_request(
+                request_claim.key, owner, TaskDisposition.CONFIRMED_EMPTY, NOW, observation=observation
+            )
+            ledger.finish_task(claim.key, owner, TaskDisposition.CONFIRMED_EMPTY, NOW)
+            evidence[claim.key] = observation.digest
+        keys = tuple(sorted(task.key for task in inventories))
+        aggregate = _canonical_digest([evidence[key] for key in keys])
+        receipt = ledger.commit_reduction(
+            tuple(reversed(keys)), source_evidence_digest=aggregate, publications=(), tasks=(), now=NOW
+        )
+        assert receipt.source_task_keys == keys
+        assert ledger.plan_status().open_expanders == 0
+        with pytest.raises(ValueError, match="conflicting"):
+            ledger.commit_reduction(
+                keys[0], source_evidence_digest=evidence[keys[0]], publications=(), tasks=(), now=NOW
+            )
+
+
+def test_closed_phased_manifest_is_byte_identical_after_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "reopen.db"
+    census = _census()
+    with Ledger.open(path) as ledger:
+        inventory, observation = _ready_expanding_inventory(ledger)
+        ledger.commit_reduction(
+            inventory.key,
+            source_evidence_digest=observation.digest,
+            publications=(),
+            tasks=(),
+            now=NOW,
+        )
+        digest = _canonical_digest(dict(ledger.closure_content()))
+        ledger.close_plan(expected_closure_digest=digest, now=NOW)
+        before = ledger.manifest().canonical_json
+    connection = sqlite3.connect(path)
+    for statement in (
+        "UPDATE plan_rounds SET planner_version = 'tampered'",
+        "UPDATE observations SET response_digest = '" + "b" * 64 + "'",
+        "DELETE FROM reduction_receipts",
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(statement)
+        connection.rollback()
+    connection.close()
+    with Ledger.open(path) as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        assert ledger.manifest().canonical_json == before
+
+
+def test_two_forward_reductions_are_contiguous_and_close_only_after_derived_expander(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "rounds.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        ledger.commit_initial_round(
+            [PlannedTask(inventory, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW
+        )
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        inventory_claim = ledger.claim_due("inventory-worker", NOW, timedelta(minutes=1))
+        assert inventory_claim is not None
+        inventory_request = ledger.claim_request(inventory_claim.key, "inventory-worker", NOW, timedelta(minutes=1))
+        assert inventory_request is not None
+        inventory_observation = ProviderObservation("scholar", "1", {}, authoritative_empty=True)
+        ledger.finish_request(
+            inventory_request.key,
+            "inventory-worker",
+            TaskDisposition.CONFIRMED_EMPTY,
+            NOW,
+            observation=inventory_observation,
+        )
+        ledger.finish_task(inventory_claim.key, "inventory-worker", TaskDisposition.CONFIRMED_EMPTY, NOW)
+        derived_request = replace(_request(), operation="discovery")
+        derived = TaskSpec("author-ada", None, "crossref", "discovery", derived_request)
+        first = ledger.commit_reduction(
+            inventory.key,
+            source_evidence_digest=inventory_observation.digest,
+            publications=(),
+            tasks=(PlannedTask(derived, expands_plan=True),),
+            phase=PlanPhase.DISCOVERY,
+            now=NOW,
+        )
+        assert first.source_task_keys == (inventory.key,)
+        with pytest.raises(ValueError, match="open or blocking work"):
+            ledger.close_plan(expected_closure_digest=_canonical_digest(dict(ledger.closure_content())), now=NOW)
+        derived_claim = ledger.claim_due("derived-worker", NOW, timedelta(minutes=1))
+        assert derived_claim is not None and derived_claim.key == derived.key
+        derived_request_claim = ledger.claim_request(derived_claim.key, "derived-worker", NOW, timedelta(minutes=1))
+        assert derived_request_claim is not None
+        derived_observation = ProviderObservation("crossref", "1", {"title": "Complete", "year": 2026})
+        ledger.finish_request(
+            derived_request_claim.key,
+            "derived-worker",
+            TaskDisposition.SUCCEEDED,
+            NOW,
+            observation=derived_observation,
+        )
+        ledger.finish_task(derived_claim.key, "derived-worker", TaskDisposition.SUCCEEDED, NOW)
+        second = ledger.commit_reduction(
+            derived.key,
+            source_evidence_digest=derived_observation.digest,
+            publications=(),
+            tasks=(),
+            phase=PlanPhase.AUTHORITATIVE,
+            now=NOW,
+        )
+        assert second.source_task_keys == (derived.key,)
+        assert [item["sequence"] for item in ledger.manifest().data["plan_rounds"]] == [1, 2, 3]
+        digest = _canonical_digest(dict(ledger.closure_content()))
+        ledger.close_plan(expected_closure_digest=digest, now=NOW)
+        assert ledger.all_required_satisfied()
+
+
 def test_schema_pragmas_and_generation_resume_are_fail_closed(tmp_path: Path) -> None:
     path = tmp_path / "refresh.sqlite3"
     census = _census()
     with Ledger.open(path) as ledger:
         ledger.create_or_resume(_generation(census), census)
         assert ledger.manifest().data["generation"]["state"] == "planning"
+        ledger.commit_initial_round(
+            [PlannedTask(inventory_tasks(census, {"scholar": "1"}, "2026-08")[0], expands_plan=True)],
+            source_evidence_digest="a" * 64,
+            now=NOW,
+        )
         ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
         with pytest.raises(ValueError, match="state transition"):
             ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
@@ -944,6 +1444,7 @@ def test_claims_require_sealed_running_generation(tmp_path: Path) -> None:
         ledger.plan_task(task)
         assert ledger.claim_due("worker", NOW, timedelta(minutes=1)) is None
         ledger.seal_plan([task], required_validations=())
+        assert ledger.plan_status().authority_mode == "legacy_compatibility"
         assert ledger.claim_due("worker", NOW, timedelta(minutes=1)) is None
         ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
         assert ledger.claim_due("worker", NOW, timedelta(minutes=1)) is not None

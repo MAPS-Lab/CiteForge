@@ -9,9 +9,13 @@ from .ledger import (
     Ledger,
     LedgerManifest,
     MaterializationEvidence,
+    PlannedTask,
+    PlanRound,
+    PlanStatus,
     ProvenanceRule,
     ProviderObservation,
     PublicationMetadata,
+    ReductionReceipt,
     RequestClaim,
     RequestResult,
     RequestSpec,
@@ -33,7 +37,7 @@ from .transport import (
     consume_response,
     correlate_exact_batch,
 )
-from .types import GenerationSpec, GenerationState, RunResult, RunStatus, TaskDisposition
+from .types import GenerationSpec, GenerationState, PlanPhase, RunResult, RunStatus, TaskDisposition
 
 __all__ = [
     "JSON_ADAPTERS",
@@ -51,12 +55,17 @@ __all__ = [
     "LedgerTransport",
     "MaterializationEvidence",
     "OutcomeClass",
+    "PlanPhase",
+    "PlanRound",
+    "PlanStatus",
+    "PlannedTask",
     "ProvenanceRule",
     "ProviderObservation",
     "ProviderResponse",
     "ProviderTransport",
     "ProviderTransportError",
     "PublicationMetadata",
+    "ReductionReceipt",
     "RequestClaim",
     "RequestResult",
     "RequestSpec",
