@@ -26,7 +26,12 @@ class TaskDisposition(str, Enum):
     DOMINATED = "dominated"
     MALFORMED = "malformed"
     AUTHENTICATION_FAILED = "authentication_failed"
+    SCHEMA_CHANGED = "schema_changed"
     PERMANENT_FAILURE = "permanent_failure"
+    CIRCUIT_OPEN = "circuit_open"
+    AMBIGUOUS = "ambiguous"
+    BLOCKED = "blocked"
+    UNKNOWN = "unknown"
 
 
 class GenerationState(str, Enum):
