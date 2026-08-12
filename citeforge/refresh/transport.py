@@ -18,7 +18,7 @@ import requests
 
 from ..config import HTTP_BACKOFF_INITIAL, HTTP_BACKOFF_MAX, HTTP_MAX_RETRIES
 from ..http_utils import send_http_once
-from .ledger import Ledger, ProviderObservation, RequestResult, RequestSpec, TaskClaim
+from .ledger import Ledger, ProviderObservation, RequestClaim, RequestResult, RequestSpec, TaskClaim
 from .types import TaskDisposition
 
 JsonMapping = Mapping[str, object]
@@ -306,7 +306,7 @@ class LedgerTransport:
                     safe_diagnostic="exact request leased by another worker",
                     from_ledger=True,
                 )
-            return self._finish_classification_failure(task_claim, operation)
+            return self._finish_before_send_failure(task_claim, request_claim, operation)
         result = self.result(operation.request.key)
         if result is not None:
             self.ledger.finish_task(task_claim.key, task_claim.owner, result.disposition, now)
@@ -325,23 +325,27 @@ class LedgerTransport:
                 from_ledger=True,
             )
 
-        try:
-            started = self.clock()
-        except Exception:
-            return self._finish_classification_failure(task_claim, operation)
+        started = now
         try:
             raw = self._send_once(operation)
         except requests.Timeout:
-            return self._finish_retryable(task_claim, operation, started, OutcomeClass.TIMEOUT, "request timed out")
+            return self._finish_retryable(
+                task_claim, request_claim, operation, started, OutcomeClass.TIMEOUT, "request timed out"
+            )
         except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
             return self._finish_retryable(
-                task_claim, operation, started, OutcomeClass.CONNECTION_FAILURE, "provider connection failed"
+                task_claim,
+                request_claim,
+                operation,
+                started,
+                OutcomeClass.CONNECTION_FAILURE,
+                "provider connection failed",
             )
         except requests.RequestException:
             try:
                 finished = self.clock()
             except Exception:
-                return self._finish_classification_failure(task_claim, operation, started)
+                return self._finish_classification_failure(task_claim, request_claim, operation, started)
             return self._finish_terminal(
                 task_claim,
                 operation,
@@ -356,7 +360,7 @@ class LedgerTransport:
             try:
                 finished = self.clock()
             except Exception:
-                return self._finish_classification_failure(task_claim, operation, started)
+                return self._finish_classification_failure(task_claim, request_claim, operation, started)
             return self._finish_terminal(
                 task_claim,
                 operation,
@@ -370,7 +374,7 @@ class LedgerTransport:
         try:
             finished = self.clock()
         except Exception:
-            return self._finish_classification_failure(task_claim, operation, started)
+            return self._finish_classification_failure(task_claim, request_claim, operation, started)
         if not isinstance(raw, requests.Response):
             return self._finish_terminal(
                 task_claim,
@@ -384,7 +388,7 @@ class LedgerTransport:
             )
         status = raw.status_code
         if not isinstance(status, int):
-            return self._finish_classification_failure(task_claim, operation, started)
+            return self._finish_classification_failure(task_claim, request_claim, operation, started)
         if status in {401, 403}:
             return self._finish_terminal(
                 task_claim,
@@ -398,7 +402,9 @@ class LedgerTransport:
             )
         if status in _RETRYABLE_STATUS:
             outcome = OutcomeClass.RATE_LIMITED if status == 429 else OutcomeClass.TRANSIENT_SERVER_ERROR
-            return self._finish_retryable(task_claim, operation, started, outcome, "retryable provider response", raw)
+            return self._finish_retryable(
+                task_claim, request_claim, operation, started, outcome, "retryable provider response", raw
+            )
         if 400 <= status < 500:
             outcome = OutcomeClass.NOT_FOUND if status == 404 else OutcomeClass.INVALID_REQUEST
             return self._finish_terminal(
@@ -531,6 +537,7 @@ class LedgerTransport:
     def _finish_retryable(
         self,
         task_claim: TaskClaim,
+        request_claim: RequestClaim,
         operation: SendOperation,
         started: datetime,
         outcome: OutcomeClass,
@@ -549,7 +556,7 @@ class LedgerTransport:
             base = min(HTTP_BACKOFF_INITIAL * (2 ** (attempt_number - 1)), HTTP_BACKOFF_MAX)
             delay = retry_after if retry_after is not None else min(HTTP_BACKOFF_MAX, base + self._jitter(base))
         except Exception:
-            return self._finish_classification_failure(task_claim, operation, started)
+            return self._finish_classification_failure(task_claim, request_claim, operation, started)
         if not operation.retryable:
             return self._finish_terminal(
                 task_claim,
@@ -599,10 +606,14 @@ class LedgerTransport:
         )
 
     def _finish_classification_failure(
-        self, task_claim: TaskClaim, operation: SendOperation, started: datetime | None = None
+        self,
+        task_claim: TaskClaim,
+        request_claim: RequestClaim,
+        operation: SendOperation,
+        started: datetime | None = None,
     ) -> ProviderResponse:
         """Release a claimed request without consulting injected timing helpers."""
-        fallback_finished = self._claim_safe_time(task_claim)
+        fallback_finished = self._claim_safe_time(task_claim, request_claim)
         fallback_started = min(started or fallback_finished, fallback_finished)
         return self._finish_terminal(
             task_claim,
@@ -616,9 +627,38 @@ class LedgerTransport:
         )
 
     @staticmethod
-    def _claim_safe_time(task_claim: TaskClaim) -> datetime:
-        """Choose a deterministic instant that remains inside the logical task lease."""
-        return task_claim.lease_expires - timedelta(microseconds=1)
+    def _claim_safe_time(task_claim: TaskClaim, request_claim: RequestClaim | None = None) -> datetime:
+        """Choose an instant inside every available durable lease."""
+        lease_expires = (
+            min(task_claim.lease_expires, request_claim.lease_expires) if request_claim else task_claim.lease_expires
+        )
+        return lease_expires - timedelta(microseconds=1)
+
+    def _finish_before_send_failure(
+        self, task_claim: TaskClaim, request_claim: RequestClaim, operation: SendOperation
+    ) -> ProviderResponse:
+        """Terminalize claimed work without inventing a physical attempt."""
+        finished = self._claim_safe_time(task_claim, request_claim)
+        diagnostic = "provider response classification failed"
+        self.ledger.finish_request(
+            operation.request.key,
+            task_claim.owner,
+            TaskDisposition.PERMANENT_FAILURE,
+            finished,
+            safe_diagnostic=diagnostic,
+        )
+        self.ledger.finish_task(
+            task_claim.key,
+            task_claim.owner,
+            TaskDisposition.PERMANENT_FAILURE,
+            finished,
+            reason=diagnostic,
+        )
+        return ProviderResponse(
+            TaskDisposition.PERMANENT_FAILURE,
+            OutcomeClass.INVALID_REQUEST,
+            safe_diagnostic=diagnostic,
+        )
 
     def _finish_terminal(
         self,

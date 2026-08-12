@@ -14,7 +14,7 @@ from citeforge import api_generics
 from citeforge.api_configs import S2_SEARCH_CONFIG
 from citeforge.cache import ResponseCache
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
-from citeforge.refresh.ledger import Ledger, ProviderObservation, RequestSpec, TaskSpec
+from citeforge.refresh.ledger import Ledger, ProviderObservation, RequestClaim, RequestSpec, TaskClaim, TaskSpec
 from citeforge.refresh.provider_adapters import JSON_ADAPTERS, JSON_DURABLE_CALLSITES, pubmed_summary_adapter
 from citeforge.refresh.transport import (
     LedgerTransport,
@@ -460,17 +460,29 @@ def test_initial_clock_failure_terminalizes_claim_with_claim_safe_time(tmp_path:
     assert not sent
     assert response.disposition is TaskDisposition.PERMANENT_FAILURE
     assert response.safe_diagnostic == "provider response classification failed"
-    assert len(ledger.manifest().data["attempts"]) == 1
+    assert len(ledger.manifest().data["attempts"]) == 0
     assert "secret" not in json.dumps(ledger.manifest().data).casefold()
     assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    manifest = ledger.manifest().data
+    assert manifest["tasks"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
+    assert manifest["requests"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
     ledger.close()
 
 
-@pytest.mark.parametrize("fail_on_call", [2, 3, 4])
+def test_claim_safe_fallback_uses_earlier_request_lease_bound() -> None:
+    task_claim = TaskClaim("a" * 64, "b" * 64, "worker", NOW + timedelta(minutes=10))
+    request_claim = RequestClaim("b" * 64, "worker", NOW + timedelta(minutes=2))
+    assert LedgerTransport._claim_safe_time(task_claim, request_claim) == (
+        request_claim.lease_expires - timedelta(microseconds=1)
+    )
+
+
+@pytest.mark.parametrize("fail_on_call", [2, 3])
 def test_post_claim_clock_failure_terminalizes_exactly_once(tmp_path: Path, fail_on_call: int) -> None:
     request = _request()
     ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
     calls = 0
+    physical_calls = 0
 
     def clock() -> datetime:
         nonlocal calls
@@ -479,14 +491,23 @@ def test_post_claim_clock_failure_terminalizes_exactly_once(tmp_path: Path, fail
             raise RuntimeError("api_key=secret")
         return NOW
 
-    response = LedgerTransport(
-        ledger, send_once=lambda _operation: _response(500, {"error": "down"}), clock=clock, jitter=lambda _d: 0
-    ).send_claim(_claim(ledger, "worker"), _operation(request))
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal physical_calls
+        physical_calls += 1
+        return _response(500, {"error": "down"})
+
+    response = LedgerTransport(ledger, send_once=sender, clock=clock, jitter=lambda _d: 0).send_claim(
+        _claim(ledger, "worker"), _operation(request)
+    )
+    assert physical_calls == 1
     assert response.disposition is TaskDisposition.PERMANENT_FAILURE
     assert response.safe_diagnostic == "provider response classification failed"
     assert len(ledger.manifest().data["attempts"]) == 1
     assert "secret" not in json.dumps(ledger.manifest().data).casefold()
     assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    manifest = ledger.manifest().data
+    assert manifest["tasks"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
+    assert manifest["requests"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
     ledger.close()
 
 
