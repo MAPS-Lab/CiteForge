@@ -337,15 +337,20 @@ def decode_scholar_inventory(
         or profile_query.get("user") != [profile_id]
     ):
         raise SchemaChangedError("Scholar response profile URL does not match requested author")
-    parameter_offset = parameters.get("cstart") if isinstance(parameters, dict) else None
-    if parameter_offset is not None and (
-        isinstance(parameter_offset, bool) or not isinstance(parameter_offset, int) or parameter_offset != offset
-    ):
-        raise SchemaChangedError("Scholar response has malformed offset evidence")
     if not isinstance(parameters, dict) or (
         parameters.get("engine") != "google_scholar_author" or parameters.get("author_id") != profile_id
     ):
         raise SchemaChangedError("Scholar response lacks exact request evidence")
+    echoed_offset = False
+    for name in ("start", "cstart"):
+        if name not in parameters:
+            continue
+        parameter_offset = parameters[name]
+        if isinstance(parameter_offset, bool) or not isinstance(parameter_offset, int) or parameter_offset != offset:
+            raise SchemaChangedError("Scholar response has malformed offset evidence")
+        echoed_offset = True
+    if offset != 0 and not echoed_offset:
+        raise SchemaChangedError("Scholar response lacks exact offset evidence")
     if not isinstance(author, dict) or not isinstance(author.get("name"), str) or not author["name"].strip():
         raise SchemaChangedError("Scholar response lacks author profile metadata")
     if not isinstance(articles, list) or not isinstance(pagination, dict):

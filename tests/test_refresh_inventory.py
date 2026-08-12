@@ -17,6 +17,7 @@ from citeforge.refresh.inventory import (
     decode_scholar_inventory,
     reduce_author_inventory,
 )
+from citeforge.refresh.transport import SchemaChangedError
 from citeforge.refresh.types import TaskDisposition
 
 
@@ -100,6 +101,79 @@ def test_scholar_decoder_is_strict_and_derives_trusted_next_offset() -> None:
     forked["serpapi_pagination"]["next"] += "&cstart=200"
     with pytest.raises(ValueError, match="identity"):
         decode_scholar_inventory(json.dumps(forked).encode(), "Scholar123", 0, 100, 2020)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "offset"),
+    [
+        ({"start": 0}, 100),
+        ({"start": True}, 0),
+        ({"start": "100"}, 100),
+        ({"cstart": 0}, 100),
+        ({"cstart": True}, 0),
+        ({"cstart": "100"}, 100),
+        ({"start": 100, "cstart": 0}, 100),
+        ({}, 100),
+    ],
+)
+def test_scholar_decoder_requires_exact_echoed_page_offset(parameters: dict[str, object], offset: int) -> None:
+    body = {
+        "search_metadata": {
+            "status": "Success",
+            "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+        },
+        "search_parameters": {
+            "engine": "google_scholar_author",
+            "author_id": "Scholar123",
+            **parameters,
+        },
+        "author": {"name": "Ada Lovelace"},
+        "articles": [
+            {
+                "title": "Analytical Engine",
+                "authors": "Ada Lovelace",
+                "year": 2024,
+                "citation_id": "Scholar123:paper1",
+            }
+        ],
+    }
+    with pytest.raises(SchemaChangedError, match="offset"):
+        decode_scholar_inventory(json.dumps(body).encode(), "Scholar123", offset, 100, 2020)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "offset"),
+    [
+        ({}, 0),
+        ({"start": 100}, 100),
+        ({"cstart": 100}, 100),
+        ({"start": 100, "cstart": 100}, 100),
+    ],
+)
+def test_scholar_decoder_accepts_documented_exact_offset_evidence(parameters: dict[str, object], offset: int) -> None:
+    body = {
+        "search_metadata": {
+            "status": "Success",
+            "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+        },
+        "search_parameters": {
+            "engine": "google_scholar_author",
+            "author_id": "Scholar123",
+            **parameters,
+        },
+        "author": {"name": "Ada Lovelace"},
+        "articles": [
+            {
+                "title": "Analytical Engine",
+                "authors": "Ada Lovelace",
+                "year": 2024,
+                "citation_id": "Scholar123:paper1",
+            }
+        ],
+    }
+    normalized, empty = decode_scholar_inventory(json.dumps(body).encode(), "Scholar123", offset, 100, 2020)
+    assert normalized["offset"] == offset
+    assert not empty
 
 
 def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> None:

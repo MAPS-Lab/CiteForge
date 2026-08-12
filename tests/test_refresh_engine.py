@@ -239,6 +239,54 @@ def test_engine_paginates_in_durable_waves_without_repeating_success(tmp_path: P
         assert "provider-secret" not in ledger.manifest().canonical_json
 
 
+def test_engine_rejects_nonzero_scholar_page_without_echoed_offset(tmp_path: Path) -> None:
+    spec = _spec()
+
+    def send_once(operation: SendOperation) -> requests.Response:
+        start = dict(operation.request.normalized_payload)["start"]
+        envelope: dict[str, object] = {
+            "search_metadata": {
+                "status": "Success",
+                "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+            },
+            "search_parameters": {
+                "engine": "google_scholar_author",
+                "author_id": "Scholar123",
+            },
+            "author": {"name": "Ada Lovelace"},
+            "articles": [
+                {
+                    "title": f"Paper {start}",
+                    "authors": "Ada Lovelace",
+                    "year": 2024,
+                    "citation_id": f"Scholar123:{start}",
+                }
+            ],
+        }
+        if start == 0:
+            envelope["serpapi_pagination"] = {
+                "next": "https://serpapi.com/search.json?engine=google_scholar_author&author_id=Scholar123"
+                "&cstart=100&num=100&sort=pubdate"
+            }
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(envelope).encode()
+        return response
+
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        engine = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), LedgerTransport(ledger, send_once=send_once))
+        assert (
+            engine.run(spec, RefreshCredentials(serpapi_key="secret"), lambda: False).status is RunStatus.CONTINUATION
+        )
+        assert engine.run(spec, RefreshCredentials(serpapi_key="secret"), lambda: False).status is RunStatus.BLOCKED
+        manifest = ledger.manifest().data
+        inventory_tasks = [item for item in manifest["tasks"] if item["operation"] == "inventory"]
+        assert sorted(item["state"] for item in inventory_tasks) == ["schema_changed", "succeeded"]
+        assert manifest["inventory_authorities"] == []
+        assert manifest["inventory_contributions"] == []
+        assert manifest["publications"] == []
+
+
 def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> None:
     spec = _spec()
     envelope = {
