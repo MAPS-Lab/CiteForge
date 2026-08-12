@@ -293,6 +293,13 @@ class LedgerTransport:
         try:
             now = self.clock()
         except Exception:
+            if datetime.now(timezone.utc) >= task_claim.lease_expires:
+                return ProviderResponse(
+                    TaskDisposition.LEASED,
+                    OutcomeClass.IN_FLIGHT,
+                    safe_diagnostic="task claim expired before provider classification",
+                    from_ledger=True,
+                )
             fallback = self._claim_safe_time(task_claim)
             result = self.result(operation.request.key)
             if result is not None:

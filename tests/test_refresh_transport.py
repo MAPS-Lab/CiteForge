@@ -456,7 +456,7 @@ def test_initial_clock_failure_terminalizes_claim_with_claim_safe_time(tmp_path:
         ledger,
         send_once=sender,
         clock=lambda: (_ for _ in ()).throw(RuntimeError("api_key=secret")),
-    ).send_claim(_claim(ledger, "worker"), _operation(request))
+    ).send_claim(_claim(ledger, "worker", datetime.now(timezone.utc)), _operation(request))
     assert not sent
     assert response.disposition is TaskDisposition.PERMANENT_FAILURE
     assert response.safe_diagnostic == "provider response classification failed"
@@ -466,6 +466,35 @@ def test_initial_clock_failure_terminalizes_claim_with_claim_safe_time(tmp_path:
     manifest = ledger.manifest().data
     assert manifest["tasks"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
     assert manifest["requests"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
+    ledger.close()
+
+
+def test_stale_initial_clock_claim_cannot_rewind_or_mutate_durable_state(tmp_path: Path) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    physical_calls = 0
+
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal physical_calls
+        physical_calls += 1
+        return _response(200, {"title": "unexpected"})
+
+    stale_claim = _claim(ledger, "stale-worker", datetime.now(timezone.utc) - timedelta(minutes=10))
+    response = LedgerTransport(
+        ledger,
+        send_once=sender,
+        clock=lambda: (_ for _ in ()).throw(RuntimeError("api_key=secret")),
+    ).send_claim(stale_claim, _operation(request))
+    assert physical_calls == 0
+    assert response.disposition is TaskDisposition.LEASED
+    assert response.outcome is OutcomeClass.IN_FLIGHT
+    assert response.safe_diagnostic == "task claim expired before provider classification"
+    manifest = ledger.manifest().data
+    assert manifest["tasks"][0]["state"] == TaskDisposition.LEASED.value
+    assert manifest["requests"][0]["state"] == TaskDisposition.PENDING.value
+    assert manifest["attempts"] == []
+    reclaimed = ledger.claim_due("recovery-worker", datetime.now(timezone.utc), timedelta(minutes=5))
+    assert reclaimed is not None and reclaimed.owner == "recovery-worker"
     ledger.close()
 
 
