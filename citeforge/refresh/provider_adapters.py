@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from .ledger import RequestSpec, TaskClaim
-from .transport import ProviderTransport, SchemaChangedError, SendOperation, consume_response
+from .transport import ProviderTransport, SchemaChangedError, SendOperation, consume_response, correlate_exact_batch
 
 Normalizer = Callable[[dict[str, object]], Mapping[str, object]]
 EmptyCheck = Callable[[dict[str, object]], bool]
@@ -72,6 +72,7 @@ class JsonProviderAdapter:
         json_payload: Mapping[str, object] | None = None,
         idempotent: bool | None = None,
         idempotency_key: str | None = None,
+        idempotency_header: str | None = None,
     ) -> SendOperation:
         request = RequestSpec(
             self.provider,
@@ -93,6 +94,7 @@ class JsonProviderAdapter:
             json_payload,
             idempotent,
             idempotency_key,
+            idempotency_header,
         )
 
     def send(
@@ -113,7 +115,6 @@ _SERPLY = _list("articles", "articles")
 _SERPAPI = _list("articles", "articles")
 _DBLP = _list("hits", "result", "hits", "hit")
 _PUBMED_SEARCH = _list("pmids", "esearchresult", "idlist")
-_PUBMED_SUMMARY = _mapping("records", "result")
 _OPENREVIEW = _list("notes", "notes")
 _GEMINI = _list("candidates", "candidates")
 
@@ -140,9 +141,6 @@ JSON_ADAPTERS: Mapping[str, JsonProviderAdapter] = {
     "pubmed.search": JsonProviderAdapter(
         "pubmed", "search", "pmids", _PUBMED_SEARCH, _normalized_empty(_PUBMED_SEARCH, "pmids")
     ),
-    "pubmed.summary": JsonProviderAdapter(
-        "pubmed", "summary", "records", _PUBMED_SUMMARY, lambda value: not _PUBMED_SUMMARY(value)["records"]
-    ),
     "openreview.notes": JsonProviderAdapter(
         "openreview", "notes_search", "notes", _OPENREVIEW, _normalized_empty(_OPENREVIEW, "notes")
     ),
@@ -153,4 +151,27 @@ JSON_ADAPTERS: Mapping[str, JsonProviderAdapter] = {
 }
 
 
-__all__ = ["JSON_ADAPTERS", "JsonProviderAdapter"]
+def pubmed_summary_adapter(requested_pmids: tuple[str, ...]) -> JsonProviderAdapter:
+    """Build the fail-closed ESummary adapter for one exact PMID set."""
+
+    def normalize(value: dict[str, object]) -> Mapping[str, object]:
+        result = _path(value, "result")
+        if not isinstance(result, dict):
+            raise SchemaChangedError("PubMed ESummary result is not an object")
+        uids = result.get("uids")
+        if not isinstance(uids, list) or not all(isinstance(uid, str) for uid in uids):
+            raise SchemaChangedError("PubMed ESummary lacks string uids")
+        raw_members = [result.get(uid) for uid in uids]
+        if not all(isinstance(member, Mapping) for member in raw_members):
+            raise SchemaChangedError("PubMed ESummary lacks a requested record")
+        members = [member for member in raw_members if isinstance(member, Mapping)]
+        try:
+            correlated = correlate_exact_batch(requested_pmids, members, correlation_field="uid")
+        except ValueError as exc:
+            raise SchemaChangedError(f"PubMed ESummary correlation failed: {exc}") from exc
+        return {"records": correlated}
+
+    return JsonProviderAdapter("pubmed", "summary", "records", normalize, lambda _value: False)
+
+
+__all__ = ["JSON_ADAPTERS", "JsonProviderAdapter", "pubmed_summary_adapter"]

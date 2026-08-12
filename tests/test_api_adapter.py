@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -21,7 +22,8 @@ from citeforge.api_generics import APISearchConfig
 from citeforge.cache import ResponseCache
 from citeforge.clients import search_apis
 from citeforge.pipeline import article
-from citeforge.refresh.transport import OutcomeClass, ProviderResponse, ScriptedTransport
+from citeforge.refresh.ledger import TaskClaim
+from citeforge.refresh.transport import OutcomeClass, ProviderResponse, SchemaChangedError, ScriptedTransport
 from citeforge.refresh.types import TaskDisposition
 
 TITLE = "Ocean Forecasting"
@@ -156,6 +158,8 @@ def test_every_generic_json_adapter_is_callable_through_provider_transport(
         case.api_key,
         venue=case.venue,
         transport=transport,
+        task_claim=TaskClaim("a" * 64, "b" * 64, "worker", datetime.max.replace(tzinfo=timezone.utc)),
+        author_key="author-ada",
         freshness_epoch="2026-08",
         adapter_version="test-v1",
     )
@@ -174,10 +178,28 @@ def test_classified_empty_from_provider_transport_is_not_schema_failure() -> Non
             S2_SEARCH_CONFIG,
             "s2-secret",
             transport=transport,
+            task_claim=TaskClaim("a" * 64, "b" * 64, "worker", datetime.max.replace(tzinfo=timezone.utc)),
+            author_key="author-ada",
             freshness_epoch="2026-08",
         )
         == []
     )
+
+
+@pytest.mark.parametrize("missing", ["task_claim", "author_key"])
+def test_durable_generic_search_rejects_missing_claim_or_stable_author_key(missing: str) -> None:
+    transport = ScriptedTransport(
+        [ProviderResponse(TaskDisposition.CONFIRMED_EMPTY, OutcomeClass.AUTHORITATIVE_EMPTY, {}, 200)]
+    )
+    kwargs: dict[str, object] = {
+        "transport": transport,
+        "task_claim": TaskClaim("a" * 64, "b" * 64, "worker", datetime.max.replace(tzinfo=timezone.utc)),
+        "author_key": "author-ada",
+        "freshness_epoch": "2026-08",
+    }
+    kwargs[missing] = None
+    with pytest.raises(ValueError, match="stable author key"):
+        api_generics.search_api_generic_multiple(TITLE, AUTHOR, S2_SEARCH_CONFIG, "s2-secret", **kwargs)
 
 
 def test_search_operation_identity_is_order_stable_and_excludes_query_credentials() -> None:
@@ -201,6 +223,36 @@ def test_search_operation_identity_is_order_stable_and_excludes_query_credential
     assert left.request.provider == "s2"
     assert left.request.quota_scope == "s2"
     assert "secret" not in str(left.request.canonical_content()).casefold()
+
+
+def test_pubmed_legacy_summary_executes_singleton_exact_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    urls: list[str] = []
+
+    def fake_get(url: str, timeout: float) -> dict[str, object]:
+        del timeout
+        urls.append(url)
+        if "esearch" in url:
+            return {"esearchresult": {"idlist": ["123", "456"]}}
+        pmid = parse_qs(urlparse(url).query)["id"][0]
+        return {"result": {"uids": [pmid], pmid: {"uid": pmid, "title": f"Title {pmid}"}}}
+
+    monkeypatch.setattr(search_apis, "http_get_json", fake_get)
+    result = search_apis._pubmed_fetch_articles("ocean", 2, 5.0)
+    assert result is not None and [record["uid"] for record in result[0]] == ["123", "456"]
+    summary_ids = [parse_qs(urlparse(url).query)["id"] for url in urls if "esummary" in url]
+    assert summary_ids == [["123"], ["456"]]
+
+
+def test_pubmed_singleton_summary_rejects_wrong_member(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter(
+        [
+            {"esearchresult": {"idlist": ["123"]}},
+            {"result": {"uids": ["999"], "999": {"uid": "999"}}},
+        ]
+    )
+    monkeypatch.setattr(search_apis, "http_get_json", lambda _url, timeout: next(responses))
+    with pytest.raises(SchemaChangedError, match="PubMed"):
+        search_apis._pubmed_fetch_articles("ocean", 1, 5.0)
 
 
 def _install_adapter_stub(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> dict[str, object]:

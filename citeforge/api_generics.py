@@ -9,7 +9,7 @@ source shares one matching and construction path.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -28,7 +28,7 @@ from .exceptions import ALL_API_ERRORS, FIELD_ACCESS_ERRORS
 from .http_utils import http_get_json, s2_http_get_json
 from .id_utils import find_arxiv_in_text, find_doi_in_text
 from .log_utils import LogCategory, logger
-from .refresh.ledger import RequestSpec
+from .refresh.ledger import RequestSpec, TaskClaim
 from .refresh.transport import ProviderTransport, SchemaChangedError, SendOperation, consume_response
 from .text_utils import (
     build_url,
@@ -121,6 +121,15 @@ def _semantic_url_identity(url: str) -> dict[str, object]:
             continue
         query.setdefault(name, []).append(value)
     return {"host": parsed.hostname or "", "path": parsed.path, "query": query}
+
+
+def _mutable_json(value: object) -> object:
+    """Copy an immutable transport payload into legacy adapter-owned JSON values."""
+    if isinstance(value, Mapping):
+        return {str(key): _mutable_json(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_mutable_json(item) for item in value]
+    return value
 
 
 def validate_result_envelope(data: dict[str, Any], config: APISearchConfig) -> list[Any]:
@@ -255,6 +264,8 @@ def _fetch_results(
     *,
     params: dict[str, Any] | None = None,
     transport: ProviderTransport | None = None,
+    task_claim: TaskClaim | None = None,
+    author_key: str | None = None,
     freshness_epoch: str = "legacy",
     adapter_version: str = "1",
 ) -> list[Any] | None:
@@ -273,21 +284,25 @@ def _fetch_results(
     logger.debug(f"{config.api_name} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
 
     if transport is not None:
+        if task_claim is None or not author_key:
+            raise ValueError("durable provider transport requires task claim and stable author key")
         normalized = consume_response(
             transport.send(
                 search_operation(
                     url,
                     config,
-                    author_scope=author_name or "anonymous",
+                    author_scope=author_key,
                     freshness_epoch=freshness_epoch,
                     adapter_version=adapter_version,
                     api_key=api_key,
-                )
+                ),
+                task_claim=task_claim,
             )
         )
-        results = normalized.get("results", [])
-        if not isinstance(results, list):
-            raise ProviderSchemaError(f"{config.api_name} normalized results are not a list")
+        mutable_results = _mutable_json(normalized.get("results", []))
+        if not isinstance(mutable_results, Sequence) or isinstance(mutable_results, (str, bytes)):
+            raise ProviderSchemaError(f"{config.api_name} normalized results are not a sequence")
+        results = list(mutable_results)
     else:
         try:
             if api_key and config.requires_api_key:
@@ -298,7 +313,8 @@ def _fetch_results(
             return None
         results = validate_result_envelope(data, config)
     if not results:
-        response_cache.put_negative(config.api_name, cache_key)
+        if transport is None:
+            response_cache.put_negative(config.api_name, cache_key)
         return None
     return results
 
@@ -364,6 +380,8 @@ def search_api_generic_multiple(
     *,
     venue: str | None = None,
     transport: ProviderTransport | None = None,
+    task_claim: TaskClaim | None = None,
+    author_key: str | None = None,
     freshness_epoch: str = "legacy",
     adapter_version: str = "1",
 ) -> list[dict[str, Any]]:
@@ -383,7 +401,7 @@ def search_api_generic_multiple(
         if config.api_name.endswith("_venue")
         else title_author_cache_key(title, author_name, prefix="multi|")
     )
-    cached = response_cache.get(config.api_name, cache_key)
+    cached = response_cache.get(config.api_name, cache_key) if transport is None else None
     if cached is not None:
         if cached.get("_negative"):
             logger.debug(f"{config.api_name}_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
@@ -403,6 +421,8 @@ def search_api_generic_multiple(
         cache_key,
         params=params,
         transport=transport,
+        task_claim=task_claim,
+        author_key=author_key,
         freshness_epoch=freshness_epoch,
         adapter_version=adapter_version,
     )
@@ -442,14 +462,14 @@ def search_api_generic_multiple(
         f"{config.api_name}_multi | RESULT | scored={scored_count}/{len(results)} | top={len(top_results)}",
         category=LogCategory.SCORE,
     )
-    if top_results:
+    if top_results and transport is None:
         response_cache.put(
             config.api_name,
             cache_key,
             {"results": [dict(r) for r in top_results]},
             ttl_days=CACHE_TTL_SEARCH_DAYS,
         )
-    else:
+    elif transport is None:
         response_cache.put_negative(config.api_name, cache_key)
     return top_results
 

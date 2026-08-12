@@ -86,8 +86,16 @@ class FaultInjectedError(RuntimeError):
     """Test-only interruption raised after a named durable boundary."""
 
 
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_plain_json(item) for item in value]
+    return value
+
+
 def _canonical(value: object) -> str:
-    return json.dumps(value, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return json.dumps(_plain_json(value), allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _digest(value: object) -> str:
@@ -486,6 +494,8 @@ class RequestResult:
     disposition: TaskDisposition
     normalized_response: Mapping[str, object] | None
     response_digest: str | None
+    outcome: str | None
+    http_status: int | None
 
 
 @dataclass(frozen=True)
@@ -1534,14 +1544,18 @@ class Ledger:
 
     def request_result(self, request_key: str) -> RequestResult | None:
         row = self._connection.execute(
-            "SELECT disposition, response_json, response_digest FROM observations WHERE generation_id = ? "
-            "AND request_key = ?",
+            "SELECT observation.disposition, observation.response_json, observation.response_digest, "
+            "attempt.outcome, attempt.http_status FROM observations AS observation LEFT JOIN attempts AS attempt "
+            "ON attempt.generation_id = observation.generation_id AND attempt.request_key = observation.request_key "
+            "AND attempt.attempt_number = (SELECT MAX(latest.attempt_number) FROM attempts AS latest WHERE "
+            "latest.generation_id = observation.generation_id AND latest.request_key = observation.request_key) "
+            "WHERE observation.generation_id = ? AND observation.request_key = ?",
             (self._generation_id(), request_key),
         ).fetchone()
         if row is None:
             return None
         response = MappingProxyType(json.loads(row[1])) if row[1] is not None else None
-        return RequestResult(request_key, TaskDisposition(row[0]), response, row[2])
+        return RequestResult(request_key, TaskDisposition(row[0]), response, row[2], row[3], row[4])
 
     def request_attempt_count(self, request_key: str) -> int:
         """Return the durable physical-attempt count for one exact request."""

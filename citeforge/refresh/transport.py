@@ -78,7 +78,7 @@ class ProviderResponse:
 
     def __post_init__(self) -> None:
         if self.payload is not None:
-            object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
+            object.__setattr__(self, "payload", _deep_freeze(self.payload))
 
 
 @dataclass(frozen=True)
@@ -94,6 +94,7 @@ class SendOperation:
     json_payload: Mapping[str, object] | None = None
     idempotent: bool | None = None
     idempotency_key: str | None = None
+    idempotency_header: str | None = None
     max_attempts: int = HTTP_MAX_RETRIES + 1
 
     def __post_init__(self) -> None:
@@ -101,12 +102,18 @@ class SendOperation:
             raise ValueError("provider timeout must be positive")
         if self.max_attempts < 1:
             raise ValueError("provider max attempts must be positive")
-        if self.request.method == "POST" and self.idempotent is None and self.idempotency_key:
-            object.__setattr__(self, "idempotent", True)
+        if self.request.method == "POST" and self.idempotent:
+            headers = {name.casefold(): value for name, value in (self.headers or {}).items()}
+            if (
+                not self.idempotency_header
+                or not self.idempotency_key
+                or headers.get(self.idempotency_header.casefold()) != self.idempotency_key
+            ):
+                raise ValueError("POST idempotency requires a matching transmitted idempotency header")
 
     @property
     def retryable(self) -> bool:
-        return self.request.method in {"GET", "HEAD"} or self.idempotent is True or self.idempotency_key is not None
+        return self.request.method in {"GET", "HEAD"} or self.idempotent is True
 
 
 class ProviderTransport(Protocol):
@@ -141,6 +148,14 @@ def consume_response(response: ProviderResponse) -> Mapping[str, object]:
     if response.disposition is TaskDisposition.CONFIRMED_EMPTY:
         return MappingProxyType({})
     raise ProviderTransportError(response)
+
+
+def _deep_freeze(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
 
 
 def _canonical_digest(payload: Mapping[str, object]) -> str:
@@ -216,7 +231,7 @@ class LedgerTransport:
 
     @staticmethod
     def _from_result(result: RequestResult) -> ProviderResponse:
-        outcome = {
+        fallback = {
             TaskDisposition.SUCCEEDED: OutcomeClass.REUSED,
             TaskDisposition.CONFIRMED_EMPTY: OutcomeClass.AUTHORITATIVE_EMPTY,
             TaskDisposition.MALFORMED: OutcomeClass.MALFORMED,
@@ -227,10 +242,15 @@ class LedgerTransport:
             TaskDisposition.AMBIGUOUS: OutcomeClass.AMBIGUOUS_PARTIAL,
             TaskDisposition.BLOCKED: OutcomeClass.RETRY_EXHAUSTED,
         }.get(result.disposition, OutcomeClass.REUSED)
+        try:
+            outcome = OutcomeClass(result.outcome) if result.outcome else fallback
+        except ValueError:
+            outcome = fallback
         return ProviderResponse(
             result.disposition,
             outcome,
             result.normalized_response,
+            status=result.http_status,
             response_digest=result.response_digest,
             safe_diagnostic="reused durable observation",
             from_ledger=True,
@@ -277,6 +297,17 @@ class LedgerTransport:
             return self._finish_retryable(
                 task_claim, operation, started, OutcomeClass.CONNECTION_FAILURE, "provider connection failed"
             )
+        except requests.RequestException:
+            return self._finish_terminal(
+                task_claim,
+                operation,
+                started,
+                self.clock(),
+                TaskDisposition.PERMANENT_FAILURE,
+                OutcomeClass.INVALID_REQUEST,
+                None,
+                "provider request was invalid",
+            )
         finished = self.clock()
         status = raw.status_code
         if status in {401, 403}:
@@ -317,8 +348,11 @@ class LedgerTransport:
                 "unsupported provider status",
             )
         try:
-            decoded = json.loads(raw.content.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError):
+            decoded = json.loads(
+                raw.content.decode("utf-8"),
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid constant {value}")),
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError):
             return self._finish_terminal(
                 task_claim,
                 operation,
@@ -342,7 +376,11 @@ class LedgerTransport:
             )
         try:
             normalized = dict(operation.validator(decoded))
-        except SchemaChangedError:
+            is_empty = operation.empty_validator(decoded)
+            if not isinstance(is_empty, bool):
+                raise SchemaChangedError("provider empty validator did not return bool")
+            _canonical_digest(normalized)
+        except Exception:  # provider adapters are untrusted schema boundaries
             return self._finish_terminal(
                 task_claim,
                 operation,
@@ -353,7 +391,7 @@ class LedgerTransport:
                 status,
                 "provider envelope failed schema validation",
             )
-        if operation.empty_validator(decoded):
+        if is_empty:
             return self._finish_observation(
                 task_claim, operation, started, finished, {}, status, authoritative_empty=True
             )
@@ -372,8 +410,26 @@ class LedgerTransport:
     ) -> ProviderResponse:
         disposition = TaskDisposition.CONFIRMED_EMPTY if authoritative_empty else TaskDisposition.SUCCEEDED
         outcome = OutcomeClass.AUTHORITATIVE_EMPTY if authoritative_empty else OutcomeClass.SUCCESS
-        digest = _canonical_digest(normalized)
         diagnostic = "validated authoritative empty" if authoritative_empty else "validated response"
+        try:
+            digest = _canonical_digest(normalized)
+            observation = ProviderObservation(
+                operation.request.provider,
+                operation.request.adapter_version,
+                normalized,
+                authoritative_empty=authoritative_empty,
+            )
+        except Exception:
+            return self._finish_terminal(
+                task_claim,
+                operation,
+                started,
+                finished,
+                TaskDisposition.MALFORMED,
+                OutcomeClass.MALFORMED,
+                status,
+                "normalized provider evidence was invalid",
+            )
         self.ledger.record_attempt(
             operation.request.key,
             task_claim.owner,
@@ -383,12 +439,6 @@ class LedgerTransport:
             http_status=status,
             response_digest=digest,
             safe_diagnostic=diagnostic,
-        )
-        observation = ProviderObservation(
-            operation.request.provider,
-            operation.request.adapter_version,
-            normalized,
-            authoritative_empty=authoritative_empty,
         )
         self.ledger.finish_request(
             operation.request.key,
@@ -436,7 +486,7 @@ class LedgerTransport:
             task_claim.owner,
             started,
             finished,
-            outcome.value,
+            durable_outcome.value,
             http_status=status,
             retry_delay=None if exhausted else delay,
             safe_diagnostic=diagnostic,

@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import xml.etree.ElementTree as ElementTree  # Element types only; parsing uses defusedxml
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,7 @@ from ..http_utils import (
 )
 from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text
 from ..log_utils import LogCategory, logger
+from ..refresh.provider_adapters import pubmed_summary_adapter
 from ..text_utils import (
     author_name_matches,
     authors_overlap,
@@ -768,16 +770,24 @@ def _pubmed_fetch_articles(
     pmids = (safe_get_nested(search_data, "esearchresult", "idlist", default=[]) or [])[:retmax]
     if not pmids:
         return [], 0
-    summary_url = build_url(
-        f"{PUBMED_BASE}/esummary.fcgi",
-        {"db": "pubmed", "id": ",".join(pmids), "retmode": "json"},
-    )
-    try:
-        summary_data = http_get_json(summary_url, timeout=timeout)
-    except NETWORK_ERRORS:
-        return None
-    result = safe_get_nested(summary_data, "result", default={}) or {}
-    articles = [result[pmid] for pmid in pmids if pmid in result and isinstance(result[pmid], dict)]
+    articles: list[dict[str, Any]] = []
+    for pmid in pmids:
+        summary_url = build_url(
+            f"{PUBMED_BASE}/esummary.fcgi",
+            {"db": "pubmed", "id": pmid, "retmode": "json"},
+        )
+        try:
+            summary_data = http_get_json(summary_url, timeout=timeout)
+        except NETWORK_ERRORS:
+            return None
+        normalized = pubmed_summary_adapter((pmid,)).normalize(summary_data)
+        records = normalized["records"]
+        if not isinstance(records, Mapping):
+            raise TypeError("PubMed ESummary normalized records are not an object")
+        record = records[pmid]
+        if not isinstance(record, Mapping):
+            raise TypeError("PubMed ESummary normalized record is not an object")
+        articles.append(dict(record))
     return articles, len(pmids)
 
 
