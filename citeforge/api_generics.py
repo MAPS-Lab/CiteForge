@@ -28,8 +28,9 @@ from .exceptions import ALL_API_ERRORS, FIELD_ACCESS_ERRORS
 from .http_utils import http_get_json, s2_http_get_json
 from .id_utils import find_arxiv_in_text, find_doi_in_text
 from .log_utils import LogCategory, logger
-from .refresh.ledger import RequestSpec, TaskClaim
-from .refresh.transport import ProviderTransport, SchemaChangedError, SendOperation, consume_response
+from .refresh.ledger import TaskClaim
+from .refresh.provider_adapters import JSON_ADAPTERS
+from .refresh.transport import ProviderTransport, SendOperation, consume_response
 from .text_utils import (
     build_url,
     extract_author_names,
@@ -109,6 +110,14 @@ class ProviderSchemaError(ValueError):
 
 
 _TRANSPORT_PROVIDER = {"semantic_scholar": "s2", "crossref_venue": "crossref", "openalex_venue": "openalex"}
+_TRANSPORT_ADAPTER = {
+    "semantic_scholar": "semantic_scholar.search",
+    "europepmc": "europepmc.search",
+    "crossref": "crossref.search",
+    "crossref_venue": "crossref.search",
+    "openalex": "openalex.search",
+    "openalex_venue": "openalex.search",
+}
 _SECRET_QUERY_NAMES = {item.casefold() for item in REDACT_QUERY_PARAM_NAMES}
 
 
@@ -144,13 +153,6 @@ def validate_result_envelope(data: dict[str, Any], config: APISearchConfig) -> l
     return current
 
 
-def _normalized_result_envelope(data: dict[str, object], config: APISearchConfig) -> dict[str, object]:
-    try:
-        return {"results": validate_result_envelope(data, config)}
-    except ProviderSchemaError as exc:
-        raise SchemaChangedError(str(exc)) from exc
-
-
 def search_operation(
     url: str,
     config: APISearchConfig,
@@ -162,22 +164,17 @@ def search_operation(
 ) -> SendOperation:
     """Build the canonical fuzzy-search operation without persisting credentials."""
     headers = {"x-api-key": api_key} if api_key and config.requires_api_key else None
-    request = RequestSpec(
-        _TRANSPORT_PROVIDER.get(config.api_name, config.api_name),
-        "fuzzy_search",
-        "GET",
-        {"author_scope": author_scope, "request": _semantic_url_identity(url)},
-        ("results",),
-        adapter_version,
-        freshness_epoch,
-        _TRANSPORT_PROVIDER.get(config.api_name, config.api_name),
-    )
-    return SendOperation(
-        request,
-        url,
-        config.timeout,
-        validator=lambda data: _normalized_result_envelope(data, config),
-        empty_validator=lambda data: not _normalized_result_envelope(data, config)["results"],
+    try:
+        adapter = JSON_ADAPTERS[_TRANSPORT_ADAPTER[config.api_name]]
+    except KeyError as exc:
+        raise ValueError(f"no durable JSON adapter for {config.api_name}") from exc
+    return adapter.build_operation(
+        url=url,
+        normalized_payload={"author_scope": author_scope, "request": _semantic_url_identity(url)},
+        freshness_epoch=freshness_epoch,
+        adapter_version=adapter_version,
+        quota_scope=_TRANSPORT_PROVIDER.get(config.api_name, config.api_name),
+        timeout=config.timeout,
         headers=headers,
     )
 

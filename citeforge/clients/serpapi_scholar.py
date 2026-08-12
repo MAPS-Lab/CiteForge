@@ -31,11 +31,12 @@ SerpAPI response structure (``/search?engine=google_scholar_author``)::
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 from ..config import HTTP_TIMEOUT_DEFAULT, SERPAPI_BASE
 from ..http_utils import _decode_json_bytes, http_fetch_bytes
+from ..refresh.provider_adapters import DurableJsonRouter, route_json
 from ._http_errors import SCHOLAR_HTTP_ERRORS
 
 _log = logging.getLogger("CiteForge.serpapi")
@@ -48,7 +49,15 @@ _PAGE_SIZE = 100
 
 
 def _serpapi_get(
-    api_key: str, author_id: str, start: int = 0, num: int = _PAGE_SIZE, sort: str = "pubdate"
+    api_key: str,
+    author_id: str,
+    start: int = 0,
+    num: int = _PAGE_SIZE,
+    sort: str = "pubdate",
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
 ) -> dict[str, Any]:
     """Execute a GET request against the SerpAPI Scholar Author endpoint.
 
@@ -77,6 +86,21 @@ def _serpapi_get(
     headers = {"Accept": "application/json"}
 
     try:
+        if durable_router is not None:
+            normalized = route_json(
+                durable_router,
+                "serpapi.author",
+                url=url,
+                normalized_payload={"author_id": author_id, "start": start, "num": num, "sort": sort},
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=HTTP_TIMEOUT_DEFAULT,
+                headers=headers,
+            )
+            return {
+                "articles": list(cast(tuple[dict[str, Any], ...], normalized["articles"])),
+                "serpapi_pagination": dict(cast(dict[str, Any], normalized["serpapi_pagination"])),
+            }
         raw = http_fetch_bytes(url, headers, HTTP_TIMEOUT_DEFAULT)
         data = _decode_json_bytes(raw, url)
         if "error" in data:

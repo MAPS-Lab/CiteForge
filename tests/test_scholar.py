@@ -23,6 +23,33 @@ _SERPLY_HTTP_PATCH = "citeforge.clients.serply_scholar.http_fetch_bytes"
 _SERPAPI_HTTP_PATCH = "citeforge.clients.serpapi_scholar.http_fetch_bytes"
 
 
+class _RecordingRouter:
+    def __init__(self, responses: dict[str, dict[str, object]]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, object]] = []
+
+    def send(self, adapter_name: str, operation: object) -> dict[str, object]:
+        self.calls.append((adapter_name, operation))
+        return self.responses[adapter_name]
+
+
+def test_scholar_json_callers_route_without_legacy_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serply_scholar, "http_fetch_bytes", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    monkeypatch.setattr(serpapi_scholar, "http_fetch_bytes", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    router = _RecordingRouter(
+        {
+            "serply.scholar": {"articles": [{"title": "Ocean"}]},
+            "serpapi.author": {
+                "articles": [{"title": "Ocean", "year": "2024"}],
+                "serpapi_pagination": {},
+            },
+        }
+    )
+    assert serply_scholar._serply_get("secret", "ocean", durable_router=router)["articles"]
+    assert serpapi_scholar._serpapi_get("secret", "author", durable_router=router)["articles"]
+    assert [name for name, _operation in router.calls] == ["serply.scholar", "serpapi.author"]
+
+
 @pytest.mark.parametrize(
     ("client_module", "getter_name", "call_args"),
     [

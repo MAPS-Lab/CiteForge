@@ -15,7 +15,7 @@ from citeforge.api_configs import S2_SEARCH_CONFIG
 from citeforge.cache import ResponseCache
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
 from citeforge.refresh.ledger import Ledger, ProviderObservation, RequestSpec, TaskSpec
-from citeforge.refresh.provider_adapters import JSON_ADAPTERS, pubmed_summary_adapter
+from citeforge.refresh.provider_adapters import JSON_ADAPTERS, JSON_DURABLE_CALLSITES, pubmed_summary_adapter
 from citeforge.refresh.transport import (
     LedgerTransport,
     OutcomeClass,
@@ -130,6 +130,66 @@ def test_provider_response_is_deeply_immutable() -> None:
     )
     with pytest.raises(TypeError):
         response.payload["nested"]["items"][0]["title"] = "mutated"  # type: ignore[index, union-attr]
+
+
+@pytest.mark.parametrize("payload", [{"bad": {1, 2}}, {"bad": object()}, {"bad": ("tuple",)}, {"bad": float("nan")}])
+def test_provider_response_rejects_non_json_mutable_or_nonfinite_values(payload: dict[str, object]) -> None:
+    with pytest.raises((TypeError, ValueError), match="JSON"):
+        ProviderResponse(TaskDisposition.SUCCEEDED, OutcomeClass.SUCCESS, payload)
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE", "PATCH"])
+def test_send_operation_rejects_unsupported_wire_methods_before_claim(method: str) -> None:
+    with pytest.raises(ValueError, match="wire method"):
+        _operation(_request(method=method))
+
+
+def test_head_is_a_supported_retryable_wire_method() -> None:
+    assert _operation(_request(method="HEAD")).retryable
+
+
+def test_unexpected_send_callback_exception_terminalizes_claim_and_attempt(tmp_path: Path) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    response = LedgerTransport(
+        ledger,
+        send_once=lambda _operation: (_ for _ in ()).throw(ValueError("secret=https://x.test?k=credential")),
+        clock=lambda: NOW,
+    ).send_claim(_claim(ledger, "worker"), _operation(request))
+    assert response.disposition is TaskDisposition.PERMANENT_FAILURE
+    assert response.outcome is OutcomeClass.INVALID_REQUEST
+    manifest = ledger.manifest().data
+    assert len(manifest["attempts"]) == 1
+    assert "credential" not in json.dumps(manifest).casefold()
+    assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    ledger.close()
+
+
+def test_invalid_send_callback_response_terminalizes_claim_and_attempt(tmp_path: Path) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    response = LedgerTransport(ledger, send_once=lambda _operation: object(), clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), _operation(request)
+    )
+    assert response.disposition is TaskDisposition.MALFORMED
+    assert response.outcome is OutcomeClass.MALFORMED
+    assert len(ledger.manifest().data["attempts"]) == 1
+    ledger.close()
+
+
+def test_unexpected_response_decode_exception_terminalizes_attempt(tmp_path: Path) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    raw = _response(200)
+    raw._content = False
+    raw._content_consumed = True
+    response = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), _operation(request)
+    )
+    assert response.disposition is TaskDisposition.MALFORMED
+    assert response.outcome is OutcomeClass.MALFORMED
+    assert len(ledger.manifest().data["attempts"]) == 1
+    ledger.close()
 
 
 def test_exact_request_key_changes_for_every_semantic_dimension_and_excludes_secrets() -> None:
@@ -448,6 +508,20 @@ def test_nonfinite_json_is_malformed_and_durable(tmp_path: Path, body: bytes) ->
     ledger.close()
 
 
+@pytest.mark.parametrize("body", [b'{"title":"A","title":"B"}', b'{"outer":{"id":"1","id":"2"}}'])
+def test_duplicate_json_object_keys_are_malformed_at_every_depth(tmp_path: Path, body: bytes) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    raw = _response(200)
+    raw._content = body
+    result = LedgerTransport(ledger, send_once=lambda _op: raw, clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), _operation(request)
+    )
+    assert result.outcome is OutcomeClass.MALFORMED
+    assert len(ledger.manifest().data["attempts"]) == 1
+    ledger.close()
+
+
 @pytest.mark.parametrize("phase", ["validator", "empty_validator"])
 def test_unexpected_envelope_callback_failure_is_durable_schema_change(tmp_path: Path, phase: str) -> None:
     request = _request()
@@ -535,13 +609,7 @@ def test_idempotent_post_may_retry(tmp_path: Path) -> None:
     ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
     response = LedgerTransport(ledger, send_once=lambda _op: _response(503, {}), clock=lambda: NOW).send_claim(
         _claim(ledger, "worker"),
-        _operation(
-            request,
-            idempotent=True,
-            headers={"Idempotency-Key": "operation-123"},
-            idempotency_header="Idempotency-Key",
-            idempotency_key="operation-123",
-        ),
+        _operation(request, idempotent=True),
     )
     assert response.disposition is TaskDisposition.RETRY_WAIT
     ledger.close()
@@ -550,10 +618,8 @@ def test_idempotent_post_may_retry(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"idempotent": True},
-        {"idempotent": True, "idempotency_header": "Idempotency-Key", "idempotency_key": "operation-123"},
+        {"idempotency_header": "Idempotency-Key", "idempotency_key": "operation-123"},
         {
-            "idempotent": True,
             "headers": {"Idempotency-Key": "different"},
             "idempotency_header": "Idempotency-Key",
             "idempotency_key": "operation-123",
@@ -563,6 +629,23 @@ def test_idempotent_post_may_retry(tmp_path: Path) -> None:
 def test_post_retry_requires_matching_transmitted_idempotency_header(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="idempotency"):
         _operation(_request(method="POST"), **kwargs)
+
+
+def test_post_retry_accepts_only_matching_standard_idempotency_key_header() -> None:
+    operation = _operation(
+        _request(method="POST"),
+        headers={"Idempotency-Key": "operation-123"},
+        idempotency_header="Idempotency-Key",
+        idempotency_key="operation-123",
+    )
+    assert operation.retryable
+    with pytest.raises(ValueError, match="standard Idempotency-Key"):
+        _operation(
+            _request(method="POST"),
+            headers={"X-Foo": "operation-123"},
+            idempotency_header="X-Foo",
+            idempotency_key="operation-123",
+        )
 
 
 def test_response_digest_is_of_normalized_mapping(tmp_path: Path) -> None:
@@ -639,6 +722,27 @@ def test_pubmed_esummary_missing_duplicate_or_unexpected_members_fail_closed(uid
         adapter.normalize(envelope)
 
 
+def test_pubmed_esummary_rejects_uid_shaped_record_not_listed_in_uids() -> None:
+    adapter = pubmed_summary_adapter(("123",))
+    envelope = {"result": {"uids": ["123"], "123": {"uid": "123"}, "999": {"uid": "999"}}}
+    with pytest.raises(SchemaChangedError, match="PubMed"):
+        adapter.normalize(envelope)
+
+
+def test_pubmed_esummary_rejects_uid_shaped_nonrecord_not_listed_in_uids() -> None:
+    adapter = pubmed_summary_adapter(("123",))
+    envelope = {"result": {"uids": ["123"], "123": {"uid": "123"}, "999": None}}
+    with pytest.raises(SchemaChangedError, match="PubMed"):
+        adapter.normalize(envelope)
+
+
+def test_pubmed_esummary_rejects_record_key_uid_mismatch() -> None:
+    adapter = pubmed_summary_adapter(("123",))
+    envelope = {"result": {"uids": ["123"], "123": {"uid": "999"}}}
+    with pytest.raises(SchemaChangedError, match="PubMed"):
+        adapter.normalize(envelope)
+
+
 @pytest.mark.parametrize(
     ("adapter_name", "envelope", "field"),
     [
@@ -694,3 +798,22 @@ def test_adapter_provider_names_match_existing_merge_and_quota_namespaces() -> N
         timeout=5,
     )
     assert operation.request.quota_scope == "doi"
+
+
+def test_registry_covers_every_production_json_durable_callsite_once() -> None:
+    assert JSON_DURABLE_CALLSITES == {
+        "api_generics.crossref": "crossref.search",
+        "api_generics.europepmc": "europepmc.search",
+        "api_generics.openalex": "openalex.search",
+        "api_generics.semantic_scholar": "semantic_scholar.search",
+        "search_apis.dblp_find_author_pid": "dblp.author_search",
+        "search_apis.fetch_csl_via_doi": "doi.csl",
+        "search_apis.openreview_notes": "openreview.notes",
+        "search_apis.pubmed_search": "pubmed.search",
+        "search_apis.pubmed_summary": "pubmed.summary.singleton",
+        "serpapi_scholar._serpapi_get": "serpapi.author",
+        "serply_scholar._serply_get": "serply.scholar",
+        "utility_apis.gemini_generate_short_title": "gemini.short_title",
+    }
+    static_names = set(JSON_ADAPTERS)
+    assert set(JSON_DURABLE_CALLSITES.values()) - {"pubmed.summary.singleton"} <= static_names

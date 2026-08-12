@@ -4,12 +4,47 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Protocol
 
 from .ledger import RequestSpec, TaskClaim
 from .transport import ProviderTransport, SchemaChangedError, SendOperation, consume_response, correlate_exact_batch
 
 Normalizer = Callable[[dict[str, object]], Mapping[str, object]]
 EmptyCheck = Callable[[dict[str, object]], bool]
+
+
+class DurableJsonRouter(Protocol):
+    """Engine-owned claimed routing for one durable JSON operation."""
+
+    def send(self, adapter_name: str, operation: SendOperation) -> Mapping[str, object]: ...
+
+
+def route_json(
+    router: DurableJsonRouter,
+    adapter_name: str,
+    *,
+    url: str,
+    normalized_payload: Mapping[str, object],
+    freshness_epoch: str,
+    adapter_version: str,
+    timeout: float,
+    headers: Mapping[str, str] | None = None,
+    json_payload: Mapping[str, object] | None = None,
+    idempotent: bool | None = None,
+) -> Mapping[str, object]:
+    """Build and route exactly one registry-owned durable JSON operation."""
+    adapter = JSON_ADAPTERS[adapter_name]
+    operation = adapter.build_operation(
+        url=url,
+        normalized_payload=normalized_payload,
+        freshness_epoch=freshness_epoch,
+        adapter_version=adapter_version,
+        timeout=timeout,
+        headers=headers,
+        json_payload=json_payload,
+        idempotent=idempotent,
+    )
+    return router.send(adapter_name, operation)
 
 
 def _path(value: object, *components: str) -> object:
@@ -112,7 +147,19 @@ _CROSSREF_SEARCH = _list("results", "message", "items")
 _OPENALEX_SEARCH = _list("results", "results")
 _EUROPEPMC_SEARCH = _list("results", "resultList", "result")
 _SERPLY = _list("articles", "articles")
-_SERPAPI = _list("articles", "articles")
+
+
+def _serpapi(value: dict[str, object]) -> Mapping[str, object]:
+    articles = _path(value, "articles")
+    pagination = value.get("serpapi_pagination", {})
+    if not isinstance(articles, list):
+        raise SchemaChangedError("provider envelope articles is not a list")
+    if not isinstance(pagination, dict):
+        raise SchemaChangedError("provider envelope serpapi_pagination is not an object")
+    return {"articles": articles, "serpapi_pagination": pagination}
+
+
+_SERPAPI = _serpapi
 _DBLP = _list("hits", "result", "hits", "hit")
 _PUBMED_SEARCH = _list("pmids", "esearchresult", "idlist")
 _OPENREVIEW = _list("notes", "notes")
@@ -150,6 +197,21 @@ JSON_ADAPTERS: Mapping[str, JsonProviderAdapter] = {
     "doi.csl": JsonProviderAdapter("doi_csl", "csl_lookup", "metadata", _csl, lambda _value: False, quota_scope="doi"),
 }
 
+JSON_DURABLE_CALLSITES: Mapping[str, str] = {
+    "api_generics.crossref": "crossref.search",
+    "api_generics.europepmc": "europepmc.search",
+    "api_generics.openalex": "openalex.search",
+    "api_generics.semantic_scholar": "semantic_scholar.search",
+    "search_apis.dblp_find_author_pid": "dblp.author_search",
+    "search_apis.fetch_csl_via_doi": "doi.csl",
+    "search_apis.openreview_notes": "openreview.notes",
+    "search_apis.pubmed_search": "pubmed.search",
+    "search_apis.pubmed_summary": "pubmed.summary.singleton",
+    "serpapi_scholar._serpapi_get": "serpapi.author",
+    "serply_scholar._serply_get": "serply.scholar",
+    "utility_apis.gemini_generate_short_title": "gemini.short_title",
+}
+
 
 def pubmed_summary_adapter(requested_pmids: tuple[str, ...]) -> JsonProviderAdapter:
     """Build the fail-closed ESummary adapter for one exact PMID set."""
@@ -165,6 +227,11 @@ def pubmed_summary_adapter(requested_pmids: tuple[str, ...]) -> JsonProviderAdap
         if not all(isinstance(member, Mapping) for member in raw_members):
             raise SchemaChangedError("PubMed ESummary lacks a requested record")
         members = [member for member in raw_members if isinstance(member, Mapping)]
+        uid_record_keys = {key for key in result if key != "uids" and key.isdigit()}
+        if uid_record_keys != set(uids):
+            raise SchemaChangedError("PubMed ESummary has unexpected or missing UID record keys")
+        if any(member.get("uid") != key for key, member in zip(uids, members, strict=True)):
+            raise SchemaChangedError("PubMed ESummary record key and uid mismatch")
         try:
             correlated = correlate_exact_batch(requested_pmids, members, correlation_field="uid")
         except ValueError as exc:
@@ -174,4 +241,11 @@ def pubmed_summary_adapter(requested_pmids: tuple[str, ...]) -> JsonProviderAdap
     return JsonProviderAdapter("pubmed", "summary", "records", normalize, lambda _value: False)
 
 
-__all__ = ["JSON_ADAPTERS", "JsonProviderAdapter", "pubmed_summary_adapter"]
+__all__ = [
+    "JSON_ADAPTERS",
+    "JSON_DURABLE_CALLSITES",
+    "DurableJsonRouter",
+    "JsonProviderAdapter",
+    "pubmed_summary_adapter",
+    "route_json",
+]

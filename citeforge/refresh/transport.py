@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -102,18 +103,21 @@ class SendOperation:
             raise ValueError("provider timeout must be positive")
         if self.max_attempts < 1:
             raise ValueError("provider max attempts must be positive")
-        if self.request.method == "POST" and self.idempotent:
+        if self.request.method not in {"GET", "HEAD", "POST"}:
+            raise ValueError("unsupported wire method")
+        if self.request.method == "POST" and self.idempotency_key is not None:
             headers = {name.casefold(): value for name, value in (self.headers or {}).items()}
             if (
-                not self.idempotency_header
-                or not self.idempotency_key
+                self.idempotency_header != "Idempotency-Key"
                 or headers.get(self.idempotency_header.casefold()) != self.idempotency_key
             ):
-                raise ValueError("POST idempotency requires a matching transmitted idempotency header")
+                raise ValueError("POST idempotency key requires matching standard Idempotency-Key header")
+        elif self.request.method == "POST" and self.idempotency_header is not None:
+            raise ValueError("POST idempotency header requires idempotency key")
 
     @property
     def retryable(self) -> bool:
-        return self.request.method in {"GET", "HEAD"} or self.idempotent is True
+        return self.request.method in {"GET", "HEAD"} or self.idempotent is True or self.idempotency_key is not None
 
 
 class ProviderTransport(Protocol):
@@ -152,10 +156,27 @@ def consume_response(response: ProviderResponse) -> Mapping[str, object]:
 
 def _deep_freeze(value: object) -> object:
     if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("JSON object keys must be strings")
         return MappingProxyType({str(key): _deep_freeze(item) for key, item in value.items()})
-    if isinstance(value, list | tuple):
+    if isinstance(value, list):
         return tuple(_deep_freeze(item) for item in value)
-    return value
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON number must be finite")
+        return value
+    raise TypeError(f"JSON value has unsupported type {type(value).__name__}")
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
 
 
 def _canonical_digest(payload: Mapping[str, object]) -> str:
@@ -308,7 +329,29 @@ class LedgerTransport:
                 None,
                 "provider request was invalid",
             )
+        except Exception:
+            return self._finish_terminal(
+                task_claim,
+                operation,
+                started,
+                self.clock(),
+                TaskDisposition.PERMANENT_FAILURE,
+                OutcomeClass.INVALID_REQUEST,
+                None,
+                "provider send callback failed",
+            )
         finished = self.clock()
+        if not isinstance(raw, requests.Response):
+            return self._finish_terminal(
+                task_claim,
+                operation,
+                started,
+                finished,
+                TaskDisposition.MALFORMED,
+                OutcomeClass.MALFORMED,
+                None,
+                "provider send callback returned invalid response",
+            )
         status = raw.status_code
         if status in {401, 403}:
             return self._finish_terminal(
@@ -351,8 +394,9 @@ class LedgerTransport:
             decoded = json.loads(
                 raw.content.decode("utf-8"),
                 parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid constant {value}")),
+                object_pairs_hook=_reject_duplicate_pairs,
             )
-        except (UnicodeError, json.JSONDecodeError, ValueError):
+        except Exception:
             return self._finish_terminal(
                 task_claim,
                 operation,

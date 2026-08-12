@@ -20,7 +20,7 @@ from citeforge.api_configs import (
 )
 from citeforge.api_generics import APISearchConfig
 from citeforge.cache import ResponseCache
-from citeforge.clients import search_apis
+from citeforge.clients import search_apis, utility_apis
 from citeforge.pipeline import article
 from citeforge.refresh.ledger import TaskClaim
 from citeforge.refresh.transport import OutcomeClass, ProviderResponse, SchemaChangedError, ScriptedTransport
@@ -28,6 +28,16 @@ from citeforge.refresh.types import TaskDisposition
 
 TITLE = "Ocean Forecasting"
 AUTHOR = "Ada Lovelace"
+
+
+class _RecordingRouter:
+    def __init__(self, responses: dict[str, dict[str, object]]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, object]] = []
+
+    def send(self, adapter_name: str, operation: object) -> dict[str, object]:
+        self.calls.append((adapter_name, operation))
+        return self.responses[adapter_name]
 
 
 @dataclass(frozen=True)
@@ -253,6 +263,45 @@ def test_pubmed_singleton_summary_rejects_wrong_member(monkeypatch: pytest.Monke
     monkeypatch.setattr(search_apis, "http_get_json", lambda _url, timeout: next(responses))
     with pytest.raises(SchemaChangedError, match="PubMed"):
         search_apis._pubmed_fetch_articles("ocean", 1, 5.0)
+
+
+def test_search_api_json_callers_route_without_legacy_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(search_apis, "http_fetch_bytes", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    monkeypatch.setattr(search_apis, "http_get_json", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    router = _RecordingRouter(
+        {
+            "doi.csl": {"metadata": {"title": "Ocean"}},
+            "openreview.notes": {"notes": [{"id": "note"}]},
+            "dblp.author_search": {"hits": [{"info": {"pid": "1", "author": AUTHOR}}]},
+            "pubmed.search": {"pmids": ["123"]},
+            "pubmed.summary.singleton": {"records": {"123": {"uid": "123", "title": "Ocean"}}},
+        }
+    )
+    assert search_apis.fetch_csl_via_doi("10.1/x", durable_router=router) == {"title": "Ocean"}
+    assert search_apis._or_fetch_candidates(TITLE, {}, durable_router=router) == [{"id": "note"}]
+    assert search_apis.dblp_find_author_pid(AUTHOR, durable_router=router) == "1"
+    assert search_apis._pubmed_fetch_articles("ocean", 1, 5.0, durable_router=router) == (
+        [{"uid": "123", "title": "Ocean"}],
+        1,
+    )
+    assert [name for name, _operation in router.calls] == [
+        "doi.csl",
+        "openreview.notes",
+        "dblp.author_search",
+        "pubmed.search",
+        "pubmed.summary.singleton",
+    ]
+
+
+def test_gemini_json_caller_routes_without_legacy_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(utility_apis, "http_post_json", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    router = _RecordingRouter(
+        {"gemini.short_title": {"candidates": [{"content": {"parts": [{"text": "OceanForecast"}]}}]}}
+    )
+    assert utility_apis.gemini_generate_short_title("Ocean Forecast", "secret", durable_router=router) == (
+        "OceanForecast"
+    )
+    assert [name for name, _operation in router.calls] == ["gemini.short_title"]
 
 
 def _install_adapter_stub(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> dict[str, object]:

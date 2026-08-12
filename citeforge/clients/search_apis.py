@@ -18,7 +18,7 @@ import time
 import xml.etree.ElementTree as ElementTree  # Element types only; parsing uses defusedxml
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
@@ -54,7 +54,7 @@ from ..http_utils import (
 )
 from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text
 from ..log_utils import LogCategory, logger
-from ..refresh.provider_adapters import pubmed_summary_adapter
+from ..refresh.provider_adapters import DurableJsonRouter, pubmed_summary_adapter, route_json
 from ..text_utils import (
     author_name_matches,
     authors_overlap,
@@ -162,18 +162,40 @@ def crossref_search_multiple(
 # ============ DOI / CSL ============
 
 
-def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
+def fetch_csl_via_doi(
+    doi: str,
+    timeout: float = 20.0,
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
+) -> dict[str, Any] | None:
     """Resolve a DOI using content negotiation and return the associated CSL-JSON metadata."""
     doi_norm = _norm_doi(doi)
     if not doi_norm:
         return None
-    cached, hit = _doi_cache_lookup("doi_csl", doi_norm)
+    cached, hit = _doi_cache_lookup("doi_csl", doi_norm) if durable_router is None else (None, False)
     if hit:
         return cached
     url = f"https://doi.org/{doi_norm}"
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["Accept"] = "application/vnd.citationstyles.csl+json"
     try:
+        if durable_router is not None:
+            normalized = route_json(
+                durable_router,
+                "doi.csl",
+                url=url,
+                normalized_payload={"doi": doi_norm},
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=timeout,
+                headers=headers,
+            )
+            metadata = normalized["metadata"]
+            if not isinstance(metadata, Mapping):
+                raise TypeError("DOI CSL normalized metadata is not an object")
+            return dict(metadata)
         raw = http_fetch_bytes(url, headers, timeout)
         result: dict[str, Any] = json.loads(raw.decode("utf-8"))
         response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
@@ -476,26 +498,46 @@ def openreview_login(creds: tuple[str, ...] | None) -> dict[str, str] | None:
     return None
 
 
-def _or_fetch_candidates(title: str, headers: dict[str, str]) -> list[dict[str, Any]]:
+def _or_fetch_candidates(
+    title: str,
+    headers: dict[str, str],
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
+) -> list[dict[str, Any]]:
     """Fetch OpenReview candidate notes via term lookup, falling back to search."""
     candidates: list[dict[str, Any]] = []
 
-    def _extend(req_url: str) -> None:
-        raw = http_fetch_bytes(req_url, headers, timeout=30.0)
-        data = json.loads(raw.decode("utf-8"))
-        notes = data.get("notes") or data.get("data") or []
+    def _extend(req_url: str, semantic_query: dict[str, object]) -> None:
+        if durable_router is not None:
+            normalized = route_json(
+                durable_router,
+                "openreview.notes",
+                url=req_url,
+                normalized_payload={"author_scope": title, **semantic_query},
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=30.0,
+                headers=headers,
+            )
+            notes = normalized["notes"]
+        else:
+            raw = http_fetch_bytes(req_url, headers, timeout=30.0)
+            data = json.loads(raw.decode("utf-8"))
+            notes = data.get("notes") or data.get("data") or []
         if isinstance(notes, list):
             candidates.extend(notes)
 
     try:
         url = build_url(f"{OPENREVIEW_BASE}/notes", {"term": title, "details": "metadata"})
-        _extend(url)
+        _extend(url, {"kind": "term", "term": title, "details": "metadata"})
     except (*ALL_API_ERRORS, ValueError):
         pass
     if not candidates:
         try:
             url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"q": title, "limit": 20})
-            _extend(url)
+            _extend(url, {"kind": "search", "query": title, "limit": 20})
         except (*ALL_API_ERRORS, ValueError):
             pass
     return candidates
@@ -582,15 +624,34 @@ def dblp_extract_pid(val: str | None) -> str | None:
     return m.group(2) if m else None
 
 
-def dblp_find_author_pid(name: str) -> str | None:
+def dblp_find_author_pid(
+    name: str,
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
+) -> str | None:
     """Look up a DBLP person identifier for an author name."""
     if not name:
         return None
     params = {"q": name, "format": "json"}
     url = build_url(DBLP_BASE, params)
-    data = http_get_json(url)
-    res = (data.get("result") or {}).get("hits") or {}
-    hits = res.get("hit") or []
+    hits: Any
+    if durable_router is not None:
+        normalized = route_json(
+            durable_router,
+            "dblp.author_search",
+            url=url,
+            normalized_payload={"name": name},
+            freshness_epoch=freshness_epoch,
+            adapter_version=adapter_version,
+            timeout=5.0,
+        )
+        hits = cast(tuple[dict[str, Any], ...], normalized["hits"])
+    else:
+        data = http_get_json(url)
+        res = (data.get("result") or {}).get("hits") or {}
+        hits = res.get("hit") or []
     name_norm = name.strip().lower()
     exact_pid = None
     first_pid = None
@@ -752,6 +813,10 @@ def _pubmed_fetch_articles(
     search_query: str,
     retmax: int,
     timeout: float,
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
 ) -> tuple[list[dict[str, Any]], int] | None:
     """Run PubMed's two-step esearch/esummary lookup.
 
@@ -764,10 +829,23 @@ def _pubmed_fetch_articles(
         {"db": "pubmed", "term": search_query, "retmax": retmax, "retmode": "json"},
     )
     try:
-        search_data = http_get_json(search_url, timeout=timeout)
+        if durable_router is not None:
+            normalized_search = route_json(
+                durable_router,
+                "pubmed.search",
+                url=search_url,
+                normalized_payload={"query": search_query, "retmax": retmax},
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=timeout,
+            )
+            pmids = list(cast(tuple[str, ...], normalized_search["pmids"]))
+        else:
+            search_data = http_get_json(search_url, timeout=timeout)
+            pmids = (safe_get_nested(search_data, "esearchresult", "idlist", default=[]) or [])[:retmax]
     except NETWORK_ERRORS:
         return None
-    pmids = (safe_get_nested(search_data, "esearchresult", "idlist", default=[]) or [])[:retmax]
+    pmids = pmids[:retmax]
     if not pmids:
         return [], 0
     articles: list[dict[str, Any]] = []
@@ -777,10 +855,21 @@ def _pubmed_fetch_articles(
             {"db": "pubmed", "id": pmid, "retmode": "json"},
         )
         try:
-            summary_data = http_get_json(summary_url, timeout=timeout)
+            if durable_router is not None:
+                adapter = pubmed_summary_adapter((pmid,))
+                operation = adapter.build_operation(
+                    url=summary_url,
+                    normalized_payload={"pmid": pmid},
+                    freshness_epoch=freshness_epoch,
+                    adapter_version=adapter_version,
+                    timeout=timeout,
+                )
+                normalized = durable_router.send("pubmed.summary.singleton", operation)
+            else:
+                summary_data = http_get_json(summary_url, timeout=timeout)
+                normalized = pubmed_summary_adapter((pmid,)).normalize(summary_data)
         except NETWORK_ERRORS:
             return None
-        normalized = pubmed_summary_adapter((pmid,)).normalize(summary_data)
         records = normalized["records"]
         if not isinstance(records, Mapping):
             raise TypeError("PubMed ESummary normalized records are not an object")
