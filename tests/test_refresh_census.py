@@ -173,6 +173,9 @@ def test_generation_id_is_canonical_and_materially_sensitive(tmp_path: Path) -> 
         "https://scholar.google.com/citations?hl=en&user=AbCdEfGh1234&user=",
         "https://scholar.google.com/citations?user=AbCdEfGh1234#profile",
         "https://scholar.google.com/citations?user=AbCdEf%20h1234",
+        "https://scholar.google.com/citations?us%65r=AbCdEfGh1234",
+        "https://scholar.google.com/citations?user=%41bCdEfGh1234",
+        "https://scholar.google.com/citations?user=AbCdEfGh1234&us%65r=OtherId12345",
         "https://user@scholar.google.com/citations?user=AbCdEfGh1234",
         "https://scholar.google.com:444/citations?user=AbCdEfGh1234",
     ],
@@ -191,6 +194,8 @@ def test_rejects_malformed_or_untrusted_scholar_links(tmp_path: Path, link: str)
         ("https://scholar.google.ca/citations?user=_bCdEfGh-234", "_bCdEfGh-234"),
         ("https://scholar.google.com/citations?hl=en&user=AbCdEfGh1234&pagesize=100", "AbCdEfGh1234"),
         ("https://scholar.google.com/citations?pagesize=100&user=AbCdEfGh1234&hl=en", "AbCdEfGh1234"),
+        ("https://scholar.google.com/citations?hl=en%2DGB&user=AbCdEfGh1234", "AbCdEfGh1234"),
+        ("https://scholar.google.com/citations?user=AbCdEfGh1234&view_op=list%5Fworks", "AbCdEfGh1234"),
         ("https://scholar.google.com:443/citations?user=AbCdEfGh1234", "AbCdEfGh1234"),
     ],
 )
@@ -214,6 +219,7 @@ def test_accepts_supported_scholar_profiles(tmp_path: Path, link: str, expected:
         "https://user@dblp.org/pid/12/3456",
         "https://dblp.org:444/pid/12/3456",
         "https://dblp.org/pid/12/3456.json",
+        "https://dblp.org/pid/12/3456.txt",
         "https://dblp.org/pid/12/3456.html.bak",
         "pid:12/3456.xml",
     ],
@@ -242,7 +248,7 @@ def test_accepts_supported_dblp_identifiers(tmp_path: Path, link: str, expected:
     assert census.rows[0].dblp_id == expected
 
 
-@pytest.mark.parametrize("suffix", ["", ".html", ".xml"])
+@pytest.mark.parametrize("suffix", ["", ".html", ".xml", ".bib", ".nt", ".rdf", ".rss", ".ris"])
 def test_dblp_url_canonicalization_matches_downstream_pid_extraction(tmp_path: Path, suffix: str) -> None:
     from citeforge.clients.search_apis import dblp_extract_pid
 

@@ -9,7 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from citeforge.models import Record
 
@@ -18,6 +18,7 @@ from .types import TaskDisposition
 _REQUIRED_COLUMNS = ("Name", "Scholar Link", "DBLP Link", "Enabled", "Exclusion Reason")
 _SCHOLAR_HOSTS = frozenset({"scholar.google.com", "scholar.google.ca"})
 _DBLP_HOSTS = frozenset({"dblp.org", "dblp.uni-trier.de"})
+_DBLP_EXPORT_SUFFIXES = frozenset({"bib", "html", "nt", "rdf", "ris", "rss", "xml"})
 _SCHOLAR_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,64}")
 _DBLP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -56,8 +57,10 @@ def _scholar_id(link: str, row_number: int) -> str:
     host, path, query = _validated_url(link, row_number, "Scholar Link")
     if host not in _SCHOLAR_HOSTS or path not in {"/citations", "/citations/"}:
         raise ValueError(f"row {row_number}: Scholar Link is not a supported Google Scholar citation profile")
-    if "%" in query:
-        raise ValueError(f"row {row_number}: Scholar Link user ID must not be encoded")
+    for raw_item in query.split("&"):
+        raw_key, _, raw_value = raw_item.partition("=")
+        if unquote_plus(raw_key) == "user" and ("%" in raw_key or "%" in raw_value):
+            raise ValueError(f"row {row_number}: Scholar Link user key and ID must not be encoded")
     try:
         query_items = parse_qsl(query, keep_blank_values=True, strict_parsing=True)
     except ValueError as exc:
@@ -83,7 +86,7 @@ def _dblp_id(link: str, row_number: int) -> str:
         identifier = path.removeprefix("/pid/")
         stem, dot, suffix = identifier.rpartition(".")
         if dot:
-            if suffix not in {"html", "xml"}:
+            if suffix not in _DBLP_EXPORT_SUFFIXES:
                 raise ValueError(f"row {row_number}: DBLP Link has an unsupported profile suffix")
             identifier = stem
     elif identifier.startswith("pid:"):
