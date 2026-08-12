@@ -28,6 +28,12 @@ def test_rejects_unclassified_rows(tmp_path: Path, enabled: str) -> None:
         load_census(path)
 
 
+def test_rejects_private_contact_in_author_name(tmp_path: Path) -> None:
+    path = _write_census(tmp_path / "authors.csv", [f"Ada person@example.test,{_SCHOLAR_URL},,true,"])
+    with pytest.raises(ValueError, match="contact"):
+        load_census(path)
+
+
 def test_rejects_blank_physical_rows(tmp_path: Path) -> None:
     path = _write_census(tmp_path / "authors.csv", [f"Ada Lovelace,{_SCHOLAR_URL},,true,", ""])
 

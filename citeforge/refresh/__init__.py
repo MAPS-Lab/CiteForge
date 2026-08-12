@@ -16,8 +16,10 @@ from .authority import (
     ProvenanceDecision,
     PublicationSeedEvidence,
     pass_for,
+    publication_key_for,
 )
 from .census import AuthorCensus, AuthorCensusRow, load_census
+from .corpus import ExistingCorpusEvidence, scan_existing_corpus
 from .engine import RefreshEngine
 from .inventory import (
     AdapterCapability,
@@ -85,6 +87,7 @@ __all__ = [
     "DominanceRule",
     "EvidenceKind",
     "EvidenceState",
+    "ExistingCorpusEvidence",
     "GenerationSpec",
     "GenerationState",
     "IntentKind",
@@ -136,4 +139,6 @@ __all__ = [
     "inventory_tasks",
     "load_census",
     "pass_for",
+    "publication_key_for",
+    "scan_existing_corpus",
 ]

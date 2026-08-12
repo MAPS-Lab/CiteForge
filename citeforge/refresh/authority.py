@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -43,7 +44,13 @@ def _optional_digest(value: str | None, name: str) -> str | None:
 
 
 def _path(value: str, name: str = "path") -> str:
-    if not isinstance(value, str) or not value or "\\" in value or _SECRET_VALUE_RE.search(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or any(unicodedata.category(char) == "Cc" for char in value)
+        or _SECRET_VALUE_RE.search(value)
+    ):
         raise ValueError(f"invalid or secret {name}")
     path = PurePosixPath(value)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
@@ -120,15 +127,40 @@ class CorpusSnapshot:
     parser_version: str
     item_set_digest: str
     derived_a2i2_digest: str | None = None
+    mapper_id: str = "citeforge.author-directory"
+    mapper_version: str = "1"
+    identity_id: str = "citeforge.publication-key"
+    identity_version: str = "1"
+    extractor_id: str = "citeforge.corpus-identifiers"
+    extractor_version: str = "1"
+    a2i2_policy_id: str = "citeforge.a2i2"
+    a2i2_policy_version: str = "1"
+    author_set_digest: str = "0" * 64
 
     def __post_init__(self) -> None:
-        for name in ("generation_id", "base_commit", "scanner_id", "scanner_version", "parser_id", "parser_version"):
+        for name in (
+            "generation_id",
+            "base_commit",
+            "scanner_id",
+            "scanner_version",
+            "parser_id",
+            "parser_version",
+            "mapper_id",
+            "mapper_version",
+            "identity_id",
+            "identity_version",
+            "extractor_id",
+            "extractor_version",
+            "a2i2_policy_id",
+            "a2i2_policy_version",
+        ):
             object.__setattr__(self, name, _identifier(getattr(self, name), name.replace("_", " ")))
         for name in ("output_tree_digest", "baseline_digest", "item_set_digest"):
             object.__setattr__(self, name, _digest(getattr(self, name), name.replace("_", " ")))
         object.__setattr__(
             self, "derived_a2i2_digest", _optional_digest(self.derived_a2i2_digest, "derived a2i2 digest")
         )
+        object.__setattr__(self, "author_set_digest", _digest(self.author_set_digest, "author set digest"))
 
     @property
     def digest(self) -> str:
@@ -149,6 +181,7 @@ class CorpusItemEvidence:
     publication_keys: tuple[str, ...]
     disposition: str
     exact_identifiers: Mapping[str, object] = field(default_factory=dict)
+    normalized_entry: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "generation_id", _identifier(self.generation_id, "generation ID"))
@@ -167,6 +200,10 @@ class CorpusItemEvidence:
         if not isinstance(identifiers, Mapping):
             raise TypeError("corpus exact identifiers must be an object")
         object.__setattr__(self, "exact_identifiers", identifiers)
+        normalized = _freeze(self.normalized_entry)
+        if not isinstance(normalized, Mapping):
+            raise TypeError("corpus normalized entry must be an object")
+        object.__setattr__(self, "normalized_entry", normalized)
 
     @property
     def key(self) -> str:
@@ -182,6 +219,16 @@ class CorpusItemEvidence:
         return MappingProxyType({name: getattr(self, name) for name in self.__dataclass_fields__})
 
 
+def publication_key_for(author_key: str, title: str, year: int | None, doi: str | None) -> str:
+    """Derive the stable Task 5B/C author-scoped publication identity."""
+    author = _identifier(author_key, "author key")
+    normalized_title = " ".join(title.split()).casefold()
+    if not normalized_title:
+        raise ValueError("publication title is blank")
+    stable_identity = doi or f"{normalized_title}\0{year or ''}"
+    return hashlib.sha256(f"{author}\0{stable_identity}".encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class PublicationSeedEvidence:
     generation_id: str
@@ -193,6 +240,7 @@ class PublicationSeedEvidence:
     baseline_digest: str | None
     exact_identifiers: Mapping[str, object]
     seed_digest: str
+    baseline_entry: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("generation_id", "author_key", "publication_key", "origin_evidence_key"):
@@ -206,6 +254,10 @@ class PublicationSeedEvidence:
             raise TypeError("exact identifiers must be an object")
         object.__setattr__(self, "exact_identifiers", identifiers)
         object.__setattr__(self, "seed_digest", _digest(self.seed_digest, "seed digest"))
+        baseline_entry = _freeze(self.baseline_entry)
+        if not isinstance(baseline_entry, Mapping):
+            raise TypeError("seed baseline entry must be an object")
+        object.__setattr__(self, "baseline_entry", baseline_entry)
 
     @property
     def key(self) -> str:
@@ -635,6 +687,7 @@ __all__ = [
     "evidence_digest",
     "execute_pass",
     "pass_for",
+    "publication_key_for",
     "registry_digest",
     "validate_pass_receipt",
 ]

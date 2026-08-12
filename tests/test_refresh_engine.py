@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,6 +10,7 @@ from pathlib import Path
 import pytest
 import requests
 
+from citeforge.refresh.authority import evidence_digest
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
 from citeforge.refresh.engine import RefreshEngine
 from citeforge.refresh.inventory import (
@@ -46,7 +49,8 @@ def _spec() -> GenerationSpec:
 
 def test_engine_missing_scholar_credential_fails_before_claim(tmp_path: Path) -> None:
     spec = _spec()
-    with Ledger.open(tmp_path / "ledger.db") as ledger:
+    ledger_path = tmp_path / "ledger.db"
+    with Ledger.open(ledger_path) as ledger:
         result = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10)).run(spec, RefreshCredentials(), lambda: False)
         assert result.status is RunStatus.INVALID_CONFIGURATION
         assert ledger.manifest().data["tasks"] == []
@@ -54,7 +58,8 @@ def test_engine_missing_scholar_credential_fails_before_claim(tmp_path: Path) ->
 
 def test_engine_commits_inventory_round_but_never_closes_discovery(tmp_path: Path) -> None:
     spec = _spec()
-    with Ledger.open(tmp_path / "ledger.db") as ledger:
+    ledger_path = tmp_path / "ledger.db"
+    with Ledger.open(ledger_path) as ledger:
         result = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10)).run(
             spec, RefreshCredentials(serpapi_key="secret"), lambda: True
         )
@@ -292,7 +297,28 @@ def test_engine_rejects_nonzero_scholar_page_without_echoed_offset(tmp_path: Pat
 
 
 def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> None:
-    spec = _spec()
+    repo = tmp_path / "repo"
+    (repo / "output").mkdir(parents=True)
+    (repo / "data").mkdir()
+    (repo / "output" / "baseline.json").write_text('{"total":0,"authors":{}}\n', encoding="utf-8")
+    (repo / "output" / "summary.csv").write_text("title\n", encoding="utf-8")
+    (repo / "data" / "a2i2.csv").write_text("Name,Scholar Link,DBLP Link\n", encoding="utf-8")
+    git = shutil.which("git")
+    assert git is not None
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "test@example.test"),
+        ("config", "user.name", "Test"),
+        ("add", "-A"),
+        ("commit", "-qm", "test: empty corpus"),
+    ):
+        subprocess.run((git, *args), cwd=repo, check=True)  # noqa: S603
+    commit = subprocess.run(  # noqa: S603
+        (git, "rev-parse", "HEAD"), cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    original = _spec()
+    spec = GenerationSpec(original.census, original.refresh_policy_version, original.adapter_versions, commit)
+    ledger_path = tmp_path / "ledger.db"
     envelope = {
         "search_metadata": {
             "status": "Success",
@@ -322,7 +348,7 @@ def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> 
         response._content = json.dumps(envelope).encode()
         return response
 
-    with Ledger.open(tmp_path / "ledger.db") as ledger:
+    with Ledger.open(ledger_path) as ledger:
         engine = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), LedgerTransport(ledger, send_once=send_once))
         ledger.set_fault("after_reduction_receipt")
         with pytest.raises(FaultInjectedError):
@@ -335,7 +361,26 @@ def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> 
             engine.run(spec, RefreshCredentials(serpapi_key="secret"), lambda: False).status is RunStatus.CONTINUATION
         )
         assert len(ledger.manifest().data["inventory_authorities"]) == 1
-        with pytest.raises(ValueError, match="substitution"):
+        publication = ledger.manifest().data["publications"][0]
+        seed = ledger._inventory_publication_seed(
+            ledger._connection,
+            spec.id,
+            publication["author_key"],
+            publication["publication_key"],
+        )
+        assert seed.baseline_entry["fields"] == {
+            "author": "Ada Lovelace",
+            "title": "atomic work",
+            "url": "https://scholar.google.com/atomic",
+            "year": "2024",
+        }
+        assert seed.baseline_digest == evidence_digest(seed.baseline_entry)
+        corpus = ledger.scan_and_commit_corpus(repo)
+        assert corpus.publications == () and corpus.seeds == ()
+        durable_seed = ledger.load_seed_snapshot()
+        assert len(durable_seed) == 1
+        assert durable_seed[0] == seed
+        with pytest.raises(ValueError, match=r"substitution|schema is not code-owned"):
             ledger.commit_inventory_union_wave(
                 (replace(spec.census.enabled_rows[0], name="Wrong Person"),),
                 InventoryPolicy(
@@ -344,7 +389,7 @@ def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> 
                 reducer_version="1",
                 now=datetime.now(timezone.utc),
             )
-        with pytest.raises(ValueError, match="substitution"):
+        with pytest.raises(ValueError, match=r"substitution|schema is not code-owned"):
             ledger.commit_inventory_union_wave(
                 (replace(spec.census.enabled_rows[0], scholar_id="OtherProfile"),),
                 InventoryPolicy(
@@ -353,14 +398,14 @@ def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> 
                 reducer_version="1",
                 now=datetime.now(timezone.utc),
             )
-        with pytest.raises(ValueError, match="generation authority"):
+        with pytest.raises(ValueError, match=r"generation authority|schema is not code-owned"):
             ledger.commit_inventory_union_wave(
                 spec.census.enabled_rows,
                 InventoryPolicy(2020, 1000, 10, "1", "1", "wrong-epoch"),
                 reducer_version="1",
                 now=datetime.now(timezone.utc),
             )
-        with pytest.raises(ValueError, match="generation authority"):
+        with pytest.raises(ValueError, match=r"generation authority|schema is not code-owned"):
             ledger.commit_inventory_union_wave(
                 spec.census.enabled_rows,
                 InventoryPolicy(
@@ -374,6 +419,8 @@ def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> 
                 reducer_version="1",
                 now=datetime.now(timezone.utc),
             )
+    with Ledger.open(ledger_path, corpus_repo_root=repo) as reopened:
+        assert reopened.load_seed_snapshot() == (seed,)
 
 
 def test_dblp_http_410_is_blocking_and_never_confirmed_empty(tmp_path: Path) -> None:

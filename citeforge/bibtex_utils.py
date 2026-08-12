@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import re
 import threading
+import unicodedata
 from functools import lru_cache
 from typing import Any, TypeAlias
 
@@ -25,6 +26,8 @@ from .config import (
     BIBTEX_KEY_MAX_WORDS,
     BIBTEX_PARSE_CACHE_SIZE,
     CACHE_TTL_GEMINI_DAYS,
+    VALID_YEAR_MAX,
+    VALID_YEAR_MIN,
 )
 from .latex_utils import latex_to_ascii
 from .log_utils import LogCategory, logger
@@ -66,6 +69,65 @@ _CONTROL_CHARS_RE = re.compile(r"[\n\r\t]")
 _PARSER_LOCAL = threading.local()
 
 _ParsedBibtex: TypeAlias = tuple[str, str, tuple[tuple[str, str], ...]]
+_CORPUS_ENTRY_TYPES = frozenset({"article", "book", "incollection", "inproceedings", "misc", "phdthesis"})
+_CORPUS_FIELDS = frozenset(
+    {
+        "archiveprefix",
+        "author",
+        "booktitle",
+        "chapter",
+        "doi",
+        "editor",
+        "eprint",
+        "howpublished",
+        "issn",
+        "journal",
+        "month",
+        "note",
+        "number",
+        "pages",
+        "pmid",
+        "primaryclass",
+        "publisher",
+        "school",
+        "series",
+        "title",
+        "url",
+        "volume",
+        "x_openalex_id",
+        "x_pmid",
+        "x_s2_paper_id",
+        "year",
+    }
+)
+
+
+class _StrictCorpusParser(BibTexParser):
+    """Use bibtexparser's grammar while preserving duplicate-field rejection."""
+
+    def _init_expressions(self) -> None:
+        super()._init_expressions()
+
+        def reject_duplicate_fields(_source: str, _location: int, tokens: Any) -> dict[str, Any]:
+            pairs = list(tokens.get("Fields"))
+            names = [str(name).casefold() for name, _value in pairs]
+            if len(names) != len(set(names)):
+                raise ValueError("committed BibTeX contains a duplicate field")
+            return dict(reversed(pairs))
+
+        seen: set[int] = set()
+        pending = [self._expr.entry]
+        while pending:
+            expression = pending.pop()
+            if id(expression) in seen:
+                continue
+            seen.add(id(expression))
+            if getattr(expression, "resultsName", None) == "Fields":
+                expression.set_parse_action(reject_duplicate_fields)
+            pending.extend(getattr(expression, "exprs", ()))
+            child = getattr(expression, "expr", None)
+            if child is not None:
+                pending.append(child)
 
 
 def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entry") -> str:
@@ -138,6 +200,69 @@ def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
     return {"type": entry_type, "key": key, "fields": dict(fields)}
 
 
+def parse_strict_bibtex_document(content: bytes) -> dict[str, Any]:
+    """Parse one complete committed-corpus BibTeX document without recovery."""
+    if not isinstance(content, bytes):
+        raise TypeError("committed BibTeX content must be bytes")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("committed BibTeX must be UTF-8") from exc
+    if not text.strip():
+        raise ValueError("committed BibTeX must not be empty")
+    if any(unicodedata.category(character) == "Cc" and character not in "\r\n\t" for character in text):
+        raise ValueError("committed BibTeX contains control characters")
+    parser = _StrictCorpusParser(common_strings=False)
+    parser.expect_multiple_parse = True
+    try:
+        database = bibtexparser.loads(text, parser=parser)
+    except ValueError as exc:
+        if "duplicate field" in str(exc):
+            raise
+        raise ValueError("committed BibTeX is malformed") from exc
+    except (TypeError, UndefinedString) as exc:
+        raise ValueError("committed BibTeX is malformed") from exc
+    if database.comments or database.preambles or database.strings:
+        raise ValueError("committed BibTeX contains directives or unconsumed text")
+    if len(database.entries) != 1:
+        raise ValueError("committed BibTeX requires exactly one entry")
+    raw = dict(database.entries[0])
+    entry_type = raw.pop("ENTRYTYPE", None)
+    key = raw.pop("ID", None)
+    if not isinstance(entry_type, str) or entry_type.casefold() not in _CORPUS_ENTRY_TYPES:
+        raise ValueError("committed BibTeX entry type is unsupported")
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("committed BibTeX citation key is blank")
+    if any(unicodedata.category(character) == "Cc" for character in key):
+        raise ValueError("committed BibTeX citation key contains control characters")
+    if not all(isinstance(name, str) and isinstance(value, str) for name, value in raw.items()):
+        raise ValueError("committed BibTeX fields must be strings")
+    fields = {
+        name.casefold(): (
+            re.sub(r"[ \r\n\t]+", " ", value).strip()
+            if name.casefold() in {"doi", "howpublished", "url"}
+            else _normalize_to_ascii(re.sub(r"[ \r\n\t]+", " ", value).strip())
+        )
+        for name, value in sorted(raw.items())
+    }
+    if "title" in fields:
+        fields["title"] = _sanitize_title(fields["title"]) or fields["title"]
+    fields = {name: value for name, value in fields.items() if value or name in {"title", "year"}}
+    for name, value in tuple(fields.items()):
+        if name not in {"url", "doi"} and "&" in value and r"\&" not in value:
+            fields[name] = value.replace("&", r"\&")
+    if any(any(unicodedata.category(character) == "Cc" for character in value) for value in fields.values()):
+        raise ValueError("committed BibTeX field contains control characters")
+    if not set(fields) <= _CORPUS_FIELDS:
+        raise ValueError("committed BibTeX contains an unsupported field")
+    if not fields.get("title"):
+        raise ValueError("committed BibTeX title is blank")
+    year = fields.get("year", "")
+    if not re.fullmatch(r"[0-9]{4}", year) or not VALID_YEAR_MIN <= int(year) <= VALID_YEAR_MAX:
+        raise ValueError("committed BibTeX year is absent or outside the project range")
+    return {"type": entry_type.casefold(), "key": key.strip(), "fields": fields}
+
+
 # Canonical BibTeX field emission order. Fields not listed are appended in
 # sorted() order afterwards. This ordering is part of the byte-identity output
 # contract; do not reorder without updating the
@@ -190,11 +315,12 @@ def _normalize_to_ascii(val: str) -> str:
         # pylatexenc treats a bare ampersand as a TeX alignment marker and
         # drops it. Protect decoded HTML ampersands as ordinary text first.
         val = _BARE_AMP_RE.sub(r"\\&", val)
-    val = val.replace("---", "--")
-    val = val.replace("--", "-")
     val = _URL_TILDE_RE.sub(_URL_TILDE_SENTINEL, val)
     val = latex_to_ascii(val, math_mode="verbatim")
     val = val.replace(_URL_TILDE_SENTINEL, "~")
+    val = val.replace("---", "--")
+    val = val.replace("--", "-")
+    val = val.replace("''", '"')
 
     val = _MULTI_SPACE_RE.sub(" ", val)
 
@@ -209,7 +335,7 @@ def _normalize_to_ascii(val: str) -> str:
     if "'" in val:
         val = _APOS_YEAR_RE.sub(r"'\1", val)
 
-    return val
+    return val.strip()
 
 
 def _sanitize_title(title_val: str | None) -> str | None:
@@ -266,7 +392,8 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
     for k in ordered_keys:
         val = fields.get(k)
         if val is not None and str(val).strip():
-            val = _normalize_to_ascii(str(val))
+            if k not in {"doi", "howpublished", "url"}:
+                val = _normalize_to_ascii(str(val))
             if k == "title":
                 val = _sanitize_title(val) or val
             # Escape bare & for valid BibTeX (but not in URLs/DOIs)

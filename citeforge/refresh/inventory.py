@@ -18,10 +18,12 @@ from ..config import DBLP_PERSON_BASE, HTTP_TIMEOUT_DEFAULT, PREPRINT_SERVERS, S
 from ..id_utils import find_doi_in_text, is_secondary_doi, normalize_doi
 from ..identity import IdentityContext, evaluate_identity
 from ..text_utils import normalize_title
+from .authority import publication_key_for
 from .capabilities import AdapterCapability, CredentialKind, ResponseMediaType, capability_for
 from .census import AuthorCensusRow
 from .decoders import decode_response
 from .ledger import Ledger, PublicationMetadata, RequestSpec, TaskClaim, TaskSpec
+from .privacy import ensure_public_https_url, ensure_safe_durable_text
 from .transport import SchemaChangedError, SendOperation
 from .types import TaskDisposition
 
@@ -192,6 +194,18 @@ def _safe_url(value: object) -> str:
     return value
 
 
+def _safe_durable_url(value: object) -> str:
+    """Validate an optional public HTTPS publication URL before persistence."""
+    url = _safe_url(value)
+    if not url:
+        return ""
+    try:
+        ensure_public_https_url(url)
+    except ValueError as exc:
+        raise ValueError("article link is unsafe for durable evidence") from exc
+    return url
+
+
 def _integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{name} must be an integer")
@@ -272,13 +286,15 @@ def decode_scholar_inventory(
         authors = item.get("authors", "")
         if not isinstance(authors, str):
             raise SchemaChangedError("Scholar article authors are malformed")
+        for durable_text in (item["title"], authors, str(item.get("publication") or ""), citation_id):
+            ensure_safe_durable_text(durable_text)
         normalized.append(
             {
                 "authors": [part.strip() for part in authors.split(",") if part.strip()],
                 "citation_id": citation_id,
                 "publication": str(item.get("publication") or ""),
                 "title": item["title"].strip(),
-                "url": _safe_url(item.get("link")),
+                "url": _safe_durable_url(item.get("link")),
                 "year": year,
             }
         )
@@ -374,22 +390,25 @@ def decode_dblp_inventory(body: bytes, pid: str) -> tuple[Mapping[str, object], 
         url = (record.findtext("url") or "").strip()
         safe_record_url = f"https://dblp.org/rec/{record.attrib['key']}" if url and not urlsplit(url).scheme else url
         doi = normalize_doi(find_doi_in_text(ee) or find_doi_in_text(url))
+        publication = (
+            record.findtext("journal")
+            or record.findtext("booktitle")
+            or record.findtext("publisher")
+            or record.findtext("school")
+            or ""
+        ).strip()
+        for durable_text in (title, publication, record.attrib["key"], *authors, *editors):
+            ensure_safe_durable_text(durable_text)
         articles.append(
             {
                 "authors": [name for name in authors if name],
                 "doi": doi or "",
                 "editors": [name for name in editors if name],
-                "publication": (
-                    record.findtext("journal")
-                    or record.findtext("booktitle")
-                    or record.findtext("publisher")
-                    or record.findtext("school")
-                    or ""
-                ).strip(),
+                "publication": publication,
                 "record_key": record.attrib["key"],
                 "record_type": record.tag,
                 "title": title,
-                "url": _safe_url(ee or safe_record_url),
+                "url": _safe_durable_url(ee or safe_record_url),
                 "year": int(year_text) if year_text else None,
             }
         )
@@ -529,9 +548,9 @@ def _record(article: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def reduce_author_inventory(
+def _merged_inventory_articles(
     census_row: AuthorCensusRow, snapshot: InventorySnapshot, policy: InventoryPolicy
-) -> InventoryReduction:
+) -> tuple[dict[str, object], ...]:
     if snapshot.author_key != census_row.row_key:
         raise ValueError("inventory snapshot belongs to another author")
     articles = [
@@ -571,6 +590,60 @@ def reduce_author_inventory(
                 match[key] = value
     if len(merged) > policy.max_publications:
         raise ValueError("inventory exceeds configured publication bound")
+    return tuple(merged)
+
+
+def inventory_baseline_entries(
+    census_row: AuthorCensusRow, snapshot: InventorySnapshot, policy: InventoryPolicy
+) -> Mapping[str, Mapping[str, object]]:
+    """Reconstruct complete canonical seed entries from immutable inventory evidence."""
+    result: dict[str, Mapping[str, object]] = {}
+    for article in _merged_inventory_articles(census_row, snapshot, policy):
+        doi = normalize_doi(_optional_text(article.get("doi")))
+        year = _integer(article["year"], "publication year") if isinstance(article.get("year"), int) else None
+        title = normalize_title(str(article["title"]))
+        publication_key = publication_key_for(census_row.row_key, title, year, doi)
+        fields: dict[str, str] = {"title": title}
+        authors = _names(article.get("authors"))
+        if authors:
+            fields["author"] = " and ".join(authors)
+        if doi:
+            fields["doi"] = doi
+        if year is not None:
+            fields["year"] = str(year)
+        record_type = str(article.get("record_type") or "").casefold()
+        type_and_container = {
+            "article": ("article", "journal"),
+            "inproceedings": ("inproceedings", "booktitle"),
+            "incollection": ("incollection", "booktitle"),
+            "phdthesis": ("phdthesis", "school"),
+            "mastersthesis": ("misc", "school"),
+            "book": ("book", "publisher"),
+            "data": ("misc", "publisher"),
+            "proceedings": ("misc", "publisher"),
+        }
+        entry_type, container_field = type_and_container.get(record_type, ("article", "journal"))
+        editors = _names(article.get("editors"))
+        if editors:
+            fields["editor"] = " and ".join(editors)
+        publication = str(article.get("publication") or "").strip()
+        if publication:
+            fields[container_field] = publication
+        url = _safe_durable_url(article.get("url"))
+        if url:
+            fields["url"] = url
+        result[publication_key] = {
+            "fields": dict(sorted(fields.items())),
+            "key": publication_key,
+            "type": entry_type if publication or record_type else "misc",
+        }
+    return MappingProxyType(result)
+
+
+def reduce_author_inventory(
+    census_row: AuthorCensusRow, snapshot: InventorySnapshot, policy: InventoryPolicy
+) -> InventoryReduction:
+    merged = _merged_inventory_articles(census_row, snapshot, policy)
     publications = []
     seeds = []
     for article in sorted(
@@ -581,15 +654,20 @@ def reduce_author_inventory(
         ),
     ):
         doi = normalize_doi(_optional_text(article.get("doi")))
-        stable_identity = doi or f"{normalize_title(str(article['title']))}\0{article.get('year') or ''}"
-        publication_key = hashlib.sha256(f"{census_row.row_key}\0{stable_identity}".encode()).hexdigest()
+        year = _integer(article["year"], "publication year") if isinstance(article.get("year"), int) else None
+        publication_key = publication_key_for(
+            census_row.row_key,
+            normalize_title(str(article["title"])),
+            year,
+            doi,
+        )
         identifiers = {"doi": doi} if doi else {}
         metadata = PublicationMetadata(
             census_row.row_key,
             publication_key,
             "scholar" if article.get("citation_id") else "dblp",
             normalize_title(str(article["title"])),
-            _integer(article["year"], "publication year") if isinstance(article.get("year"), int) else None,
+            year,
             identifiers,
             "",
             "monthly",
@@ -651,6 +729,7 @@ __all__ = [
     "capability_for",
     "decode_dblp_inventory",
     "decode_scholar_inventory",
+    "inventory_baseline_entries",
     "plan_scholar_page_wave",
     "reduce_author_inventory",
 ]

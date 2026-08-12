@@ -44,9 +44,12 @@ class RefreshEngine:
         credentials: RefreshCredentials,
         stop_requested: Callable[[], bool],
     ) -> RunResult:
+        run_started_at = datetime.now(timezone.utc)
         self._ledger.create_or_resume(spec, spec.census)
         try:
             capabilities = self._preflight(spec, credentials)
+            if self._policy.min_year > run_started_at.year:
+                raise ValueError("inventory minimum year exceeds the code-owned refresh year")
         except ValueError as exc:
             return RunResult(RunStatus.INVALID_CONFIGURATION, spec.id, detail=str(exc))
 
@@ -54,7 +57,7 @@ class RefreshEngine:
         authority = self._authority_content(spec, capabilities)
         digest = hashlib.sha256(json.dumps(authority, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
         if status.revision == 0:
-            epoch = datetime.now(timezone.utc).strftime("%Y-%m")
+            epoch = run_started_at.strftime("%Y-%m")
             tasks = []
             for row in spec.census.enabled_rows:
                 for source in ("scholar", "dblp"):
@@ -67,12 +70,10 @@ class RefreshEngine:
             self._ledger.commit_initial_round(
                 tasks,
                 source_evidence_digest=digest,
-                now=datetime.now(timezone.utc),
+                now=run_started_at,
                 inventory_authority=authority,
             )
-            self._ledger.transition_generation(
-                GenerationState.PLANNING, GenerationState.RUNNING, datetime.now(timezone.utc)
-            )
+            self._ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, run_started_at)
         else:
             try:
                 self._ledger.assert_initial_inventory_authority(digest)

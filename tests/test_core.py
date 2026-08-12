@@ -331,7 +331,7 @@ def test_bibtex_unicode_normalization() -> None:
         ("\u201cDouble\u201d quotes", '"Double" quotes'),
         # Unicode dashes
         ("En\u2013dash", "En-dash"),
-        ("Em—dash", "Em--dash"),
+        ("Em—dash", "Em-dash"),
         # Ellipsis
         ("Trailing…", "Trailing..."),
         # Non-breaking space
@@ -340,7 +340,7 @@ def test_bibtex_unicode_normalization() -> None:
         ("Class of '21", "Class of'21"),
         ("Back in '99", "Back in'99"),
         # Combined Unicode and special chars
-        ("José's café—open 24/7", "Jose's cafe--open 24/7"),
+        ("José's café—open 24/7", "Jose's cafe-open 24/7"),
     ]
 
     for input_val, expected_val in test_cases:
@@ -365,11 +365,11 @@ def test_bibtex_latex_and_unicode_combined() -> None:
         # LaTeX + Unicode quotes
         ("\\textbf{\u201cImportant\u201d} finding", '"Important" finding'),
         # LaTeX + dashes + accents
-        (r"\emph{José}—A \textbf{Survey}", "Jose--A Survey"),
+        (r"\emph{José}—A \textbf{Survey}", "Jose-A Survey"),
         # Special chars + accents
         (r"50\% of café visitors", "50% of cafe visitors"),
         # Full complex case
-        ("\\textit{François}'s \\textbf{café}—50\\% \u201cdiscount\u201d", 'Francois\'s cafe--50% "discount"'),
+        ("\\textit{François}'s \\textbf{café}—50\\% \u201cdiscount\u201d", 'Francois\'s cafe-50% "discount"'),
     ]
 
     for input_title, expected_title in test_cases:

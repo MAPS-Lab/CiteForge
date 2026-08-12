@@ -15,6 +15,7 @@ from citeforge.refresh.inventory import (
     capability_for,
     decode_dblp_inventory,
     decode_scholar_inventory,
+    inventory_baseline_entries,
     reduce_author_inventory,
 )
 from citeforge.refresh.transport import SchemaChangedError
@@ -176,6 +177,83 @@ def test_scholar_decoder_accepts_documented_exact_offset_evidence(parameters: di
     assert not empty
 
 
+@pytest.mark.parametrize(
+    "link",
+    [
+        "http://127.0.0.1/private",
+        "https://example.com/paper?token=secret",
+        "https://localhost./private",
+        "https://foo.localhost./private",
+        "https://2130706433/private",
+        "https://0x7f000001/private",
+        "https://017700000001/private",
+        "https://%31%32%37.0.0.1/private",
+        "https://local%68ost/private",
+    ],
+)
+def test_scholar_decoder_rejects_unsafe_durable_publication_link(link: str) -> None:
+    body = {
+        "search_metadata": {
+            "status": "Success",
+            "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+        },
+        "search_parameters": {"engine": "google_scholar_author", "author_id": "Scholar123"},
+        "author": {"name": "Ada Lovelace"},
+        "articles": [
+            {
+                "title": "Analytical Engine",
+                "year": 2024,
+                "citation_id": "Scholar123:paper1",
+                "link": link,
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="unsafe"):
+        decode_scholar_inventory(json.dumps(body).encode(), "Scholar123", 0, 100, 2020)
+
+
+def test_scholar_decoder_accepts_public_https_publication_link() -> None:
+    link = "https://publisher.example/paper"
+    body = {
+        "search_metadata": {
+            "status": "Success",
+            "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+        },
+        "search_parameters": {"engine": "google_scholar_author", "author_id": "Scholar123"},
+        "author": {"name": "Ada Lovelace"},
+        "articles": [{"title": "Analytical Engine", "year": 2024, "citation_id": "Scholar123:paper1", "link": link}],
+    }
+    normalized, _empty = decode_scholar_inventory(json.dumps(body).encode(), "Scholar123", 0, 100, 2020)
+    assert normalized["articles"][0]["url"] == link
+
+
+@pytest.mark.parametrize(("field", "value"), [("title", "ada@example.com"), ("authors", "http://10.0.0.1/x")])
+def test_scholar_decoder_rejects_private_durable_text(field: str, value: str) -> None:
+    article = {"title": "Work", "authors": "Ada", "year": 2024, "citation_id": "Scholar123:paper1"}
+    article[field] = value
+    body = {
+        "search_metadata": {
+            "status": "Success",
+            "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+        },
+        "search_parameters": {"engine": "google_scholar_author", "author_id": "Scholar123"},
+        "author": {"name": "Ada"},
+        "articles": [article],
+    }
+    with pytest.raises(ValueError, match=r"unsafe|private"):
+        decode_scholar_inventory(json.dumps(body).encode(), "Scholar123", 0, 100, 2020)
+
+
+def test_dblp_decoder_rejects_private_durable_text() -> None:
+    xml = (
+        b'<dblpperson key="homepages/12/345"><r><article key="journals/x/1">'
+        b"<author>ada@example.com</author><title>Work</title><year>2024</year>"
+        b"</article></r></dblpperson>"
+    )
+    with pytest.raises(ValueError, match="private"):
+        decode_dblp_inventory(xml, "12/345")
+
+
 def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> None:
     xml = b"""<dblpperson key="homepages/12/345"><person key="homepages/12/345"><author>Ada Lovelace</author></person>
     <r><article key="journals/x/1"><author>Ada Lovelace 0001</author>
@@ -255,6 +333,19 @@ def test_pure_union_is_order_independent_and_seeds_every_publication() -> None:
     assert len(first.publications) == len(first.seed_tasks) == 1
     assert first.publications[0].exact_identifiers["doi"] == "10.1000/example"
     assert first.seed_tasks[0].provider == "doi_csl"
+    baseline = inventory_baseline_entries(_row(), InventorySnapshot("author-ada", (scholar, dblp)), policy)
+    assert baseline[first.publications[0].publication_key] == {
+        "fields": {
+            "author": "Ada Lovelace and Charles Babbage",
+            "doi": "10.1000/example",
+            "journal": "Science",
+            "title": "computing machinery",
+            "url": "https://scholar.google.com/paper1",
+            "year": "2024",
+        },
+        "key": first.publications[0].publication_key,
+        "type": "article",
+    }
 
 
 def test_pure_union_has_no_socket_or_filesystem_capability(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -308,3 +399,45 @@ def test_pure_union_preserves_preprint_and_published_versions() -> None:
     )
     reduction = reduce_author_inventory(_row(), snapshot, InventoryPolicy(2020, 1000, 10))
     assert len(reduction.publications) == len(reduction.seed_tasks) == 2
+
+
+@pytest.mark.parametrize(
+    ("record_type", "expected_type", "container_field"),
+    [
+        ("inproceedings", "inproceedings", "booktitle"),
+        ("incollection", "incollection", "booktitle"),
+        ("phdthesis", "phdthesis", "school"),
+        ("book", "book", "publisher"),
+        ("data", "misc", "publisher"),
+    ],
+)
+def test_inventory_baseline_preserves_dblp_record_semantics(
+    record_type: str, expected_type: str, container_field: str
+) -> None:
+    article = {
+        "title": "Typed Work",
+        "authors": ("Ada Lovelace",),
+        "editors": ("Charles Babbage",),
+        "year": 2024,
+        "publication": "Exact Container",
+        "record_key": "conf/x/typed",
+        "record_type": record_type,
+        "url": "https://dblp.org/rec/conf/x/typed",
+    }
+    snapshot = InventorySnapshot(
+        "author-ada",
+        (
+            SnapshotContribution(
+                "task",
+                "dblp",
+                TaskDisposition.SUCCEEDED,
+                "dblpperson-v1",
+                "a" * 64,
+                (article,),
+            ),
+        ),
+    )
+    baseline = next(iter(inventory_baseline_entries(_row(), snapshot, InventoryPolicy(2020, 1000, 10)).values()))
+    assert baseline["type"] == expected_type
+    assert baseline["fields"][container_field] == "Exact Container"
+    assert baseline["fields"]["editor"] == "Charles Babbage"

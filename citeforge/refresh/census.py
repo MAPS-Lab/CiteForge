@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from citeforge.models import Record
 
+from .privacy import ensure_safe_durable_text
 from .types import TaskDisposition
 
 _REQUIRED_COLUMNS = ("Name", "Scholar Link", "DBLP Link", "Enabled", "Exclusion Reason")
@@ -21,6 +22,16 @@ _DBLP_HOSTS = frozenset({"dblp.org", "dblp.uni-trier.de"})
 _DBLP_EXPORT_SUFFIXES = frozenset({"bib", "html", "nt", "rdf", "ris", "rss", "xml"})
 _SCHOLAR_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,64}")
 _DBLP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def is_valid_scholar_id(value: str) -> bool:
+    """Return whether an extracted Scholar profile ID matches census authority."""
+    return isinstance(value, str) and _SCHOLAR_ID_RE.fullmatch(value) is not None
+
+
+def is_valid_dblp_id(value: str) -> bool:
+    """Return whether an extracted DBLP person ID matches census authority."""
+    return isinstance(value, str) and _DBLP_ID_RE.fullmatch(value) is not None
 
 
 def _normalize_name(value: str) -> str:
@@ -66,7 +77,7 @@ def _scholar_id(link: str, row_number: int) -> str:
     except ValueError as exc:
         raise ValueError(f"row {row_number}: Scholar Link query is malformed") from exc
     user_values = [value for key, value in query_items if key == "user"]
-    if len(user_values) != 1 or not _SCHOLAR_ID_RE.fullmatch(user_values[0]):
+    if len(user_values) != 1 or not is_valid_scholar_id(user_values[0]):
         raise ValueError(f"row {row_number}: Scholar Link requires exactly one safe user ID")
     return user_values[0]
 
@@ -95,7 +106,7 @@ def _dblp_id(link: str, row_number: int) -> str:
         _, dot, suffix = identifier.rpartition(".")
         if dot and suffix in _DBLP_EXPORT_SUFFIXES:
             raise ValueError(f"row {row_number}: bare DBLP Link person ID must not contain a profile suffix")
-    if not _DBLP_ID_RE.fullmatch(identifier):
+    if not is_valid_dblp_id(identifier):
         raise ValueError(f"row {row_number}: DBLP Link does not contain a safe supported person ID")
     return identifier
 
@@ -195,6 +206,8 @@ def load_census(path: Path) -> AuthorCensus:
             raw = dict(zip(fieldnames, values, strict=True))
             name = (raw.get("Name") or "").strip()
             normalized_name = _normalize_name(name)
+            ensure_safe_durable_text(name)
+            ensure_safe_durable_text(normalized_name)
             scholar_id = _scholar_id((raw.get("Scholar Link") or "").strip(), row_number)
             dblp_id = _dblp_id((raw.get("DBLP Link") or "").strip(), row_number)
             enabled = _parse_enabled(raw.get("Enabled") or "", row_number)

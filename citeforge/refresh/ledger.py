@@ -8,18 +8,31 @@ import re
 import sqlite3
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import cast
-from urllib.parse import parse_qsl, urlsplit
+from typing import TYPE_CHECKING, cast
+from urllib.parse import parse_qsl, unquote, urlsplit
 
-from ..config import PREPRINT_ONLY_PUBLISHERS, PREPRINT_SERVERS
-from ..id_utils import is_secondary_doi
+from ..config import PREPRINT_ONLY_PUBLISHERS, PREPRINT_SERVERS, SIM_IDENTIFIER_TITLE_MIN
+from ..id_utils import (
+    extract_arxiv_eprint,
+    find_doi_in_text,
+    find_dois_in_text,
+    is_secondary_doi,
+    normalize_doi,
+    normalize_strict_arxiv_id,
+)
 from ..merge_utils import merge_with_policy
-from ..text_utils import has_placeholder
+from ..text_utils import (
+    extract_year_from_any,
+    format_author_dirname,
+    has_placeholder,
+    normalize_title,
+    title_similarity,
+)
 from .authority import (
     PASS_REGISTRY_DIGEST,
     PASS_WAVE_COUNT,
@@ -41,20 +54,33 @@ from .authority import (
 from .authority import (
     canonical_json as evidence_json,
 )
-from .census import AuthorCensus
+from .authority import (
+    publication_key_for as _publication_key_authority,
+)
+from .census import AuthorCensus, is_valid_dblp_id, is_valid_scholar_id
+from .privacy import ensure_safe_durable_text
 from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
-_SCHEMA_VERSION = "6"
+if TYPE_CHECKING:
+    from .census import AuthorCensusRow
+    from .corpus import ExistingCorpusEvidence
+
+_SCHEMA_VERSION = "7"
 _SCHEMA_V4_FINGERPRINT = "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
 _SCHEMA_V5_FINGERPRINT = "be14f7bc658bf347c5f519d0483311ff23118e0c9569f5328939b546b1fe2f46"
 _MAX_PLAN_ROUNDS = 64
-_EXPECTED_SCHEMA_FINGERPRINT = "9bf51dac21ab9a519ff8461a030d0a87c7211191554f1c06024996bd4e95ff3a"
+_SCHEMA_V6_FINGERPRINT = "9bf51dac21ab9a519ff8461a030d0a87c7211191554f1c06024996bd4e95ff3a"
+_EXPECTED_SCHEMA_FINGERPRINT = "4391a86ee7f96c62c42280042b09de5e7b2fe0b59006ab58e3abbe6f77545bdf"
 _SNAPSHOT_DOMAIN_SEPARATOR = "citeforge-task5c2-planner-snapshot-v1"
+_CORPUS_S2_ID = re.compile(r"[0-9a-f]{40}", re.I)
+_CORPUS_OPENALEX_ID = re.compile(r"(?:https://openalex\.org/)?(W\d+)", re.I)
+_CORPUS_ARXIV_URL_ID = r"(\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})"
 _V6_AUTHORITY_TABLES = frozenset(
     {
         "aggregate_inputs",
         "corpus_items",
         "corpus_snapshots",
+        "corpus_scan_receipts",
         "intent_provenance",
         "materialization_intents",
         "planner_pass_expected_items",
@@ -122,6 +148,10 @@ _FAULT_POINTS = frozenset(
         "after_v6_corpus_snapshot",
         "after_v6_corpus_items",
         "after_v6_seed_evidence",
+        "after_c3_corpus_snapshot",
+        "after_c3_corpus_items",
+        "after_c3_corpus_publications",
+        "after_c3_corpus_seeds",
         "after_v6_planner_pass",
         "after_v6_planner_expected_items",
         "after_v6_migration_meta",
@@ -323,6 +353,73 @@ def _free_text(value: str, purpose: str, *, required: bool = False) -> str:
     if _contains_secret(value):
         raise ValueError(f"secret material cannot be persisted as {purpose}")
     return value
+
+
+def _corpus_identifiers_from_fields(fields: Mapping[str, object]) -> dict[str, str]:
+    """Independently derive durable corpus identifiers at the ledger boundary."""
+    for value in fields.values():
+        ensure_safe_durable_text(str(value))
+    explicit_doi = normalize_doi(str(fields.get("doi", "")))
+    if str(fields.get("doi", "")).strip() and normalize_doi(find_doi_in_text(explicit_doi or "")) != explicit_doi:
+        raise ValueError("corpus normalized entry has invalid explicit DOI")
+    dois = set(find_dois_in_text(str(fields.get("doi", ""))))
+    for field_name in ("url", "howpublished"):
+        dois.update(find_dois_in_text(unquote(str(fields.get(field_name, "")))))
+    primary = {doi for doi in dois if not is_secondary_doi(doi)}
+    secondary = dois - primary
+    if len(primary) > 1 or len(secondary) > 1:
+        raise ValueError("corpus normalized entry has conflicting DOI evidence")
+    result: dict[str, str] = {}
+    canonical_doi = next(iter(primary or secondary), None)
+    if canonical_doi:
+        result["doi"] = canonical_doi
+    if primary and secondary:
+        result["secondary_doi"] = next(iter(secondary))
+    arxiv_candidates = set()
+    if canonical_doi:
+        doi_arxiv = re.fullmatch(r"10\.48550/arxiv\.(.+)", canonical_doi, re.I)
+        if doi_arxiv:
+            value = re.sub(r"v\d+$", "", doi_arxiv.group(1), flags=re.I)
+            prefix, separator, suffix = value.partition("/")
+            arxiv_candidates.add(f"{prefix.casefold()}/{suffix}" if separator else value)
+    for candidate_fields in (
+        {"archiveprefix": fields.get("archiveprefix"), "eprint": fields.get("eprint")},
+        {"doi": fields.get("doi")},
+        {"journal": fields.get("journal")},
+        {"journal": fields.get("howpublished")},
+    ):
+        if arxiv := extract_arxiv_eprint({"fields": candidate_fields}):
+            prefix, separator, suffix = arxiv.partition("/")
+            arxiv_candidates.add(f"{prefix.casefold()}/{suffix}" if separator else arxiv)
+    for field_name in ("url", "howpublished"):
+        for match in re.finditer(
+            rf"(?i)arxiv\.org/(?:abs|pdf)/{_CORPUS_ARXIV_URL_ID}(?:v\d+)?",
+            str(fields.get(field_name, "")),
+        ):
+            arxiv_candidates.add(match[1])
+    if len(arxiv_candidates) > 1:
+        raise ValueError("corpus normalized entry has conflicting arXiv evidence")
+    if len(arxiv_candidates) == 1:
+        arxiv = normalize_strict_arxiv_id(next(iter(arxiv_candidates)))
+        if arxiv is None:
+            raise ValueError("corpus normalized entry has invalid arXiv evidence")
+        result["arxiv"] = arxiv
+    pmids = {str(fields[key]).strip() for key in ("pmid", "x_pmid") if str(fields.get(key, "")).strip()}
+    if len(pmids) > 1 or (pmids and not next(iter(pmids)).isdigit()):
+        raise ValueError("corpus normalized entry has invalid PMID evidence")
+    if len(pmids) == 1:
+        result["pmid"] = next(iter(pmids))
+    s2 = str(fields.get("x_s2_paper_id", "")).strip()
+    if s2 and not _CORPUS_S2_ID.fullmatch(s2):
+        raise ValueError("corpus normalized entry has invalid Semantic Scholar evidence")
+    if _CORPUS_S2_ID.fullmatch(s2):
+        result["s2"] = s2.lower()
+    openalex = _CORPUS_OPENALEX_ID.fullmatch(str(fields.get("x_openalex_id", "")).strip())
+    if fields.get("x_openalex_id") and openalex is None:
+        raise ValueError("corpus normalized entry has invalid OpenAlex evidence")
+    if openalex:
+        result["openalex"] = openalex[1].upper()
+    return dict(sorted(result.items()))
 
 
 def _digest_text(value: str, purpose: str) -> str:
@@ -741,12 +838,14 @@ class LedgerManifest:
 class Ledger:
     """Single-generation SQLite ledger with explicit durable transitions."""
 
-    def __init__(self, path: Path, connection: sqlite3.Connection) -> None:
+    def __init__(self, path: Path, connection: sqlite3.Connection, corpus_repo_root: Path | None = None) -> None:
         self.path = path
         self._connection = connection
         self._fault: str | None = None
         self._manifest_probe: Callable[[], None] | None = None
         self.__authority_write_depth = 0
+        self._corpus_repo_root = corpus_repo_root.resolve() if corpus_repo_root is not None else None
+        self.__trusted_corpus_cache: tuple[str, object] | None = None
         connection.create_function(
             "citeforge_authority_write_enabled",
             0,
@@ -771,7 +870,7 @@ class Ledger:
         return sqlite3.SQLITE_OK
 
     @classmethod
-    def open(cls, path: Path) -> Ledger:
+    def open(cls, path: Path, *, corpus_repo_root: Path | None = None) -> Ledger:
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, timeout=30, isolation_level=None, cached_statements=0)
         connection.row_factory = sqlite3.Row
@@ -782,9 +881,13 @@ class Ledger:
         if journal_mode != "delete":
             connection.close()
             raise ValueError(f"unsupported SQLite journal mode: {journal_mode}")
-        ledger = cls(path, connection)
+        ledger = cls(path, connection, corpus_repo_root)
         try:
             ledger._initialize_schema()
+            if connection.execute("SELECT COUNT(*) FROM corpus_scan_receipts").fetchone()[0]:
+                if corpus_repo_root is None:
+                    raise ValueError("scanner-owned corpus reopen requires a trusted Git repository root")
+                ledger._verify_trusted_corpus()
         except Exception:
             connection.close()
             raise
@@ -934,12 +1037,40 @@ class Ledger:
             self._inject(f"after_v6_migration_statement_{index}")
         self._inject("after_v6_migration_ddl")
 
+    @staticmethod
+    def _install_schema_v7(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE corpus_scan_receipts (generation_id TEXT PRIMARY KEY, snapshot_digest TEXT NOT NULL, "
+            "receipt_digest TEXT NOT NULL, FOREIGN KEY (generation_id, snapshot_digest) "
+            "REFERENCES corpus_snapshots(generation_id, snapshot_digest))"
+        )
+        for suffix, action in (
+            ("append_only_update", "UPDATE"),
+            ("append_only_delete", "DELETE"),
+        ):
+            connection.execute(
+                f"CREATE TRIGGER corpus_scan_receipts_{suffix} BEFORE {action} ON corpus_scan_receipts "
+                "BEGIN SELECT RAISE(ABORT, 'corpus_scan_receipts is append-only'); END"
+            )
+        connection.execute(
+            "CREATE TRIGGER corpus_scan_receipts_post_close_insert BEFORE INSERT ON corpus_scan_receipts WHEN "
+            "(SELECT plan_closed FROM generations WHERE generation_id = NEW.generation_id) != 0 "
+            "BEGIN SELECT RAISE(ABORT, 'corpus_scan_receipts rejects post-close evidence'); END"
+        )
+        connection.execute(
+            "CREATE TRIGGER corpus_scan_receipts_authority_insert BEFORE INSERT ON corpus_scan_receipts WHEN "
+            "citeforge_authority_write_enabled() != 1 BEGIN SELECT RAISE(ABORT, "
+            "'corpus_scan_receipts requires guarded authority API'); END"
+        )
+
     def _initialize_schema(self) -> None:
         with self._transaction(immediate=True) as connection:
             user_objects = connection.execute(
                 "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name"
             ).fetchall()
             names = {str(row[0]) for row in user_objects}
+            if user_objects and connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ValueError("refusing to migrate database with foreign-key violations")
             if user_objects and "schema_meta" not in names:
                 raise ValueError("refusing to initialize nonempty database without schema metadata")
             if not user_objects:
@@ -976,7 +1107,7 @@ class Ledger:
                 self._validate_schema_v5(connection)
                 self._install_schema_v6(connection)
                 actual = self._schema_fingerprint(connection)
-                expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
+                expected = _SCHEMA_V6_FINGERPRINT
                 if actual != expected:
                     raise ValueError("structurally inconsistent schema version 6 fingerprint")
                 connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (_SCHEMA_VERSION,))
@@ -985,13 +1116,23 @@ class Ledger:
                     (expected,),
                 )
                 self._inject("after_v6_migration_meta")
+                existing_version = ("6",)
+            if existing_version is not None and existing_version[0] == "6":
+                self._validate_schema_v6(connection)
+                if connection.execute("SELECT COUNT(*) FROM corpus_snapshots").fetchone()[0]:
+                    raise ValueError("schema version 6 corpus lacks scanner-owned receipt authority")
+                self._install_schema_v7(connection)
+                actual = self._schema_fingerprint(connection)
+                expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
+                connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (_SCHEMA_VERSION,))
+                connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (expected,))
                 existing_version = (_SCHEMA_VERSION,)
             if existing_version is not None and existing_version[0] != _SCHEMA_VERSION:
                 raise ValueError(
                     f"unsupported or structurally inconsistent ledger schema version: {existing_version[0]}"
                 )
             if existing_version is not None:
-                self._validate_schema_v6(connection)
+                self._validate_schema_v7(connection)
                 return
             schema = """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -1415,6 +1556,7 @@ class Ledger:
             )
             if existing_version is None:
                 self._install_schema_v6(connection)
+                self._install_schema_v7(connection)
                 actual = self._schema_fingerprint(connection)
                 expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
                 connection.execute(
@@ -1424,7 +1566,7 @@ class Ledger:
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_fingerprint', ?)",
                     (expected,),
                 )
-            self._validate_schema_v6(connection)
+            self._validate_schema_v7(connection)
 
     @staticmethod
     def _schema_fingerprint(connection: sqlite3.Connection) -> str:
@@ -1556,9 +1698,32 @@ class Ledger:
                 raise ValueError(f"structurally inconsistent schema version 6 triggers: {table}")
         fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
         actual = Ledger._schema_fingerprint(connection)
+        if fingerprint is None or fingerprint[0] != _SCHEMA_V6_FINGERPRINT or actual != _SCHEMA_V6_FINGERPRINT:
+            raise ValueError("structurally inconsistent schema version 6 fingerprint")
+        Ledger._assert_task5a_authority_invariant(connection)
+        for row in connection.execute("SELECT generation_id FROM generations ORDER BY generation_id"):
+            generation_id = str(row[0])
+            Ledger._v6_evidence_content(connection, generation_id)
+            Ledger._verify_v6_relationships(connection, generation_id)
+
+    @staticmethod
+    def _validate_schema_v7(connection: sqlite3.Connection) -> None:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(corpus_scan_receipts)")}
+        if {"generation_id", "snapshot_digest", "receipt_digest"} - columns:
+            raise ValueError("structurally inconsistent schema version 7 receipt table")
+        triggers = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'corpus_scan_receipts'"
+            )
+        }
+        if len(triggers) != 4:
+            raise ValueError("structurally inconsistent schema version 7 receipt triggers")
+        fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
+        actual = Ledger._schema_fingerprint(connection)
         expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
         if fingerprint is None or fingerprint[0] != expected or actual != expected:
-            raise ValueError("structurally inconsistent schema version 6 fingerprint")
+            raise ValueError("structurally inconsistent schema version 7 fingerprint")
         Ledger._assert_task5a_authority_invariant(connection)
         for row in connection.execute("SELECT generation_id FROM generations ORDER BY generation_id"):
             generation_id = str(row[0])
@@ -1580,8 +1745,820 @@ class Ledger:
             raise ValueError("ledger must contain exactly one generation")
         return str(rows[0][0])
 
+    def _a2i2_year_window(self, generation_id: str) -> tuple[int, int]:
+        authority = self._load_inventory_policy_authority(self._connection, generation_id)
+        freshness = self._connection.execute(
+            "SELECT inventory_freshness_epoch FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        if authority is None or freshness is None:
+            raise ValueError("a2i2 policy requires durable inventory policy authority")
+        policy = cast(Mapping[str, object], authority["authority"]).get("policy")
+        match = re.match(r"^(\d{4})", str(freshness[0]))
+        if not isinstance(policy, Mapping) or match is None:
+            raise ValueError("a2i2 policy authority is malformed")
+        return int(policy["min_year"]), int(match.group(1))
+
+    @staticmethod
+    def _trusted_authority_token(connection: sqlite3.Connection, generation_id: str) -> str:
+        generation = connection.execute(
+            "SELECT base_commit, census_digest, inventory_freshness_epoch FROM generations WHERE generation_id = ?",
+            (generation_id,),
+        ).fetchone()
+        policy = Ledger._load_inventory_policy_authority(connection, generation_id)
+        authors = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT physical_row, row_key, name, normalized_name, scholar_id, dblp_id, enabled, "
+                "exclusion_reason, disposition FROM authors WHERE generation_id = ? ORDER BY physical_row",
+                (generation_id,),
+            )
+        ]
+        if generation is None or policy is None:
+            raise ValueError("trusted corpus authority token is incomplete")
+        return evidence_digest(
+            {
+                "a2i2_policy": "1",
+                "authors": authors,
+                "base_commit": str(generation[0]),
+                "census_digest": str(generation[1]),
+                "freshness_epoch": str(generation[2]),
+                "generation_id": generation_id,
+                "inventory_policy_digest": str(policy["authority_digest"]),
+                "scanner_authority": ("citeforge.committed-corpus", "1", "citeforge.strict-bibtex", "1"),
+            }
+        )
+
+    def scan_and_commit_corpus(self, repo_root: Path) -> ExistingCorpusEvidence:
+        """Scan the generation's committed Git corpus and atomically bind all C3 evidence."""
+        from .corpus import _scan_existing_corpus_authority
+
+        generation_id = self._generation_id()
+        generation = self._connection.execute(
+            "SELECT base_commit, state FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        if generation is None or str(generation[1]) != GenerationState.RUNNING.value:
+            raise ValueError("existing corpus scan requires a running generation")
+        enabled_count = self._connection.execute(
+            "SELECT COUNT(*) FROM authors WHERE generation_id = ? AND enabled = 1", (generation_id,)
+        ).fetchone()[0]
+        authority_count = self._connection.execute(
+            "SELECT COUNT(DISTINCT author_key) FROM inventory_authorities WHERE generation_id = ?", (generation_id,)
+        ).fetchone()[0]
+        if authority_count != enabled_count:
+            raise ValueError("existing corpus requires the complete inventory union")
+        rows = self._connection.execute(
+            "SELECT physical_row, row_key, name, normalized_name, scholar_id, dblp_id, enabled, exclusion_reason, "
+            "disposition FROM authors WHERE generation_id = ? ORDER BY physical_row",
+            (generation_id,),
+        ).fetchall()
+        from .census import AuthorCensusRow
+
+        census = AuthorCensus(
+            tuple(
+                AuthorCensusRow(
+                    int(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    str(row[4]),
+                    str(row[5]),
+                    bool(row[6]),
+                    str(row[7]),
+                    TaskDisposition(str(row[8])),
+                )
+                for row in rows
+            )
+        )
+        authority_token = self._trusted_authority_token(self._connection, generation_id)
+        evidence = _scan_existing_corpus_authority(
+            repo_root,
+            census,
+            generation_id=generation_id,
+            base_commit=str(generation[0]),
+            a2i2_year_window=self._a2i2_year_window(generation_id),
+        )
+        self._commit_existing_corpus(evidence, authority_token=authority_token)
+        self._corpus_repo_root = repo_root.resolve()
+        self.__trusted_corpus_cache = (authority_token, evidence)
+        return evidence
+
+    def _trusted_corpus_expected(self) -> object:
+        """Scan immutable Git authority without holding a SQLite writer lock."""
+        from .corpus import ExistingCorpusEvidence, _scan_existing_corpus_authority, attest_existing_corpus
+
+        if self._corpus_repo_root is None:
+            raise ValueError("scanner-owned corpus evidence requires a trusted Git repository root")
+        generation_id = self._generation_id()
+        base_commit = self._connection.execute(
+            "SELECT base_commit FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        if base_commit is None:
+            raise ValueError("trusted corpus generation is absent")
+        token = self._trusted_authority_token(self._connection, generation_id)
+        if self.__trusted_corpus_cache is not None:
+            cached_token, cached = self.__trusted_corpus_cache
+            if cached_token != token or not isinstance(cached, ExistingCorpusEvidence):
+                raise StaleClaimError("trusted corpus authority changed after scan")
+            attest_existing_corpus(self._corpus_repo_root, cached.git_proof)
+            return cached
+        census = AuthorCensus(self._author_census_rows(self._connection, generation_id))
+        expected = _scan_existing_corpus_authority(
+            self._corpus_repo_root,
+            census,
+            generation_id=generation_id,
+            base_commit=str(base_commit[0]),
+            a2i2_year_window=self._a2i2_year_window(generation_id),
+        )
+        self.__trusted_corpus_cache = (token, expected)
+        return expected
+
+    def _verify_trusted_corpus(
+        self, connection: sqlite3.Connection | None = None, expected_authority: object | None = None
+    ) -> None:
+        """Rebuild C3 evidence from trusted Git and compare every durable scanner claim."""
+        from .corpus import ExistingCorpusEvidence
+
+        if self._corpus_repo_root is None:
+            raise ValueError("scanner-owned corpus evidence requires a trusted Git repository root")
+        expected = expected_authority if expected_authority is not None else self._trusted_corpus_expected()
+        if not isinstance(expected, ExistingCorpusEvidence):
+            raise TypeError("trusted corpus scan returned an invalid authority value")
+        if connection is None:
+            with self._transaction(immediate=True) as locked:
+                self._verify_trusted_corpus(locked, expected)
+            return
+        generation_id = self._generation_id()
+        base_commit = connection.execute(
+            "SELECT base_commit FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        if base_commit is None:
+            raise ValueError("trusted corpus generation is absent")
+        if expected.snapshot.generation_id != generation_id or expected.snapshot.base_commit != str(base_commit[0]):
+            raise StaleClaimError("trusted corpus authority changed during verification")
+        if self.__trusted_corpus_cache is not None and self.__trusted_corpus_cache[0] != self._trusted_authority_token(
+            connection, generation_id
+        ):
+            raise StaleClaimError("trusted corpus authority changed during verification")
+        stored_snapshot = connection.execute(
+            "SELECT evidence_json FROM corpus_snapshots WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        stored_items = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT evidence_json FROM corpus_items WHERE generation_id = ? ORDER BY source_path COLLATE NOCASE",
+                (generation_id,),
+            )
+        )
+        stored_corpus_seeds = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+                "AND origin_kind = ? ORDER BY author_key, publication_key",
+                (generation_id, EvidenceKind.CORPUS.value),
+            )
+        )
+        corpus_publications = {
+            (publication.author_key, publication.publication_key): publication for publication in expected.publications
+        }
+        expected_seed_union = {(seed.author_key, seed.publication_key): seed for seed in expected.seeds}
+        inventory_cache, inventory_publications = self._inventory_authority_maps(connection, generation_id)
+        for member, inventory_seed in inventory_cache.items():
+            if member not in corpus_publications:
+                expected_seed_union[member] = inventory_seed
+        stored_seed_union = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+                "ORDER BY author_key, publication_key",
+                (generation_id,),
+            )
+        )
+        stored_publications = {
+            (str(row[0]), str(row[1])): tuple(row[2:])
+            for row in connection.execute(
+                "SELECT author_key, publication_key, discovery_source, normalized_title, year, "
+                "exact_identifiers_json, baseline_output_path, freshness_policy FROM publications "
+                "WHERE generation_id = ?",
+                (generation_id,),
+            )
+        }
+        expected_members = set(corpus_publications) | set(inventory_publications)
+        if set(stored_publications) != expected_members:
+            raise ValueError("publication membership changed from trusted authorities")
+        for member in expected_members:
+            publication = inventory_publications.get(member) or corpus_publications[member]
+            expected_row = (
+                publication.discovery_source,
+                publication.normalized_title,
+                publication.year,
+                evidence_json(publication.exact_identifiers),
+                publication.baseline_output_path,
+                publication.freshness_policy,
+            )
+            if stored_publications[member] != expected_row:
+                raise ValueError("publication row changed from trusted authority")
+        receipt = connection.execute(
+            "SELECT snapshot_digest, receipt_digest FROM corpus_scan_receipts WHERE generation_id = ?",
+            (generation_id,),
+        ).fetchone()
+        expected_receipt = evidence_digest(
+            {"domain": "citeforge-committed-corpus-scan-v1", "snapshot_digest": expected.snapshot.digest}
+        )
+        if (
+            stored_snapshot is None
+            or str(stored_snapshot[0]) != evidence_json(expected.snapshot.canonical_content())
+            or stored_items != tuple(evidence_json(item.canonical_content()) for item in expected.items)
+            or stored_corpus_seeds != tuple(evidence_json(seed.canonical_content()) for seed in expected.seeds)
+            or stored_seed_union
+            != tuple(evidence_json(seed.canonical_content()) for _member, seed in sorted(expected_seed_union.items()))
+            or receipt is None
+            or tuple(receipt) != (expected.snapshot.digest, expected_receipt)
+        ):
+            raise ValueError("durable corpus evidence does not match trusted Git authority")
+
+    def _commit_existing_corpus(self, evidence: object, *, authority_token: str | None = None) -> None:
+        from .corpus import ExistingCorpusEvidence, corpus_author_set_digest
+
+        if not isinstance(evidence, ExistingCorpusEvidence):
+            raise TypeError("existing corpus commit requires scanner-owned evidence")
+        generation_id = self._generation_id()
+        snapshot = evidence.snapshot
+        if (
+            snapshot.scanner_id != "citeforge.committed-corpus"
+            or snapshot.scanner_version != "1"
+            or snapshot.parser_id != "citeforge.strict-bibtex"
+            or snapshot.parser_version != "1"
+            or snapshot.mapper_id != "citeforge.author-directory"
+            or snapshot.mapper_version != "1"
+            or snapshot.identity_id != "citeforge.publication-key"
+            or snapshot.identity_version != "1"
+            or snapshot.extractor_id != "citeforge.corpus-identifiers"
+            or snapshot.extractor_version != "1"
+            or snapshot.a2i2_policy_id != "citeforge.a2i2"
+            or snapshot.a2i2_policy_version != "1"
+        ):
+            raise ValueError("existing corpus code-owned authority identity mismatch")
+        items = tuple(sorted(evidence.items, key=lambda item: item.source_path.casefold()))
+        publications = tuple(sorted(evidence.publications, key=lambda item: (item.author_key, item.publication_key)))
+        seeds = tuple(sorted(evidence.seeds, key=lambda item: (item.author_key, item.publication_key)))
+        if snapshot.generation_id != generation_id or any(item.generation_id != generation_id for item in items):
+            raise ValueError("existing corpus generation mismatch")
+        if len({item.source_path.casefold() for item in items}) != len(items):
+            raise ValueError("duplicate existing corpus source path")
+        if any(item.snapshot_digest != snapshot.digest for item in items):
+            raise ValueError("existing corpus item snapshot mismatch")
+        if snapshot.item_set_digest != evidence_digest([item.digest for item in items]):
+            raise ValueError("existing corpus item-set digest mismatch")
+        for item in items:
+            if item.disposition == "parsed":
+                if not item.normalized_entry or item.parse_digest != evidence_digest(item.normalized_entry):
+                    raise ValueError("existing corpus normalized parse digest mismatch")
+            elif item.disposition != "absent" or item.publication_keys or item.normalized_entry:
+                raise ValueError("production corpus evidence contains blocked or malformed disposition")
+        publication_members = {(item.author_key, item.publication_key) for item in publications}
+        item_members = {
+            (item.author_key, publication_key) for item in items for publication_key in item.publication_keys
+        }
+        seed_members = {(item.author_key, item.publication_key) for item in seeds}
+        if publication_members != item_members or seed_members != item_members:
+            raise ValueError("existing corpus publication or seed membership mismatch")
+        publication_by_member = {
+            (publication.author_key, publication.publication_key): publication for publication in publications
+        }
+        for item in items:
+            if item.disposition != "parsed":
+                continue
+            fields = item.normalized_entry.get("fields")
+            if not isinstance(fields, Mapping):
+                raise ValueError("corpus normalized entry fields are absent")
+            ensure_safe_durable_text(str(item.normalized_entry.get("key", "")))
+            expected_identifiers = _corpus_identifiers_from_fields(fields)
+            expected_title = normalize_title(str(fields.get("title", "")))
+            expected_year = extract_year_from_any(fields.get("year"), fallback=0) or None
+            for publication_key in item.publication_keys:
+                publication = publication_by_member[(item.author_key, publication_key)]
+                expected_key = _publication_key_authority(
+                    item.author_key,
+                    expected_title,
+                    expected_year,
+                    str(expected_identifiers.get("doi", "")) or None,
+                )
+                if (
+                    publication.publication_key != expected_key
+                    or publication.normalized_title != expected_title
+                    or publication.year != expected_year
+                    or dict(item.exact_identifiers) != expected_identifiers
+                    or dict(publication.exact_identifiers) != dict(item.exact_identifiers)
+                    or publication.discovery_source != "corpus"
+                    or publication.baseline_output_path != item.source_path
+                    or publication.freshness_policy != "monthly"
+                ):
+                    raise ValueError("corpus publication metadata is not independently derived")
+        snapshot_content = evidence_json(snapshot.canonical_content())
+        with self._transaction(immediate=True) as connection, self._authority_write():
+            if authority_token is not None and authority_token != self._trusted_authority_token(
+                connection, generation_id
+            ):
+                raise StaleClaimError("trusted corpus authority changed during scan")
+            base = connection.execute(
+                "SELECT base_commit, state FROM generations WHERE generation_id = ?", (generation_id,)
+            ).fetchone()
+            if base is None or str(base[0]) != snapshot.base_commit:
+                raise ValueError("existing corpus base commit mismatch")
+            if str(base[1]) != GenerationState.RUNNING.value:
+                raise ValueError("existing corpus commit requires a running generation")
+            enabled = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT row_key FROM authors WHERE generation_id = ? AND enabled = 1", (generation_id,)
+                )
+            }
+            if {item.author_key for item in items} != enabled:
+                raise ValueError("existing corpus does not cover exact enabled census")
+            inventory_authorities = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT author_key FROM inventory_authorities WHERE generation_id = ?", (generation_id,)
+                )
+            }
+            if inventory_authorities != enabled:
+                raise ValueError("existing corpus requires the complete inventory union")
+            inventory_seed_cache, _inventory_publications = self._inventory_authority_maps(connection, generation_id)
+            author_rows = self._author_census_rows(connection, generation_id)
+            if snapshot.author_set_digest != corpus_author_set_digest(author_rows):
+                raise ValueError("existing corpus author-set authority mismatch")
+            existing_snapshot = connection.execute(
+                "SELECT evidence_json FROM corpus_snapshots WHERE generation_id = ?", (generation_id,)
+            ).fetchone()
+            if existing_snapshot is not None:
+                expected_receipt_digest = evidence_digest(
+                    {"domain": "citeforge-committed-corpus-scan-v1", "snapshot_digest": snapshot.digest}
+                )
+                stored_receipt = connection.execute(
+                    "SELECT snapshot_digest, receipt_digest FROM corpus_scan_receipts WHERE generation_id = ?",
+                    (generation_id,),
+                ).fetchone()
+                stored_items = tuple(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT evidence_json FROM corpus_items WHERE generation_id = ? "
+                        "ORDER BY source_path COLLATE NOCASE",
+                        (generation_id,),
+                    )
+                )
+                stored_seeds = tuple(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+                        "ORDER BY author_key, publication_key",
+                        (generation_id,),
+                    )
+                )
+                expected_seeds = list(seeds)
+                corpus_members = {(seed.author_key, seed.publication_key) for seed in seeds}
+                for row in connection.execute(
+                    "SELECT author_key, publication_key FROM publications WHERE generation_id = ? "
+                    "ORDER BY author_key, publication_key",
+                    (generation_id,),
+                ):
+                    member = (str(row[0]), str(row[1]))
+                    if member not in corpus_members:
+                        expected_seeds.append(
+                            self._inventory_publication_seed(
+                                connection, generation_id, member[0], member[1], inventory_seed_cache
+                            )
+                        )
+                expected_seeds = [replace(seed, seed_digest=seed.derived_seed_digest) for seed in expected_seeds]
+                if (
+                    str(existing_snapshot[0]) != snapshot_content
+                    or stored_receipt is None
+                    or tuple(stored_receipt) != (snapshot.digest, expected_receipt_digest)
+                    or stored_items != tuple(evidence_json(item.canonical_content()) for item in items)
+                    or stored_seeds
+                    != tuple(
+                        evidence_json(seed.canonical_content())
+                        for seed in sorted(expected_seeds, key=lambda item: (item.author_key, item.publication_key))
+                    )
+                ):
+                    raise ValueError("conflicting existing corpus replay")
+                return
+            partial = connection.execute(
+                "SELECT (SELECT COUNT(*) FROM corpus_items WHERE generation_id = ?) + "
+                "(SELECT COUNT(*) FROM publication_seed_evidence WHERE generation_id = ?)",
+                (generation_id, generation_id),
+            ).fetchone()[0]
+            if partial:
+                raise ValueError("partial existing corpus authority conflicts")
+            connection.execute(
+                "INSERT INTO corpus_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    snapshot.digest,
+                    snapshot.base_commit,
+                    snapshot.output_tree_digest,
+                    snapshot.baseline_digest,
+                    snapshot.scanner_id,
+                    snapshot.scanner_version,
+                    snapshot.parser_id,
+                    snapshot.parser_version,
+                    snapshot.item_set_digest,
+                    snapshot.derived_a2i2_digest,
+                    snapshot_content,
+                ),
+            )
+            self._inject("after_c3_corpus_snapshot")
+            for item in items:
+                connection.execute(
+                    "INSERT INTO corpus_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        snapshot.digest,
+                        item.source_path,
+                        item.author_key,
+                        item.before_digest,
+                        item.parse_digest,
+                        evidence_json(item.publication_keys),
+                        item.disposition,
+                        evidence_json(item.exact_identifiers),
+                        item.digest,
+                        evidence_json(item.canonical_content()),
+                    ),
+                )
+            self._inject("after_c3_corpus_items")
+            for publication in publications:
+                expected_publication_key = _publication_key_authority(
+                    publication.author_key,
+                    publication.normalized_title,
+                    publication.year,
+                    str(publication.exact_identifiers.get("doi", "")) or None,
+                )
+                if publication.publication_key != expected_publication_key:
+                    raise ValueError("corpus publication key is not code-derived")
+                ambiguous_split = connection.execute(
+                    "SELECT normalized_title, year, exact_identifiers_json FROM publications "
+                    "WHERE generation_id = ? AND author_key = ? AND publication_key != ?",
+                    (
+                        generation_id,
+                        publication.author_key,
+                        publication.publication_key,
+                    ),
+                ).fetchall()
+                if any(
+                    (row[1] is None or publication.year is None or int(row[1]) == publication.year)
+                    and str(row[0]) == publication.normalized_title
+                    and bool(json.loads(str(row[2])).get("doi")) != bool(publication.exact_identifiers.get("doi"))
+                    for row in ambiguous_split
+                ):
+                    raise ValueError("corpus and inventory contain a cross-source late-identifier split")
+                existing = connection.execute(
+                    "SELECT normalized_title, year, exact_identifiers_json FROM publications "
+                    "WHERE generation_id = ? AND author_key = ? AND publication_key = ?",
+                    (generation_id, publication.author_key, publication.publication_key),
+                ).fetchone()
+                if existing is None:
+                    self._insert_publication(connection, generation_id, publication)
+                else:
+                    existing_identifiers = json.loads(str(existing[2]))
+                    if (
+                        existing_identifiers.get("doi") != publication.exact_identifiers.get("doi")
+                        or (
+                            existing[1] is not None
+                            and publication.year is not None
+                            and int(existing[1]) != publication.year
+                        )
+                        or title_similarity(str(existing[0]), publication.normalized_title) < SIM_IDENTIFIER_TITLE_MIN
+                    ):
+                        raise ValueError("shared DOI publication lacks coherent year, identifiers, or title similarity")
+            self._inject("after_c3_corpus_publications")
+            item_by_key = {item.key: item for item in items}
+            for seed in seeds:
+                origin = item_by_key.get(seed.origin_evidence_key)
+                if (
+                    seed.generation_id != generation_id
+                    or seed.origin_kind is not EvidenceKind.CORPUS
+                    or origin is None
+                    or seed.publication_key not in origin.publication_keys
+                    or seed.author_key != origin.author_key
+                    or seed.origin_evidence_digest != origin.digest
+                    or seed.baseline_digest != origin.before_digest
+                    or evidence_json(seed.exact_identifiers) != evidence_json(origin.exact_identifiers)
+                    or evidence_json(seed.baseline_entry) != evidence_json(origin.normalized_entry)
+                    or seed.seed_digest != seed.derived_seed_digest
+                ):
+                    raise ValueError("existing corpus seed is not derived from exact item authority")
+                connection.execute(
+                    "INSERT INTO publication_seed_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        seed.author_key,
+                        seed.publication_key,
+                        seed.origin_kind.value,
+                        seed.origin_evidence_key,
+                        seed.origin_evidence_digest,
+                        seed.baseline_digest,
+                        evidence_json(seed.exact_identifiers),
+                        seed.seed_digest,
+                        evidence_json(seed.canonical_content()),
+                    ),
+                )
+            corpus_members = {(seed.author_key, seed.publication_key) for seed in seeds}
+            inventory_seed_cache = {}
+            for row in connection.execute(
+                "SELECT author_key, publication_key, discovery_source, normalized_title, year, "
+                "exact_identifiers_json, baseline_output_path, freshness_policy FROM publications "
+                "WHERE generation_id = ? ORDER BY author_key, publication_key",
+                (generation_id,),
+            ):
+                member = (str(row[0]), str(row[1]))
+                if member in corpus_members:
+                    continue
+                publication_seed = self._inventory_publication_seed(
+                    connection, generation_id, member[0], member[1], inventory_seed_cache
+                )
+                publication_seed = replace(
+                    publication_seed,
+                    seed_digest=publication_seed.derived_seed_digest,
+                )
+                connection.execute(
+                    "INSERT INTO publication_seed_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        publication_seed.author_key,
+                        publication_seed.publication_key,
+                        publication_seed.origin_kind.value,
+                        publication_seed.origin_evidence_key,
+                        publication_seed.origin_evidence_digest,
+                        publication_seed.baseline_digest,
+                        evidence_json(publication_seed.exact_identifiers),
+                        publication_seed.seed_digest,
+                        evidence_json(publication_seed.canonical_content()),
+                    ),
+                )
+            self._inject("after_c3_corpus_seeds")
+            receipt_digest = evidence_digest(
+                {"domain": "citeforge-committed-corpus-scan-v1", "snapshot_digest": snapshot.digest}
+            )
+            connection.execute(
+                "INSERT INTO corpus_scan_receipts VALUES (?, ?, ?)",
+                (generation_id, snapshot.digest, receipt_digest),
+            )
+
+    @staticmethod
+    def _author_census_rows(connection: sqlite3.Connection, generation_id: str) -> tuple[AuthorCensusRow, ...]:
+        from .census import AuthorCensusRow
+
+        return tuple(
+            AuthorCensusRow(
+                int(row[0]),
+                str(row[1]),
+                str(row[2]),
+                str(row[3]),
+                str(row[4]),
+                str(row[5]),
+                bool(row[6]),
+                str(row[7]),
+                TaskDisposition(str(row[8])),
+            )
+            for row in connection.execute(
+                "SELECT physical_row, row_key, name, normalized_name, scholar_id, dblp_id, enabled, "
+                "exclusion_reason, disposition FROM authors WHERE generation_id = ? ORDER BY physical_row",
+                (generation_id,),
+            )
+        )
+
+    @staticmethod
+    def _reconstruct_inventory_authority(
+        connection: sqlite3.Connection,
+        generation_id: str,
+        author_key: str,
+    ) -> tuple[dict[tuple[str, str], PublicationSeedEvidence], dict[tuple[str, str], PublicationMetadata]]:
+        """Rederive one author's complete publication and seed maps from immutable inventory evidence."""
+        from .census import AuthorCensusRow
+        from .inventory import (
+            InventoryPolicy,
+            InventorySnapshot,
+            SnapshotContribution,
+            inventory_baseline_entries,
+            reduce_author_inventory,
+        )
+
+        author = connection.execute(
+            "SELECT physical_row, row_key, name, normalized_name, scholar_id, dblp_id, enabled, exclusion_reason, "
+            "disposition FROM authors WHERE generation_id = ? AND row_key = ?",
+            (generation_id, author_key),
+        ).fetchone()
+        authority = connection.execute(
+            "SELECT reducer_version, policy_digest, snapshot_digest, reduction_digest, round_key "
+            "FROM inventory_authorities "
+            "WHERE generation_id = ? AND author_key = ? ORDER BY reducer_version",
+            (generation_id, author_key),
+        ).fetchall()
+        policy_authority = Ledger._load_inventory_policy_authority(connection, generation_id)
+        if author is None or len(authority) != 1 or policy_authority is None:
+            raise ValueError("publication seed lacks exact immutable inventory authority")
+        policy_content = cast(Mapping[str, object], policy_authority["authority"])["policy"]
+        if not isinstance(policy_content, Mapping):
+            raise ValueError("inventory policy authority is malformed")
+        generation_freshness = connection.execute(
+            "SELECT inventory_freshness_epoch FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()[0]
+        policy = InventoryPolicy(
+            int(policy_content["min_year"]),
+            int(policy_content["max_publications"]),
+            int(policy_content["max_scholar_pages"]),
+            str(cast(Mapping[str, object], policy_content["seed_adapter_versions"])["doi_csl"]),
+            str(cast(Mapping[str, object], policy_content["seed_adapter_versions"])["s2"]),
+            str(generation_freshness),
+        )
+        expected_policy_digest = _digest(
+            {
+                "doi_adapter_version": policy.doi_adapter_version,
+                "freshness_epoch": policy.freshness_epoch,
+                "max_publications": policy.max_publications,
+                "max_scholar_pages": policy.max_scholar_pages,
+                "min_year": policy.min_year,
+                "s2_adapter_version": policy.s2_adapter_version,
+            }
+        )
+        authority_row = authority[0]
+        if str(authority_row[1]) != expected_policy_digest:
+            raise ValueError("inventory authority policy digest changed")
+        census_row = AuthorCensusRow(
+            int(author[0]),
+            str(author[1]),
+            str(author[2]),
+            str(author[3]),
+            str(author[4]),
+            str(author[5]),
+            bool(author[6]),
+            str(author[7]),
+            TaskDisposition(str(author[8])),
+        )
+        contribution_rows = connection.execute(
+            "SELECT contribution.task_key, task.provider, task.state, observation.schema_version, "
+            "observation.response_digest, observation.response_json, contribution.page_offset, "
+            "contribution.next_offset, contribution.request_key, contribution.capability_id, "
+            "contribution.topology_digest FROM inventory_contributions AS contribution "
+            "JOIN tasks AS task ON task.generation_id = contribution.generation_id "
+            "AND task.task_key = contribution.task_key JOIN observations AS observation "
+            "ON observation.generation_id = contribution.generation_id "
+            "AND observation.request_key = contribution.request_key WHERE contribution.generation_id = ? "
+            "AND contribution.author_key = ? AND contribution.reducer_version = ? "
+            "ORDER BY task.provider, contribution.task_key",
+            (generation_id, author_key, str(authority_row[0])),
+        ).fetchall()
+        contributions = []
+        for row in contribution_rows:
+            response = json.loads(str(row[5]))
+            if not isinstance(response, Mapping) or evidence_digest(response) != str(row[4]):
+                raise ValueError("publication seed inventory observation changed")
+            articles = response.get("articles", [])
+            if not isinstance(articles, list):
+                raise ValueError("publication seed inventory articles are malformed")
+            contributions.append(
+                SnapshotContribution(
+                    str(row[0]),
+                    str(row[1]),
+                    TaskDisposition(str(row[2])),
+                    str(row[3]),
+                    str(row[4]),
+                    tuple(articles),
+                    row[6],
+                    row[7],
+                    str(row[8]),
+                    str(row[9]),
+                    str(row[10]),
+                )
+            )
+        snapshot = InventorySnapshot(author_key, tuple(contributions))
+        if not isinstance(snapshot, InventorySnapshot):
+            raise TypeError("ledger failed to reconstruct inventory snapshot")
+        if snapshot.digest != str(authority_row[2]):
+            raise ValueError("publication seed inventory snapshot changed")
+        baseline_entries = inventory_baseline_entries(census_row, snapshot, policy)
+        reduction = reduce_author_inventory(census_row, snapshot, policy)
+        expected_reduction_digest = _digest(
+            {
+                "policy_digest": expected_policy_digest,
+                "publications": [Ledger._publication_content(item) for item in reduction.publications],
+                "reducer_version": str(authority_row[0]),
+                "seed_tasks": [item.identity_digest for item in reduction.seed_tasks],
+                "snapshot_digest": snapshot.digest,
+            }
+        )
+        if str(authority_row[3]) != expected_reduction_digest:
+            raise ValueError("inventory authority reduction digest changed")
+        terminal = tuple(
+            contribution
+            for contribution in snapshot.contributions
+            if contribution.logical_source != "scholar" or contribution.next_offset is None
+        )
+        receipt = connection.execute(
+            "SELECT round.phase, round.planner_id, round.planner_version, receipt.source_task_keys_json, "
+            "receipt.source_evidence_digests_json FROM plan_rounds AS round JOIN reduction_receipts AS receipt "
+            "ON receipt.generation_id = round.generation_id AND receipt.round_key = round.round_key "
+            "WHERE round.generation_id = ? AND round.round_key = ?",
+            (generation_id, str(authority_row[4])),
+        ).fetchall()
+        if len(receipt) != 1:
+            raise ValueError("inventory authority lacks exact reduction receipt")
+        receipt_row = receipt[0]
+        receipt_tasks = tuple(json.loads(str(receipt_row[3])))
+        receipt_digests = tuple(json.loads(str(receipt_row[4])))
+        expected_tasks = tuple(sorted(item.task_key for item in terminal))
+        expected_digests = tuple(item.observation_digest for item in sorted(terminal, key=lambda item: item.task_key))
+        if (
+            str(receipt_row[0]) != PlanPhase.DISCOVERY.value
+            or str(receipt_row[1]) != "inventory_union"
+            or str(receipt_row[2]) != str(authority_row[0])
+            or receipt_tasks != expected_tasks
+            or receipt_digests != expected_digests
+        ):
+            raise ValueError("inventory authority reduction receipt changed")
+        expected_publications = {publication.publication_key: publication for publication in reduction.publications}
+        publication_cache = {(author_key, key): metadata for key, metadata in expected_publications.items()}
+        result_cache: dict[tuple[str, str], PublicationSeedEvidence] = {}
+        for key, metadata in expected_publications.items():
+            entry = baseline_entries.get(key)
+            if entry is None:
+                continue
+            origin_content = {
+                "baseline_entry": entry,
+                "reduction_digest": str(authority_row[3]),
+                "snapshot_digest": snapshot.digest,
+            }
+            seed = PublicationSeedEvidence(
+                generation_id,
+                author_key,
+                key,
+                EvidenceKind.PUBLICATION,
+                f"inventory:{author_key}:{authority_row[0]}:{snapshot.digest}",
+                evidence_digest(origin_content),
+                evidence_digest(entry),
+                metadata.exact_identifiers,
+                "0" * 64,
+                entry,
+            )
+            result_cache[(author_key, key)] = replace(seed, seed_digest=seed.derived_seed_digest)
+        return result_cache, publication_cache
+
+    @staticmethod
+    def _inventory_publication_seed(
+        connection: sqlite3.Connection,
+        generation_id: str,
+        author_key: str,
+        publication_key: str,
+        cache: dict[tuple[str, str], PublicationSeedEvidence] | None = None,
+        publication_cache: dict[tuple[str, str], PublicationMetadata] | None = None,
+    ) -> PublicationSeedEvidence:
+        cache_key = (author_key, publication_key)
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
+        seeds, publications = Ledger._reconstruct_inventory_authority(connection, generation_id, author_key)
+        if cache is not None:
+            cache.update(seeds)
+        if publication_cache is not None:
+            publication_cache.update(publications)
+        if cache_key not in seeds:
+            raise ValueError("publication seed is absent from immutable inventory reduction")
+        return seeds[cache_key]
+
+    @staticmethod
+    def _inventory_authority_maps(
+        connection: sqlite3.Connection,
+        generation_id: str,
+    ) -> tuple[
+        dict[tuple[str, str], PublicationSeedEvidence],
+        dict[tuple[str, str], PublicationMetadata],
+    ]:
+        seed_cache: dict[tuple[str, str], PublicationSeedEvidence] = {}
+        publication_cache: dict[tuple[str, str], PublicationMetadata] = {}
+        authors = tuple(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT row_key FROM authors WHERE generation_id = ? AND enabled = 1 ORDER BY row_key",
+                (generation_id,),
+            )
+        )
+        for author_key in authors:
+            authority = connection.execute(
+                "SELECT COUNT(*) FROM inventory_authorities WHERE generation_id = ? AND author_key = ?",
+                (generation_id, author_key),
+            ).fetchone()[0]
+            if authority != 1:
+                raise ValueError("inventory authority is incomplete for enabled census")
+            seeds, publications = Ledger._reconstruct_inventory_authority(connection, generation_id, author_key)
+            seed_cache.update(seeds)
+            publication_cache.update(publications)
+        return seed_cache, publication_cache
+
     def commit_corpus_snapshot(self, snapshot: CorpusSnapshot, items: Sequence[CorpusItemEvidence]) -> str:
-        """Atomically persist the one immutable corpus snapshot and exact membership."""
+        """Reject caller-attested corpus authority in the supported API."""
+        del snapshot, items
+        raise ValueError("corpus authority must be created by scan_and_commit_corpus")
+
+    def _commit_corpus_snapshot_fixture(self, snapshot: CorpusSnapshot, items: Sequence[CorpusItemEvidence]) -> str:
+        """Persist value-object fixtures for legacy planner unit tests only."""
         generation_id = self._generation_id()
         if snapshot.generation_id != generation_id:
             raise ValueError("corpus snapshot generation mismatch")
@@ -1672,6 +2649,7 @@ class Ledger:
         if any(seed.generation_id != generation_id for seed in ordered):
             raise ValueError("publication seed generation mismatch")
         with self._transaction(immediate=True) as connection, self._authority_write():
+            inventory_seed_cache: dict[tuple[str, str], PublicationSeedEvidence] = {}
             for seed in ordered:
                 author = connection.execute(
                     "SELECT enabled FROM authors WHERE generation_id = ? AND row_key = ?",
@@ -1713,28 +2691,18 @@ class Ledger:
                     )
                     if evidence_json(seed.exact_identifiers) != evidence_json(origin_item.exact_identifiers):
                         raise ValueError("corpus seed identifiers do not match immutable parsed authority")
+                    if evidence_json(seed.baseline_entry) != evidence_json(origin_item.normalized_entry):
+                        raise ValueError("corpus seed baseline entry does not match immutable parsed authority")
                 elif seed.origin_kind is EvidenceKind.PUBLICATION:
-                    publication = connection.execute(
-                        "SELECT author_key, publication_key, discovery_source, normalized_title, year, "
-                        "exact_identifiers_json, baseline_output_path, freshness_policy FROM publications "
-                        "WHERE generation_id = ? AND author_key = ? AND publication_key = ?",
-                        (generation_id, seed.author_key, seed.publication_key),
-                    ).fetchone()
-                    if publication is None:
-                        raise ValueError("publication seed lacks immutable publication origin")
-                    payload = dict(publication)
-                    if seed.origin_evidence_key not in {
+                    expected = self._inventory_publication_seed(
+                        connection,
+                        generation_id,
+                        seed.author_key,
                         seed.publication_key,
-                        f"publication:{seed.author_key}:{seed.publication_key}",
-                    } or seed.origin_evidence_digest != evidence_digest(payload):
-                        raise ValueError("publication seed origin does not match immutable publication")
-                    identifiers = json.loads(str(publication["exact_identifiers_json"]))
-                    if evidence_json(seed.exact_identifiers) != evidence_json(identifiers):
-                        raise ValueError("publication seed identifiers do not match immutable publication")
-                    baseline_path = str(publication["baseline_output_path"])
-                    expected_baseline = evidence_digest(baseline_path) if baseline_path else None
-                    if seed.baseline_digest != expected_baseline:
-                        raise ValueError("publication seed baseline does not match immutable publication")
+                        inventory_seed_cache,
+                    )
+                    if evidence_json(seed.canonical_content()) != evidence_json(expected.canonical_content()):
+                        raise ValueError("publication seed does not match immutable inventory evidence")
                 if seed.seed_digest != seed.derived_seed_digest:
                     raise ValueError("publication seed digest is not derived from immutable evidence")
                 content = evidence_json(seed.canonical_content())
@@ -1803,7 +2771,7 @@ class Ledger:
                 raise ValueError("corrupt corpus item evidence") from exc
             if evidence_json(payload) != str(row[2]):
                 raise ValueError("noncanonical corpus item evidence")
-            add(EvidenceKind.CORPUS, f"corpus:{row[0]}", str(row[1]), payload)
+            add(EvidenceKind.CORPUS, f"corpus:{evidence_digest(str(row[0]))}", str(row[1]), payload)
         for row in connection.execute(
             "SELECT author_key, publication_key, seed_digest, evidence_json FROM publication_seed_evidence "
             "WHERE generation_id = ? ORDER BY author_key, publication_key",
@@ -1919,14 +2887,34 @@ class Ledger:
         return frozen
 
     def snapshot_for_pass(self, pass_id: str) -> Mapping[str, object]:
-        return self._snapshot_for_pass(self._connection, self._generation_id(), pass_id)
+        expected = None
+        if self._connection.execute("SELECT COUNT(*) FROM corpus_scan_receipts").fetchone()[0]:
+            expected = self._trusted_corpus_expected()
+        with self._transaction(immediate=True) as connection:
+            if expected is not None:
+                self._verify_trusted_corpus(connection, expected)
+            return self._snapshot_for_pass(connection, self._generation_id(), pass_id)
 
     def execute_registered_pass(self, pass_id: str) -> PlannerPassReceipt:
         generation_id = self._generation_id()
-        initial_snapshot = self._snapshot_for_pass(self._connection, generation_id, pass_id)
+        receipt_count = self._connection.execute(
+            "SELECT COUNT(*) FROM corpus_scan_receipts WHERE generation_id = ?", (generation_id,)
+        ).fetchone()[0]
+        inventory_count = self._connection.execute(
+            "SELECT COUNT(*) FROM inventory_authorities WHERE generation_id = ?", (generation_id,)
+        ).fetchone()[0]
+        if inventory_count and receipt_count != 1:
+            raise ValueError("planner passes require trusted committed-corpus authority")
+        trusted_expected = self._trusted_corpus_expected() if receipt_count else None
+        with self._transaction(immediate=True) as connection:
+            if trusted_expected is not None:
+                self._verify_trusted_corpus(connection, trusted_expected)
+            initial_snapshot = self._snapshot_for_pass(connection, generation_id, pass_id)
         receipt = _execute_authoritative_pass(pass_id, initial_snapshot)
         receipt_content = evidence_json(receipt.canonical_content())
         with self._transaction(immediate=True) as connection, self._authority_write():
+            if trusted_expected is not None:
+                self._verify_trusted_corpus(connection, trusted_expected)
             current_snapshot = self._snapshot_for_pass(connection, generation_id, pass_id)
             if evidence_digest(current_snapshot) != receipt.snapshot_digest:
                 raise StaleClaimError("planner input membership changed before commit")
@@ -2542,10 +3530,10 @@ class Ledger:
             _identifier(str(row["row_key"]), "census row key")
             _free_text(str(row["name"]), "author name", required=True)
             _free_text(str(row["normalized_name"]), "normalized author name", required=True)
-            if row["scholar_id"]:
-                _identifier(str(row["scholar_id"]), "Scholar identifier")
-            if row["dblp_id"]:
-                _identifier(str(row["dblp_id"]), "DBLP identifier")
+            if row["scholar_id"] and not is_valid_scholar_id(str(row["scholar_id"])):
+                raise ValueError("invalid Scholar identifier")
+            if row["dblp_id"] and not is_valid_dblp_id(str(row["dblp_id"])):
+                raise ValueError("invalid DBLP identifier")
             _free_text(str(row["exclusion_reason"]), "exclusion reason")
         authors_digest = _digest(durable_census)
         base_commit = _identifier(spec.base_commit.strip(), "base commit")
@@ -5484,7 +6472,12 @@ class Ledger:
             )
 
     def manifest(self) -> LedgerManifest:
+        trusted_expected = None
+        if self._connection.execute("SELECT COUNT(*) FROM corpus_scan_receipts").fetchone()[0]:
+            trusted_expected = self._trusted_corpus_expected()
         with self._transaction(immediate=True) as connection:
+            if trusted_expected is not None:
+                self._verify_trusted_corpus(connection, trusted_expected)
             self._assert_task5a_authority_invariant(connection)
             generation_id = self._generation_id()
             self._verify_plan_integrity(connection, generation_id)
@@ -5740,6 +6733,7 @@ class Ledger:
     @staticmethod
     def _v6_evidence_content(connection: sqlite3.Connection, generation_id: str) -> dict[str, object]:
         specs = {
+            "corpus_scan_receipts": "snapshot_digest",
             "corpus_snapshots": "snapshot_digest",
             "corpus_items": "source_path COLLATE NOCASE",
             "publication_seed_evidence": "author_key, publication_key",
@@ -5753,6 +6747,14 @@ class Ledger:
         }
         result: dict[str, object] = {}
         for table, order_by in specs.items():
+            if (
+                connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+                is None
+            ):
+                if table == "corpus_scan_receipts":
+                    result[table] = []
+                    continue
+                raise ValueError(f"missing Task5C evidence table: {table}")
             values: list[dict[str, object]] = []
             for row in connection.execute(
                 f"SELECT * FROM {table} WHERE generation_id = ? ORDER BY {order_by}",  # noqa: S608
@@ -5777,10 +6779,30 @@ class Ledger:
     @staticmethod
     def _verify_v6_relationships(connection: sqlite3.Connection, generation_id: str) -> None:
         snapshot = connection.execute(
-            "SELECT snapshot_digest, item_set_digest FROM corpus_snapshots WHERE generation_id = ?",
+            "SELECT snapshot_digest, item_set_digest, evidence_json FROM corpus_snapshots WHERE generation_id = ?",
             (generation_id,),
         ).fetchone()
+        snapshot_evidence: CorpusSnapshot | None = None
         if snapshot is not None:
+            from .corpus import corpus_author_set_digest
+
+            try:
+                snapshot_evidence = CorpusSnapshot(**json.loads(str(snapshot[2])))
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError("corrupt corpus snapshot evidence JSON") from exc
+            generation_base = connection.execute(
+                "SELECT base_commit FROM generations WHERE generation_id = ?", (generation_id,)
+            ).fetchone()
+            if (
+                snapshot_evidence.generation_id != generation_id
+                or generation_base is None
+                or snapshot_evidence.base_commit != str(generation_base[0])
+            ):
+                raise ValueError("corpus snapshot generation or base commit authority changed")
+            if snapshot_evidence.author_set_digest != "0" * 64 and snapshot_evidence.author_set_digest != (
+                corpus_author_set_digest(Ledger._author_census_rows(connection, generation_id))
+            ):
+                raise ValueError("corpus snapshot author-set authority changed")
             enabled = {
                 str(row[0])
                 for row in connection.execute(
@@ -5788,7 +6810,8 @@ class Ledger:
                 )
             }
             items = connection.execute(
-                "SELECT author_key, evidence_digest FROM corpus_items WHERE generation_id = ? "
+                "SELECT author_key, evidence_digest, source_path, disposition, evidence_json FROM corpus_items "
+                "WHERE generation_id = ? "
                 "ORDER BY source_path COLLATE NOCASE",
                 (generation_id,),
             ).fetchall()
@@ -5796,6 +6819,191 @@ class Ledger:
                 snapshot[1]
             ):
                 raise ValueError("corpus snapshot membership is incomplete or substituted")
+            expected_dirs = {
+                row.row_key: format_author_dirname(row.name, row.scholar_id or row.dblp_id)
+                for row in Ledger._author_census_rows(connection, generation_id)
+                if row.enabled
+            }
+            for row in items if snapshot_evidence.author_set_digest != "0" * 64 else ():
+                if str(row[3]) not in {"parsed", "absent"}:
+                    raise ValueError("corpus item disposition is not scanner-owned")
+                expected_prefix = f"output/{expected_dirs[str(row[0])]}"
+                expected_path = (
+                    f"{expected_prefix}/.citeforge-absent-directory" if str(row[3]) == "absent" else str(row[2])
+                )
+                path_parts = PurePosixPath(str(row[2])).parts
+                if expected_path != str(row[2]) or (
+                    str(row[3]) == "parsed"
+                    and (
+                        path_parts[:2] != ("output", expected_dirs[str(row[0])])
+                        or len(path_parts) != 3
+                        or path_parts[2] == ".bib"
+                        or not path_parts[2].endswith(".bib")
+                    )
+                ):
+                    raise ValueError("corpus item path does not match code-owned author directory")
+                if str(row[3]) == "absent":
+                    absent = CorpusItemEvidence(**json.loads(str(row[4])))
+                    absent_digest = evidence_digest({"disposition": "absent", "path": expected_prefix, "version": "1"})
+                    if (
+                        absent.before_digest != absent_digest
+                        or absent.parse_digest != absent_digest
+                        or absent.publication_keys
+                        or absent.exact_identifiers
+                        or absent.normalized_entry
+                    ):
+                        raise ValueError("corpus absence evidence is not code-derived")
+        seed_members: dict[tuple[str, str], EvidenceKind] = {}
+        inventory_seed_cache: dict[tuple[str, str], PublicationSeedEvidence] = {}
+        corpus_origins: dict[str, CorpusItemEvidence] = {}
+        if snapshot_evidence is not None:
+            corpus_origins = {
+                item.key: item
+                for row in connection.execute(
+                    "SELECT evidence_json FROM corpus_items WHERE generation_id = ?", (generation_id,)
+                )
+                for item in (CorpusItemEvidence(**json.loads(str(row[0]))),)
+            }
+            stored_publications = {
+                (str(row[0]), str(row[1])): tuple(row[2:])
+                for row in connection.execute(
+                    "SELECT author_key, publication_key, discovery_source, normalized_title, year, "
+                    "exact_identifiers_json, baseline_output_path, freshness_policy FROM publications "
+                    "WHERE generation_id = ?",
+                    (generation_id,),
+                )
+            }
+            for item in corpus_origins.values() if snapshot_evidence.author_set_digest != "0" * 64 else ():
+                if item.disposition != "parsed":
+                    continue
+                if set(item.normalized_entry) != {"type", "key", "fields"}:
+                    raise ValueError("corpus normalized entry schema is not code-owned")
+                fields = item.normalized_entry.get("fields")
+                if not isinstance(fields, Mapping):
+                    raise ValueError("corpus normalized entry fields are absent")
+                expected_identifiers = _corpus_identifiers_from_fields(fields)
+                if dict(item.exact_identifiers) != expected_identifiers:
+                    raise ValueError("corpus item identifiers are not independently derived")
+                expected_title = normalize_title(str(fields.get("title", "")))
+                expected_year = extract_year_from_any(fields.get("year"), fallback=0) or None
+                expected_key = _publication_key_authority(
+                    item.author_key,
+                    expected_title,
+                    expected_year,
+                    str(expected_identifiers.get("doi", "")) or None,
+                )
+                expected_publication_row = (
+                    "corpus",
+                    expected_title,
+                    expected_year,
+                    evidence_json(expected_identifiers),
+                    item.source_path,
+                    "monthly",
+                )
+                stored_row = stored_publications.get((item.author_key, expected_key))
+                inventory_row: tuple[object, ...] | None = None
+                try:
+                    inventory_seed = Ledger._inventory_publication_seed(
+                        connection, generation_id, item.author_key, expected_key, {}
+                    )
+                except ValueError:
+                    pass
+                else:
+                    baseline_fields = inventory_seed.baseline_entry.get("fields")
+                    if isinstance(baseline_fields, Mapping):
+                        matching_providers = set()
+                        for provider_row in connection.execute(
+                            "SELECT task.provider, observation.response_json FROM inventory_contributions contribution "
+                            "JOIN tasks task ON task.generation_id = contribution.generation_id "
+                            "AND task.task_key = contribution.task_key JOIN observations observation "
+                            "ON observation.generation_id = contribution.generation_id "
+                            "AND observation.request_key = contribution.request_key "
+                            "WHERE contribution.generation_id = ? AND contribution.author_key = ?",
+                            (generation_id, item.author_key),
+                        ):
+                            response = json.loads(str(provider_row[1]))
+                            for article in response.get("articles", ()) if isinstance(response, Mapping) else ():
+                                if (
+                                    isinstance(article, Mapping)
+                                    and normalize_title(str(article.get("title", "")))
+                                    == normalize_title(str(baseline_fields.get("title", "")))
+                                    and extract_year_from_any(article.get("year"), fallback=0)
+                                    == extract_year_from_any(baseline_fields.get("year"), fallback=0)
+                                ):
+                                    matching_providers.add(str(provider_row[0]))
+                        expected_source = "scholar" if "scholar" in matching_providers else "dblp"
+                        inventory_row = (
+                            expected_source,
+                            normalize_title(str(baseline_fields.get("title", ""))),
+                            extract_year_from_any(baseline_fields.get("year"), fallback=0) or None,
+                            evidence_json(inventory_seed.exact_identifiers),
+                            "",
+                            "monthly",
+                        )
+                if item.publication_keys != (expected_key,) or (
+                    stored_row != expected_publication_row and stored_row != inventory_row
+                ):
+                    raise ValueError("corpus publication row is not independently derived")
+        for row in connection.execute(
+            "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+            "ORDER BY author_key, publication_key",
+            (generation_id,),
+        ):
+            content = json.loads(str(row[0]))
+            content["origin_kind"] = EvidenceKind(content["origin_kind"])
+            seed = PublicationSeedEvidence(**content)
+            seed_members[(seed.author_key, seed.publication_key)] = seed.origin_kind
+            if seed.seed_digest != seed.derived_seed_digest:
+                raise ValueError("publication seed digest is not derived from baseline authority")
+            if seed.origin_kind is EvidenceKind.CORPUS:
+                origin = corpus_origins.get(seed.origin_evidence_key)
+                if (
+                    origin is None
+                    or seed.origin_evidence_digest != origin.digest
+                    or seed.author_key != origin.author_key
+                    or seed.publication_key not in origin.publication_keys
+                    or evidence_json(seed.baseline_entry) != evidence_json(origin.normalized_entry)
+                ):
+                    raise ValueError("publication seed corpus baseline authority changed")
+            else:
+                expected_seed = Ledger._inventory_publication_seed(
+                    connection,
+                    generation_id,
+                    seed.author_key,
+                    seed.publication_key,
+                    inventory_seed_cache,
+                )
+                if evidence_json(seed.canonical_content()) != evidence_json(expected_seed.canonical_content()):
+                    raise ValueError("publication seed inventory baseline authority changed")
+        if snapshot_evidence is not None and snapshot_evidence.author_set_digest != "0" * 64:
+            receipt = connection.execute(
+                "SELECT snapshot_digest, receipt_digest FROM corpus_scan_receipts WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            expected_receipt = evidence_digest(
+                {"domain": "citeforge-committed-corpus-scan-v1", "snapshot_digest": snapshot_evidence.digest}
+            )
+            if receipt is None or tuple(receipt) != (snapshot_evidence.digest, expected_receipt):
+                raise ValueError("corpus snapshot lacks scanner-owned receipt authority")
+            publication_members = {
+                (str(row[0]), str(row[1]))
+                for row in connection.execute(
+                    "SELECT author_key, publication_key FROM publications WHERE generation_id = ?",
+                    (generation_id,),
+                )
+            }
+            corpus_members = {
+                (str(row[0]), str(publication_key))
+                for row in connection.execute(
+                    "SELECT author_key, publication_keys_json FROM corpus_items WHERE generation_id = ?",
+                    (generation_id,),
+                )
+                for publication_key in json.loads(str(row[1]))
+            }
+            if set(seed_members) != publication_members or any(
+                seed_members[member] is not EvidenceKind.CORPUS for member in corpus_members
+            ):
+                raise ValueError("publication seed union membership is incomplete or not corpus-preferred")
         pass_rows = connection.execute(
             "SELECT pass_key, pass_id, receipt_json, snapshot_authority_digest, predecessor_output_digest "
             "FROM planner_passes WHERE generation_id = ? ORDER BY rowid",
@@ -5945,6 +7153,10 @@ class Ledger:
                 require_matching_columns(corpus_item)
                 if corpus_item.digest != item.get("evidence_digest"):
                     raise ValueError("corrupt corpus item digest")
+                if corpus_item.normalized_entry and corpus_item.parse_digest != evidence_digest(
+                    corpus_item.normalized_entry
+                ):
+                    raise ValueError("corrupt corpus normalized parse digest")
             elif table == "publication_seed_evidence":
                 if not isinstance(evidence, Mapping):
                     raise ValueError("missing publication seed evidence")

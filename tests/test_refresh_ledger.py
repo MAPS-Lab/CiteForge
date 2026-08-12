@@ -112,14 +112,15 @@ def _open_ready(path: Path, *, enabled: bool = False) -> Ledger:
     return ledger
 
 
-def test_schema_v6_contains_exact_append_only_evidence_substrate(tmp_path: Path) -> None:
+def test_schema_v7_contains_exact_append_only_evidence_substrate(tmp_path: Path) -> None:
     path = tmp_path / "v6.db"
     with Ledger.open(path):
         pass
     connection = sqlite3.connect(path)
-    assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "6"
+    assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
     expected = {
         "corpus_snapshots",
+        "corpus_scan_receipts",
         "corpus_items",
         "publication_seed_evidence",
         "aggregate_inputs",
@@ -191,7 +192,7 @@ def test_authority_write_scope_does_not_leak_after_fault_rollback(tmp_path: Path
         )
         ledger.set_fault("after_v6_corpus_snapshot")
         with pytest.raises(FaultInjectedError, match="after_v6_corpus_snapshot"):
-            ledger.commit_corpus_snapshot(
+            ledger._commit_corpus_snapshot_fixture(
                 snapshot,
                 [replace(provisional, snapshot_digest=snapshot.digest)],
             )
@@ -232,8 +233,8 @@ def test_corpus_snapshot_and_seed_evidence_commit_replay_and_reject_mismatch(tmp
             evidence_digest([provisional.digest]),
         )
         item = replace(provisional, snapshot_digest=snapshot.digest)
-        assert ledger.commit_corpus_snapshot(snapshot, [item]) == snapshot.digest
-        assert ledger.commit_corpus_snapshot(snapshot, [item]) == snapshot.digest
+        assert ledger._commit_corpus_snapshot_fixture(snapshot, [item]) == snapshot.digest
+        assert ledger._commit_corpus_snapshot_fixture(snapshot, [item]) == snapshot.digest
 
         seed = PublicationSeedEvidence(
             generation,
@@ -284,7 +285,7 @@ def test_registered_pass_snapshots_exact_membership_and_commits_inputs_without_c
             "1",
             evidence_digest([provisional.digest]),
         )
-        ledger.commit_corpus_snapshot(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
+        ledger._commit_corpus_snapshot_fixture(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
 
         pass_snapshot = ledger.snapshot_for_pass("bind_corpus_seed")
         with pytest.raises(TypeError):
@@ -613,7 +614,7 @@ def test_remove_intent_requires_exact_path_digest_and_no_emitted_provenance(tmp_
             "1",
             evidence_digest([provisional.digest]),
         )
-        ledger.commit_corpus_snapshot(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
+        ledger._commit_corpus_snapshot_fixture(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
         publication = PublicationMetadata(
             "author-ada",
             "pub-remove",
@@ -780,7 +781,7 @@ def test_corpus_snapshot_rejects_omitted_enabled_census_author(tmp_path: Path) -
             evidence_digest([provisional.digest]),
         )
         with pytest.raises(ValueError, match="exact enabled census"):
-            ledger.commit_corpus_snapshot(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
+            ledger._commit_corpus_snapshot_fixture(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
 
 
 def test_registered_pass_rejects_forged_zero_expected_receipt_and_skipped_phase(
@@ -1127,11 +1128,12 @@ def test_recomputed_stored_fingerprint_cannot_bless_alien_schema(tmp_path: Path)
     assert path.read_bytes() == before
 
 
-def test_exact_v4_ledger_migrates_atomically_to_v6(tmp_path: Path) -> None:
+def test_exact_v4_ledger_migrates_atomically_to_v7(tmp_path: Path) -> None:
     path = tmp_path / "v4.db"
     with Ledger.open(path):
         pass
     connection = sqlite3.connect(path)
+    connection.execute("DROP TABLE corpus_scan_receipts")
     for table in (
         "intent_provenance",
         "materialization_intents",
@@ -1168,11 +1170,12 @@ def test_exact_v4_ledger_migrates_atomically_to_v6(tmp_path: Path) -> None:
     with Ledger.open(path) as migrated:
         assert migrated.pragma("integrity_check") == "ok"
         version = migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        assert version[0] == "6"
+        assert version[0] == "7"
 
 
 def _downgrade_exact_v6_to_v5(path: Path) -> None:
     connection = sqlite3.connect(path)
+    connection.execute("DROP TABLE corpus_scan_receipts")
     for table in (
         "intent_provenance",
         "materialization_intents",
@@ -1206,7 +1209,7 @@ def _downgrade_exact_v6_to_v5(path: Path) -> None:
     connection.close()
 
 
-def test_exact_v5_ledger_migrates_atomically_to_v6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_exact_v5_ledger_migrates_atomically_to_v7(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "v5.db"
     with Ledger.open(path):
         pass
@@ -1227,8 +1230,94 @@ def test_exact_v5_ledger_migrates_atomically_to_v6(tmp_path: Path, monkeypatch: 
         assert migrated.pragma("integrity_check") == "ok"
         assert (
             migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
-            == "6"
+            == "7"
         )
+
+
+def test_populated_v6_generation_without_corpus_migrates_to_v7(tmp_path: Path) -> None:
+    path = tmp_path / "populated-v6.db"
+    with _open_ready(path, enabled=True) as ledger:
+        census = _census(enabled=True)
+        ledger.commit_initial_round(
+            [PlannedTask(task, expands_plan=True) for task in inventory_tasks(census, {"scholar": "1"}, "2026-08")],
+            source_evidence_digest="a" * 64,
+            now=NOW,
+        )
+    connection = sqlite3.connect(path)
+    connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
+    connection.execute("DROP TABLE corpus_scan_receipts")
+    objects = [
+        {
+            "name": row[1],
+            "sql": " ".join(str(row[3]).split()) if row[3] is not None else None,
+            "table": row[2],
+            "type": row[0],
+        }
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    ]
+    assert _canonical_digest(objects) == "9bf51dac21ab9a519ff8461a030d0a87c7211191554f1c06024996bd4e95ff3a"
+    connection.execute("UPDATE schema_meta SET value = '6' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (_canonical_digest(objects),)
+    )
+    connection.commit()
+    connection.close()
+    with Ledger.open(path) as migrated:
+        assert migrated._connection.execute("SELECT COUNT(*) FROM generations").fetchone()[0] == 1
+        assert migrated._connection.execute("SELECT COUNT(*) FROM plan_rounds").fetchone()[0] == 1
+        assert migrated._connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+        assert (
+            migrated._connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
+            == "7"
+        )
+
+
+def test_v6_migration_rejects_orphaned_c2_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "orphan-v6.db"
+    with Ledger.open(path):
+        pass
+    connection = sqlite3.connect(path)
+    connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("DROP TABLE corpus_scan_receipts")
+    connection.execute(
+        "INSERT INTO corpus_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "missing-generation",
+            "a" * 64,
+            "output/Missing/paper.bib",
+            "missing-author",
+            "b" * 64,
+            "c" * 64,
+            "[]",
+            "parsed",
+            "{}",
+            "d" * 64,
+            "{}",
+        ),
+    )
+    objects = [
+        {
+            "name": row[1],
+            "sql": " ".join(str(row[3]).split()) if row[3] is not None else None,
+            "table": row[2],
+            "type": row[0],
+        }
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    ]
+    connection.execute("UPDATE schema_meta SET value = '6' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'",
+        (_canonical_digest(objects),),
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(ValueError, match="foreign-key"):
+        Ledger.open(path)
 
 
 def _canonical_digest(value: object) -> str:

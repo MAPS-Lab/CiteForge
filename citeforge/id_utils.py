@@ -76,6 +76,31 @@ def _norm_arxiv_id(s: str | None) -> str | None:
     return t.strip() or None
 
 
+def normalize_strict_arxiv_id(value: str | None) -> str | None:
+    """Return one structurally valid, version-free arXiv identifier."""
+    normalized = _norm_arxiv_id(value)
+    if normalized is None:
+        return None
+    modern = re.fullmatch(r"(?P<year_month>\d{4})\.(?P<sequence>\d{4,5})", normalized)
+    if modern is not None:
+        year_month = int(modern.group("year_month"))
+        if year_month >= 704 and 1 <= year_month % 100 <= 12 and int(modern.group("sequence")) > 0:
+            return normalized
+        return None
+    legacy = re.fullmatch(
+        r"(?P<category>[a-z-]+(?:\.[a-z]{2})?)/(?P<year_month>\d{4})(?P<sequence>\d{3})",
+        normalized,
+        re.I,
+    )
+    if legacy is None:
+        return None
+    year_month = int(legacy.group("year_month"))
+    in_legacy_epoch = 9108 <= year_month <= 9912 or 1 <= year_month <= 703
+    if not in_legacy_epoch or not 1 <= year_month % 100 <= 12 or int(legacy.group("sequence")) == 0:
+        return None
+    return f"{legacy.group('category').casefold()}/{legacy.group('year_month')}{legacy.group('sequence')}"
+
+
 # meta tag patterns for finding DOIs in HTML
 _DOI_META_PATTERNS = [
     r'<meta[^>]+name=["\']citation_doi["\'][^>]+content=["\']([^"\']+)["\']',
@@ -122,6 +147,13 @@ def find_doi_in_text(text: str) -> str | None:
         return None
     m = re.search(_DOI_REGEX, text, flags=re.IGNORECASE)
     return _norm_doi(m.group(1)) if m else None
+
+
+def find_dois_in_text(text: str) -> tuple[str, ...]:
+    """Return every distinct normalized DOI found in text, in encounter order."""
+    if not text:
+        return ()
+    return tuple(dict.fromkeys(match.group(1).lower() for match in re.finditer(_DOI_REGEX, text, re.IGNORECASE)))
 
 
 def find_arxiv_in_text(text: str) -> str | None:
