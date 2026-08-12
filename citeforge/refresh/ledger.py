@@ -25,7 +25,7 @@ from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
 _SCHEMA_VERSION = "3"
 _MAX_PLAN_ROUNDS = 64
-_EXPECTED_SCHEMA_FINGERPRINT = "fd8fed2a3f6b01da42ea09bb2f402221c6cbc8b962d8f7985f26ed2a73feb17c"
+_EXPECTED_SCHEMA_FINGERPRINT = "afca98d2aa1807fc082a629ca37b908db40ed47e788a9e131c87774b9591105c"
 _SATISFIED = frozenset(
     {
         TaskDisposition.SUCCEEDED,
@@ -1021,6 +1021,17 @@ class Ledger:
                 "WHEN (SELECT plan_closed FROM generations WHERE generation_id = NEW.generation_id) = 1 "
                 "BEGIN SELECT RAISE(ABORT, 'closed plan rejects publication identity insert'); END"
             )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS generations_task5a_authority_update "
+                "BEFORE UPDATE OF discovery_closed, plan_authority_mode ON generations "
+                "WHEN NEW.discovery_closed != 0 OR NEW.plan_authority_mode = 'phased_authoritative' "
+                "BEGIN SELECT RAISE(ABORT, 'Task 5A cannot establish discovery authority'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS generations_task5a_authority_insert BEFORE INSERT ON generations "
+                "WHEN NEW.discovery_closed != 0 OR NEW.plan_authority_mode = 'phased_authoritative' "
+                "BEGIN SELECT RAISE(ABORT, 'Task 5A cannot establish discovery authority'); END"
+            )
             if existing_version is None:
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)", (_SCHEMA_VERSION,)
@@ -1090,6 +1101,16 @@ class Ledger:
             or actual != _EXPECTED_SCHEMA_FINGERPRINT
         ):
             raise ValueError("structurally inconsistent schema version 3 fingerprint")
+        Ledger._assert_task5a_authority_invariant(connection)
+
+    @staticmethod
+    def _assert_task5a_authority_invariant(connection: sqlite3.Connection) -> None:
+        invalid = connection.execute(
+            "SELECT COUNT(*) FROM generations WHERE discovery_closed != 0 "
+            "OR plan_authority_mode = 'phased_authoritative'"
+        ).fetchone()[0]
+        if invalid:
+            raise ValueError("Task 5A authority invariant violated")
 
     def _generation_id(self) -> str:
         rows = self._connection.execute("SELECT generation_id FROM generations").fetchall()
@@ -1614,6 +1635,7 @@ class Ledger:
 
     def plan_status(self) -> PlanStatus:
         generation_id = self._generation_id()
+        self._assert_task5a_authority_invariant(self._connection)
         row = self._connection.execute(
             "SELECT plan_revision, plan_closed, discovery_closed, plan_authority_mode, plan_digest, closure_digest "
             "FROM generations "
@@ -3094,6 +3116,7 @@ class Ledger:
 
     def manifest(self) -> LedgerManifest:
         with self._transaction(immediate=True) as connection:
+            self._assert_task5a_authority_invariant(connection)
             generation_id = self._generation_id()
             self._verify_plan_integrity(connection, generation_id)
             closure = connection.execute(

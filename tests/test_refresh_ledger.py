@@ -373,25 +373,36 @@ def test_empty_reduction_receipt_enables_structural_closure(tmp_path: Path) -> N
             ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
 
 
-def test_discovery_readiness_revalidates_persisted_typed_evidence(tmp_path: Path) -> None:
-    path = tmp_path / "forged-discovery.db"
+def test_task5a_schema_rejects_raw_discovery_authority_update(tmp_path: Path) -> None:
+    path = tmp_path / "blocked-discovery.db"
     with Ledger.open(path) as ledger:
-        inventory, observation = _ready_expanding_inventory(ledger)
-        ledger.commit_reduction(
-            inventory.key,
-            source_evidence_digest=observation.digest,
-            publications=(),
-            tasks=(),
-            now=NOW,
-        )
-        snapshot = _canonical_digest(dict(ledger.closure_content()))
-        ledger.close_plan(expected_closure_digest=snapshot, now=NOW)
+        ledger.create_or_resume(_generation(_census()), _census())
     connection = sqlite3.connect(path)
+    with pytest.raises(sqlite3.IntegrityError, match="Task 5A"):
+        connection.execute("UPDATE generations SET discovery_closed = 1")
+    with pytest.raises(sqlite3.IntegrityError, match="Task 5A"):
+        connection.execute("UPDATE generations SET plan_authority_mode = 'phased_authoritative'")
+    connection.close()
+    with Ledger.open(path) as ledger:
+        assert not ledger.plan_status().discovery_closed
+        assert not ledger.all_required_satisfied()
+
+
+def test_status_manifest_and_reopen_reject_authority_corruption_without_trigger(tmp_path: Path) -> None:
+    path = tmp_path / "corrupt-discovery.db"
+    ledger = _open_ready(path)
+    connection = sqlite3.connect(path)
+    connection.execute("DROP TRIGGER generations_task5a_authority_update")
     connection.execute("UPDATE generations SET discovery_closed = 1, plan_authority_mode = 'phased_authoritative'")
     connection.commit()
     connection.close()
-    with Ledger.open(path) as ledger:
-        assert not ledger.all_required_satisfied()
+    with pytest.raises(ValueError, match="Task 5A authority"):
+        ledger.plan_status()
+    with pytest.raises(ValueError, match="Task 5A authority"):
+        ledger.manifest()
+    ledger.close()
+    with pytest.raises(ValueError, match="fingerprint"):
+        Ledger.open(path)
 
 
 def test_task5a_exposes_no_caller_self_attestation_surface(tmp_path: Path) -> None:
