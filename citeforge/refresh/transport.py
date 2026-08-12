@@ -288,9 +288,25 @@ class LedgerTransport:
 
     def send_claim(self, task_claim: TaskClaim, operation: SendOperation) -> ProviderResponse:
         """Execute one claimed task or observe its shared exact request."""
-        now = self.clock()
         if task_claim.request_key != operation.request.key:
             raise ValueError("claimed task does not match exact request")
+        try:
+            now = self.clock()
+        except Exception:
+            fallback = self._claim_safe_time(task_claim)
+            result = self.result(operation.request.key)
+            if result is not None:
+                self.ledger.finish_task(task_claim.key, task_claim.owner, result.disposition, fallback)
+                return result
+            request_claim = self.ledger.claim_request(task_claim.key, task_claim.owner, fallback, timedelta(minutes=10))
+            if request_claim is None:
+                return ProviderResponse(
+                    TaskDisposition.LEASED,
+                    OutcomeClass.IN_FLIGHT,
+                    safe_diagnostic="exact request leased by another worker",
+                    from_ledger=True,
+                )
+            return self._finish_classification_failure(task_claim, operation)
         result = self.result(operation.request.key)
         if result is not None:
             self.ledger.finish_task(task_claim.key, task_claim.owner, result.disposition, now)
@@ -586,8 +602,8 @@ class LedgerTransport:
         self, task_claim: TaskClaim, operation: SendOperation, started: datetime | None = None
     ) -> ProviderResponse:
         """Release a claimed request without consulting injected timing helpers."""
-        fallback_finished = datetime.now(timezone.utc)
-        fallback_started = started or fallback_finished
+        fallback_finished = self._claim_safe_time(task_claim)
+        fallback_started = min(started or fallback_finished, fallback_finished)
         return self._finish_terminal(
             task_claim,
             operation,
@@ -598,6 +614,11 @@ class LedgerTransport:
             None,
             "provider response classification failed",
         )
+
+    @staticmethod
+    def _claim_safe_time(task_claim: TaskClaim) -> datetime:
+        """Choose a deterministic instant that remains inside the logical task lease."""
+        return task_claim.lease_expires - timedelta(microseconds=1)
 
     def _finish_terminal(
         self,

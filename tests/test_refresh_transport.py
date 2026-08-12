@@ -416,8 +416,11 @@ def test_post_claim_retry_helper_failure_terminalizes_exactly_once(tmp_path: Pat
     request = _request()
     ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
     raw = _response(500, {"error": "down"})
+    jitter_called = False
 
     def jitter(_delay: float) -> float:
+        nonlocal jitter_called
+        jitter_called = True
         if failure == "jitter":
             raise RuntimeError("token=secret")
         return 0.0
@@ -425,11 +428,36 @@ def test_post_claim_retry_helper_failure_terminalizes_exactly_once(tmp_path: Pat
     if failure == "retry_headers":
         raw.status_code = 429
         raw.headers = _RaisingHeaders()
-    else:
+    elif failure == "status_none":
         raw.status_code = None
     response = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW, jitter=jitter).send_claim(
         _claim(ledger, "worker"), _operation(request)
     )
+    assert response.disposition is TaskDisposition.PERMANENT_FAILURE
+    assert response.safe_diagnostic == "provider response classification failed"
+    assert len(ledger.manifest().data["attempts"]) == 1
+    assert "secret" not in json.dumps(ledger.manifest().data).casefold()
+    assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    assert jitter_called is (failure == "jitter")
+    ledger.close()
+
+
+def test_initial_clock_failure_terminalizes_claim_with_claim_safe_time(tmp_path: Path) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    sent = False
+
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal sent
+        sent = True
+        return _response(200, {"title": "unexpected"})
+
+    response = LedgerTransport(
+        ledger,
+        send_once=sender,
+        clock=lambda: (_ for _ in ()).throw(RuntimeError("api_key=secret")),
+    ).send_claim(_claim(ledger, "worker"), _operation(request))
+    assert not sent
     assert response.disposition is TaskDisposition.PERMANENT_FAILURE
     assert response.safe_diagnostic == "provider response classification failed"
     assert len(ledger.manifest().data["attempts"]) == 1
