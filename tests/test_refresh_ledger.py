@@ -15,12 +15,9 @@ from citeforge.refresh.ledger import (
     ApplicabilityReason,
     DominanceEvidence,
     DominanceRule,
-    EvidenceState,
     FaultInjectedError,
     Ledger,
-    MaterializationEvidence,
     PlannedTask,
-    PlannerClosureEvidence,
     ProvenanceRule,
     ProviderObservation,
     PublicationMetadata,
@@ -138,29 +135,6 @@ def _finish_request_and_task(ledger: Ledger, disposition: TaskDisposition) -> No
 def _seal_and_run(ledger: Ledger, tasks: list[TaskSpec]) -> None:
     ledger.seal_plan(tasks, required_validations=())
     ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
-
-
-def _authorize_empty_phased_plan(ledger: Ledger, *, required_validations: tuple[ValidationSpec, ...] = ()) -> None:
-    ledger.commit_initial_round([], source_evidence_digest="a" * 64, now=NOW)
-    ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
-    snapshot = _canonical_digest(dict(ledger.closure_content(required_validations)))
-    ledger.close_plan(
-        expected_closure_digest=snapshot,
-        required_validations=required_validations,
-        now=NOW,
-    )
-    ledger.commit_discovery_closure(
-        PlannerClosureEvidence(
-            planner_id="phased_refresh_planner",
-            planner_version="1",
-            policy_version="policy-v1",
-            complete_snapshot_digest=snapshot,
-            zero_unseen_task_keys=(),
-            inventory_union_receipt_digests=(),
-            publication_coverage_digest=_canonical_digest([]),
-        ),
-        now=NOW,
-    )
 
 
 def _record_dominance_observations(
@@ -397,49 +371,6 @@ def test_empty_reduction_receipt_enables_structural_closure(tmp_path: Path) -> N
         assert not ledger.all_required_satisfied()
         with pytest.raises(ValueError, match="discovery"):
             ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
-        evidence = PlannerClosureEvidence(
-            planner_id="phased_refresh_planner",
-            planner_version="1",
-            policy_version="policy-v1",
-            complete_snapshot_digest=closure_digest,
-            zero_unseen_task_keys=(),
-            inventory_union_receipt_digests=(receipt.reduction_digest,),
-            publication_coverage_digest=_canonical_digest([]),
-        )
-        authoritative = ledger.commit_discovery_closure(evidence, now=NOW)
-        assert authoritative.discovery_closed
-        assert authoritative.authority_mode == "phased_authoritative"
-        assert ledger.all_required_satisfied()
-        ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
-
-
-def test_discovery_closure_rejects_unregistered_or_incomplete_planner_evidence(tmp_path: Path) -> None:
-    with Ledger.open(tmp_path / "planner-evidence.db") as ledger:
-        inventory, observation = _ready_expanding_inventory(ledger)
-        receipt = ledger.commit_reduction(
-            inventory.key,
-            source_evidence_digest=observation.digest,
-            publications=(),
-            tasks=(),
-            now=NOW,
-        )
-        snapshot = _canonical_digest(dict(ledger.closure_content()))
-        ledger.close_plan(expected_closure_digest=snapshot, now=NOW)
-        base = PlannerClosureEvidence(
-            planner_id="phased_refresh_planner",
-            planner_version="1",
-            policy_version="policy-v1",
-            complete_snapshot_digest=snapshot,
-            zero_unseen_task_keys=(),
-            inventory_union_receipt_digests=(receipt.reduction_digest,),
-            publication_coverage_digest=_canonical_digest([]),
-        )
-        with pytest.raises(ValueError, match="registered"):
-            ledger.commit_discovery_closure(replace(base, planner_version="999"), now=NOW)
-        with pytest.raises(ValueError, match="unseen"):
-            ledger.commit_discovery_closure(replace(base, zero_unseen_task_keys=("a" * 64,)), now=NOW)
-        with pytest.raises(ValueError, match="inventory"):
-            ledger.commit_discovery_closure(replace(base, inventory_union_receipt_digests=()), now=NOW)
 
 
 def test_discovery_readiness_revalidates_persisted_typed_evidence(tmp_path: Path) -> None:
@@ -461,6 +392,27 @@ def test_discovery_readiness_revalidates_persisted_typed_evidence(tmp_path: Path
     connection.close()
     with Ledger.open(path) as ledger:
         assert not ledger.all_required_satisfied()
+
+
+def test_task5a_exposes_no_caller_self_attestation_surface(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "no-authority-api.db") as ledger:
+        assert not hasattr(ledger, "commit_discovery_closure")
+
+
+def test_arbitrary_publication_and_caller_hashes_cannot_authorize_discovery(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "self-attestation.db") as ledger:
+        publication = PublicationMetadata(
+            "author-ada", "pub-arbitrary", "scholar", "Arbitrary publication", 2026, {}, "", "monthly"
+        )
+        ledger.commit_initial_round([], publications=(publication,), source_evidence_digest="a" * 64, now=NOW)
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        caller_hash = _canonical_digest(dict(ledger.closure_content()))
+        ledger.close_plan(expected_closure_digest=caller_hash, now=NOW)
+        assert ledger.plan_status().closed
+        assert not ledger.plan_status().discovery_closed
+        assert not ledger.all_required_satisfied()
+        with pytest.raises(ValueError, match="discovery"):
+            ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
 
 
 def test_reduction_rejects_wrong_evidence_and_nonexpanding_source(tmp_path: Path) -> None:
@@ -1330,20 +1282,12 @@ def test_generation_lifecycle_rejects_skips_and_terminal_reentry(tmp_path: Path)
             ledger.transition_generation(GenerationState.SUPERSEDED, GenerationState.RUNNING, NOW)
 
 
-def test_complete_and_published_generation_are_forward_only(tmp_path: Path) -> None:
+def test_legacy_compatibility_cannot_enter_production_validation(tmp_path: Path) -> None:
     with _open_ready(tmp_path / "ledger.db") as ledger:
-        _authorize_empty_phased_plan(ledger, required_validations=(ValidationSpec("corpus"),))
-        ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
-        ledger.record_validation("corpus", EvidenceState.SUCCEEDED, "e" * 64, "All checks passed")
-        binding = ledger.current_manifest_binding()
-        ledger.record_materialization(MaterializationEvidence("stage", binding, {}, EvidenceState.VALIDATED))
-        ledger.transition_generation(GenerationState.VALIDATING, GenerationState.COMPLETE, NOW)
-        with pytest.raises(ValueError, match="illegal"):
-            ledger.transition_generation(GenerationState.COMPLETE, GenerationState.PLANNING, NOW)
-        ledger.record_publication("verified_merge", "deadbeef", NOW, candidate_digest=binding, manifest_digest=binding)
-        ledger.transition_generation(GenerationState.COMPLETE, GenerationState.PUBLISHED, NOW)
-        with pytest.raises(ValueError, match="illegal"):
-            ledger.transition_generation(GenerationState.PUBLISHED, GenerationState.RUNNING, NOW)
+        ledger.seal_plan([], required_validations=(ValidationSpec("corpus"),))
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        with pytest.raises(ValueError, match="discovery"):
+            ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
 
 
 @pytest.mark.parametrize(
@@ -1528,31 +1472,20 @@ def test_planned_not_applicable_task_has_no_request_and_closes_with_typed_reason
             )
 
 
-def test_complete_requires_exact_validations_and_bound_materialization(tmp_path: Path) -> None:
+def test_structural_closure_cannot_enter_validation_without_task5b_authority(tmp_path: Path) -> None:
     with _open_ready(tmp_path / "ledger.db") as ledger:
-        _authorize_empty_phased_plan(ledger, required_validations=(ValidationSpec("corpus"),))
-        ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
-        with pytest.raises(ValueError, match="sealed obligation"):
-            ledger.record_validation("undeclared", EvidenceState.SUCCEEDED, "d" * 64)
-        with pytest.raises(ValueError, match="validation"):
-            ledger.transition_generation(GenerationState.VALIDATING, GenerationState.COMPLETE, NOW)
-        ledger.record_validation("corpus", EvidenceState.SUCCEEDED, "e" * 64)
-        with pytest.raises(ValueError, match="materialization"):
-            ledger.transition_generation(GenerationState.VALIDATING, GenerationState.COMPLETE, NOW)
-        binding = ledger.current_manifest_binding()
-        ledger.record_materialization(MaterializationEvidence("stage", binding, {"files": 1}, EvidenceState.VALIDATED))
-        ledger.transition_generation(GenerationState.VALIDATING, GenerationState.COMPLETE, NOW)
-        ledger.record_publication("candidate", "deadbeef", NOW, candidate_digest=binding, manifest_digest=binding)
-        with pytest.raises(ValueError, match="verified merge"):
-            ledger.transition_generation(GenerationState.COMPLETE, GenerationState.PUBLISHED, NOW)
-        ledger.record_publication(
-            "verified_merge",
-            "feedface",
-            NOW,
-            candidate_digest=binding,
-            manifest_digest=binding,
+        ledger.commit_initial_round([], source_evidence_digest="a" * 64, now=NOW)
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        snapshot = _canonical_digest(dict(ledger.closure_content((ValidationSpec("corpus"),))))
+        ledger.close_plan(
+            expected_closure_digest=snapshot,
+            required_validations=(ValidationSpec("corpus"),),
+            now=NOW,
         )
-        ledger.transition_generation(GenerationState.COMPLETE, GenerationState.PUBLISHED, NOW)
+        assert ledger.plan_status().closed
+        assert not ledger.plan_status().discovery_closed
+        with pytest.raises(ValueError, match="discovery"):
+            ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
 
 
 @pytest.mark.parametrize(
