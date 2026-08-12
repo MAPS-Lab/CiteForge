@@ -11,7 +11,7 @@ CiteForge is a Python tool that builds clean, per-author BibTeX files from schol
 - Trust-based field merging that prioritizes authoritative registries over scraped content
 - Deduplication combining DOI normalization, external-identifier matching, and fuzzy title similarity (rapidfuzz)
 - Metadata correction for fragmented compound words, misclassified publication types, invalid page ranges, and all-capitals titles
-- Deterministic output, with byte-identical results on cache-hit runs
+- Deterministic materialization, with byte-identical results for equivalent cache-hit inputs
 - Parallel per-author processing under per-API rate limits, backed by a response cache with monthly expiry
 - Config-driven behavior, with trust order, similarity thresholds, rate limits, and venue mappings centralized in [`citeforge/config.py`](citeforge/config.py)
 
@@ -55,7 +55,7 @@ Name,Scholar Link,DBLP Link
 Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659
 ```
 
-Output is organized per author, with a shared summary and run log. API responses are cached under `data/api_cache/` with monthly expiry.
+Output is organized per author, with a shared summary and run log. API responses are cached under `data/api_cache/` with monthly expiry. A cache hit establishes only response-cache freshness. It does not establish entry completeness or refresh completion.
 
 ```
 output/
@@ -74,7 +74,9 @@ output/
 
 CiteForge retrieves each author's publication list from Google Scholar through SerpAPI, then enriches every entry by querying scholarly services including Semantic Scholar, Crossref, arXiv, OpenAlex, and PubMed. A trust-based consolidation stage merges the collected records according to source reliability, prioritizing authoritative registries over scraped content. Duplicate detection combines DOI normalization, external identifier matching, and fuzzy title similarity. The pipeline also corrects recurrent metadata issues such as fragmented compound words, misclassified publication types, invalid page ranges, and all-capitals titles.
 
-Cache-hit runs produce byte-identical output, author queries run in parallel under per-API rate limits, and configurable parameters (source trust order, similarity thresholds, rate limits, venue mappings) are centralized in [`citeforge/config.py`](citeforge/config.py).
+Equivalent cache-hit inputs produce byte-identical materialized output. That idempotence result is distinct from entry completeness, response-cache freshness, and workflow completion. Author queries run in parallel under per-API rate limits, and configurable parameters (source trust order, similarity thresholds, rate limits, venue mappings) are centralized in [`citeforge/config.py`](citeforge/config.py).
+
+The legacy monthly workflow is currently a non-publishing diagnostic path. It cannot establish a complete refresh or publish generated output. The durable refresh engine described in the architecture documents has not been implemented yet.
 
 ## Data sources
 

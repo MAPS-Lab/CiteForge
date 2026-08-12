@@ -1,9 +1,10 @@
 """File-based API response cache.
 
 A thread-safe, on-disk cache keyed by namespace and request key, with
-monthly-boundary expiry and confirmation-counted negative caching. Persisting
-responses between runs is what lets cache-hit executions reproduce
-byte-identical output.
+monthly-boundary expiry and confirmation-counted negative caching. Cache
+freshness permits reuse of a response. It does not establish entry
+completeness or workflow completion. Equivalent cached inputs can reproduce
+byte-identical materialized output.
 """
 
 from __future__ import annotations
@@ -43,8 +44,9 @@ def _month_boundary() -> float:
 class ResponseCache:
     """Thread-safe, file-based response cache with monthly expiry.
 
-    All entries expire on the 1st of each calendar month (AST/UTC-4),
-    ensuring a full refresh of every API source at least once per month.
+    All entries expire on the 1st of each calendar month (AST/UTC-4), which
+    bounds response-cache freshness. That boundary alone does not prove a full
+    refresh of every API source or any entry's completeness.
 
     Negative cache entries use a three-tier confirmation system.
 

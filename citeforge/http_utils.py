@@ -411,20 +411,26 @@ def http_fetch_bytes(
     return _http_request("GET", url, headers, timeout)
 
 
-def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
-    """
-    Decode a UTF-8 JSON response and parse it into a Python object, including a
-    short preview of invalid data in error messages.
-    """
+def decode_json_mapping(raw: bytes, url: str) -> dict[str, Any]:
+    """Decode a UTF-8 JSON object, rejecting valid JSON with another root shape."""
     try:
-        result: dict[str, Any] = json.loads(raw.decode("utf-8"))
-        return result
+        result: Any = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as ex:
         # include a preview for debugging (scrub the preview too; an upstream
         # error body may echo request params carrying a key)
         preview = _scrub_secrets(raw[:256].decode("utf-8", errors="replace"))
         safe_url = _scrub_secrets(url)
         raise DecodeError(f"Invalid JSON from {safe_url!r}: {ex.msg} at pos {ex.pos}; preview={preview!r}") from ex
+    if not isinstance(result, dict):
+        preview = _scrub_secrets(raw[:256].decode("utf-8", errors="replace"))
+        safe_url = _scrub_secrets(url)
+        raise DecodeError(f"Expected JSON object from {safe_url!r}, got {type(result).__name__}; preview={preview!r}")
+    return result
+
+
+def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
+    """Backward-compatible private alias for :func:`decode_json_mapping`."""
+    return decode_json_mapping(raw, url)
 
 
 def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any]:
@@ -433,7 +439,7 @@ def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any
     returning the parsed response as a dictionary.
     """
     raw = http_fetch_bytes(url, DEFAULT_JSON_HEADERS.copy(), timeout)
-    return _decode_json_bytes(raw, url)
+    return decode_json_mapping(raw, url)
 
 
 def http_post_json(
@@ -450,7 +456,7 @@ def http_post_json(
     h = (headers or DEFAULT_JSON_HEADERS).copy()
     h.setdefault("Content-Type", "application/json")
     raw = _http_request("POST", url, h, timeout, json_payload=payload)
-    return _decode_json_bytes(raw, url)
+    return decode_json_mapping(raw, url)
 
 
 def s2_http_get_json(url: str, api_key: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any]:
@@ -461,7 +467,7 @@ def s2_http_get_json(url: str, api_key: str, timeout: float = HTTP_TIMEOUT_FAST)
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["x-api-key"] = api_key
     raw = http_fetch_bytes(url, headers, timeout)
-    return _decode_json_bytes(raw, url)
+    return decode_json_mapping(raw, url)
 
 
 def http_get_text(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> str:
