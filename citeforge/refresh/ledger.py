@@ -16,7 +16,10 @@ from types import MappingProxyType
 from typing import cast
 from urllib.parse import parse_qsl, urlsplit
 
-from ..config import TRUST_ORDER
+from ..config import PREPRINT_ONLY_PUBLISHERS, PREPRINT_SERVERS
+from ..id_utils import is_secondary_doi
+from ..merge_utils import merge_with_policy
+from ..text_utils import has_placeholder
 from .census import AuthorCensus
 from .types import GenerationSpec, GenerationState, TaskDisposition
 
@@ -168,6 +171,67 @@ def _freeze_json(value: object) -> object:
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
 
 
+def _has_observation_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip()) and not has_placeholder(value)
+    if isinstance(value, Mapping):
+        return bool(value) and any(_has_observation_value(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return bool(value) and any(_has_observation_value(item) for item in value)
+    return True
+
+
+def _is_preprint_observation(response: Mapping[str, object]) -> bool:
+    doi = response.get("doi")
+    journal = str(response.get("journal") or "").casefold()
+    publisher = str(response.get("publisher") or "").casefold().strip()
+    return bool(
+        (doi and is_secondary_doi(str(doi)))
+        or any(server in journal for server in PREPRINT_SERVERS)
+        or publisher in PREPRINT_ONLY_PUBLISHERS
+    )
+
+
+def _is_published_observation(response: Mapping[str, object]) -> bool:
+    if _is_preprint_observation(response):
+        return False
+    doi = response.get("doi")
+    journal = str(response.get("journal") or "").casefold()
+    return bool(
+        (doi and not is_secondary_doi(str(doi))) or (journal and not any(s in journal for s in PREPRINT_SERVERS))
+    )
+
+
+def _merge_proves_dominance(
+    lower_provider: str,
+    lower_response: Mapping[str, object],
+    stronger: Sequence[tuple[str, Mapping[str, object]]],
+    covered_fields: Sequence[str],
+    rule: DominanceRule,
+) -> bool:
+    # merge_with_policy assigns primary fields to scholar_min. Until the reducer
+    # exposes provenance-aware incumbents, other lower providers are unprovable.
+    if lower_provider != "scholar_min":
+        return False
+    enrichers = [(provider, {"type": "misc", "fields": dict(response)}) for provider, response in stronger]
+    primary = {"type": "misc", "fields": dict(lower_response)}
+    merged = merge_with_policy(primary, enrichers)["fields"]
+    lower_normalized = merge_with_policy(primary, [])["fields"]
+    stronger_normalized = merge_with_policy({"type": "misc", "fields": {}}, enrichers)["fields"]
+    if rule is DominanceRule.PUBLISHED_OVER_PREPRINT and (
+        not _is_preprint_observation(lower_response) or not _is_published_observation(stronger_normalized)
+    ):
+        return False
+    return all(
+        field_name in stronger_normalized
+        and merged.get(field_name) == stronger_normalized[field_name]
+        and merged.get(field_name) != lower_normalized.get(field_name)
+        for field_name in covered_fields
+    )
+
+
 class ApplicabilityReason(str, Enum):
     NO_APPLICABLE_IDENTIFIER = "no_applicable_identifier"
     PROVIDER_NOT_SUPPORTED = "provider_not_supported"
@@ -181,15 +245,6 @@ class DominanceRule(str, Enum):
 class ProvenanceRule(str, Enum):
     TRUST_POLICY = "trust_policy"
     PUBLISHED_OVER_PREPRINT = "published_over_preprint"
-
-
-_TRUST_RANK = {provider: rank for rank, provider in enumerate(TRUST_ORDER)}
-_REGISTRY_PROVIDERS = frozenset(TRUST_ORDER[: TRUST_ORDER.index("openalex")])
-_DOMINANCE_PROVIDERS = {
-    DominanceRule.PUBLISHED_OVER_PREPRINT: _REGISTRY_PROVIDERS,
-    DominanceRule.AUTHORITATIVE_METADATA: frozenset(TRUST_ORDER),
-}
-_PUBLISHED_OVER_PREPRINT_FIELDS = frozenset({"doi", "journal"})
 
 
 class EvidenceState(str, Enum):
@@ -226,12 +281,14 @@ class DominanceEvidence:
     stronger_observation_keys: tuple[str, ...]
     rule: DominanceRule
     covered_fields: tuple[str, ...]
+    dominated_observation_key: str
 
     def __post_init__(self) -> None:
         if not self.stronger_observation_keys or not self.covered_fields:
             raise ValueError("dominance evidence requires observations and covered fields")
         for key in self.stronger_observation_keys:
             _digest_text(key, "observation key")
+        _digest_text(self.dominated_observation_key, "dominated observation key")
         if not isinstance(self.rule, DominanceRule):
             raise ValueError("invalid dominance rule")
         for field_name in self.covered_fields:
@@ -677,10 +734,13 @@ class Ledger:
                     generation_id TEXT NOT NULL,
                     task_key TEXT NOT NULL,
                     stronger_observations_json TEXT NOT NULL,
+                    dominated_observation_key TEXT NOT NULL,
                     rule TEXT NOT NULL,
                     covered_fields_json TEXT NOT NULL,
                     PRIMARY KEY (generation_id, task_key),
-                    FOREIGN KEY (generation_id, task_key) REFERENCES tasks(generation_id, task_key)
+                    FOREIGN KEY (generation_id, task_key) REFERENCES tasks(generation_id, task_key),
+                    FOREIGN KEY (generation_id, dominated_observation_key)
+                        REFERENCES requests(generation_id, request_key)
                 );
                 CREATE TABLE IF NOT EXISTS provider_state (
                     generation_id TEXT NOT NULL REFERENCES generations(generation_id),
@@ -1420,6 +1480,26 @@ class Ledger:
         generation_id = self._generation_id()
         with self._transaction(immediate=True) as connection:
             self._assert_owner("requests", "request_key", request_key, owner, now)
+            request_identity = connection.execute(
+                "SELECT identity_json FROM requests WHERE generation_id = ? AND request_key = ?",
+                (generation_id, request_key),
+            ).fetchone()
+            if request_identity is None:
+                raise ValueError("request identity missing")
+            identity = json.loads(request_identity[0])
+            if observation is not None and observation.provider != identity["provider"]:
+                raise ValueError("observation provider does not match request")
+            if disposition is TaskDisposition.SUCCEEDED and observation is not None:
+                missing = [
+                    field_name
+                    for field_name in identity["requested_fields"]
+                    if field_name not in observation.response
+                    or not _has_observation_value(observation.response[field_name])
+                ]
+                if missing:
+                    raise ValueError(f"successful observation lacks requested field evidence: {', '.join(missing)}")
+            if disposition is TaskDisposition.CONFIRMED_EMPTY and observation is not None and observation.response:
+                raise ValueError("confirmed empty requires an empty response")
             connection.execute(
                 "UPDATE requests SET state = ?, next_attempt_at = ?, lease_owner = NULL, lease_expires_at = NULL, "
                 "response_digest = ?, safe_diagnostic = ? WHERE generation_id = ? AND request_key = ?",
@@ -1433,15 +1513,6 @@ class Ledger:
                 ),
             )
             if disposition in _TERMINAL:
-                request_identity = connection.execute(
-                    "SELECT identity_json FROM requests WHERE generation_id = ? AND request_key = ?",
-                    (generation_id, request_key),
-                ).fetchone()
-                if request_identity is None:
-                    raise ValueError("request identity missing")
-                identity = json.loads(request_identity[0])
-                if observation is not None and observation.provider != identity["provider"]:
-                    raise ValueError("observation provider does not match request")
                 connection.execute(
                     "INSERT INTO observations(generation_id, request_key, disposition, response_json, response_digest, "
                     "provider, schema_version, authoritative_empty, observed_at, safe_diagnostic) "
@@ -1522,8 +1593,8 @@ class Ledger:
                     raise ValueError("dominated terminalization requires typed dominance evidence")
                 terminal_observations = [
                     connection.execute(
-                        "SELECT request_key, provider, disposition FROM observations WHERE generation_id = ? "
-                        "AND request_key = ?",
+                        "SELECT request_key, provider, disposition, response_json FROM observations "
+                        "WHERE generation_id = ? AND request_key = ?",
                         (generation_id, observation_key),
                     ).fetchone()
                     for observation_key in evidence.stronger_observation_keys
@@ -1533,8 +1604,13 @@ class Ledger:
                     item["disposition"] != TaskDisposition.SUCCEEDED.value for item in terminal_observations
                 ):
                     raise ValueError("dominance evidence must reference succeeded observations")
-                if any(item["provider"] not in _DOMINANCE_PROVIDERS[evidence.rule] for item in terminal_observations):
-                    raise ValueError("stronger observation provider is not allowed by dominance rule")
+                lower_observation = connection.execute(
+                    "SELECT request_key, provider, disposition, response_json FROM observations "
+                    "WHERE generation_id = ? AND request_key = ?",
+                    (generation_id, evidence.dominated_observation_key),
+                ).fetchone()
+                if lower_observation is None or lower_observation["disposition"] != TaskDisposition.SUCCEEDED.value:
+                    raise ValueError("dominance evidence requires a succeeded dominated observation")
                 request_identity = connection.execute(
                     "SELECT request.identity_json, task.provider FROM tasks AS task JOIN requests AS request ON "
                     "request.generation_id = task.generation_id AND request.request_key = task.request_key "
@@ -1546,23 +1622,22 @@ class Ledger:
                 requested_fields = tuple(json.loads(request_identity[0])["requested_fields"])
                 if tuple(sorted(evidence.covered_fields)) != tuple(sorted(requested_fields)):
                     raise ValueError("dominance covered fields must exactly match dominated requested fields")
-                if evidence.rule is DominanceRule.PUBLISHED_OVER_PREPRINT and not set(requested_fields).issubset(
-                    _PUBLISHED_OVER_PREPRINT_FIELDS
+                if not _merge_proves_dominance(
+                    lower_observation["provider"],
+                    json.loads(lower_observation["response_json"]),
+                    [(item["provider"], json.loads(item["response_json"])) for item in terminal_observations],
+                    evidence.covered_fields,
+                    evidence.rule,
                 ):
-                    raise ValueError("published-over-preprint dominance only covers DOI and journal fields")
-                if evidence.rule is DominanceRule.AUTHORITATIVE_METADATA:
-                    dominated_rank = _TRUST_RANK.get(request_identity["provider"])
-                    if dominated_rank is None or any(
-                        _TRUST_RANK[item["provider"]] >= dominated_rank for item in terminal_observations
-                    ):
-                        raise ValueError("authoritative metadata dominance requires a higher-trust provider")
+                    raise ValueError("live merge policy does not prove dominance for every covered field")
                 connection.execute(
-                    "INSERT INTO dominance_evidence(generation_id, task_key, stronger_observations_json, rule, "
-                    "covered_fields_json) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO dominance_evidence(generation_id, task_key, stronger_observations_json, "
+                    "dominated_observation_key, rule, covered_fields_json) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         generation_id,
                         task_key,
                         _canonical(sorted(evidence.stronger_observation_keys)),
+                        evidence.dominated_observation_key,
                         evidence.rule.value,
                         _canonical(sorted(evidence.covered_fields)),
                     ),
@@ -1903,6 +1978,20 @@ class Ledger:
                     "SELECT author_key, publication_key, field_name, selected_value_digest, provider, request_key, "
                     "decision_rule FROM field_provenance WHERE generation_id = ? "
                     "ORDER BY author_key, publication_key, field_name",
+                    (generation_id,),
+                )
+            ],
+            "dominance_evidence": [
+                {
+                    "task_key": row["task_key"],
+                    "stronger_observation_keys": json.loads(row["stronger_observations_json"]),
+                    "dominated_observation_key": row["dominated_observation_key"],
+                    "rule": row["rule"],
+                    "covered_fields": json.loads(row["covered_fields_json"]),
+                }
+                for row in connection.execute(
+                    "SELECT task_key, stronger_observations_json, dominated_observation_key, rule, "
+                    "covered_fields_json FROM dominance_evidence WHERE generation_id = ? ORDER BY task_key",
                     (generation_id,),
                 )
             ],

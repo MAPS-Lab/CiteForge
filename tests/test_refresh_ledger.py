@@ -102,7 +102,7 @@ def _finish_request_and_task(ledger: Ledger, disposition: TaskDisposition) -> No
     observation = ProviderObservation(
         provider="crossref",
         schema_version="1",
-        response={"result": "ok"} if disposition is TaskDisposition.SUCCEEDED else {},
+        response={"title": "Complete title", "year": 2026} if disposition is TaskDisposition.SUCCEEDED else {},
         authoritative_empty=disposition is TaskDisposition.CONFIRMED_EMPTY,
     )
     ledger.finish_request(
@@ -123,7 +123,9 @@ def _finish_request_and_task(ledger: Ledger, disposition: TaskDisposition) -> No
         evidence=(
             ApplicabilityReason.NO_APPLICABLE_IDENTIFIER
             if disposition is TaskDisposition.NOT_APPLICABLE
-            else DominanceEvidence((request_claim.key,), "stronger-current-observation", ("title", "year"))
+            else DominanceEvidence(
+                (request_claim.key,), "stronger-current-observation", ("title", "year"), request_claim.key
+            )
             if disposition is TaskDisposition.DOMINATED
             else None
         ),
@@ -134,6 +136,40 @@ def _finish_request_and_task(ledger: Ledger, disposition: TaskDisposition) -> No
 def _seal_and_run(ledger: Ledger, tasks: list[TaskSpec]) -> None:
     ledger.seal_plan(tasks, required_validations=())
     ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+
+
+def _record_dominance_observations(
+    ledger: Ledger,
+    stronger: TaskSpec,
+    stronger_response: dict[str, object],
+    dominated: TaskSpec,
+    dominated_response: dict[str, object],
+) -> tuple[str, str, str, str]:
+    claims = {}
+    for index in range(2):
+        owner = f"worker-{index}"
+        claim = ledger.claim_due(owner, NOW, timedelta(minutes=1))
+        assert claim and claim.request_key
+        request_claim = ledger.claim_request(claim.key, owner, NOW, timedelta(minutes=1))
+        assert request_claim
+        task, response = (
+            (stronger, stronger_response)
+            if request_claim.key == stronger.request.key
+            else (dominated, dominated_response)
+        )
+        ledger.finish_request(
+            request_claim.key,
+            owner,
+            TaskDisposition.SUCCEEDED,
+            NOW,
+            observation=ProviderObservation(task.provider, "1", response),
+        )
+        claims[task.key] = (claim.key, request_claim.key, owner)
+        if task is stronger:
+            ledger.finish_task(claim.key, owner, TaskDisposition.SUCCEEDED, NOW)
+    strong_request_key = claims[stronger.key][1]
+    dominated_claim_key, dominated_request_key, dominated_owner = claims[dominated.key]
+    return strong_request_key, dominated_request_key, dominated_claim_key, dominated_owner
 
 
 def test_schema_pragmas_and_generation_resume_are_fail_closed(tmp_path: Path) -> None:
@@ -345,7 +381,7 @@ def test_task_cannot_claim_success_from_unfinished_or_contradictory_request(tmp_
             "worker",
             TaskDisposition.SUCCEEDED,
             NOW,
-            observation=ProviderObservation("crossref", "1", {"result": "ok"}),
+            observation=ProviderObservation("crossref", "1", {"title": "Complete title", "year": 2026}),
         )
         with pytest.raises(ValueError, match="request disposition"):
             ledger.finish_task(task_claim.key, "worker", TaskDisposition.CONFIRMED_EMPTY, NOW, reason="empty")
@@ -420,7 +456,7 @@ def test_fault_injection_occurs_after_durable_boundary(tmp_path: Path, fault_nam
                     "worker",
                     TaskDisposition.SUCCEEDED,
                     NOW,
-                    observation=ProviderObservation("crossref", "1", {"title": "A durable response"}),
+                    observation=ProviderObservation("crossref", "1", {"title": "A durable response", "year": 2026}),
                 )
             elif fault_name == "after_task_terminalization":
                 ledger.finish_request(
@@ -428,7 +464,7 @@ def test_fault_injection_occurs_after_durable_boundary(tmp_path: Path, fault_nam
                     "worker",
                     TaskDisposition.SUCCEEDED,
                     NOW,
-                    observation=ProviderObservation("crossref", "1", {"title": "A durable response"}),
+                    observation=ProviderObservation("crossref", "1", {"title": "A durable response", "year": 2026}),
                 )
                 ledger.finish_task(task_claim.key, "worker", TaskDisposition.SUCCEEDED, NOW, reason="proof")
             else:
@@ -459,7 +495,7 @@ def test_fault_injection_occurs_after_durable_boundary(tmp_path: Path, fault_nam
             assert manifest["requests"][0]["state"] == "succeeded"
             result = reopened.request_result(manifest["requests"][0]["request_key"])
             assert result is not None
-            assert result.normalized_response == {"title": "A durable response"}
+            assert result.normalized_response == {"title": "A durable response", "year": 2026}
         if fault_name == "after_task_terminalization":
             assert manifest["tasks"][0]["state"] == "succeeded"
         if fault_name == "after_manifest_commit":
@@ -725,6 +761,56 @@ def test_typed_terminal_evidence_is_required(tmp_path: Path) -> None:
             )
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"title": "A complete title"},
+        {"title": "", "year": 2026},
+        {"title": "unknown", "year": 2026},
+        {"title": "A complete title", "year": []},
+    ],
+)
+def test_success_requires_nonempty_nonplaceholder_values_for_every_requested_field(
+    tmp_path: Path, response: dict[str, object]
+) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        task = _task()
+        ledger.plan_task(task)
+        _seal_and_run(ledger, [task])
+        claim = ledger.claim_due("worker", NOW, timedelta(minutes=1))
+        assert claim
+        request_claim = ledger.claim_request(claim.key, "worker", NOW, timedelta(minutes=1))
+        assert request_claim
+        with pytest.raises(ValueError, match="requested field"):
+            ledger.finish_request(
+                request_claim.key,
+                "worker",
+                TaskDisposition.SUCCEEDED,
+                NOW,
+                observation=ProviderObservation("crossref", "1", response),
+            )
+
+
+def test_confirmed_empty_rejects_nonempty_response(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        task = _task()
+        ledger.plan_task(task)
+        _seal_and_run(ledger, [task])
+        claim = ledger.claim_due("worker", NOW, timedelta(minutes=1))
+        assert claim
+        request_claim = ledger.claim_request(claim.key, "worker", NOW, timedelta(minutes=1))
+        assert request_claim
+        with pytest.raises(ValueError, match="empty response"):
+            ledger.finish_request(
+                request_claim.key,
+                "worker",
+                TaskDisposition.CONFIRMED_EMPTY,
+                NOW,
+                observation=ProviderObservation("crossref", "1", {"title": "Unexpected"}, True),
+            )
+
+
 def test_not_applicable_and_dominated_require_typed_matching_evidence(tmp_path: Path) -> None:
     with _open_ready(tmp_path / "ledger.db") as ledger:
         applicable = _task("applicable")
@@ -771,7 +857,7 @@ def test_planned_not_applicable_task_has_no_request_and_closes_with_typed_reason
                 "worker",
                 TaskDisposition.DOMINATED,
                 NOW,
-                evidence=DominanceEvidence(("0" * 64,), "rule", ()),
+                evidence=DominanceEvidence(("0" * 64,), "rule", (), "1" * 64),
             )
 
 
@@ -958,7 +1044,10 @@ def test_dominance_requires_succeeded_allowed_provider_and_exact_fields(tmp_path
                 TaskDisposition.DOMINATED,
                 NOW,
                 evidence=DominanceEvidence(
-                    (strong_request.key,), DominanceRule.PUBLISHED_OVER_PREPRINT, ("title", "year")
+                    (strong_request.key,),
+                    DominanceRule.PUBLISHED_OVER_PREPRINT,
+                    ("title", "year"),
+                    strong_request.key,
                 ),
             )
 
@@ -989,24 +1078,40 @@ def test_dominance_rejects_wrong_fields_and_provider_for_rule(tmp_path: Path) ->
         )
         dominated_claim = ledger.claim_due("weak", NOW, timedelta(minutes=1))
         assert dominated_claim
+        dominated_request = ledger.claim_request(dominated_claim.key, "weak", NOW, timedelta(minutes=1))
+        assert dominated_request
+        ledger.finish_request(
+            dominated_request.key,
+            "weak",
+            TaskDisposition.SUCCEEDED,
+            NOW,
+            observation=ProviderObservation("scholar_min", "1", {"title": "Weak title", "year": 2025}),
+        )
         with pytest.raises(ValueError, match="covered fields"):
             ledger.finish_task(
                 dominated_claim.key,
                 "weak",
                 TaskDisposition.DOMINATED,
                 NOW,
-                evidence=DominanceEvidence((strong_request.key,), DominanceRule.AUTHORITATIVE_METADATA, ("title",)),
+                evidence=DominanceEvidence(
+                    (strong_request.key,), DominanceRule.AUTHORITATIVE_METADATA, ("title",), dominated_request.key
+                ),
             )
         ledger.finish_task(
             dominated_claim.key,
             "weak",
             TaskDisposition.DOMINATED,
             NOW,
-            evidence=DominanceEvidence((strong_request.key,), DominanceRule.AUTHORITATIVE_METADATA, ("title", "year")),
+            evidence=DominanceEvidence(
+                (strong_request.key,),
+                DominanceRule.AUTHORITATIVE_METADATA,
+                ("title", "year"),
+                dominated_request.key,
+            ),
         )
 
 
-def test_dominance_rejects_provider_not_allowed_by_rule(tmp_path: Path) -> None:
+def test_dominance_rejects_unprovable_scholar_observation(tmp_path: Path) -> None:
     with _open_ready(tmp_path / "ledger.db") as ledger:
         scholar_request = RequestSpec(
             "scholar", "lookup", "GET", {"query": "paper"}, ("title", "year"), "1", "epoch", "scholar"
@@ -1029,16 +1134,105 @@ def test_dominance_rejects_provider_not_allowed_by_rule(tmp_path: Path) -> None:
         )
         dominated_claim = ledger.claim_due("weak", NOW, timedelta(minutes=1))
         assert dominated_claim
-        with pytest.raises(ValueError, match="not allowed"):
+        with pytest.raises(ValueError, match="live merge policy"):
             ledger.finish_task(
                 dominated_claim.key,
                 "weak",
                 TaskDisposition.DOMINATED,
                 NOW,
                 evidence=DominanceEvidence(
-                    (strong_request.key,), DominanceRule.AUTHORITATIVE_METADATA, ("title", "year")
+                    (strong_request.key,),
+                    DominanceRule.AUTHORITATIVE_METADATA,
+                    ("title", "year"),
+                    strong_request.key,
                 ),
             )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "stronger_provider", "lower_value", "stronger_value"),
+    [
+        ("title", "arxiv", "A substantially longer incumbent paper title", "Short title"),
+        ("pages", "crossref", "1-10", "2025.11.07.685935"),
+        ("booktitle", "crossref", "Specific Systems Conference", "Lecture Notes in Computer Science"),
+    ],
+)
+def test_dominance_rejects_values_blocked_by_live_merge_guards(
+    tmp_path: Path, field_name: str, stronger_provider: str, lower_value: str, stronger_value: str
+) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        stronger_request = RequestSpec(
+            stronger_provider,
+            "lookup",
+            "GET",
+            {"query": "stronger"},
+            (field_name,),
+            "1",
+            "epoch",
+            stronger_provider,
+        )
+        lower_request = RequestSpec(
+            "scholar_min",
+            "lookup",
+            "GET",
+            {"query": "lower"},
+            (field_name,),
+            "1",
+            "epoch",
+            "scholar",
+        )
+        stronger = TaskSpec("author-ada", "pub-strong", stronger_provider, "lookup", stronger_request)
+        dominated = TaskSpec("author-ada", "pub-lower", "scholar_min", "lookup", lower_request)
+        ledger.plan_task(stronger)
+        ledger.plan_task(dominated)
+        _seal_and_run(ledger, [stronger, dominated])
+        strong_key, lower_key, claim_key, owner = _record_dominance_observations(
+            ledger, stronger, {field_name: stronger_value}, dominated, {field_name: lower_value}
+        )
+        with pytest.raises(ValueError, match="live merge policy"):
+            ledger.finish_task(
+                claim_key,
+                owner,
+                TaskDisposition.DOMINATED,
+                NOW,
+                evidence=DominanceEvidence(
+                    (strong_key,), DominanceRule.AUTHORITATIVE_METADATA, (field_name,), lower_key
+                ),
+            )
+
+
+def test_published_over_preprint_requires_actual_values_and_live_merge_selection(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        fields = ("doi", "journal")
+        stronger_request = RequestSpec(
+            "crossref", "lookup", "GET", {"query": "published"}, fields, "1", "epoch", "public"
+        )
+        lower_request = RequestSpec(
+            "scholar_min", "lookup", "GET", {"query": "preprint"}, fields, "1", "epoch", "scholar"
+        )
+        stronger = TaskSpec("author-ada", "pub-published", "crossref", "lookup", stronger_request)
+        dominated = TaskSpec("author-ada", "pub-preprint", "scholar_min", "lookup", lower_request)
+        ledger.plan_task(stronger)
+        ledger.plan_task(dominated)
+        _seal_and_run(ledger, [stronger, dominated])
+        strong_key, lower_key, claim_key, owner = _record_dominance_observations(
+            ledger,
+            stronger,
+            {"doi": "10.1000/published", "journal": "Journal of Sound Results"},
+            dominated,
+            {"doi": "10.48550/arxiv.2601.12345", "journal": "arXiv e-prints"},
+        )
+        ledger.finish_task(
+            claim_key,
+            owner,
+            TaskDisposition.DOMINATED,
+            NOW,
+            evidence=DominanceEvidence((strong_key,), DominanceRule.PUBLISHED_OVER_PREPRINT, fields, lower_key),
+        )
+        manifest = ledger.manifest().data
+        task_states = {item["task_key"]: item["state"] for item in manifest["tasks"]}
+        assert task_states[dominated.key] == "dominated"
+        assert manifest["dominance_evidence"][0]["dominated_observation_key"] == lower_key
 
 
 @pytest.mark.parametrize(
@@ -1093,7 +1287,7 @@ def test_field_provenance_requires_succeeded_matching_observation(tmp_path: Path
             "worker",
             TaskDisposition.SUCCEEDED,
             NOW,
-            observation=ProviderObservation("crossref", "1", {"title": "title"}),
+            observation=ProviderObservation("crossref", "1", {"title": "title", "year": 2026}),
         )
         ledger.record_field_provenance(
             "author-ada",
