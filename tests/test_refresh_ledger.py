@@ -14,10 +14,12 @@ from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
 from citeforge.refresh.ledger import (
     ApplicabilityReason,
     DominanceEvidence,
+    DominanceRule,
     EvidenceState,
     FaultInjectedError,
     Ledger,
     MaterializationEvidence,
+    ProvenanceRule,
     ProviderObservation,
     PublicationMetadata,
     RequestSpec,
@@ -699,7 +701,7 @@ def test_inventory_obligations_derive_exactly_from_enabled_census_sources(tmp_pa
         for task in derived[:-1]:
             ledger.plan_task(task)
         with pytest.raises(ValueError, match="inventory obligation"):
-            ledger.seal_plan(derived[:-1], required_validations=())
+            ledger.seal_plan(derived[:-1], required_validations=(), inventory_freshness_epoch="2026-08")
 
 
 def test_typed_terminal_evidence_is_required(tmp_path: Path) -> None:
@@ -844,22 +846,10 @@ def test_typed_evidence_writers_are_manifested(tmp_path: Path) -> None:
         )
         ledger.record_publication_metadata(publication)
         ledger.record_provider_state("crossref", "public", 2, "closed", 3, 1)
-        task = _task("provenance")
-        ledger.plan_task(task)
-        ledger.record_field_provenance(
-            "author-ada",
-            "pub-typed",
-            "title",
-            "a" * 64,
-            "crossref",
-            task.request.key,
-            "trust-policy",
-        )
         manifest = ledger.manifest().data
         typed_publication = next(item for item in manifest["publications"] if item["publication_key"] == "pub-typed")
         assert typed_publication["normalized_title"] == "typed title"
         assert manifest["provider_state"][0]["current_concurrency"] == 2
-        assert manifest["field_provenance"][0]["field_name"] == "title"
 
 
 def test_claims_require_sealed_running_generation(tmp_path: Path) -> None:
@@ -895,3 +885,223 @@ def test_sealed_obligation_tamper_is_blocked_and_detected(tmp_path: Path, mutati
     with Ledger.open(path) as ledger:
         census = _census(enabled=False)
         ledger.create_or_resume(_generation(census), census)
+
+
+def test_seal_rejects_forged_inventory_request_identity(tmp_path: Path) -> None:
+    census = _census(enabled=True)
+    spec = _generation(census)
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        ledger.create_or_resume(spec, census)
+        forged = TaskSpec(
+            "author-ada",
+            None,
+            "scholar",
+            "inventory",
+            RequestSpec(
+                "scholar",
+                "inventory",
+                "POST",
+                {"profile_id": "WrongProfile"},
+                ("title",),
+                "wrong-adapter",
+                "stale",
+                "wrong-quota",
+            ),
+        )
+        ledger.plan_task(forged)
+        with pytest.raises(ValueError, match="canonical inventory"):
+            ledger.seal_plan([forged], inventory_freshness_epoch="2026-08")
+
+
+def test_seal_requires_request_backed_applicable_inventory(tmp_path: Path) -> None:
+    census = _census(enabled=True)
+    spec = _generation(census)
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        ledger.create_or_resume(spec, census)
+        requestless = TaskSpec(
+            "author-ada",
+            None,
+            "scholar",
+            "inventory",
+            None,
+            applicability="not_applicable",
+        )
+        ledger.plan_task(requestless)
+        with pytest.raises(ValueError, match="canonical inventory"):
+            ledger.seal_plan([requestless], inventory_freshness_epoch="2026-08")
+
+
+def test_dominance_requires_succeeded_allowed_provider_and_exact_fields(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        stronger = _task("stronger")
+        dominated = _task("dominated", request=_request(query="doi:10.1/dominated"))
+        ledger.plan_task(stronger)
+        ledger.plan_task(dominated)
+        _seal_and_run(ledger, [stronger, dominated])
+        strong_claim = ledger.claim_due("strong", NOW, timedelta(minutes=1))
+        assert strong_claim
+        strong_request = ledger.claim_request(strong_claim.key, "strong", NOW, timedelta(minutes=1))
+        assert strong_request
+        ledger.finish_request(
+            strong_request.key,
+            "strong",
+            TaskDisposition.CONFIRMED_EMPTY,
+            NOW,
+            observation=ProviderObservation("crossref", "1", {}, True),
+        )
+        dominated_claim = ledger.claim_due("weak", NOW, timedelta(minutes=1))
+        assert dominated_claim
+        with pytest.raises(ValueError, match="succeeded observation"):
+            ledger.finish_task(
+                dominated_claim.key,
+                "weak",
+                TaskDisposition.DOMINATED,
+                NOW,
+                evidence=DominanceEvidence(
+                    (strong_request.key,), DominanceRule.PUBLISHED_OVER_PREPRINT, ("title", "year")
+                ),
+            )
+
+
+def test_dominance_rejects_wrong_fields_and_provider_for_rule(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        openalex_request = RequestSpec(
+            "openalex", "lookup", "GET", {"query": "paper"}, ("title", "year"), "1", "epoch", "openalex"
+        )
+        stronger = TaskSpec("author-ada", "pub-strong", "openalex", "lookup", openalex_request)
+        weak_request = RequestSpec(
+            "scholar_min", "lookup", "GET", {"query": "paper"}, ("title", "year"), "1", "epoch", "scholar"
+        )
+        dominated = TaskSpec("author-ada", "pub-dominated", "scholar_min", "lookup", weak_request)
+        ledger.plan_task(stronger)
+        ledger.plan_task(dominated)
+        _seal_and_run(ledger, [stronger, dominated])
+        strong_claim = ledger.claim_due("strong", NOW, timedelta(minutes=1))
+        assert strong_claim
+        strong_request = ledger.claim_request(strong_claim.key, "strong", NOW, timedelta(minutes=1))
+        assert strong_request
+        ledger.finish_request(
+            strong_request.key,
+            "strong",
+            TaskDisposition.SUCCEEDED,
+            NOW,
+            observation=ProviderObservation("openalex", "1", {"title": "Strong", "year": 2026}),
+        )
+        dominated_claim = ledger.claim_due("weak", NOW, timedelta(minutes=1))
+        assert dominated_claim
+        with pytest.raises(ValueError, match="covered fields"):
+            ledger.finish_task(
+                dominated_claim.key,
+                "weak",
+                TaskDisposition.DOMINATED,
+                NOW,
+                evidence=DominanceEvidence((strong_request.key,), DominanceRule.AUTHORITATIVE_METADATA, ("title",)),
+            )
+        ledger.finish_task(
+            dominated_claim.key,
+            "weak",
+            TaskDisposition.DOMINATED,
+            NOW,
+            evidence=DominanceEvidence((strong_request.key,), DominanceRule.AUTHORITATIVE_METADATA, ("title", "year")),
+        )
+
+
+def test_dominance_rejects_provider_not_allowed_by_rule(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        scholar_request = RequestSpec(
+            "scholar", "lookup", "GET", {"query": "paper"}, ("title", "year"), "1", "epoch", "scholar"
+        )
+        stronger = TaskSpec("author-ada", "pub-strong", "scholar", "lookup", scholar_request)
+        dominated = _task("dominated", request=_request(query="doi:10.1/dominated"))
+        ledger.plan_task(stronger)
+        ledger.plan_task(dominated)
+        _seal_and_run(ledger, [stronger, dominated])
+        strong_claim = ledger.claim_due("strong", NOW, timedelta(minutes=1))
+        assert strong_claim
+        strong_request = ledger.claim_request(strong_claim.key, "strong", NOW, timedelta(minutes=1))
+        assert strong_request
+        ledger.finish_request(
+            strong_request.key,
+            "strong",
+            TaskDisposition.SUCCEEDED,
+            NOW,
+            observation=ProviderObservation("scholar", "1", {"title": "Strong", "year": 2026}),
+        )
+        dominated_claim = ledger.claim_due("weak", NOW, timedelta(minutes=1))
+        assert dominated_claim
+        with pytest.raises(ValueError, match="not allowed"):
+            ledger.finish_task(
+                dominated_claim.key,
+                "weak",
+                TaskDisposition.DOMINATED,
+                NOW,
+                evidence=DominanceEvidence(
+                    (strong_request.key,), DominanceRule.AUTHORITATIVE_METADATA, ("title", "year")
+                ),
+            )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE tasks SET provider = 'dblp'",
+        "UPDATE tasks SET request_key = NULL",
+        "DELETE FROM tasks",
+        "UPDATE requests SET identity_json = '{}'",
+        "UPDATE requests SET request_key = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+        "DELETE FROM requests",
+    ],
+)
+def test_sealed_task_and_request_identity_mutation_is_blocked(tmp_path: Path, statement: str) -> None:
+    path = tmp_path / "ledger.db"
+    with _open_ready(path) as ledger:
+        task = _task()
+        ledger.plan_task(task)
+        ledger.seal_plan([task])
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys = ON")
+    with pytest.raises(sqlite3.IntegrityError, match="sealed"):
+        connection.execute(statement)
+    connection.close()
+
+
+def test_field_provenance_requires_succeeded_matching_observation(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        publication = PublicationMetadata(
+            "author-ada", "pub-provenance", "scholar", "title", 2026, {}, "output/p.bib", "monthly"
+        )
+        ledger.record_publication_metadata(publication)
+        task = _task("provenance")
+        ledger.plan_task(task)
+        with pytest.raises(ValueError, match="succeeded observation"):
+            ledger.record_field_provenance(
+                "author-ada",
+                "pub-provenance",
+                "title",
+                "a" * 64,
+                "crossref",
+                task.request.key,
+                ProvenanceRule.TRUST_POLICY,
+            )
+        _seal_and_run(ledger, [task])
+        claim = ledger.claim_due("worker", NOW, timedelta(minutes=1))
+        assert claim
+        request_claim = ledger.claim_request(claim.key, "worker", NOW, timedelta(minutes=1))
+        assert request_claim
+        ledger.finish_request(
+            request_claim.key,
+            "worker",
+            TaskDisposition.SUCCEEDED,
+            NOW,
+            observation=ProviderObservation("crossref", "1", {"title": "title"}),
+        )
+        ledger.record_field_provenance(
+            "author-ada",
+            "pub-provenance",
+            "title",
+            "a" * 64,
+            "crossref",
+            task.request.key,
+            ProvenanceRule.TRUST_POLICY,
+        )
+        assert ledger.manifest().data["field_provenance"][0]["provider"] == "crossref"

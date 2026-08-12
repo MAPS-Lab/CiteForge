@@ -16,6 +16,7 @@ from types import MappingProxyType
 from typing import cast
 from urllib.parse import parse_qsl, urlsplit
 
+from ..config import TRUST_ORDER
 from .census import AuthorCensus
 from .types import GenerationSpec, GenerationState, TaskDisposition
 
@@ -172,6 +173,25 @@ class ApplicabilityReason(str, Enum):
     PROVIDER_NOT_SUPPORTED = "provider_not_supported"
 
 
+class DominanceRule(str, Enum):
+    PUBLISHED_OVER_PREPRINT = "published_over_preprint"
+    AUTHORITATIVE_METADATA = "authoritative_metadata"
+
+
+class ProvenanceRule(str, Enum):
+    TRUST_POLICY = "trust_policy"
+    PUBLISHED_OVER_PREPRINT = "published_over_preprint"
+
+
+_TRUST_RANK = {provider: rank for rank, provider in enumerate(TRUST_ORDER)}
+_REGISTRY_PROVIDERS = frozenset(TRUST_ORDER[: TRUST_ORDER.index("openalex")])
+_DOMINANCE_PROVIDERS = {
+    DominanceRule.PUBLISHED_OVER_PREPRINT: _REGISTRY_PROVIDERS,
+    DominanceRule.AUTHORITATIVE_METADATA: frozenset(TRUST_ORDER),
+}
+_PUBLISHED_OVER_PREPRINT_FIELDS = frozenset({"doi", "journal"})
+
+
 class EvidenceState(str, Enum):
     PENDING = "pending"
     FAILED = "failed"
@@ -204,7 +224,7 @@ class ProviderObservation:
 @dataclass(frozen=True)
 class DominanceEvidence:
     stronger_observation_keys: tuple[str, ...]
-    rule: str
+    rule: DominanceRule
     covered_fields: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -212,7 +232,8 @@ class DominanceEvidence:
             raise ValueError("dominance evidence requires observations and covered fields")
         for key in self.stronger_observation_keys:
             _digest_text(key, "observation key")
-        _identifier(self.rule, "dominance rule")
+        if not isinstance(self.rule, DominanceRule):
+            raise ValueError("invalid dominance rule")
         for field_name in self.covered_fields:
             if not _FIELD_RE.fullmatch(field_name):
                 raise ValueError("invalid dominated field")
@@ -491,7 +512,8 @@ class Ledger:
                     blocking_reason TEXT NOT NULL DEFAULT '',
                     plan_sealed INTEGER NOT NULL DEFAULT 0 CHECK(plan_sealed IN (0, 1)),
                     plan_digest TEXT,
-                    completed_manifest_digest TEXT
+                    completed_manifest_digest TEXT,
+                    inventory_freshness_epoch TEXT
                 );
                 CREATE TABLE IF NOT EXISTS authors (
                     generation_id TEXT NOT NULL REFERENCES generations(generation_id),
@@ -705,6 +727,37 @@ class Ledger:
                         f"{'OLD' if operation != 'INSERT' else 'NEW'}.generation_id) = 1 "
                         "BEGIN SELECT RAISE(ABORT, 'sealed obligations are immutable'); END"
                     )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS tasks_sealed_identity_update BEFORE UPDATE OF task_key, author_key, "
+                "publication_key, provider, operation, request_key, identity_digest, required, applicability ON tasks "
+                "WHEN (SELECT plan_sealed FROM generations WHERE generation_id = OLD.generation_id) = 1 "
+                "BEGIN SELECT RAISE(ABORT, 'sealed task identity is immutable'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS tasks_sealed_delete BEFORE DELETE ON tasks WHEN "
+                "(SELECT plan_sealed FROM generations WHERE generation_id = OLD.generation_id) = 1 "
+                "BEGIN SELECT RAISE(ABORT, 'sealed task identity is immutable'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS tasks_sealed_insert BEFORE INSERT ON tasks WHEN "
+                "(SELECT plan_sealed FROM generations WHERE generation_id = NEW.generation_id) = 1 "
+                "BEGIN SELECT RAISE(ABORT, 'sealed task identity is immutable'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS requests_sealed_identity_update BEFORE UPDATE OF request_key, "
+                "identity_json ON requests WHEN (SELECT plan_sealed FROM generations WHERE generation_id = "
+                "OLD.generation_id) = 1 BEGIN SELECT RAISE(ABORT, 'sealed request identity is immutable'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS requests_sealed_delete BEFORE DELETE ON requests WHEN "
+                "(SELECT plan_sealed FROM generations WHERE generation_id = OLD.generation_id) = 1 "
+                "BEGIN SELECT RAISE(ABORT, 'sealed request identity is immutable'); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS requests_sealed_insert BEFORE INSERT ON requests WHEN "
+                "(SELECT plan_sealed FROM generations WHERE generation_id = NEW.generation_id) = 1 "
+                "BEGIN SELECT RAISE(ABORT, 'sealed request identity is immutable'); END"
+            )
             connection.execute(
                 "CREATE TRIGGER IF NOT EXISTS attempts_no_delete BEFORE DELETE ON attempts "
                 "BEGIN SELECT RAISE(ABORT, 'attempts are append-only'); END"
@@ -979,6 +1032,7 @@ class Ledger:
         expected_tasks: list[TaskSpec],
         *,
         required_validations: tuple[ValidationSpec, ...] = (),
+        inventory_freshness_epoch: str | None = None,
     ) -> None:
         generation_id = self._generation_id()
         declared = {task.key: task for task in expected_tasks}
@@ -1011,23 +1065,48 @@ class Ledger:
             }
             if actual != expected:
                 raise ValueError("expected obligations do not exactly match planned tasks")
-            census_rows = connection.execute(
-                "SELECT row_key, scholar_id, dblp_id FROM authors WHERE generation_id = ? AND enabled = 1",
-                (generation_id,),
+            census_rows = list(
+                connection.execute(
+                    "SELECT row_key, scholar_id, dblp_id FROM authors WHERE generation_id = ? AND enabled = 1",
+                    (generation_id,),
+                )
             )
-            mandatory_inventory = {
-                (row["row_key"], provider)
+            generation_identity = json.loads(
+                connection.execute(
+                    "SELECT identity_json FROM generations WHERE generation_id = ?", (generation_id,)
+                ).fetchone()[0]
+            )
+            mandatory_sources = [
+                (row["row_key"], provider, provider_id)
                 for row in census_rows
                 for provider, provider_id in (("scholar", row["scholar_id"]), ("dblp", row["dblp_id"]))
                 if provider_id
-            }
-            declared_inventory = {
-                (task.author_key, task.provider)
-                for task in expected_tasks
-                if task.required and task.operation == "inventory"
-            }
-            if declared_inventory != mandatory_inventory:
-                raise ValueError("inventory obligations do not exactly match enabled census sources")
+            ]
+            if mandatory_sources and inventory_freshness_epoch is None:
+                raise ValueError("canonical inventory obligations require an explicit freshness epoch")
+            if inventory_freshness_epoch is not None:
+                inventory_freshness_epoch = _identifier(inventory_freshness_epoch, "inventory freshness epoch")
+            canonical_inventory: list[TaskSpec] = []
+            for author_key, provider, profile_id in mandatory_sources:
+                adapter_version = generation_identity["adapter_versions"].get(provider)
+                if adapter_version is None:
+                    raise ValueError(f"generation lacks adapter version for inventory provider {provider}")
+                request = RequestSpec(
+                    provider,
+                    "inventory",
+                    "GET",
+                    {"profile_id": profile_id},
+                    ("publications",),
+                    adapter_version,
+                    cast(str, inventory_freshness_epoch),
+                    provider,
+                )
+                canonical_inventory.append(TaskSpec(author_key, None, provider, "inventory", request))
+            declared_inventory = [task for task in expected_tasks if task.operation == "inventory"]
+            if [task.key for task in sorted(declared_inventory, key=lambda item: item.key)] != [
+                task.key for task in sorted(canonical_inventory, key=lambda item: item.key)
+            ]:
+                raise ValueError("declared tasks do not match full canonical inventory obligations")
             connection.executemany(
                 "INSERT INTO plan_obligations(generation_id, task_key, identity_digest, author_key, provider, "
                 "operation, required, applicability) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1051,6 +1130,10 @@ class Ledger:
                     (generation_id, validation.name)
                     for validation in sorted(required_validations, key=lambda item: item.name)
                 ],
+            )
+            connection.execute(
+                "UPDATE generations SET inventory_freshness_epoch = ? WHERE generation_id = ?",
+                (inventory_freshness_epoch, generation_id),
             )
             plan_content = self._plan_content(connection, generation_id)
             connection.execute(
@@ -1081,7 +1164,10 @@ class Ledger:
                 (generation_id,),
             )
         ]
-        return {"tasks": tasks, "validations": validations}
+        freshness = connection.execute(
+            "SELECT inventory_freshness_epoch FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()[0]
+        return {"inventory_freshness_epoch": freshness, "tasks": tasks, "validations": validations}
 
     @classmethod
     def _verify_plan_integrity(cls, connection: sqlite3.Connection, generation_id: str) -> None:
@@ -1090,6 +1176,43 @@ class Ledger:
         ).fetchone()
         if generation is None or not generation[0]:
             return
+        live_tasks = connection.execute(
+            "SELECT task.task_key, task.identity_digest, task.author_key, task.publication_key, task.provider, "
+            "task.operation, task.request_key, task.required, task.applicability, obligation.identity_digest AS "
+            "obligation_digest, obligation.author_key AS obligation_author, obligation.provider AS "
+            "obligation_provider, obligation.operation AS obligation_operation, obligation.required AS "
+            "obligation_required, obligation.applicability AS obligation_applicability, request.identity_json "
+            "FROM tasks AS task JOIN plan_obligations AS obligation ON obligation.generation_id = task.generation_id "
+            "AND obligation.task_key = task.task_key LEFT JOIN requests AS request ON request.generation_id = "
+            "task.generation_id AND request.request_key = task.request_key WHERE task.generation_id = ?",
+            (generation_id,),
+        ).fetchall()
+        for task in live_tasks:
+            request_key = task["request_key"]
+            if request_key is not None and (
+                task["identity_json"] is None or _digest(json.loads(task["identity_json"])) != request_key
+            ):
+                raise ValueError("sealed request identity mismatch")
+            canonical_task = {
+                "applicability": task["applicability"],
+                "author_key": task["author_key"],
+                "operation": task["operation"],
+                "provider": task["provider"],
+                "publication_key": task["publication_key"],
+                "request_key": request_key,
+                "required": bool(task["required"]),
+            }
+            if (
+                _digest(canonical_task) != task["task_key"]
+                or task["identity_digest"] != task["task_key"]
+                or task["identity_digest"] != task["obligation_digest"]
+                or task["author_key"] != task["obligation_author"]
+                or task["provider"] != task["obligation_provider"]
+                or task["operation"] != task["obligation_operation"]
+                or task["required"] != task["obligation_required"]
+                or task["applicability"] != task["obligation_applicability"]
+            ):
+                raise ValueError("sealed live task identity mismatch")
         if generation[1] != _digest(cls._plan_content(connection, generation_id)):
             raise ValueError("sealed plan obligation digest mismatch")
 
@@ -1399,14 +1522,40 @@ class Ledger:
                     raise ValueError("dominated terminalization requires typed dominance evidence")
                 terminal_observations = [
                     connection.execute(
-                        "SELECT request_key FROM observations WHERE generation_id = ? AND request_key = ?",
+                        "SELECT request_key, provider, disposition FROM observations WHERE generation_id = ? "
+                        "AND request_key = ?",
                         (generation_id, observation_key),
                     ).fetchone()
                     for observation_key in evidence.stronger_observation_keys
                 ]
                 terminal_observations = [item for item in terminal_observations if item is not None]
-                if len(terminal_observations) != len(evidence.stronger_observation_keys):
-                    raise ValueError("dominance evidence must reference persisted terminal observations")
+                if len(terminal_observations) != len(evidence.stronger_observation_keys) or any(
+                    item["disposition"] != TaskDisposition.SUCCEEDED.value for item in terminal_observations
+                ):
+                    raise ValueError("dominance evidence must reference succeeded observations")
+                if any(item["provider"] not in _DOMINANCE_PROVIDERS[evidence.rule] for item in terminal_observations):
+                    raise ValueError("stronger observation provider is not allowed by dominance rule")
+                request_identity = connection.execute(
+                    "SELECT request.identity_json, task.provider FROM tasks AS task JOIN requests AS request ON "
+                    "request.generation_id = task.generation_id AND request.request_key = task.request_key "
+                    "WHERE task.generation_id = ? AND task.task_key = ?",
+                    (generation_id, task_key),
+                ).fetchone()
+                if request_identity is None:
+                    raise ValueError("dominated task requires a persisted exact request")
+                requested_fields = tuple(json.loads(request_identity[0])["requested_fields"])
+                if tuple(sorted(evidence.covered_fields)) != tuple(sorted(requested_fields)):
+                    raise ValueError("dominance covered fields must exactly match dominated requested fields")
+                if evidence.rule is DominanceRule.PUBLISHED_OVER_PREPRINT and not set(requested_fields).issubset(
+                    _PUBLISHED_OVER_PREPRINT_FIELDS
+                ):
+                    raise ValueError("published-over-preprint dominance only covers DOI and journal fields")
+                if evidence.rule is DominanceRule.AUTHORITATIVE_METADATA:
+                    dominated_rank = _TRUST_RANK.get(request_identity["provider"])
+                    if dominated_rank is None or any(
+                        _TRUST_RANK[item["provider"]] >= dominated_rank for item in terminal_observations
+                    ):
+                        raise ValueError("authoritative metadata dominance requires a higher-trust provider")
                 connection.execute(
                     "INSERT INTO dominance_evidence(generation_id, task_key, stronger_observations_json, rule, "
                     "covered_fields_json) VALUES (?, ?, ?, ?, ?)",
@@ -1414,7 +1563,7 @@ class Ledger:
                         generation_id,
                         task_key,
                         _canonical(sorted(evidence.stronger_observation_keys)),
-                        evidence.rule,
+                        evidence.rule.value,
                         _canonical(sorted(evidence.covered_fields)),
                     ),
                 )
@@ -1626,25 +1775,48 @@ class Ledger:
         selected_value_digest: str,
         provider: str,
         request_key: str,
-        decision_rule: str,
+        decision_rule: ProvenanceRule,
     ) -> None:
         if not _FIELD_RE.fullmatch(field_name):
             raise ValueError("invalid provenance field")
         _digest_text(selected_value_digest, "selected value digest")
         _digest_text(request_key, "request key")
+        if not isinstance(decision_rule, ProvenanceRule):
+            raise ValueError("invalid field provenance decision rule")
         with self._transaction(immediate=True) as connection:
+            generation_id = self._generation_id()
+            grounded = connection.execute(
+                "SELECT observation.provider FROM observations AS observation JOIN tasks AS task ON "
+                "task.generation_id = observation.generation_id AND task.request_key = observation.request_key "
+                "JOIN publications AS publication ON publication.generation_id = task.generation_id AND "
+                "publication.author_key = task.author_key AND publication.publication_key = task.publication_key "
+                "WHERE observation.generation_id = ? AND observation.request_key = ? AND observation.disposition = ? "
+                "AND publication.author_key = ? AND publication.publication_key = ?",
+                (
+                    generation_id,
+                    request_key,
+                    TaskDisposition.SUCCEEDED.value,
+                    author_key,
+                    publication_key,
+                ),
+            ).fetchone()
+            if grounded is None:
+                raise ValueError("field provenance requires a persisted succeeded observation and matching task")
+            validated_provider = _provider(provider)
+            if grounded[0] != validated_provider:
+                raise ValueError("field provenance provider does not match succeeded observation")
             connection.execute(
                 "INSERT INTO field_provenance(generation_id, author_key, publication_key, field_name, "
                 "selected_value_digest, provider, request_key, decision_rule) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    self._generation_id(),
+                    generation_id,
                     _identifier(author_key, "author key"),
                     _identifier(publication_key, "publication key"),
                     field_name,
                     selected_value_digest,
-                    _provider(provider),
+                    validated_provider,
                     request_key,
-                    _identifier(decision_rule, "decision rule"),
+                    decision_rule.value,
                 ),
             )
 
@@ -1655,7 +1827,8 @@ class Ledger:
             generation = connection.execute(
                 "SELECT generation_id, identity_json, census_digest, authors_digest, base_commit, input_digest, "
                 "policy_digest, adapter_digest, state, created_at, updated_at, completed_at, published_at, "
-                "checkpoint_sequence, blocking_reason, plan_sealed, plan_digest FROM generations "
+                "checkpoint_sequence, blocking_reason, plan_sealed, plan_digest, completed_manifest_digest, "
+                "inventory_freshness_epoch FROM generations "
                 "WHERE generation_id = ?",
                 (generation_id,),
             ).fetchone()
@@ -1845,11 +2018,13 @@ class Ledger:
 __all__ = [
     "ApplicabilityReason",
     "DominanceEvidence",
+    "DominanceRule",
     "EvidenceState",
     "FaultInjectedError",
     "Ledger",
     "LedgerManifest",
     "MaterializationEvidence",
+    "ProvenanceRule",
     "ProviderObservation",
     "PublicationMetadata",
     "RequestClaim",
