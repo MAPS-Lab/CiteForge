@@ -25,6 +25,8 @@ from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
 _SCHEMA_VERSION = "3"
 _MAX_PLAN_ROUNDS = 64
+_REGISTERED_CLOSURE_PLANNERS = frozenset({("phased_refresh_planner", "1")})
+_EXPECTED_SCHEMA_FINGERPRINT = "1ef80f0ac7927c4e38ee9d878e0c9d8a4c217e300a1f0ee29fa0f4157afdceca"
 _SATISFIED = frozenset(
     {
         TaskDisposition.SUCCEEDED,
@@ -404,11 +406,54 @@ class ReductionReceipt:
 class PlanStatus:
     revision: int
     closed: bool
+    discovery_closed: bool
     authority_mode: str
     plan_digest: str | None
     closure_digest: str | None
     open_expanders: int
     unbound_tasks: int
+
+
+@dataclass(frozen=True)
+class PlannerClosureEvidence:
+    planner_id: str
+    planner_version: str
+    policy_version: str
+    complete_snapshot_digest: str
+    zero_unseen_task_keys: tuple[str, ...]
+    inventory_union_receipt_digests: tuple[str, ...]
+    publication_coverage_digest: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "planner_id", _identifier(self.planner_id, "planner identifier"))
+        object.__setattr__(self, "planner_version", _identifier(self.planner_version, "planner version"))
+        object.__setattr__(self, "policy_version", _identifier(self.policy_version, "policy version"))
+        _digest_text(self.complete_snapshot_digest, "complete snapshot digest")
+        _digest_text(self.publication_coverage_digest, "publication coverage digest")
+        unseen = tuple(sorted(_digest_text(key, "unseen task key") for key in self.zero_unseen_task_keys))
+        receipts = tuple(
+            sorted(
+                _digest_text(value, "inventory union receipt digest") for value in self.inventory_union_receipt_digests
+            )
+        )
+        if len(set(unseen)) != len(unseen) or len(set(receipts)) != len(receipts):
+            raise ValueError("planner closure evidence contains duplicate identities")
+        object.__setattr__(self, "zero_unseen_task_keys", unseen)
+        object.__setattr__(self, "inventory_union_receipt_digests", receipts)
+
+    @property
+    def digest(self) -> str:
+        return _digest(
+            {
+                "complete_snapshot_digest": self.complete_snapshot_digest,
+                "inventory_union_receipt_digests": self.inventory_union_receipt_digests,
+                "planner_id": self.planner_id,
+                "planner_version": self.planner_version,
+                "policy_version": self.policy_version,
+                "publication_coverage_digest": self.publication_coverage_digest,
+                "zero_unseen_task_keys": self.zero_unseen_task_keys,
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -635,10 +680,21 @@ class Ledger:
 
     def _initialize_schema(self) -> None:
         with self._transaction(immediate=True) as connection:
-            connection.execute("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            existing_version = connection.execute(
-                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-            ).fetchone()
+            user_objects = connection.execute(
+                "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()
+            names = {str(row[0]) for row in user_objects}
+            if user_objects and "schema_meta" not in names:
+                raise ValueError("refusing to initialize nonempty database without schema metadata")
+            if not user_objects:
+                connection.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                existing_version = None
+            else:
+                existing_version = connection.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()
+                if existing_version is None:
+                    raise ValueError("refusing to initialize nonempty database without schema version")
             if existing_version is not None and existing_version[0] != _SCHEMA_VERSION:
                 raise ValueError(f"unsupported ledger schema version: {existing_version[0]}")
             if existing_version is not None:
@@ -672,6 +728,7 @@ class Ledger:
                     ,plan_closed INTEGER NOT NULL DEFAULT 0 CHECK(plan_closed IN (0, 1))
                     ,plan_revision INTEGER NOT NULL DEFAULT 0
                     ,closure_digest TEXT
+                    ,discovery_closed INTEGER NOT NULL DEFAULT 0 CHECK(discovery_closed IN (0, 1))
                     ,plan_authority_mode TEXT NOT NULL DEFAULT 'phased'
                 );
                 CREATE TABLE IF NOT EXISTS authors (
@@ -861,6 +918,18 @@ class Ledger:
                     FOREIGN KEY (generation_id, reduction_digest)
                         REFERENCES reduction_receipts(generation_id, reduction_digest)
                 );
+                CREATE TABLE IF NOT EXISTS planner_closure_evidence (
+                    generation_id TEXT PRIMARY KEY REFERENCES generations(generation_id),
+                    evidence_digest TEXT NOT NULL,
+                    planner_id TEXT NOT NULL,
+                    planner_version TEXT NOT NULL,
+                    policy_version TEXT NOT NULL,
+                    complete_snapshot_digest TEXT NOT NULL,
+                    zero_unseen_task_keys_json TEXT NOT NULL,
+                    inventory_union_receipt_digests_json TEXT NOT NULL,
+                    publication_coverage_digest TEXT NOT NULL,
+                    committed_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS validation_obligations (
                     generation_id TEXT NOT NULL REFERENCES generations(generation_id),
                     check_name TEXT NOT NULL,
@@ -980,7 +1049,12 @@ class Ledger:
                         f"CREATE TRIGGER IF NOT EXISTS {table}_append_only_{operation.lower()} BEFORE {operation} "
                         f"ON {table} BEGIN SELECT RAISE(ABORT, 'terminal evidence is append-only'); END"
                     )
-            for table in ("plan_rounds", "reduction_receipts", "reduction_sources", "round_publications"):
+            for table in (
+                "plan_rounds",
+                "reduction_receipts",
+                "reduction_sources",
+                "round_publications",
+            ):
                 for operation in ("UPDATE", "DELETE"):
                     connection.execute(
                         f"CREATE TRIGGER IF NOT EXISTS {table}_append_only_{operation.lower()} BEFORE {operation} "
@@ -991,26 +1065,42 @@ class Ledger:
                     "WHEN (SELECT plan_closed FROM generations WHERE generation_id = NEW.generation_id) = 1 "
                     "BEGIN SELECT RAISE(ABORT, 'closed plan rejects planning insert'); END"
                 )
+            for operation in ("UPDATE", "DELETE"):
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS planner_closure_evidence_append_only_{operation.lower()} "
+                    f"BEFORE {operation} ON planner_closure_evidence "
+                    "BEGIN SELECT RAISE(ABORT, 'planner closure evidence is append-only'); END"
+                )
             for table in ("publications", "request_consumers"):
                 for operation in ("UPDATE", "DELETE"):
                     connection.execute(
                         f"CREATE TRIGGER IF NOT EXISTS {table}_append_only_{operation.lower()} BEFORE {operation} "
                         f"ON {table} BEGIN SELECT RAISE(ABORT, 'planning identity is append-only'); END"
                     )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS publications_closed_insert BEFORE INSERT ON publications "
+                "WHEN (SELECT plan_closed FROM generations WHERE generation_id = NEW.generation_id) = 1 "
+                "BEGIN SELECT RAISE(ABORT, 'closed plan rejects publication identity insert'); END"
+            )
             if existing_version is None:
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)", (_SCHEMA_VERSION,)
                 )
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_fingerprint', ?)",
-                    (self._schema_fingerprint(connection),),
+                    (_EXPECTED_SCHEMA_FINGERPRINT,),
                 )
             self._validate_schema_v3(connection)
 
     @staticmethod
     def _schema_fingerprint(connection: sqlite3.Connection) -> str:
         objects = [
-            {"name": row[1], "sql": row[3], "table": row[2], "type": row[0]}
+            {
+                "name": row[1],
+                "sql": " ".join(str(row[3]).split()) if row[3] is not None else None,
+                "table": row[2],
+                "type": row[0],
+            }
             for row in connection.execute(
                 "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
             )
@@ -1020,7 +1110,13 @@ class Ledger:
     @staticmethod
     def _validate_schema_v3(connection: sqlite3.Connection) -> None:
         required_columns = {
-            "generations": {"plan_closed", "plan_revision", "closure_digest", "plan_authority_mode"},
+            "generations": {
+                "plan_closed",
+                "plan_revision",
+                "closure_digest",
+                "discovery_closed",
+                "plan_authority_mode",
+            },
             "plan_obligations": {"round_sequence", "expands_plan"},
             "plan_rounds": {
                 "sequence",
@@ -1042,13 +1138,28 @@ class Ledger:
             },
             "reduction_sources": {"source_task_key", "reduction_digest"},
             "round_publications": {"round_sequence", "author_key", "publication_key"},
+            "planner_closure_evidence": {
+                "evidence_digest",
+                "planner_id",
+                "planner_version",
+                "policy_version",
+                "complete_snapshot_digest",
+                "zero_unseen_task_keys_json",
+                "inventory_union_receipt_digests_json",
+                "publication_coverage_digest",
+            },
         }
         for table, required in required_columns.items():
             columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             if not required <= columns:
                 raise ValueError(f"structurally inconsistent schema version 3 table: {table}")
         fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
-        if fingerprint is None or fingerprint[0] != Ledger._schema_fingerprint(connection):
+        actual = Ledger._schema_fingerprint(connection)
+        if (
+            fingerprint is None
+            or fingerprint[0] != _EXPECTED_SCHEMA_FINGERPRINT
+            or actual != _EXPECTED_SCHEMA_FINGERPRINT
+        ):
             raise ValueError("structurally inconsistent schema version 3 fingerprint")
 
     def _generation_id(self) -> str:
@@ -1172,7 +1283,7 @@ class Ledger:
                 if not initial_round:
                     raise ValueError("generation cannot run before committed initial round")
             if new is GenerationState.VALIDATING and not self._all_required_satisfied(connection, generation_id):
-                raise ValueError("generation cannot validate before structurally closed complete plan")
+                raise ValueError("generation cannot validate before authoritative discovery closure")
             if new is GenerationState.COMPLETE:
                 incomplete = connection.execute(
                     "SELECT COUNT(*) FROM validation_obligations AS obligation LEFT JOIN validations AS validation "
@@ -1427,6 +1538,8 @@ class Ledger:
                     raise ValueError("conflicting initial round replay")
                 return self._load_round(connection, generation_id, 1)
             epoch = self._validate_mandatory_inventory(connection, generation_id, [item.task for item in tasks])
+            if any(item.task.operation == "inventory" and not item.expands_plan for item in tasks):
+                raise ValueError("every mandatory inventory must expand the plan")
             for publication in publications:
                 self._insert_publication(connection, generation_id, publication)
             self._inject("after_initial_round_publications")
@@ -1573,7 +1686,8 @@ class Ledger:
     def plan_status(self) -> PlanStatus:
         generation_id = self._generation_id()
         row = self._connection.execute(
-            "SELECT plan_revision, plan_closed, plan_authority_mode, plan_digest, closure_digest FROM generations "
+            "SELECT plan_revision, plan_closed, discovery_closed, plan_authority_mode, plan_digest, closure_digest "
+            "FROM generations "
             "WHERE generation_id = ?",
             (generation_id,),
         ).fetchone()
@@ -1589,7 +1703,7 @@ class Ledger:
             "AND obligation.task_key IS NULL",
             (generation_id,),
         ).fetchone()[0]
-        return PlanStatus(row[0], bool(row[1]), row[2], row[3], row[4], int(open_expanders), int(unbound))
+        return PlanStatus(row[0], bool(row[1]), bool(row[2]), row[3], row[4], row[5], int(open_expanders), int(unbound))
 
     @staticmethod
     def _source_evidence(
@@ -2136,6 +2250,158 @@ class Ledger:
             )
         self._inject("after_plan_close_commit")
         return self.plan_status()
+
+    @staticmethod
+    def _publication_coverage_digest(connection: sqlite3.Connection, generation_id: str) -> str:
+        coverage = [
+            {
+                "author_key": row[0],
+                "publication_key": row[1],
+                "task_keys": [
+                    task[0]
+                    for task in connection.execute(
+                        "SELECT task_key FROM plan_obligations WHERE generation_id = ? AND author_key = ? "
+                        "AND task_key IN (SELECT task_key FROM tasks WHERE generation_id = ? AND publication_key = ?) "
+                        "ORDER BY task_key",
+                        (generation_id, row[0], generation_id, row[1]),
+                    )
+                ],
+            }
+            for row in connection.execute(
+                "SELECT author_key, publication_key FROM publications WHERE generation_id = ? "
+                "ORDER BY author_key, publication_key",
+                (generation_id,),
+            )
+        ]
+        return _digest(coverage)
+
+    def commit_discovery_closure(self, evidence: PlannerClosureEvidence, *, now: datetime) -> PlanStatus:
+        """Promote a structural seal only with registered, complete planner evidence."""
+        if not isinstance(evidence, PlannerClosureEvidence):
+            raise TypeError("discovery closure requires typed planner evidence")
+        if (evidence.planner_id, evidence.planner_version) not in _REGISTERED_CLOSURE_PLANNERS:
+            raise ValueError("planner closure evidence is not from a registered planner")
+        if evidence.zero_unseen_task_keys:
+            raise ValueError("planner closure evidence reports unseen required task keys")
+        generation_id = self._generation_id()
+        with self._transaction(immediate=True) as connection:
+            generation = connection.execute(
+                "SELECT state, plan_closed, discovery_closed, closure_digest, identity_json, plan_authority_mode "
+                "FROM generations WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if generation is None or generation[0] != GenerationState.RUNNING.value or not generation[1]:
+                raise ValueError("discovery closure requires a structurally closed running plan")
+            if generation[5] not in {"phased_structural", "phased_authoritative"}:
+                raise ValueError("legacy compatibility plan cannot establish discovery closure")
+            if evidence.complete_snapshot_digest != generation[3]:
+                raise ValueError("planner complete snapshot digest does not match structural closure")
+            identity = json.loads(generation[4])
+            if evidence.policy_version != identity["refresh_policy_version"]:
+                raise ValueError("planner closure policy version mismatch")
+            if evidence.publication_coverage_digest != self._publication_coverage_digest(connection, generation_id):
+                raise ValueError("planner publication coverage digest mismatch")
+            receipt_rows = [
+                connection.execute(
+                    "SELECT source_task_keys_json FROM reduction_receipts WHERE generation_id = ? "
+                    "AND reduction_digest = ?",
+                    (generation_id, digest),
+                ).fetchone()
+                for digest in evidence.inventory_union_receipt_digests
+            ]
+            if any(row is None for row in receipt_rows):
+                raise ValueError("planner inventory union references missing reduction receipt")
+            covered_inventory = {key for row in receipt_rows if row is not None for key in json.loads(row[0])}
+            mandatory_inventory = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT task_key FROM plan_obligations WHERE generation_id = ? AND operation = 'inventory'",
+                    (generation_id,),
+                )
+            }
+            if covered_inventory != mandatory_inventory:
+                raise ValueError("planner inventory union does not exactly cover mandatory inventory")
+            existing = connection.execute(
+                "SELECT evidence_digest FROM planner_closure_evidence WHERE generation_id = ?", (generation_id,)
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != evidence.digest:
+                    raise ValueError("conflicting discovery closure replay")
+                return self.plan_status()
+            connection.execute(
+                "INSERT INTO planner_closure_evidence(generation_id, evidence_digest, planner_id, planner_version, "
+                "policy_version, complete_snapshot_digest, zero_unseen_task_keys_json, "
+                "inventory_union_receipt_digests_json, publication_coverage_digest, committed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    evidence.digest,
+                    evidence.planner_id,
+                    evidence.planner_version,
+                    evidence.policy_version,
+                    evidence.complete_snapshot_digest,
+                    _canonical(evidence.zero_unseen_task_keys),
+                    _canonical(evidence.inventory_union_receipt_digests),
+                    evidence.publication_coverage_digest,
+                    _timestamp(now),
+                ),
+            )
+            connection.execute(
+                "UPDATE generations SET discovery_closed = 1, plan_authority_mode = 'phased_authoritative', "
+                "updated_at = ? WHERE generation_id = ?",
+                (_timestamp(now), generation_id),
+            )
+        return self.plan_status()
+
+    @classmethod
+    def _discovery_evidence_valid(cls, connection: sqlite3.Connection, generation_id: str) -> bool:
+        row = connection.execute(
+            "SELECT evidence.*, generation.closure_digest, generation.identity_json "
+            "FROM planner_closure_evidence AS evidence JOIN generations AS generation "
+            "ON generation.generation_id = evidence.generation_id WHERE evidence.generation_id = ?",
+            (generation_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            evidence = PlannerClosureEvidence(
+                row["planner_id"],
+                row["planner_version"],
+                row["policy_version"],
+                row["complete_snapshot_digest"],
+                tuple(json.loads(row["zero_unseen_task_keys_json"])),
+                tuple(json.loads(row["inventory_union_receipt_digests_json"])),
+                row["publication_coverage_digest"],
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if (
+            row["evidence_digest"] != evidence.digest
+            or (evidence.planner_id, evidence.planner_version) not in _REGISTERED_CLOSURE_PLANNERS
+            or evidence.zero_unseen_task_keys
+            or evidence.complete_snapshot_digest != row["closure_digest"]
+            or evidence.policy_version != json.loads(row["identity_json"])["refresh_policy_version"]
+            or evidence.publication_coverage_digest != cls._publication_coverage_digest(connection, generation_id)
+        ):
+            return False
+        receipts = [
+            connection.execute(
+                "SELECT source_task_keys_json FROM reduction_receipts WHERE generation_id = ? AND reduction_digest = ?",
+                (generation_id, digest),
+            ).fetchone()
+            for digest in evidence.inventory_union_receipt_digests
+        ]
+        if any(receipt is None for receipt in receipts):
+            return False
+        covered = {key for receipt in receipts if receipt is not None for key in json.loads(receipt[0])}
+        mandatory = {
+            item[0]
+            for item in connection.execute(
+                "SELECT task_key FROM plan_obligations WHERE generation_id = ? AND operation = 'inventory'",
+                (generation_id,),
+            )
+        }
+        return covered == mandatory
 
     def plan_task(self, task: TaskSpec) -> TaskClaim:
         generation_id = self._generation_id()
@@ -2842,14 +3108,16 @@ class Ledger:
     def _all_required_satisfied(connection: sqlite3.Connection, generation_id: str) -> bool:
         Ledger._verify_plan_integrity(connection, generation_id)
         sealed = connection.execute(
-            "SELECT plan_closed, plan_authority_mode FROM generations WHERE generation_id = ?", (generation_id,)
+            "SELECT plan_closed, discovery_closed, plan_authority_mode FROM generations WHERE generation_id = ?",
+            (generation_id,),
         ).fetchone()
-        if sealed is None or not sealed[0]:
+        if sealed is None or not sealed[0] or not sealed[1] or sealed[2] != "phased_authoritative":
             return False
-        if sealed[1] == "phased_structural":
-            verifier = Ledger.__new__(Ledger)
-            verifier._connection = connection
-            Ledger._verify_structural_closure(verifier, connection, generation_id)
+        if not Ledger._discovery_evidence_valid(connection, generation_id):
+            return False
+        verifier = Ledger.__new__(Ledger)
+        verifier._connection = connection
+        Ledger._verify_structural_closure(verifier, connection, generation_id)
         missing_obligations = connection.execute(
             "SELECT COUNT(*) FROM plan_obligations AS obligation LEFT JOIN tasks AS task "
             "ON task.generation_id = obligation.generation_id AND task.task_key = obligation.task_key "
@@ -2966,6 +3234,11 @@ class Ledger:
             raise ValueError("secret material cannot be persisted in publication identifiers")
         _freeze_json(identifiers)
         with self._transaction(immediate=True) as connection:
+            closed = connection.execute(
+                "SELECT plan_closed FROM generations WHERE generation_id = ?", (self._generation_id(),)
+            ).fetchone()
+            if closed is None or closed[0]:
+                raise ValueError("closed plan rejects publication identity changes")
             connection.execute(
                 "INSERT INTO publications(generation_id, author_key, publication_key, discovery_source, "
                 "normalized_title, year, exact_identifiers_json, baseline_output_path, freshness_policy) "
@@ -3073,13 +3346,14 @@ class Ledger:
             closure = connection.execute(
                 "SELECT plan_closed, plan_authority_mode FROM generations WHERE generation_id = ?", (generation_id,)
             ).fetchone()
-            if closure[0] and closure[1] == "phased_structural":
+            if closure[0] and closure[1] in {"phased_structural", "phased_authoritative"}:
                 self._verify_structural_closure(connection, generation_id)
             generation = connection.execute(
                 "SELECT generation_id, identity_json, census_digest, authors_digest, base_commit, input_digest, "
                 "policy_digest, adapter_digest, state, created_at, updated_at, completed_at, published_at, "
                 "checkpoint_sequence, blocking_reason, plan_sealed, plan_digest, completed_manifest_digest, "
-                "inventory_freshness_epoch, plan_closed, plan_revision, closure_digest, plan_authority_mode "
+                "inventory_freshness_epoch, plan_closed, discovery_closed, plan_revision, closure_digest, "
+                "plan_authority_mode "
                 "FROM generations "
                 "WHERE generation_id = ?",
                 (generation_id,),
@@ -3233,6 +3507,20 @@ class Ledger:
                     (generation_id,),
                 )
             ],
+            "planner_closure_evidence": [
+                {
+                    **{key: value for key, value in dict(row).items() if not key.endswith("_json")},
+                    "inventory_union_receipt_digests": json.loads(row["inventory_union_receipt_digests_json"]),
+                    "zero_unseen_task_keys": json.loads(row["zero_unseen_task_keys_json"]),
+                }
+                for row in connection.execute(
+                    "SELECT evidence_digest, planner_id, planner_version, policy_version, "
+                    "complete_snapshot_digest, zero_unseen_task_keys_json, "
+                    "inventory_union_receipt_digests_json, publication_coverage_digest, committed_at "
+                    "FROM planner_closure_evidence WHERE generation_id = ?",
+                    (generation_id,),
+                )
+            ],
             "reduction_receipts": [
                 {
                     "reduction_digest": row["reduction_digest"],
@@ -3320,6 +3608,7 @@ __all__ = [
     "PlanRound",
     "PlanStatus",
     "PlannedTask",
+    "PlannerClosureEvidence",
     "ProvenanceRule",
     "ProviderObservation",
     "PublicationMetadata",
