@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from citeforge.refresh.census import load_census
+
+
+def test_current_author_census_counts() -> None:
+    census = load_census(Path(__file__).parents[1] / "data" / "input.csv")
+
+    assert census.total_count == 69
+    assert census.enabled_count == 64
+    assert census.excluded_count == 5
+    assert census.invalid_count == 0
+
+
 # Well-known papers for testing, including complex edge cases
 KNOWN_PAPERS = [
     {

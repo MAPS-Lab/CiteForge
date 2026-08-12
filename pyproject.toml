@@ -33,7 +33,7 @@ dev = [
 citeforge = "citeforge.cli:main"
 
 [tool.setuptools]
-packages = ["citeforge", "citeforge.clients", "citeforge.pipeline"]
+packages = ["citeforge", "citeforge.clients", "citeforge.pipeline", "citeforge.refresh"]
 include-package-data = false
 
 [tool.pytest.ini_options]

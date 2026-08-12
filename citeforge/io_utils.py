@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import threading
+from pathlib import Path
 from typing import Any
 
 from . import bibtex_utils as bt
@@ -32,6 +33,7 @@ from .exceptions import CSV_ERRORS, FILE_READ_ERRORS
 from .fsscan import iter_author_bibs, iter_output_dirs
 from .id_utils import doi_bases_match, normalize_doi
 from .models import Record
+from .refresh.census import load_census
 from .text_utils import format_author_dirname, normalize_person_name, title_similarity
 
 _SUMMARY_CSV_FIELDNAMES = [
@@ -136,57 +138,16 @@ def read_gemini_api_key(path: str = DEFAULT_GEMINI_KEY_FILE) -> str | None:
 
 
 def read_records(path: str = DEFAULT_INPUT) -> list[Record]:
-    """Load author records from a CSV file, keeping only rows with a Scholar or DBLP identifier."""
-    records: list[Record] = []
+    """Load enabled author records through the validated input census."""
     candidates = _candidate_paths(path)
     for p in candidates:
         try:
-            with open(p, newline="", encoding="utf-8") as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    if not any(row.values()):
-                        continue
-
-                    name = (row.get("Name") or "").strip()
-                    scholar_link = (row.get("Scholar Link") or "").strip()
-                    dblp_link = (row.get("DBLP Link") or "").strip()
-
-                    m = re.search(r"user=([^&]+)", scholar_link) if scholar_link else None
-                    scholar_id = m.group(1) if m else ""
-
-                    dblp_id = ""
-                    if dblp_link:
-                        if "/pid/" in dblp_link:
-                            m = re.search(r"/pid/(.+?)(?:\.[a-z0-9]+)?$", dblp_link)
-                            dblp_id = m.group(1) if m else ""
-                        else:
-                            dblp_id = dblp_link
-
-                    if not name and (scholar_id or dblp_id):
-                        logging.getLogger("CiteForge.io").warning(
-                            "Skipping record with empty Name but ID(s): %s/%s",
-                            scholar_id,
-                            dblp_id,
-                        )
-                        continue
-
-                    records.append(
-                        Record(
-                            name=name,
-                            scholar_id=scholar_id,
-                            dblp=dblp_id,
-                        )
-                    )
-            break
+            census = load_census(Path(p))
+            return [row.as_record() for row in census.enabled_rows]
         except FileNotFoundError:
             continue
     else:
         raise FileNotFoundError(f"Input file not found (tried: {', '.join(candidates)})")
-
-    records = [r for r in records if r.scholar_id or r.dblp]
-    if not records:
-        raise ValueError("No valid records with Scholar ID or DBLP ID found in input file.")
-    return records
 
 
 def safe_read_file(path: str, encoding: str = "utf-8") -> str | None:
