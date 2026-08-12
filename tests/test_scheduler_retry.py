@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -202,7 +203,7 @@ def test_completion_after_warning_threshold_is_counted_once(monkeypatch: pytest.
         return 5
 
     def hit_warning_threshold(*_args: object, **_kwargs: object) -> None:
-        raise TimeoutError
+        raise FuturesTimeoutError
 
     def record_warning(message: str, **_kwargs: object) -> None:
         warnings.append(message)

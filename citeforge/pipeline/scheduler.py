@@ -13,6 +13,7 @@ import random
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from tenacity import Retrying, retry_if_result, stop_after_attempt, wait_exponential
@@ -367,7 +368,7 @@ def run_all(
                 timeout=completion_warning_seconds_per_author * len(records),
             ):
                 _account_result(future, future_to_author[future])
-        except TimeoutError:
+        except FuturesTimeoutError:
             remaining = [r.name for f, r in future_to_author.items() if not f.done()]
             logger.warn(
                 f"Pipeline completion warning threshold reached with {len(remaining)} author(s) still running: "
