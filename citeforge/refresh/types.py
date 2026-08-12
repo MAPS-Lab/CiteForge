@@ -32,10 +32,14 @@ class TaskDisposition(str, Enum):
 class GenerationState(str, Enum):
     """Durable lifecycle state for a refresh generation."""
 
-    PLANNED = "planned"
+    PLANNING = "planning"
     RUNNING = "running"
-    COMPLETE = "complete"
+    WAITING = "waiting"
     BLOCKED = "blocked"
+    VALIDATING = "validating"
+    COMPLETE = "complete"
+    PUBLISHED = "published"
+    SUPERSEDED = "superseded"
 
 
 class RunStatus(str, Enum):

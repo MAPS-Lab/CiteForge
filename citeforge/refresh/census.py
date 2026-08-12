@@ -9,31 +9,77 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qsl, urlsplit
 
 from citeforge.models import Record
 
 from .types import TaskDisposition
 
 _REQUIRED_COLUMNS = ("Name", "Scholar Link", "DBLP Link", "Enabled", "Exclusion Reason")
+_SCHOLAR_HOSTS = frozenset({"scholar.google.com", "scholar.google.ca"})
+_DBLP_HOSTS = frozenset({"dblp.org", "dblp.uni-trier.de"})
+_SCHOLAR_ID_RE = re.compile(r"[A-Za-z0-9_-]{6,64}")
+_DBLP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _normalize_name(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
 
 
-def _scholar_id(link: str) -> str:
-    if not link:
-        return ""
-    values = parse_qs(urlparse(link).query).get("user", [])
-    return values[0].strip() if values else ""
+def _has_unsafe_characters(value: str) -> bool:
+    return any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value)
 
 
-def _dblp_id(link: str) -> str:
+def _validated_url(link: str, row_number: int, field: str) -> tuple[str, str, str]:
+    if _has_unsafe_characters(link):
+        raise ValueError(f"row {row_number}: {field} contains whitespace or control characters")
+    try:
+        parsed = urlsplit(link)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"row {row_number}: {field} is malformed") from exc
+    if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None or port is not None:
+        raise ValueError(f"row {row_number}: {field} must be an uncredentialed HTTPS URL without a port")
+    if parsed.fragment:
+        raise ValueError(f"row {row_number}: {field} must not contain a fragment")
+    return parsed.hostname or "", parsed.path, parsed.query
+
+
+def _scholar_id(link: str, row_number: int) -> str:
     if not link:
         return ""
-    match = re.search(r"/pid/(.+?)(?:\.[a-z0-9]+)?$", link)
-    return match.group(1) if match else link
+    host, path, query = _validated_url(link, row_number, "Scholar Link")
+    if host not in _SCHOLAR_HOSTS or path not in {"/citations", "/citations/"}:
+        raise ValueError(f"row {row_number}: Scholar Link is not a supported Google Scholar citation profile")
+    if "%" in query:
+        raise ValueError(f"row {row_number}: Scholar Link user ID must not be encoded")
+    try:
+        query_items = parse_qsl(query, keep_blank_values=True, strict_parsing=True)
+    except ValueError as exc:
+        raise ValueError(f"row {row_number}: Scholar Link query is malformed") from exc
+    if len(query_items) != 1 or query_items[0][0] != "user" or not _SCHOLAR_ID_RE.fullmatch(query_items[0][1]):
+        raise ValueError(f"row {row_number}: Scholar Link requires exactly one safe user ID")
+    return query_items[0][1]
+
+
+def _dblp_id(link: str, row_number: int) -> str:
+    if not link:
+        return ""
+    if _has_unsafe_characters(link):
+        raise ValueError(f"row {row_number}: DBLP Link contains whitespace or control characters")
+    identifier = link
+    if "://" in link or link.startswith("//"):
+        host, path, query = _validated_url(link, row_number, "DBLP Link")
+        if host not in _DBLP_HOSTS or query:
+            raise ValueError(f"row {row_number}: DBLP Link is not a supported DBLP profile URL")
+        if not path.startswith("/pid/"):
+            raise ValueError(f"row {row_number}: DBLP Link must use the /pid/ path")
+        identifier = path.removeprefix("/pid/")
+        if identifier.endswith(".html"):
+            identifier = identifier.removesuffix(".html")
+    if not _DBLP_ID_RE.fullmatch(identifier):
+        raise ValueError(f"row {row_number}: DBLP Link does not contain a safe supported person ID")
+    return identifier
 
 
 def _parse_enabled(value: str, row_number: int) -> bool:
@@ -124,14 +170,15 @@ def load_census(path: Path) -> AuthorCensus:
 
         rows: list[AuthorCensusRow] = []
         seen_identities: dict[tuple[str, str, str], int] = {}
+        seen_provider_ids: dict[tuple[str, str], int] = {}
         for row_number, values in enumerate(reader, start=2):
             if len(values) != len(fieldnames):
                 raise ValueError(f"row {row_number}: expected {len(fieldnames)} columns, found {len(values)}")
             raw = dict(zip(fieldnames, values, strict=True))
             name = (raw.get("Name") or "").strip()
             normalized_name = _normalize_name(name)
-            scholar_id = _scholar_id((raw.get("Scholar Link") or "").strip())
-            dblp_id = _dblp_id((raw.get("DBLP Link") or "").strip())
+            scholar_id = _scholar_id((raw.get("Scholar Link") or "").strip(), row_number)
+            dblp_id = _dblp_id((raw.get("DBLP Link") or "").strip(), row_number)
             enabled = _parse_enabled(raw.get("Enabled") or "", row_number)
             exclusion_reason = (raw.get("Exclusion Reason") or "").strip()
 
@@ -150,6 +197,17 @@ def load_census(path: Path) -> AuthorCensus:
                     f"row {row_number}: duplicate normalized identity first seen at row {seen_identities[identity]}"
                 )
             seen_identities[identity] = row_number
+            # One authoritative provider profile cannot safely identify two census rows,
+            # even when their display names or other provider identifiers differ.
+            for provider, provider_id in (("Scholar", scholar_id), ("DBLP", dblp_id)):
+                provider_key = (provider, provider_id)
+                if provider_id and provider_key in seen_provider_ids:
+                    raise ValueError(
+                        f"row {row_number}: duplicate {provider} provider identity first seen at "
+                        f"row {seen_provider_ids[provider_key]}"
+                    )
+                if provider_id:
+                    seen_provider_ids[provider_key] = row_number
             rows.append(
                 AuthorCensusRow(
                     physical_row=row_number,
