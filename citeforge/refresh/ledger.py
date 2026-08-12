@@ -1750,6 +1750,24 @@ class Ledger:
         ).fetchone()[0]
         return PlanStatus(row[0], bool(row[1]), bool(row[2]), row[3], row[4], row[5], int(open_expanders), int(unbound))
 
+    def generation_state(self) -> GenerationState:
+        row = self._connection.execute(
+            "SELECT state FROM generations WHERE generation_id = ?", (self._generation_id(),)
+        ).fetchone()
+        if row is None:
+            raise ValueError("generation state is missing")
+        return GenerationState(str(row[0]))
+
+    def assert_initial_inventory_authority(self, evidence_digest: str) -> None:
+        """Require the initial round to bind the exact current policy and capabilities."""
+        evidence_digest = _digest_text(evidence_digest, "initial inventory authority digest")
+        row = self._connection.execute(
+            "SELECT source_evidence_digest FROM plan_rounds WHERE generation_id = ? AND sequence = 1",
+            (self._generation_id(),),
+        ).fetchone()
+        if row is None or row[0] != evidence_digest:
+            raise ValueError("inventory policy or capability authority mismatch")
+
     @staticmethod
     def _source_evidence(
         connection: sqlite3.Connection, generation_id: str, task_key: str
@@ -2109,6 +2127,7 @@ class Ledger:
         )
         semantic_digest = _digest(
             {
+                "policy_digest": policy_digest,
                 "publications": [self._publication_content(item) for item in reduction.publications],
                 "reducer_version": reducer_version,
                 "seed_tasks": [item.identity_digest for item in reduction.seed_tasks],
@@ -2862,6 +2881,8 @@ class Ledger:
             capability = capability_for(str(row[1]), "inventory", request.adapter_version)
             if request.requested_fields != capability.requested_fields or request.quota_scope != capability.quota_scope:
                 raise ValueError("inventory request capability mismatch")
+            if row[8] != capability.decoder_schema:
+                raise ValueError("inventory observation decoder schema mismatch")
             payload = dict(request.normalized_payload)
             start_value = payload.get("start")
             if row[1] == "scholar" and (isinstance(start_value, bool) or not isinstance(start_value, int)):

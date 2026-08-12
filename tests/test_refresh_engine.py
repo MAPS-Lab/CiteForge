@@ -80,6 +80,21 @@ def test_stop_before_claim_does_not_start_physical_work(tmp_path: Path) -> None:
         assert task["attempt_count"] == 0
 
 
+def test_resume_rejects_policy_change_before_physical_work(tmp_path: Path) -> None:
+    spec = _spec()
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        first = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10)).run(
+            spec, RefreshCredentials(serpapi_key="secret"), lambda: True
+        )
+        assert first.status is RunStatus.CONTINUATION
+        changed = RefreshEngine(ledger, InventoryPolicy(2021, 1000, 10)).run(
+            spec, RefreshCredentials(serpapi_key="secret"), lambda: False
+        )
+        assert changed.status is RunStatus.INVALID_CONFIGURATION
+        task = ledger.manifest().data["tasks"][0]
+        assert task["state"] == "pending" and task["attempt_count"] == 0
+
+
 def test_engine_executes_exact_inventory_and_commits_union_seed(tmp_path: Path) -> None:
     spec = _spec()
     body = {
@@ -87,9 +102,9 @@ def test_engine_executes_exact_inventory_and_commits_union_seed(tmp_path: Path) 
         "search_parameters": {
             "engine": "google_scholar_author",
             "author_id": "Scholar123",
-            "start": 0,
+            "cstart": 0,
         },
-        "author": {"author_id": "Scholar123"},
+        "author": {"name": "Ada Lovelace"},
         "articles": [
             {
                 "title": "Analytical Engine",
@@ -134,9 +149,9 @@ def test_engine_paginates_in_durable_waves_without_repeating_success(tmp_path: P
             "search_parameters": {
                 "engine": "google_scholar_author",
                 "author_id": "Scholar123",
-                "start": start,
+                "cstart": start,
             },
-            "author": {"author_id": "Scholar123"},
+            "author": {"name": "Ada Lovelace"},
             "articles": [
                 {
                     "title": f"Paper {start}",
@@ -149,8 +164,8 @@ def test_engine_paginates_in_durable_waves_without_repeating_success(tmp_path: P
         }
         if start == 0:
             envelope["serpapi_pagination"] = {
-                "next": "https://serpapi.com/search?engine=google_scholar_author&author_id=Scholar123"
-                "&start=100&num=100&sort=pubdate&api_key=provider-secret"
+                "next": "https://serpapi.com/search.json?engine=google_scholar_author&author_id=Scholar123"
+                "&cstart=100&num=100&sort=pubdate&hl=en&api_key=provider-secret"
             }
         response = requests.Response()
         response.status_code = 200
@@ -179,9 +194,9 @@ def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> 
         "search_parameters": {
             "engine": "google_scholar_author",
             "author_id": "Scholar123",
-            "start": 0,
+            "cstart": 0,
         },
-        "author": {"author_id": "Scholar123"},
+        "author": {"name": "Ada Lovelace"},
         "articles": [
             {
                 "title": "Atomic Work",
@@ -250,6 +265,13 @@ def test_dblp_http_410_is_blocking_and_never_confirmed_empty(tmp_path: Path) -> 
         assert result.status is RunStatus.BLOCKED
         tasks = ledger.manifest().data["tasks"]
         assert tasks[0]["state"] == "permanent_failure"
-        observations = ledger.manifest().data["observations"]
+        blocked_manifest = ledger.manifest().data
+        assert blocked_manifest["generation"]["state"] == "blocked"
+        assert blocked_manifest["generation"]["blocking_reason"]
+        observations = blocked_manifest["observations"]
         assert observations[0]["disposition"] == "permanent_failure"
         assert observations[0]["authoritative_empty"] == 0
+        resumed = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), LedgerTransport(ledger, send_once=gone)).run(
+            spec, RefreshCredentials(), lambda: False
+        )
+        assert resumed.status is RunStatus.BLOCKED

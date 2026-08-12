@@ -61,9 +61,9 @@ def test_scholar_decoder_is_strict_and_derives_trusted_next_offset() -> None:
             "search_parameters": {
                 "engine": "google_scholar_author",
                 "author_id": "Scholar123",
-                "start": 0,
+                "cstart": 0,
             },
-            "author": {"author_id": "Scholar123"},
+            "author": {"name": "Ada Lovelace"},
             "articles": [
                 {
                     "title": "Analytical Engine",
@@ -75,8 +75,8 @@ def test_scholar_decoder_is_strict_and_derives_trusted_next_offset() -> None:
                 }
             ],
             "serpapi_pagination": {
-                "next": "https://serpapi.com/search?engine=google_scholar_author&start=100"
-                "&author_id=Scholar123&num=100&sort=pubdate"
+                "next": "https://serpapi.com/search.json?engine=google_scholar_author&cstart=100"
+                "&author_id=Scholar123&hl=en"
             },
         }
     ).encode()
@@ -89,12 +89,17 @@ def test_scholar_decoder_is_strict_and_derives_trusted_next_offset() -> None:
         decode_scholar_inventory(duplicate, "Scholar123", 0, 100, 2020)
     with pytest.raises(ValueError, match="provider error"):
         decode_scholar_inventory(b'{"error":"quota"}', "Scholar123", 0, 100, 2020)
+    malformed = json.loads(body)
+    malformed["search_parameters"]["cstart"] = True
+    with pytest.raises(ValueError, match="offset"):
+        decode_scholar_inventory(json.dumps(malformed).encode(), "Scholar123", 0, 100, 2020)
 
 
 def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> None:
-    xml = b"""<dblpperson pid="12/345"><r><article key="journals/x/1"><author>Ada Lovelace</author>
+    xml = b"""<dblpperson key="homepages/12/345"><person key="homepages/12/345"><author>Ada Lovelace</author></person>
+    <r><article key="journals/x/1"><author>Ada Lovelace</author>
     <title>Computing Machinery</title><year>2024</year><journal>Science</journal>
-    <ee>https://doi.org/10.1000/example</ee></article></r></dblpperson>"""
+    <ee>https://doi.org/10.1000/example</ee></article></r><coauthors/></dblpperson>"""
     normalized, empty = decode_dblp_inventory(xml, "12/345")
     assert not empty
     assert normalized["articles"][0]["doi"] == "10.1000/example"
@@ -172,3 +177,37 @@ def test_pure_union_has_no_socket_or_filesystem_capability(monkeypatch: pytest.M
         ),
     )
     assert reduce_author_inventory(_row(), snapshot, InventoryPolicy(2020, 1000, 10)).publications == ()
+
+
+def test_pure_union_preserves_preprint_and_published_versions() -> None:
+    articles = (
+        {
+            "title": "A Unified Result",
+            "authors": ("Ada Lovelace",),
+            "year": 2024,
+            "doi": "10.48550/arXiv.2401.00001",
+            "publication": "arXiv",
+        },
+        {
+            "title": "A Unified Result",
+            "authors": ("Ada Lovelace",),
+            "year": 2024,
+            "doi": "10.1000/journal",
+            "publication": "Science",
+        },
+    )
+    snapshot = InventorySnapshot(
+        "author-ada",
+        (
+            SnapshotContribution(
+                "task",
+                "dblp",
+                TaskDisposition.SUCCEEDED,
+                "dblpperson-v1",
+                "a" * 64,
+                articles,
+            ),
+        ),
+    )
+    reduction = reduce_author_inventory(_row(), snapshot, InventoryPolicy(2020, 1000, 10))
+    assert len(reduction.publications) == len(reduction.seed_tasks) == 2

@@ -7,14 +7,15 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
-from ..config import DBLP_PERSON_BASE, HTTP_TIMEOUT_DEFAULT, SERPAPI_BASE
-from ..id_utils import find_doi_in_text, normalize_doi
+from ..config import DBLP_PERSON_BASE, HTTP_TIMEOUT_DEFAULT, PREPRINT_SERVERS, SERPAPI_BASE
+from ..id_utils import find_doi_in_text, is_secondary_doi, normalize_doi
 from ..identity import IdentityContext, evaluate_identity
 from ..text_utils import normalize_title
 from .census import AuthorCensusRow
@@ -46,6 +47,22 @@ class AdapterCapability:
     decoder_schema: str
     requested_fields: tuple[str, ...]
 
+    def canonical_content(self) -> Mapping[str, object]:
+        return MappingProxyType(
+            {
+                "adapter_version": self.adapter_version,
+                "capability_id": self.capability_id,
+                "credential_kind": self.credential_kind.value,
+                "decoder_schema": self.decoder_schema,
+                "logical_source": self.logical_source,
+                "media_type": self.media_type.value,
+                "operation": self.operation,
+                "quota_scope": self.quota_scope,
+                "requested_fields": self.requested_fields,
+                "wire_provider": self.wire_provider,
+            }
+        )
+
 
 @dataclass(frozen=True)
 class RefreshCredentials:
@@ -57,10 +74,15 @@ class InventoryPolicy:
     min_year: int
     max_publications: int
     max_scholar_pages: int
+    doi_adapter_version: str = "1"
+    s2_adapter_version: str = "1"
+    freshness_epoch: str = "current"
 
     def __post_init__(self) -> None:
         if self.min_year < 1000 or self.max_publications < 1 or self.max_scholar_pages < 1:
             raise ValueError("invalid inventory policy")
+        if not self.doi_adapter_version or not self.s2_adapter_version or not self.freshness_epoch:
+            raise ValueError("inventory policy requires seed adapter and freshness identity")
 
 
 def _freeze(value: object) -> object:
@@ -300,14 +322,17 @@ def decode_scholar_inventory(
     pagination = value.get("serpapi_pagination", {})
     if not isinstance(metadata, dict) or metadata.get("status") != "Success":
         raise SchemaChangedError("Scholar response lacks successful metadata")
+    parameter_offset = parameters.get("cstart") if isinstance(parameters, dict) else None
+    if parameter_offset is not None and (
+        isinstance(parameter_offset, bool) or not isinstance(parameter_offset, int) or parameter_offset != offset
+    ):
+        raise SchemaChangedError("Scholar response has malformed offset evidence")
     if not isinstance(parameters, dict) or (
-        parameters.get("engine") != "google_scholar_author"
-        or parameters.get("author_id") != profile_id
-        or int(parameters.get("start", -1)) != offset
+        parameters.get("engine") != "google_scholar_author" or parameters.get("author_id") != profile_id
     ):
         raise SchemaChangedError("Scholar response lacks exact request evidence")
-    if not isinstance(author, dict) or author.get("author_id") != profile_id:
-        raise SchemaChangedError("Scholar response lacks exact author profile evidence")
+    if not isinstance(author, dict) or not isinstance(author.get("name"), str) or not author["name"].strip():
+        raise SchemaChangedError("Scholar response lacks author profile metadata")
     if not isinstance(articles, list) or not isinstance(pagination, dict):
         raise SchemaChangedError("Scholar response has wrong envelope")
     normalized = []
@@ -345,19 +370,19 @@ def decode_scholar_inventory(
         parsed = urlsplit(_safe_url(next_url))
         query = parse_qs(parsed.query)
         try:
-            candidate = int(query["start"][0])
+            candidate = int(query["cstart"][0])
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise ValueError("Scholar continuation lacks trusted offset") from exc
         if (
             parsed.scheme != "https"
             or parsed.hostname not in {"serpapi.com", "www.serpapi.com"}
-            or parsed.path != "/search"
+            or parsed.path not in {"/search", "/search.json"}
             or candidate != offset + page_size
             or query.get("engine") != ["google_scholar_author"]
             or query.get("author_id") != [profile_id]
-            or query.get("num") != [str(page_size)]
-            or query.get("sort") != ["pubdate"]
-            or not set(query) <= {"api_key", "author_id", "engine", "num", "sort", "start"}
+            or query.get("num", [str(page_size)]) != [str(page_size)]
+            or query.get("sort", ["pubdate"]) != ["pubdate"]
+            or not set(query) <= {"api_key", "author_id", "cstart", "engine", "hl", "num", "sort"}
         ):
             raise SchemaChangedError("Scholar continuation identity is inconsistent")
         next_offset = candidate
@@ -390,7 +415,15 @@ def decode_dblp_inventory(body: bytes, pid: str) -> tuple[Mapping[str, object], 
     if root.tag != "dblpperson" or not exact_pid:
         raise SchemaChangedError("DBLP root or PID mismatch")
     articles = []
+    saw_person = False
     for wrapper in root:
+        if wrapper.tag == "person":
+            if saw_person or wrapper.attrib.get("key") not in {None, f"homepages/{pid}"}:
+                raise SchemaChangedError("DBLP person metadata is malformed")
+            saw_person = True
+            continue
+        if wrapper.tag == "coauthors":
+            continue
         if wrapper.tag != "r" or len(wrapper) != 1:
             raise SchemaChangedError("DBLP response has unexpected structure")
         record = wrapper[0]
@@ -431,13 +464,9 @@ def build_claimed_inventory_operation(
     credentials: RefreshCredentials,
     policy: InventoryPolicy,
     *,
-    now: object,
+    now: datetime,
 ) -> SendOperation:
     """Reconstruct a claimed logical inventory and add wire-only credentials."""
-    from datetime import datetime
-
-    if not isinstance(now, datetime):
-        raise TypeError("claimed reconstruction requires a datetime")
     task = ledger.reconstruct_claimed_task(claim, now)
     if task.request is None:
         raise ValueError("claimed inventory lacks exact request")
@@ -447,6 +476,12 @@ def build_claimed_inventory_operation(
         raise ValueError("claimed request does not match capability")
     payload = dict(request.normalized_payload)
     if capability.logical_source == "scholar":
+        if (
+            capability.wire_provider != "serpapi"
+            or capability.media_type is not ResponseMediaType.JSON
+            or capability.credential_kind is not CredentialKind.SERPAPI_KEY
+        ):
+            raise ValueError("Scholar capability has invalid physical transport binding")
         if not credentials.serpapi_key:
             raise ValueError("missing SerpAPI credential")
         query = {
@@ -469,6 +504,12 @@ def build_claimed_inventory_operation(
             )
 
     elif capability.logical_source == "dblp":
+        if (
+            capability.wire_provider != "dblp"
+            or capability.media_type is not ResponseMediaType.XML
+            or capability.credential_kind is not CredentialKind.NONE
+        ):
+            raise ValueError("DBLP capability has invalid physical transport binding")
         pid = str(payload["pid"])
         url = f"{DBLP_PERSON_BASE}/{pid}.xml"
 
@@ -483,6 +524,7 @@ def build_claimed_inventory_operation(
         lambda _value: {},
         lambda _value: False,
         response_decoder=decoder,
+        decoder_schema=capability.decoder_schema,
     )
 
 
@@ -558,6 +600,7 @@ def reduce_author_inventory(
             (
                 existing
                 for existing in merged
+                if not _preprint_published_pair(existing, candidate)
                 if not (
                     normalize_doi(_optional_text(existing.get("doi")))
                     and normalize_doi(_optional_text(candidate.get("doi")))
@@ -606,7 +649,16 @@ def reduce_author_inventory(
         )
         publications.append(metadata)
         if doi:
-            request = RequestSpec("doi_csl", "csl_lookup", "GET", {"doi": doi}, ("metadata",), "1", "current", "doi")
+            request = RequestSpec(
+                "doi_csl",
+                "csl_lookup",
+                "GET",
+                {"doi": doi},
+                ("metadata",),
+                policy.doi_adapter_version,
+                policy.freshness_epoch,
+                "doi",
+            )
             seeds.append(TaskSpec(census_row.row_key, publication_key, "doi_csl", "csl_lookup", request))
         else:
             payload = {
@@ -614,9 +666,27 @@ def reduce_author_inventory(
                 "title": metadata.normalized_title,
                 "year": metadata.year,
             }
-            request = RequestSpec("s2", "fuzzy_search", "GET", payload, ("results",), "1", "current", "s2")
+            request = RequestSpec(
+                "s2",
+                "fuzzy_search",
+                "GET",
+                payload,
+                ("results",),
+                policy.s2_adapter_version,
+                policy.freshness_epoch,
+                "s2",
+            )
             seeds.append(TaskSpec(census_row.row_key, publication_key, "s2", "fuzzy_search", request))
     return InventoryReduction(census_row.row_key, tuple(publications), tuple(seeds), snapshot.digest)
+
+
+def _preprint_published_pair(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
+    def preprint(item: Mapping[str, object]) -> bool:
+        doi = normalize_doi(_optional_text(item.get("doi")))
+        venue = str(item.get("publication") or "").casefold()
+        return bool(doi and is_secondary_doi(doi)) or any(name.casefold() in venue for name in PREPRINT_SERVERS)
+
+    return preprint(left) != preprint(right)
 
 
 __all__ = [

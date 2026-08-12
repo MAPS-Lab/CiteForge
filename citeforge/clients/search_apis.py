@@ -739,10 +739,7 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
         xml = http_get_text(url, timeout=HTTP_TIMEOUT_DEFAULT)
     except NETWORK_ERRORS:
         return []
-    try:
-        articles = normalize_dblp_person_xml(xml, pid)
-    except (ValueError, TypeError):
-        return []
+    articles = normalize_dblp_person_xml(xml, pid)
     if articles:
         response_cache.put("dblp", cache_key, {"articles": articles}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         logger.debug(

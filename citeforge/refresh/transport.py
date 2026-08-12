@@ -99,6 +99,7 @@ class SendOperation:
     idempotency_header: str | None = None
     max_attempts: int = HTTP_MAX_RETRIES + 1
     response_decoder: ResponseDecoder | None = None
+    decoder_schema: str | None = None
 
     def __post_init__(self) -> None:
         if self.timeout <= 0:
@@ -107,6 +108,8 @@ class SendOperation:
             raise ValueError("provider max attempts must be positive")
         if self.request.method not in {"GET", "HEAD", "POST"}:
             raise ValueError("unsupported wire method")
+        if self.response_decoder is not None and not self.decoder_schema:
+            raise ValueError("typed response decoder requires an exact schema identity")
         if self.request.method == "POST" and self.idempotency_key is not None:
             headers = {name.casefold(): value for name, value in (self.headers or {}).items()}
             if (
@@ -552,7 +555,7 @@ class LedgerTransport:
             digest = _canonical_digest(normalized)
             observation = ProviderObservation(
                 operation.request.provider,
-                operation.request.adapter_version,
+                operation.decoder_schema or operation.request.adapter_version,
                 normalized,
                 authoritative_empty=authoritative_empty,
             )

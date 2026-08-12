@@ -49,6 +49,7 @@ class RefreshEngine:
             return RunResult(RunStatus.INVALID_CONFIGURATION, spec.id, detail=str(exc))
 
         status = self._ledger.plan_status()
+        digest = self._authority_digest(spec, capabilities)
         if status.revision == 0:
             epoch = datetime.now(timezone.utc).strftime("%Y-%m")
             tasks = []
@@ -60,20 +61,17 @@ class RefreshEngine:
                     tasks.append(
                         PlannedTask(build_inventory_task(row, capability, epoch, self._policy), expands_plan=True)
                     )
-            evidence = {
-                "capabilities": sorted(item.capability_id for item in capabilities.values()),
-                "generation": spec.id,
-                "policy": {
-                    "max_publications": self._policy.max_publications,
-                    "max_scholar_pages": self._policy.max_scholar_pages,
-                    "min_year": self._policy.min_year,
-                },
-            }
-            digest = hashlib.sha256(json.dumps(evidence, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
             self._ledger.commit_initial_round(tasks, source_evidence_digest=digest, now=datetime.now(timezone.utc))
             self._ledger.transition_generation(
                 GenerationState.PLANNING, GenerationState.RUNNING, datetime.now(timezone.utc)
             )
+        else:
+            try:
+                self._ledger.assert_initial_inventory_authority(digest)
+            except ValueError as exc:
+                return RunResult(RunStatus.INVALID_CONFIGURATION, spec.id, detail=str(exc))
+        if self._ledger.generation_state() is GenerationState.BLOCKED:
+            return RunResult(RunStatus.BLOCKED, spec.id, detail="inventory generation remains durably blocked")
 
         completed = 0
         if self._transport is not None:
@@ -100,9 +98,18 @@ class RefreshEngine:
                 )
                 self._transport.send(operation, task_claim=claim)
                 completed += 1
-            self._commit_pending_page_wave(spec)
-            if not self._inventory_work_open():
-                self._commit_ready_unions(spec)
+            try:
+                self._commit_pending_page_wave(spec)
+                if not self._inventory_work_open():
+                    self._commit_ready_unions(spec)
+            except ValueError as exc:
+                self._ledger.transition_generation(
+                    GenerationState.RUNNING,
+                    GenerationState.BLOCKED,
+                    datetime.now(timezone.utc),
+                    blocking_reason="inventory planning or reduction rejected durable evidence",
+                )
+                return RunResult(RunStatus.BLOCKED, spec.id, completed_tasks=completed, detail=str(exc))
 
         manifest = self._ledger.manifest().data
         task_rows = manifest["tasks"]
@@ -119,6 +126,13 @@ class RefreshEngine:
         if isinstance(task_rows, list) and any(
             item["operation"] == "inventory" and item["state"] in blocking_states for item in task_rows
         ):
+            if self._ledger.generation_state() in {GenerationState.RUNNING, GenerationState.WAITING}:
+                self._ledger.transition_generation(
+                    self._ledger.generation_state(),
+                    GenerationState.BLOCKED,
+                    datetime.now(timezone.utc),
+                    blocking_reason="author inventory has durable blocking evidence",
+                )
             return RunResult(
                 RunStatus.BLOCKED,
                 spec.id,
@@ -179,14 +193,47 @@ class RefreshEngine:
         )
 
     def _commit_ready_unions(self, spec: GenerationSpec) -> None:
+        manifest = self._ledger.manifest().data
+        generation = manifest.get("generation")
+        if not isinstance(generation, dict) or not isinstance(generation.get("inventory_freshness_epoch"), str):
+            raise ValueError("inventory freshness authority is missing")
+        policy = InventoryPolicy(
+            self._policy.min_year,
+            self._policy.max_publications,
+            self._policy.max_scholar_pages,
+            spec.adapter_versions["doi_csl"],
+            spec.adapter_versions["s2"],
+            generation["inventory_freshness_epoch"],
+        )
         for row in spec.census.enabled_rows:
-            self._ledger.commit_inventory_union(row, self._policy, reducer_version="1", now=datetime.now(timezone.utc))
+            self._ledger.commit_inventory_union(row, policy, reducer_version="1", now=datetime.now(timezone.utc))
 
     def _inventory_work_open(self) -> bool:
         tasks = _manifest_rows(self._ledger.manifest().data.get("tasks"), "tasks")
         return any(
             item["operation"] == "inventory" and item["state"] not in {"succeeded", "confirmed_empty"} for item in tasks
         )
+
+    def _authority_digest(self, spec: GenerationSpec, capabilities: dict[str, AdapterCapability]) -> str:
+        content = {
+            "capabilities": [
+                dict(item.canonical_content())
+                for item in sorted(capabilities.values(), key=lambda value: value.capability_id)
+            ],
+            "generation": spec.id,
+            "policy": {
+                "max_publications": self._policy.max_publications,
+                "max_scholar_pages": self._policy.max_scholar_pages,
+                "min_year": self._policy.min_year,
+                "seed_adapter_versions": {
+                    "doi_csl": spec.adapter_versions["doi_csl"],
+                    "s2": spec.adapter_versions["s2"],
+                },
+            },
+            "planner_version": "1",
+            "reducer_version": "1",
+        }
+        return hashlib.sha256(json.dumps(content, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
 
     @staticmethod
     def _preflight(spec: GenerationSpec, credentials: RefreshCredentials) -> dict[str, AdapterCapability]:
@@ -195,7 +242,7 @@ class RefreshEngine:
             version = spec.adapter_versions.get(source)
             if version is None:
                 raise ValueError(f"missing adapter version for {source}")
-            capability_for(source, operation, version)
+            capabilities[source] = capability_for(source, operation, version)
         for row in spec.census.enabled_rows:
             for source, identifier in (("scholar", row.scholar_id), ("dblp", row.dblp_id)):
                 if not identifier:
