@@ -5,9 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
+from citeforge.clients.search_apis import OpenReviewRuntimeSession, OpenReviewSessionBroker
+
+from .discovery import (
+    DiscoveryCredentials,
+    DiscoveryPolicy,
+    build_claimed_discovery_operation,
+    resolve_discovery_authority,
+)
 from .inventory import (
     AdapterCapability,
     InventoryPolicy,
@@ -20,7 +29,20 @@ from .inventory import (
 )
 from .ledger import Ledger, PlannedTask
 from .transport import ProviderTransport
-from .types import GenerationSpec, GenerationState, RunResult, RunStatus
+from .types import GenerationSpec, GenerationState, RunResult, RunStatus, TaskDisposition
+
+_DISCOVERY_BLOCKING = frozenset(
+    {
+        TaskDisposition.MALFORMED,
+        TaskDisposition.AUTHENTICATION_FAILED,
+        TaskDisposition.SCHEMA_CHANGED,
+        TaskDisposition.PERMANENT_FAILURE,
+        TaskDisposition.CIRCUIT_OPEN,
+        TaskDisposition.AMBIGUOUS,
+        TaskDisposition.BLOCKED,
+        TaskDisposition.UNKNOWN,
+    }
+)
 
 
 def _manifest_rows(value: object, name: str) -> list[dict[str, object]]:
@@ -32,17 +54,28 @@ def _manifest_rows(value: object, name: str) -> list[dict[str, object]]:
 class RefreshEngine:
     """Create a durable inventory plan without granting discovery authority."""
 
-    def __init__(self, ledger: Ledger, policy: InventoryPolicy, transport: ProviderTransport | None = None) -> None:
+    def __init__(
+        self,
+        ledger: Ledger,
+        policy: InventoryPolicy,
+        transport: ProviderTransport | None = None,
+        openreview_broker: OpenReviewSessionBroker | None = None,
+    ) -> None:
         self._ledger = ledger
         self._policy = policy
         self._transport = transport
         self._owner = f"inventory-{secrets.token_hex(12)}"
+        self._discovery_owner = f"discovery-{secrets.token_hex(12)}"
+        self._openreview_broker = openreview_broker or OpenReviewSessionBroker()
 
     def run(
         self,
         spec: GenerationSpec,
         credentials: RefreshCredentials,
         stop_requested: Callable[[], bool],
+        *,
+        discovery_policy: DiscoveryPolicy | None = None,
+        discovery_credentials: DiscoveryCredentials | None = None,
     ) -> RunResult:
         run_started_at = datetime.now(timezone.utc)
         self._ledger.create_or_resume(spec, spec.census)
@@ -50,6 +83,45 @@ class RefreshEngine:
             capabilities = self._preflight(spec, credentials)
             if self._policy.min_year > run_started_at.year:
                 raise ValueError("inventory minimum year exceeds the code-owned refresh year")
+            if (discovery_policy is None) != (discovery_credentials is None):
+                raise ValueError("discovery policy and credentials must be supplied together")
+            if discovery_policy is None and set(spec.adapter_versions) >= {
+                "arxiv",
+                "crossref",
+                "doi_bibtex",
+                "doi_csl",
+                "europepmc",
+                "gemini",
+                "openalex",
+                "openreview",
+                "pubmed",
+                "s2",
+                "serply",
+            }:
+                try:
+                    self._ledger.load_discovery_authority()
+                except ValueError as exc:
+                    raise ValueError("full discovery generations require preflight before inventory planning") from exc
+            if discovery_policy is not None and discovery_credentials is not None:
+                if discovery_policy.freshness_epoch != run_started_at.strftime("%Y-%m"):
+                    raise ValueError("discovery freshness does not match the code-owned inventory epoch")
+                if discovery_policy.max_scholar_pages != self._policy.max_scholar_pages:
+                    raise ValueError("discovery Scholar bound does not match inventory policy")
+                if self._ledger.generation_state() is GenerationState.BLOCKED:
+                    try:
+                        bound_authority = self._ledger.load_discovery_authority()
+                    except ValueError:
+                        bound_authority = None
+                    if bound_authority is not None and bound_authority != resolve_discovery_authority(
+                        discovery_policy, discovery_credentials
+                    ):
+                        raise ValueError("discovery wave policy does not match bound authority")
+                    return RunResult(
+                        RunStatus.BLOCKED,
+                        spec.id,
+                        detail="inventory generation remains durably blocked",
+                    )
+                self._ledger.bind_discovery_policy(discovery_policy, discovery_credentials)
         except ValueError as exc:
             return RunResult(RunStatus.INVALID_CONFIGURATION, spec.id, detail=str(exc))
 
@@ -173,6 +245,175 @@ class RefreshEngine:
             remaining_tasks=remaining,
             detail="inventory execution requires a configured durable transport",
         )
+
+    def run_discovery(
+        self,
+        spec: GenerationSpec,
+        policy: DiscoveryPolicy,
+        credentials: DiscoveryCredentials,
+        stop_requested: Callable[[], bool],
+    ) -> RunResult:
+        """Advance only the earliest incomplete C4 phase with exact scoped claims."""
+        try:
+            generation = self._ledger.manifest().data.get("generation")
+            if not isinstance(generation, dict) or generation.get("generation_id") != spec.id:
+                raise ValueError("discovery generation identity does not match the supplied specification")
+            self._ledger.create_or_resume(spec, spec.census)
+            if self._ledger.generation_state() is GenerationState.BLOCKED:
+                try:
+                    authority = self._ledger.load_discovery_authority()
+                except ValueError:
+                    authority = None
+                if authority is not None and authority.policy != policy:
+                    raise ValueError("discovery wave policy does not match bound authority")
+                return RunResult(
+                    RunStatus.BLOCKED,
+                    spec.id,
+                    detail="discovery generation remains durably blocked",
+                )
+            self._ledger.assert_c3_discovery_ready()
+            self._ledger.bind_discovery_policy(policy, credentials)
+            authority = self._ledger.load_discovery_authority()
+        except (TypeError, ValueError) as exc:
+            return RunResult(RunStatus.INVALID_CONFIGURATION, spec.id, detail=str(exc))
+
+        completed = 0
+        for pass_id in ("known_doi", "broad_discovery", "dynamic_expansion"):
+            non_openreview: deque[str] = deque()
+            openreview: deque[str] = deque()
+            while True:
+                now = datetime.now(timezone.utc)
+                status = (
+                    "pending"
+                    if non_openreview or openreview
+                    else self._ledger.discovery_phase_status(pass_id, now=now)
+                )
+                if status == "uncommitted":
+                    try:
+                        self._ledger.execute_and_commit_discovery_wave(pass_id, policy, now=now)
+                    except ValueError as exc:
+                        return self._block_discovery(spec.id, completed, str(exc), now)
+                    continue
+                if status == "blocking":
+                    return self._block_discovery(
+                        spec.id,
+                        completed,
+                        f"{pass_id} has durable blocking evidence",
+                        now,
+                    )
+                if status == "complete":
+                    break
+
+                if not non_openreview and not openreview:
+                    due = self._ledger.discovery_wave_due_tasks(pass_id, now=now)
+                    non_openreview.extend(key for key, provider in due.items() if provider != "openreview")
+                    openreview.extend(key for key, provider in due.items() if provider == "openreview")
+                if not non_openreview and not openreview and pass_id == "known_doi":  # noqa: S105
+                    try:
+                        self._ledger.execute_and_commit_discovery_wave(pass_id, policy, now=now)
+                    except ValueError as exc:
+                        return self._block_discovery(spec.id, completed, str(exc), now)
+                    refreshed = datetime.now(timezone.utc)
+                    if self._ledger.discovery_phase_status(pass_id, now=refreshed) != "pending":
+                        continue
+                    due = self._ledger.discovery_wave_due_tasks(pass_id, now=refreshed)
+                    non_openreview.extend(key for key, provider in due.items() if provider != "openreview")
+                    openreview.extend(key for key, provider in due.items() if provider == "openreview")
+                    now = refreshed
+                if (not non_openreview and not openreview) or stop_requested() or self._transport is None:
+                    return RunResult(
+                        RunStatus.CONTINUATION,
+                        spec.id,
+                        completed_tasks=completed,
+                        remaining_tasks=len(non_openreview) + len(openreview),
+                        detail="discovery work remains pending",
+                    )
+
+                openreview_session: OpenReviewRuntimeSession | None = None
+                if non_openreview:
+                    claim_key = non_openreview.popleft()
+                    is_openreview = False
+                else:
+                    claim_key = openreview.popleft()
+                    is_openreview = True
+                if policy.openreview_mode == "authenticated" and is_openreview:
+                    identity = (credentials.openreview_username, credentials.openreview_password)
+                    if not all(isinstance(value, str) for value in identity):
+                        return self._block_discovery(
+                            spec.id,
+                            completed,
+                            "authenticated OpenReview credentials are unavailable",
+                            now,
+                        )
+                    try:
+                        openreview_session = self._openreview_broker.acquire((str(identity[0]), str(identity[1])))
+                    except ValueError as exc:
+                        return self._block_discovery(spec.id, completed, str(exc), now)
+                    if openreview_session is None:
+                        return self._block_discovery(
+                            spec.id,
+                            completed,
+                            "authenticated OpenReview login failed",
+                            now,
+                        )
+
+                claim = self._ledger.claim_due_for_operations(
+                    self._discovery_owner,
+                    now,
+                    timedelta(minutes=5),
+                    frozenset({claim_key}),
+                )
+                if claim is None:
+                    continue
+                try:
+                    operation = build_claimed_discovery_operation(
+                        self._ledger,
+                        claim,
+                        credentials,
+                        authority,
+                        now=datetime.now(timezone.utc),
+                        openreview_session=openreview_session,
+                    )
+                except ValueError as exc:
+                    return self._block_discovery(spec.id, completed, str(exc), datetime.now(timezone.utc))
+                response = self._transport.send(operation, task_claim=claim)
+                completed += 1
+                if getattr(response, "disposition", None) in _DISCOVERY_BLOCKING:
+                    return self._block_discovery(
+                        spec.id,
+                        completed,
+                        f"{pass_id} has durable blocking evidence",
+                        datetime.now(timezone.utc),
+                    )
+                if getattr(response, "disposition", None) is TaskDisposition.LEASED:
+                    eligible_status = self._ledger.discovery_phase_status(
+                        pass_id, now=datetime.now(timezone.utc)
+                    )
+                    if eligible_status == "blocking":
+                        return self._block_discovery(
+                            spec.id,
+                            completed,
+                            f"{pass_id} has durable blocking evidence",
+                            datetime.now(timezone.utc),
+                        )
+
+        return RunResult(
+            RunStatus.CONTINUATION,
+            spec.id,
+            completed_tasks=completed,
+            detail="C4 discovery waves are complete",
+        )
+
+    def _block_discovery(self, generation_id: str, completed: int, detail: str, now: datetime) -> RunResult:
+        state = self._ledger.generation_state()
+        if state in {GenerationState.RUNNING, GenerationState.WAITING}:
+            self._ledger.transition_generation(
+                state,
+                GenerationState.BLOCKED,
+                now,
+                blocking_reason="discovery execution rejected durable evidence",
+            )
+        return RunResult(RunStatus.BLOCKED, generation_id, completed_tasks=completed, detail=detail)
 
     def _commit_pending_page_wave(self, spec: GenerationSpec) -> None:
         raw = self._ledger.load_pending_scholar_wave()

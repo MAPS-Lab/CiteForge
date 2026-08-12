@@ -90,7 +90,10 @@ def _list_decoder(
                 if (
                     not isinstance(item, dict)
                     or any(not item.get(name) for name in required_fields)
-                    or any(not isinstance(item.get(name), str) for name in string_fields)
+                    or any(
+                        not isinstance(item.get(name), str) or not str(item[name]).strip()
+                        for name in string_fields
+                    )
                     or (record_validator is not None and not record_validator(item))
                 ):
                     raise SchemaChangedError("provider record lacks required reducer evidence")
@@ -146,18 +149,24 @@ def _counted_list_decoder(
 
 
 def _string_list(value: object) -> bool:
-    return isinstance(value, list) and all(isinstance(member, str) for member in value)
+    return (
+        isinstance(value, list) and bool(value) and all(isinstance(member, str) and member.strip() for member in value)
+    )
 
 
 def _date_parts(value: object) -> bool:
     if not isinstance(value, dict):
         return False
     parts = value.get("date-parts")
-    return isinstance(parts, list) and all(
-        isinstance(part, list)
-        and bool(part)
-        and all(isinstance(member, int) and not isinstance(member, bool) for member in part)
-        for part in parts
+    return (
+        isinstance(parts, list)
+        and bool(parts)
+        and all(
+            isinstance(part, list)
+            and bool(part)
+            and all(isinstance(member, int) and not isinstance(member, bool) for member in part)
+            for part in parts
+        )
     )
 
 
@@ -280,20 +289,27 @@ def _doi_csl(raw: RawProviderResponse, context: Mapping[str, object]) -> Decoded
         raise SchemaChangedError("DOI CSL response lacks title metadata")
     requested = normalize_doi(str(context.get("doi", "")))
     returned = normalize_doi(str(value.get("DOI", "")))
-    if requested and returned and requested != returned:
+    if "DOI" in value and returned is None:
+        raise SchemaChangedError("DOI CSL response identity is invalid")
+    if requested and returned is not None and returned != requested:
         raise SchemaChangedError("DOI CSL response identity conflicts with request")
     for key in ("type", "DOI", "URL", "volume", "issue", "page", "publisher"):
-        if key in value and not isinstance(value[key], str):
+        member = value.get(key)
+        if key in value and (not isinstance(member, str) or not member.strip()):
             raise SchemaChangedError("DOI CSL response member types are invalid")
     for key in ("subtitle", "container-title", "event"):
-        if key in value and not (isinstance(value[key], str) or _string_list(value[key])):
+        member = value.get(key)
+        if key in value and not ((isinstance(member, str) and member.strip()) or _string_list(member)):
             raise SchemaChangedError("DOI CSL response member types are invalid")
     csl_authors = value.get("author")
     if csl_authors is not None and not (
         isinstance(csl_authors, list)
+        and bool(csl_authors)
         and all(
             isinstance(author, dict)
+            and bool(author)
             and all(key not in author or isinstance(author[key], str) for key in ("given", "family", "literal"))
+            and any(isinstance(author.get(key), str) and author[key].strip() for key in ("given", "family", "literal"))
             for author in csl_authors
         )
     ):
@@ -424,6 +440,11 @@ def _pubmed_search(raw: RawProviderResponse, context: Mapping[str, object]) -> D
     pmids = normalized["pmids"]
     if not isinstance(pmids, list) or any(not pmid.isdigit() for pmid in pmids) or len(pmids) != len(set(pmids)):
         raise SchemaChangedError("PubMed ESearch contains invalid or duplicate PMIDs")
+    retmax = context.get("retmax")
+    if isinstance(retmax, bool) or not isinstance(retmax, int) or retmax < 1:
+        raise SchemaChangedError("PubMed ESearch lacks exact result bound authority")
+    if len(pmids) > retmax:
+        raise SchemaChangedError("PubMed ESearch exceeds requested result bound")
     return normalized, empty
 
 
@@ -432,6 +453,8 @@ def _openreview(raw: RawProviderResponse, _context: Mapping[str, object]) -> Dec
     notes = value.get("notes")
     if not isinstance(notes, list) or not all(isinstance(note, dict) for note in notes):
         raise SchemaChangedError("OpenReview response lacks notes")
+    if len(notes) > 20:
+        raise SchemaChangedError("OpenReview response exceeds fixed result bound")
     projected: list[dict[str, object]] = []
     for note in notes:
         note_id = note.get("id")
@@ -439,6 +462,20 @@ def _openreview(raw: RawProviderResponse, _context: Mapping[str, object]) -> Dec
         title = content.get("title") if isinstance(content, dict) else None
         if not isinstance(note_id, str) or not note_id or not isinstance(title, str) or not title.strip():
             raise SchemaChangedError("OpenReview note lacks stable ID or title")
+        if any(
+            key in note and (isinstance(note[key], bool) or not isinstance(note[key], (int, float)))
+            for key in ("cdate", "tcdate")
+        ):
+            raise SchemaChangedError("OpenReview note timestamp is invalid")
+        if "authors" in note and not _string_list(note["authors"]):
+            raise SchemaChangedError("OpenReview note authors are invalid")
+        if any(key in content and not _string_list(content[key]) for key in ("authors", "authorids")):
+            raise SchemaChangedError("OpenReview note authors are invalid")
+        if any(
+            key in content and (not isinstance(content[key], str) or not content[key].strip())
+            for key in ("venue", "venueid", "doi", "pdf", "link", "homepage")
+        ):
+            raise SchemaChangedError("OpenReview note metadata is invalid")
         allowed_content = {
             key: content[key]
             for key in ("title", "authors", "authorids", "venue", "venueid", "doi", "pdf", "link", "homepage")
@@ -582,9 +619,10 @@ def _doi_bibtex(raw: RawProviderResponse, context: Mapping[str, object]) -> Deco
     if normalized is None or not normalized.get("fields", {}).get("title"):
         raise SchemaChangedError("DOI BibTeX lacks normalized title metadata")
     requested = normalize_doi(str(context.get("doi", "")))
-    fields = normalized.get("fields", {})
-    returned = normalize_doi(str(fields.get("doi", ""))) if isinstance(fields, Mapping) else ""
-    if requested and returned and requested != returned:
+    returned = normalize_doi(str(entries[0].get("doi", "")))
+    if "doi" in entries[0] and returned is None:
+        raise SchemaChangedError("DOI BibTeX response identity is invalid")
+    if requested and returned != requested:
         raise SchemaChangedError("DOI BibTeX response identity conflicts with request")
     return {"metadata": normalized}, False
 

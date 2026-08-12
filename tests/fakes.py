@@ -23,6 +23,9 @@ class FakeResponse:
         if self.status_code >= 400:
             raise requests.exceptions.HTTPError(f"{self.status_code} Error", response=self)  # type: ignore[arg-type]
 
+    def close(self) -> None:
+        return None
+
 
 class FakeSession:
     """Scriptable stand-in for ``requests.Session``.

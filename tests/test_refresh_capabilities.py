@@ -58,7 +58,7 @@ def _builder_payload(capability_id: str) -> dict[str, object]:
             "min_year": 2020,
         },
         "dblp.inventory.v1": {"author_key": "author", "pid": "p"},
-        "s2.fuzzy_search.v2": {"author_key": "author", "title": "safe", "year": 2026},
+        "s2.fuzzy_search.v2": {"author_key": "author", "author": "Ada", "title": "safe", "year": 2026},
         "s2.fuzzy_search.v1": {"author_key": "author", "query": "safe", "limit": 15},
         "serply.scholar_search.v1": {"author_key": "author", "query": "safe", "start": 0},
         "crossref.fuzzy_search.v1": {"author_key": "author", "query": "safe", "author": None, "rows": 20},
@@ -75,7 +75,7 @@ def _builder_payload(capability_id: str) -> dict[str, object]:
         "europepmc.fuzzy_search.v1": {"author_key": "author", "query": "safe", "page_size": 20},
         "doi_csl.csl_lookup.v1": {"doi": "10.1/x"},
         "doi_bibtex.bibtex_lookup.v1": {"doi": "10.1/x"},
-        "openreview.term_search.v1": {"author_key": "author", "term": "safe"},
+        "openreview.term_search.v1": {"author_key": "author", "term": "safe", "limit": 20},
         "openreview.fallback_search.v1": {"author_key": "author", "query": "safe"},
         "pubmed.summary.v1": {"requested_pmids": ("1",)},
         "crossref.venue_search.v1": {"author_key": "author", "query": "safe", "venue": "v", "author": None, "rows": 20},
@@ -259,8 +259,21 @@ def test_distinct_operations_bind_exact_endpoint_templates() -> None:
     assert endpoints["pubmed.title_search.v1"].endswith("/esearch.fcgi")
     assert endpoints["pubmed.summary.v1"].endswith("/esummary.fcgi")
     assert len(set(endpoints.values())) == 4
+    fallback = build_request(
+        "openreview.fallback_search.v1", _builder_payload("openreview.fallback_search.v1")
+    )
+    assert fallback.query == {"query": "safe", "limit": 20}
     serply = build_request("serply.scholar_search.v1", _builder_payload("serply.scholar_search.v1")).endpoint
     assert serply.endswith("/safe")
+
+
+def test_serply_builder_binds_output_affecting_current_client_headers() -> None:
+    request = build_request("serply.scholar_search.v1", _builder_payload("serply.scholar_search.v1"))
+    assert request.required_headers == {
+        "Accept": "application/json",
+        "Accept-Encoding": "identity",
+        "X-Proxy-Location": "US",
+    }
 
 
 def test_doi_media_operations_require_distinct_exact_accept_headers() -> None:

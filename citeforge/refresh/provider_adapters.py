@@ -73,7 +73,7 @@ def _exact_builder_payload(capability_id: str, payload: Mapping[str, object], ur
         return {"requested_pmids": requested if requested is not None else (payload.get("pmid"),)}
     if capability_id.startswith("openreview."):
         return (
-            {"author_key": author_key, "term": payload["term"]}
+            {"author_key": author_key, "term": payload["term"], "limit": int(query.get("limit", 20))}
             if "term" in payload
             else {"author_key": author_key, "query": payload["query"]}
         )
@@ -268,7 +268,9 @@ def _normalized_empty(normalize: Normalizer, field: str) -> EmptyCheck:
     return lambda value: not normalize(value)[field]
 
 
-def _registry_normalizer(capability_id: str) -> Normalizer:
+def _registry_normalizer(
+    capability_id: str, *, decoder_context: Mapping[str, object] = MappingProxyType({})
+) -> Normalizer:
     def normalize(value: dict[str, object]) -> Mapping[str, object]:
         normalized, _empty = decode_response(
             capability_id + ".decoder",
@@ -278,6 +280,7 @@ def _registry_normalizer(capability_id: str) -> Normalizer:
                 "https://compatibility.invalid/normalized-envelope",
                 {},
             ),
+            decoder_context,
         )
         return normalized
 
@@ -316,7 +319,7 @@ def _serpapi(value: dict[str, object]) -> Mapping[str, object]:
 
 _SERPAPI = _serpapi
 _DBLP = _list("hits", "result", "hits", "hit")
-_PUBMED_SEARCH = _registry_normalizer("pubmed.title_search.v1")
+_PUBMED_SEARCH = _registry_normalizer("pubmed.title_search.v1", decoder_context=MappingProxyType({"retmax": 5}))
 _OPENREVIEW = _registry_normalizer("openreview.term_search.v1")
 _GEMINI = _registry_normalizer("gemini.short_title.v1")
 

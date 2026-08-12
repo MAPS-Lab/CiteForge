@@ -520,10 +520,59 @@ _PASS_IDS = (
 
 
 def _callback_for(
-    _pass_id: str,
+    pass_id: str,
 ) -> Callable[[Mapping[str, object]], tuple[tuple[str, ...], tuple[str, ...]]]:
     def callback(snapshot: Mapping[str, object]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        return _expected_items(snapshot)
+        expected, _unseen = _expected_items(snapshot)
+        if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+            items = snapshot.get("items", ())
+            if not isinstance(items, Sequence) or isinstance(items, (str, bytes, bytearray)):
+                raise ValueError("known DOI snapshot items must be a sequence")
+            seed_keys = tuple(sorted(
+                _identifier(str(item.get("key", "")), "known DOI seed item")
+                for item in items
+                if isinstance(item, Mapping) and item.get("kind") == EvidenceKind.SEED.value
+            ))
+            if len(seed_keys) != len(set(seed_keys)):
+                raise ValueError("known DOI pass requires the exact seed union")
+            authority_items = [
+                item
+                for item in items
+                if isinstance(item, Mapping)
+                and item.get("kind") == EvidenceKind.REDUCTION_RECEIPT.value
+                and str(item.get("key", "")).startswith("authority:")
+            ]
+            decisions = [
+                item
+                for item in items
+                if isinstance(item, Mapping)
+                and item.get("kind") == EvidenceKind.APPLICABILITY.value
+                and str(item.get("key", "")).startswith("decision:")
+            ]
+            if not authority_items and not decisions and pass_id == "known_doi":  # noqa: S105
+                return expected, expected
+            if len(authority_items) != 1:
+                raise ValueError("discovery pass authority is incomplete")
+            if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
+                if len(decisions) != len(seed_keys):
+                    raise ValueError("known DOI pass output authority is incomplete")
+                return expected, seed_keys
+            source_prefix = (
+                "doi-reduction:"
+                if pass_id == "broad_discovery"  # noqa: S105 - planner pass identifier
+                else "broad-decision:"
+            )
+            source_keys = tuple(
+                sorted(
+                    _identifier(str(item.get("key", "")), "discovery source item")
+                    for item in items
+                    if isinstance(item, Mapping) and str(item.get("key", "")).startswith(source_prefix)
+                )
+            )
+            if (not source_keys or not decisions) and seed_keys:
+                raise ValueError("discovery pass source or output authority is incomplete")
+            return expected, source_keys
+        return expected, expected
 
     return callback
 
@@ -533,14 +582,22 @@ _PRIVATE_PASSES = MappingProxyType(
     {
         pass_id: PassDefinition(
             pass_id,
-            "1",
+            "2" if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"} else "1",
             f"{pass_id}.callback",
-            "1",
+            "2" if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"} else "1",
             pass_id,
             ordinal,
             "task5c-fixed-waves-v1",
-            "task5c-evidence-policy-v1",
-            "task5c-snapshot-v1",
+            (
+                "task5c4-discovery-policy-v2"
+                if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}
+                else "task5c-evidence-policy-v1"
+            ),
+            (
+                "task5c4-discovery-snapshot-v2"
+                if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}
+                else "task5c-snapshot-v1"
+            ),
             "task5c-provenance-v1",
             "task5c-intent-v1",
             REGISTRY_DIGEST,

@@ -355,6 +355,7 @@ class LedgerTransport:
             dict(operation.json_payload) if operation.json_payload is not None else None,
             stream=True,
             allow_redirects=False,
+            isolated_session=True,
         )
 
     def result(self, request_key: str) -> ProviderResponse | None:

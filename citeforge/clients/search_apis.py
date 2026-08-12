@@ -10,16 +10,20 @@ the chosen record into a BibTeX entry through a ``build_bibtex_from_*`` helper.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import math
 import os
 import re
 import threading
 import time
 import xml.etree.ElementTree as ElementTree  # Element types only; parsing uses defusedxml
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
+import requests
 from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
 from ..cache import response_cache
@@ -402,6 +406,107 @@ _OPENREVIEW_SESSION_CREATED_AT: float = 0.0
 _OPENREVIEW_SESSION_LOCK = threading.Lock()
 
 
+def _openreview_login_once(credentials: tuple[str, str]) -> dict[str, str] | None:
+    """Perform one runtime login without consulting any shared session cache."""
+    url = f"{OPENREVIEW_BASE}/login"
+    payload = {"id": credentials[0], "password": credentials[1]}
+    headers = DEFAULT_JSON_HEADERS.copy()
+    headers["Content-Type"] = "application/json"
+    try:
+        with requests.Session() as session:
+            response = session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=20,
+                allow_redirects=False,
+                stream=True,
+            )
+            try:
+                if response.status_code != 200 or len(str(response.headers)) > 16_384:
+                    return None
+                cookie = _cookie_header(response.headers.get("Set-Cookie", ""))
+            finally:
+                response.close()
+    except (*NETWORK_ERRORS, *PARSE_ERRORS):
+        return None
+    return {"Cookie": cookie} if cookie else None
+
+
+@dataclass(frozen=True)
+class OpenReviewRuntimeSession:
+    """Opaque runtime cookie bound to exactly one credential identity."""
+
+    _cookie: str = field(repr=False)
+    _credential_digest: str = field(repr=False)
+    _expires_at: float = field(repr=False)
+    _monotonic: Callable[[], float] = field(repr=False)
+
+    def cookie_for(self, credentials: tuple[str, str]) -> str:
+        digest = hashlib.sha256("\0".join(credentials).encode()).hexdigest()
+        if digest != self._credential_digest:
+            raise ValueError("OpenReview runtime session credential authority changed")
+        if self._monotonic() >= self._expires_at:
+            raise ValueError("OpenReview runtime session expired")
+        return self._cookie
+
+
+@dataclass
+class OpenReviewSessionBroker:
+    """Runtime-only, credential-affine OpenReview session cache for C4."""
+
+    login_once: Callable[[tuple[str, str]], dict[str, str] | None] = field(default=_openreview_login_once, repr=False)
+    monotonic: Callable[[], float] = field(default=time.monotonic, repr=False)
+    ttl_seconds: float = OPENREVIEW_SESSION_TTL_SECS
+    _session: OpenReviewRuntimeSession | None = field(default=None, init=False, repr=False)
+    _created_at: float = field(default=0.0, init=False, repr=False)
+    _credential_digest: str | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.ttl_seconds, (int, float))
+            or isinstance(self.ttl_seconds, bool)
+            or not math.isfinite(self.ttl_seconds)
+            or self.ttl_seconds <= 0
+        ):
+            raise ValueError("OpenReview session TTL must be positive")
+
+    def acquire(self, credentials: tuple[str, str]) -> OpenReviewRuntimeSession | None:
+        """Return the exact live session for these credentials, never another account's."""
+        if len(credentials) != 2 or any(
+            not isinstance(value, str) or not value.strip() or "\r" in value or "\n" in value for value in credentials
+        ):
+            raise ValueError("OpenReview credentials are invalid")
+        credential_digest = hashlib.sha256("\0".join(credentials).encode()).hexdigest()
+        with self._lock:
+            now = self.monotonic()
+            if (
+                self._session is not None
+                and self._credential_digest == credential_digest
+                and now - self._created_at < self.ttl_seconds
+            ):
+                return self._session
+            self._session = None
+            self._created_at = 0.0
+            self._credential_digest = None
+            headers = self.login_once(credentials)
+            if headers is None:
+                return None
+            cookie = headers.get("Cookie")
+            if set(headers) != {"Cookie"} or not isinstance(cookie, str) or not cookie.strip():
+                raise ValueError("OpenReview login returned invalid session authority")
+            self._created_at = self.monotonic()
+            self._session = OpenReviewRuntimeSession(
+                cookie,
+                credential_digest,
+                self._created_at + self.ttl_seconds,
+                self.monotonic,
+            )
+            self._credential_digest = credential_digest
+            return self._session
+
+
 def _or_note_title(note: dict[str, Any]) -> str:
     """Extract the title from an OpenReview note."""
     content = note.get("content") or {}
@@ -540,7 +645,7 @@ def _or_fetch_candidates(
         pass
     if not candidates:
         try:
-            url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"q": title, "limit": 20})
+            url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"query": title, "limit": 20})
             _extend(url, {"kind": "search", "query": title, "limit": 20})
         except (*ALL_API_ERRORS, ValueError):
             pass

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -77,6 +78,20 @@ def test_all_multiple_candidate_functions_exist() -> None:
         assert callable(getattr(search_apis, func_name, None)), f"Function {func_name} not found or not callable"
 
 
+def test_openreview_legacy_fallback_uses_supported_query_parameter(monkeypatch: pytest.MonkeyPatch) -> None:
+    urls: list[str] = []
+
+    def fetch(url: str, _headers: dict[str, str], **_kwargs: object) -> bytes:
+        urls.append(url)
+        return json.dumps({"notes": []}).encode()
+
+    monkeypatch.setattr(search_apis, "http_fetch_bytes", fetch)
+    assert search_apis._or_fetch_candidates("A title", {}) == []
+    assert len(urls) == 2
+    assert "/notes/search?query=A+title&limit=20" in urls[1]
+    assert "?q=" not in urls[1]
+
+
 def test_openreview_login_forwards_cookie_pairs_without_response_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
     response = FakeResponse(200, headers={"Set-Cookie": "sid=abc; Path=/; HttpOnly; SameSite=Lax"})
     monkeypatch.setattr(search_apis, "_get_session", lambda: FakeSession(response))
@@ -85,6 +100,92 @@ def test_openreview_login_forwards_cookie_pairs_without_response_attributes(monk
     headers = search_apis.openreview_login(("user", "password"))
     assert headers is not None
     assert headers["Cookie"] == "sid=abc"
+
+
+def test_openreview_session_broker_is_credential_affine_and_expiration_aware() -> None:
+    calls: list[tuple[str, str]] = []
+    now = [100.0]
+
+    def login_once(credentials: tuple[str, str]) -> dict[str, str]:
+        calls.append(credentials)
+        return {"Cookie": f"session={len(calls)}"}
+
+    broker = search_apis.OpenReviewSessionBroker(login_once, lambda: now[0], ttl_seconds=10.0)
+    first = broker.acquire(("account-a", "password-a"))
+    assert first is not None and first.cookie_for(("account-a", "password-a")) == "session=1"
+    assert broker.acquire(("account-a", "password-a")) is first
+    assert calls == [("account-a", "password-a")]
+
+    with pytest.raises(ValueError, match="credential authority"):
+        first.cookie_for(("account-b", "password-b"))
+
+    second = broker.acquire(("account-b", "password-b"))
+    assert second is not None and second is not first
+    assert calls[-1] == ("account-b", "password-b")
+
+    now[0] += 10.0
+    with pytest.raises(ValueError, match="expired"):
+        second.cookie_for(("account-b", "password-b"))
+    third = broker.acquire(("account-b", "password-b"))
+    assert third is not None and third is not second
+    assert len(calls) == 3
+    assert "password" not in repr(broker).casefold()
+
+    failing = search_apis.OpenReviewSessionBroker(lambda _credentials: None, lambda: 100.0)
+    assert failing.acquire(("account-c", "password-c")) is None
+    with pytest.raises(ValueError, match="TTL"):
+        search_apis.OpenReviewSessionBroker(ttl_seconds=0)
+
+
+def test_openreview_runtime_login_uses_cookie_empty_isolated_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    posted_headers: list[dict[str, str]] = []
+    posted_options: list[dict[str, object]] = []
+
+    class Session:
+        def __enter__(self) -> Session:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def post(self, _url: str, **kwargs: object) -> FakeResponse:
+            posted_headers.append(dict(kwargs["headers"]))  # type: ignore[arg-type]
+            posted_options.append(kwargs)
+            return FakeResponse(200, headers={"Set-Cookie": "sid=runtime; Path=/; HttpOnly"})
+
+    monkeypatch.setattr(search_apis.requests, "Session", Session)
+    monkeypatch.setattr(
+        search_apis,
+        "_get_session",
+        lambda: pytest.fail("runtime login must not use ambient session cookie jar"),
+    )
+    broker = search_apis.OpenReviewSessionBroker()
+    session = broker.acquire(("account", "password"))
+    assert session is not None and session.cookie_for(("account", "password")) == "sid=runtime"
+    assert all("Cookie" not in headers for headers in posted_headers)
+    assert posted_options[0]["allow_redirects"] is False
+    assert posted_options[0]["stream"] is True
+
+
+def test_openreview_runtime_login_rejects_redirect_without_following(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    class Session:
+        def __enter__(self) -> Session:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def post(self, _url: str, **kwargs: object) -> FakeResponse:
+            nonlocal calls
+            calls += 1
+            assert kwargs["allow_redirects"] is False
+            return FakeResponse(307, headers={"Location": "https://attacker.invalid/collect"})
+
+    monkeypatch.setattr(search_apis.requests, "Session", Session)
+    assert search_apis.OpenReviewSessionBroker().acquire(("account", "password")) is None
+    assert calls == 1
 
 
 @pytest.mark.live

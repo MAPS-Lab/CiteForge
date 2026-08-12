@@ -143,9 +143,9 @@ _BUILDER_REQUIRED = {
     "doi_bibtex.bibtex_lookup.v1": frozenset({"doi"}),
     "serply.scholar_search.v1": frozenset({"author_key", "query", "start"}),
     "s2.fuzzy_search.v1": frozenset({"author_key", "query", "limit"}),
-    "s2.fuzzy_search.v2": frozenset({"author_key", "title", "year"}),
+    "s2.fuzzy_search.v2": frozenset({"author_key", "author", "title", "year"}),
     "crossref.fuzzy_search.v1": frozenset({"author_key", "query", "author", "rows"}),
-    "openreview.term_search.v1": frozenset({"author_key", "term"}),
+    "openreview.term_search.v1": frozenset({"author_key", "term", "limit"}),
     "openreview.fallback_search.v1": frozenset({"author_key", "query"}),
     "arxiv.fuzzy_search.v1": frozenset({"author_key", "query", "start", "max_results", "sort_by", "sort_order"}),
     "openalex.fuzzy_search.v1": frozenset({"author_key", "query", "per_page"}),
@@ -294,8 +294,19 @@ def _builder_callback(capability_id: str, method: str, endpoint: str) -> Callabl
             built_endpoint = f"{SERPLY_BASE}/{quote(str(frozen['query']), safe='')}"
             query = MappingProxyType({"start": frozen["start"]} if frozen["start"] else {})
             credential = "header:X-API-KEY"
+            required_headers = MappingProxyType(
+                {
+                    "Accept": "application/json",
+                    "Accept-Encoding": "identity",
+                    "X-Proxy-Location": "US",
+                }
+            )
         elif capability_id.startswith("s2."):
-            search_text = frozen["query"] if "query" in frozen else frozen["title"]
+            search_text = (
+                frozen["query"]
+                if "query" in frozen
+                else f'"{frozen["title"]}" {frozen["author"]}'
+            )
             query = MappingProxyType(
                 {
                     "query": search_text,
@@ -327,9 +338,9 @@ def _builder_callback(capability_id: str, method: str, endpoint: str) -> Callabl
             credential = "query:mailto_if_configured"
         elif capability_id.startswith("openreview."):
             query = MappingProxyType(
-                {"term": frozen["term"], "details": "metadata"}
+                {"term": frozen["term"], "details": "metadata", "limit": frozen["limit"]}
                 if "term" in frozen
-                else {"q": frozen["query"], "limit": 20}
+                else {"query": frozen["query"], "limit": 20}
             )
             credential = "cookie:runtime_session_if_selected"
         elif capability_id == "arxiv.fuzzy_search.v1":
@@ -491,6 +502,7 @@ def _cap(
     url_policy: str = "fixed_https_origin",
     body_limit: int = 2_000_000,
     plan_expansion: str = "none",
+    builder_version: str = "1",
 ) -> AdapterCapability:
     logical_source, operation, version_token = capability_id.rsplit(".", 2)
     adapter_version = version_token.removeprefix("v")
@@ -508,7 +520,7 @@ def _cap(
         fields,
         method,
         f"{capability_id}.builder",
-        "1",
+        builder_version,
         f"{capability_id}.decoder",
         "1",
         body_limit,
@@ -553,7 +565,13 @@ _VALUES = (
         fields=("results",),
         planner=False,
     ),
-    _cap("s2.fuzzy_search.v2", credential=CredentialKind.S2_API_KEY, schema="s2-search-v2", fields=("results",)),
+    _cap(
+        "s2.fuzzy_search.v2",
+        credential=CredentialKind.S2_API_KEY,
+        schema="s2-search-v2",
+        fields=("results",),
+        builder_version="2",
+    ),
     _cap("crossref.fuzzy_search.v1", schema="crossref-search-v1", fields=("results",)),
     _cap(
         "openreview.term_search.v1",
@@ -569,6 +587,7 @@ _VALUES = (
         schema="openreview-search-v1",
         fields=("notes",),
         auth_mode="runtime_selected_session_or_anonymous_no_downgrade",
+        builder_version="2",
     ),
     _cap("arxiv.fuzzy_search.v1", media=ResponseMediaType.XML, schema="arxiv-atom-v1", fields=("entries",)),
     _cap("openalex.fuzzy_search.v1", schema="openalex-search-v1", fields=("results",)),

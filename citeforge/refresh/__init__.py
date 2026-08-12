@@ -20,6 +20,22 @@ from .authority import (
 )
 from .census import AuthorCensus, AuthorCensusRow, load_census
 from .corpus import ExistingCorpusEvidence, scan_existing_corpus
+from .discovery import (
+    DiscoveryAuthority,
+    DiscoveryCredentials,
+    DiscoveryDecision,
+    DiscoveryObservation,
+    DiscoveryPolicy,
+    DiscoveryWave,
+    DoiReduction,
+    build_claimed_discovery_operation,
+    plan_broad_discovery,
+    plan_doi_bibtex,
+    plan_dynamic_expansion,
+    plan_known_doi,
+    reduce_doi_observations,
+    resolve_discovery_authority,
+)
 from .engine import RefreshEngine
 from .inventory import (
     AdapterCapability,
@@ -83,6 +99,13 @@ __all__ = [
     "CorpusItemEvidence",
     "CorpusSnapshot",
     "CredentialKind",
+    "DiscoveryAuthority",
+    "DiscoveryCredentials",
+    "DiscoveryDecision",
+    "DiscoveryObservation",
+    "DiscoveryPolicy",
+    "DiscoveryWave",
+    "DoiReduction",
     "DominanceEvidence",
     "DominanceRule",
     "EvidenceKind",
@@ -134,11 +157,18 @@ __all__ = [
     "TaskDisposition",
     "TaskSpec",
     "ValidationSpec",
+    "build_claimed_discovery_operation",
     "consume_response",
     "correlate_exact_batch",
     "inventory_tasks",
     "load_census",
     "pass_for",
+    "plan_broad_discovery",
+    "plan_doi_bibtex",
+    "plan_dynamic_expansion",
+    "plan_known_doi",
     "publication_key_for",
+    "reduce_doi_observations",
+    "resolve_discovery_authority",
     "scan_existing_corpus",
 ]

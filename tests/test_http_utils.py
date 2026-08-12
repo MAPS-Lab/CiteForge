@@ -355,6 +355,37 @@ class TestBackoffCapAndPostRetry:
 
 
 class TestLogicalAndTransportAccounting:
+    def test_isolated_durable_send_ignores_ambient_cookie_jar(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prepared_cookies: list[str | None] = []
+
+        class IsolatedSession(requests.Session):
+            def get(self, url: str, **kwargs: object) -> FakeResponse:
+                request = requests.Request("GET", url, headers=kwargs.get("headers"))
+                prepared_cookies.append(self.prepare_request(request).headers.get("Cookie"))
+                return FakeResponse(200)
+
+        monkeypatch.setattr(http_utils.requests, "Session", IsolatedSession)
+        monkeypatch.setattr(
+            http_utils,
+            "_get_session",
+            lambda: pytest.fail("isolated durable send must not use ambient session"),
+        )
+        http_utils.send_http_once(
+            "GET",
+            "https://api.openreview.net/notes",
+            {},
+            1.0,
+            isolated_session=True,
+        )
+        http_utils.send_http_once(
+            "GET",
+            "https://api.openreview.net/notes",
+            {"Cookie": "session=exact-runtime"},
+            1.0,
+            isolated_session=True,
+        )
+        assert prepared_cookies == [None, "session=exact-runtime"]
+
     def test_single_send_preserves_buffered_default_and_allows_durable_streaming(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -6,12 +6,14 @@ import subprocess
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import requests
 
 from citeforge.refresh.authority import evidence_digest
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
+from citeforge.refresh.discovery import DiscoveryCredentials, DiscoveryPolicy
 from citeforge.refresh.engine import RefreshEngine
 from citeforge.refresh.inventory import (
     InventoryPolicy,
@@ -20,7 +22,7 @@ from citeforge.refresh.inventory import (
 )
 from citeforge.refresh.ledger import FaultInjectedError, Ledger, PlannedTask, ProviderObservation, RequestSpec, TaskSpec
 from citeforge.refresh.transport import LedgerTransport, SendOperation
-from citeforge.refresh.types import GenerationSpec, RunStatus, TaskDisposition
+from citeforge.refresh.types import GenerationSpec, GenerationState, RunStatus, TaskDisposition
 
 
 def _spec() -> GenerationSpec:
@@ -47,6 +49,292 @@ def _spec() -> GenerationSpec:
     )
 
 
+def test_discovery_engine_advances_earliest_incomplete_wave_and_scopes_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim = SimpleNamespace(key="a" * 64)
+
+    class FakeLedger:
+        def __init__(self) -> None:
+            self.committed: list[str] = []
+            self.sent = False
+            self.claimed_scopes: list[frozenset[str]] = []
+
+        def bind_discovery_policy(self, _policy: object, _credentials: object) -> str:
+            return "b" * 64
+
+        def create_or_resume(self, _spec: object, _census: object) -> str:
+            return "generation"
+
+        def generation_state(self) -> object:
+            return GenerationState.RUNNING
+
+        def assert_c3_discovery_ready(self) -> None:
+            return None
+
+        def load_discovery_authority(self) -> object:
+            return object()
+
+        def manifest(self) -> object:
+            return SimpleNamespace(
+                data={
+                    "generation": {"generation_id": "generation"},
+                    "tasks": [{"task_key": claim.key, "provider": "doi_csl"}],
+                }
+            )
+
+        def discovery_phase_status(self, pass_id: str, *, now: datetime) -> str:
+            if pass_id not in self.committed:
+                return "uncommitted"
+            if pass_id == "known_doi" and not self.sent:
+                return "pending"
+            return "complete"
+
+        def execute_and_commit_discovery_wave(self, pass_id: str, _policy: object, *, now: datetime) -> object:
+            self.committed.append(pass_id)
+            return object()
+
+        def discovery_wave_due_tasks(self, pass_id: str, *, now: datetime) -> dict[str, str]:
+            return {claim.key: "doi_csl"} if pass_id == "known_doi" and not self.sent else {}
+
+        def claim_due_for_operations(
+            self, _owner: object, _now: object, _lease: object, keys: frozenset[str]
+        ) -> object:
+            self.claimed_scopes.append(keys)
+            return claim
+
+    class Transport:
+        def send(self, _operation: object, *, task_claim: object) -> None:
+            ledger.sent = True
+
+    ledger = FakeLedger()
+    built: list[str] = []
+    monkeypatch.setattr(
+        "citeforge.refresh.engine.build_claimed_discovery_operation",
+        lambda *_args, **_kwargs: built.append(claim.key) or object(),
+    )
+    engine = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), Transport())  # type: ignore[arg-type]
+    policy = SimpleNamespace(openreview_mode="anonymous")
+    result = engine.run_discovery(  # type: ignore[arg-type]
+        SimpleNamespace(id="generation", census=object()), policy, DiscoveryCredentials(), lambda: False
+    )
+    assert result.status is RunStatus.CONTINUATION
+    assert ledger.committed == ["known_doi", "broad_discovery", "dynamic_expansion"]
+    assert built == [claim.key]
+    assert ledger.claimed_scopes == [frozenset({claim.key})]
+
+
+def test_discovery_engine_stops_cached_wave_after_first_blocking_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = tuple(SimpleNamespace(key=character * 64) for character in ("a", "b"))
+
+    class FakeLedger:
+        def __init__(self) -> None:
+            self.claimed = 0
+
+        def manifest(self) -> object:
+            return SimpleNamespace(data={"generation": {"generation_id": "generation"}})
+
+        def create_or_resume(self, _spec: object, _census: object) -> str:
+            return "generation"
+
+        def generation_state(self) -> GenerationState:
+            return GenerationState.RUNNING
+
+        def assert_c3_discovery_ready(self) -> None:
+            return None
+
+        def bind_discovery_policy(self, _policy: object, _credentials: object) -> str:
+            return "b" * 64
+
+        def load_discovery_authority(self) -> object:
+            return object()
+
+        def discovery_phase_status(self, _pass_id: str, *, now: datetime) -> str:
+            return "pending"
+
+        def discovery_wave_due_tasks(self, _pass_id: str, *, now: datetime) -> dict[str, str]:
+            return {claim.key: "doi_csl" for claim in claims}
+
+        def claim_due_for_operations(self, *_args: object) -> object:
+            claim = claims[self.claimed]
+            self.claimed += 1
+            return claim
+
+        def transition_generation(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class Transport:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def send(self, _operation: object, *, task_claim: object) -> object:
+            self.sent.append(task_claim.key)  # type: ignore[attr-defined]
+            return SimpleNamespace(disposition=TaskDisposition.SCHEMA_CHANGED)
+
+    ledger = FakeLedger()
+    transport = Transport()
+    monkeypatch.setattr("citeforge.refresh.engine.build_claimed_discovery_operation", lambda *_a, **_k: object())
+    result = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), transport).run_discovery(  # type: ignore[arg-type]
+        SimpleNamespace(id="generation", census=object()),
+        SimpleNamespace(openreview_mode="anonymous"),
+        DiscoveryCredentials(),
+        lambda: False,
+    )
+    assert result.status is RunStatus.BLOCKED
+    assert transport.sent == [claims[0].key]
+
+
+def test_discovery_engine_rechecks_durable_phase_after_lost_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = tuple(SimpleNamespace(key=character * 64) for character in ("a", "b"))
+
+    class FakeLedger:
+        def __init__(self) -> None:
+            self.claimed = 0
+            self.blocking = False
+
+        def manifest(self) -> object:
+            return SimpleNamespace(data={"generation": {"generation_id": "generation"}})
+
+        def create_or_resume(self, _spec: object, _census: object) -> str:
+            return "generation"
+
+        def generation_state(self) -> GenerationState:
+            return GenerationState.RUNNING
+
+        def assert_c3_discovery_ready(self) -> None:
+            return None
+
+        def bind_discovery_policy(self, _policy: object, _credentials: object) -> str:
+            return "b" * 64
+
+        def load_discovery_authority(self) -> object:
+            return object()
+
+        def discovery_phase_status(self, _pass_id: str, *, now: datetime) -> str:
+            return "blocking" if self.blocking else "pending"
+
+        def discovery_wave_due_tasks(self, _pass_id: str, *, now: datetime) -> dict[str, str]:
+            return {claim.key: "doi_csl" for claim in claims}
+
+        def claim_due_for_operations(self, *_args: object) -> object:
+            claim = claims[self.claimed]
+            self.claimed += 1
+            return claim
+
+        def transition_generation(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    class Transport:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def send(self, _operation: object, *, task_claim: object) -> object:
+            self.sent.append(task_claim.key)  # type: ignore[attr-defined]
+            ledger.blocking = True
+            return SimpleNamespace(disposition=TaskDisposition.LEASED)
+
+    ledger = FakeLedger()
+    transport = Transport()
+    monkeypatch.setattr("citeforge.refresh.engine.build_claimed_discovery_operation", lambda *_a, **_k: object())
+    result = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), transport).run_discovery(  # type: ignore[arg-type]
+        SimpleNamespace(id="generation", census=object()),
+        SimpleNamespace(openreview_mode="anonymous"),
+        DiscoveryCredentials(),
+        lambda: False,
+    )
+    assert result.status is RunStatus.BLOCKED
+    assert transport.sent == [claims[0].key]
+
+
+def test_discovery_engine_does_not_login_without_pending_openreview(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Broker:
+        def acquire(self, _credentials: tuple[str, str]) -> object:
+            raise AssertionError("OpenReview login requires an exact pending OpenReview claim")
+
+    class FakeLedger:
+        def bind_discovery_policy(self, _policy: object, _credentials: object) -> str:
+            return "b" * 64
+
+        def create_or_resume(self, _spec: object, _census: object) -> str:
+            return "generation"
+
+        def generation_state(self) -> object:
+            return GenerationState.RUNNING
+
+        def assert_c3_discovery_ready(self) -> None:
+            return None
+
+        def load_discovery_authority(self) -> object:
+            return object()
+
+        def manifest(self) -> object:
+            return SimpleNamespace(data={"generation": {"generation_id": "generation"}})
+
+        def discovery_phase_status(self, pass_id: str, *, now: datetime) -> str:
+            return "complete"
+
+    engine = RefreshEngine(  # type: ignore[arg-type]
+        FakeLedger(), InventoryPolicy(2020, 1000, 10), transport=object(), openreview_broker=Broker()
+    )
+    result = engine.run_discovery(  # type: ignore[arg-type]
+        SimpleNamespace(id="generation", census=object()),
+        SimpleNamespace(openreview_mode="authenticated"),
+        DiscoveryCredentials(openreview_username="user", openreview_password="password"),
+        lambda: False,
+    )
+    assert result.status is RunStatus.CONTINUATION
+
+
+def test_discovery_engine_rejects_generation_mismatch_before_policy_or_send() -> None:
+    class FakeLedger:
+        def manifest(self) -> object:
+            return SimpleNamespace(data={"generation": {"generation_id": "different"}})
+
+        def bind_discovery_policy(self, _policy: object, _credentials: object) -> str:
+            raise AssertionError("mismatched generation must fail before policy binding")
+
+    engine = RefreshEngine(FakeLedger(), InventoryPolicy(2020, 1000, 10), transport=object())  # type: ignore[arg-type]
+    result = engine.run_discovery(  # type: ignore[arg-type]
+        SimpleNamespace(id="supplied", census=object()),
+        SimpleNamespace(openreview_mode="anonymous"),
+        DiscoveryCredentials(),
+        lambda: False,
+    )
+    assert result.status is RunStatus.INVALID_CONFIGURATION
+    assert result.generation_id == "supplied"
+
+
+def test_discovery_engine_requires_committed_c3_before_policy_binding() -> None:
+    class FakeLedger:
+        def manifest(self) -> object:
+            return SimpleNamespace(data={"generation": {"generation_id": "generation"}})
+
+        def create_or_resume(self, _spec: object, _census: object) -> str:
+            return "generation"
+
+        def generation_state(self) -> object:
+            return GenerationState.RUNNING
+
+        def assert_c3_discovery_ready(self) -> None:
+            raise ValueError("C3 discovery readiness requires the corpus seed binding pass")
+
+        def bind_discovery_policy(self, _policy: object, _credentials: object) -> str:
+            raise AssertionError("C4 policy must not bind before committed C3")
+
+    engine = RefreshEngine(FakeLedger(), InventoryPolicy(2020, 1000, 10), transport=object())  # type: ignore[arg-type]
+    result = engine.run_discovery(  # type: ignore[arg-type]
+        SimpleNamespace(id="generation", census=object()),
+        SimpleNamespace(openreview_mode="anonymous"),
+        DiscoveryCredentials(),
+        lambda: False,
+    )
+    assert result.status is RunStatus.INVALID_CONFIGURATION
+
+
 def test_engine_missing_scholar_credential_fails_before_claim(tmp_path: Path) -> None:
     spec = _spec()
     ledger_path = tmp_path / "ledger.db"
@@ -54,6 +342,123 @@ def test_engine_missing_scholar_credential_fails_before_claim(tmp_path: Path) ->
         result = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10)).run(spec, RefreshCredentials(), lambda: False)
         assert result.status is RunStatus.INVALID_CONFIGURATION
         assert ledger.manifest().data["tasks"] == []
+
+
+def test_generation_start_binds_discovery_preflight_before_inventory_send(tmp_path: Path) -> None:
+    spec = _spec()
+    calls = 0
+
+    def send_once(_operation: SendOperation) -> requests.Response:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("invalid discovery preflight must prevent inventory sockets")
+
+    adapters = {
+        "arxiv": "1",
+        "crossref": "1",
+        "doi_bibtex": "1",
+        "doi_csl": "1",
+        "europepmc": "1",
+        "gemini": "1",
+        "openalex": "1",
+        "openreview": "1",
+        "pubmed": "1",
+        "s2": "2",
+        "serply": "1",
+    }
+    policy = DiscoveryPolicy(
+        "2026-08",
+        adapters,
+        {
+            "arxiv": 10,
+            "crossref": 20,
+            "europepmc": 20,
+            "openalex": 20,
+            "openreview": 20,
+            "pubmed": 5,
+            "s2": 15,
+            "serply": 20,
+        },
+        {"gemini": "disabled", "s2": "required", "serply": "disabled"},
+        "anonymous",
+        False,
+        False,
+        10,
+        8,
+    )
+    full_spec = GenerationSpec(
+        spec.census,
+        spec.refresh_policy_version,
+        {**adapters, "scholar": "1"},
+        spec.base_commit,
+    )
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        result = RefreshEngine(
+            ledger,
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+            LedgerTransport(ledger, send_once=send_once),
+        ).run(
+            full_spec,
+            RefreshCredentials(serpapi_key="inventory-secret"),
+            lambda: False,
+            discovery_policy=policy,
+            discovery_credentials=DiscoveryCredentials(),
+        )
+        assert result.status is RunStatus.INVALID_CONFIGURATION
+        assert calls == 0
+        assert ledger.manifest().data["tasks"] == []
+
+
+def test_generation_start_rejects_stale_discovery_epoch_before_binding(tmp_path: Path) -> None:
+    base = _spec()
+    adapters = {
+        "arxiv": "1",
+        "crossref": "1",
+        "doi_bibtex": "1",
+        "doi_csl": "1",
+        "europepmc": "1",
+        "gemini": "1",
+        "openalex": "1",
+        "openreview": "1",
+        "pubmed": "1",
+        "s2": "2",
+        "serply": "1",
+    }
+    spec = GenerationSpec(base.census, base.refresh_policy_version, {**adapters, "scholar": "1"}, base.base_commit)
+    policy = DiscoveryPolicy(
+        "2026-07",
+        adapters,
+        {
+            "arxiv": 10,
+            "crossref": 20,
+            "europepmc": 20,
+            "openalex": 20,
+            "openreview": 20,
+            "pubmed": 5,
+            "s2": 15,
+            "serply": 20,
+        },
+        {"gemini": "disabled", "s2": "required", "serply": "disabled"},
+        "anonymous",
+        False,
+        False,
+        10,
+        8,
+    )
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        result = RefreshEngine(
+            ledger,
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+        ).run(
+            spec,
+            RefreshCredentials(serpapi_key="inventory-secret"),
+            lambda: True,
+            discovery_policy=policy,
+            discovery_credentials=DiscoveryCredentials(s2_key="wire-only"),
+        )
+        assert result.status is RunStatus.INVALID_CONFIGURATION
+        assert ledger._connection.execute("SELECT COUNT(*) FROM discovery_policy_authority").fetchone()[0] == 0
+        assert ledger.plan_status().revision == 0
 
 
 def test_engine_commits_inventory_round_but_never_closes_discovery(tmp_path: Path) -> None:

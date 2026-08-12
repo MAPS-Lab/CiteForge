@@ -7,7 +7,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -34,7 +34,6 @@ from ..text_utils import (
     title_similarity,
 )
 from .authority import (
-    PASS_REGISTRY_DIGEST,
     PASS_WAVE_COUNT,
     PASSES,
     AggregateInput,
@@ -64,13 +63,18 @@ from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 if TYPE_CHECKING:
     from .census import AuthorCensusRow
     from .corpus import ExistingCorpusEvidence
+    from .discovery import DiscoveryAuthority
 
-_SCHEMA_VERSION = "7"
+_SCHEMA_VERSION = "8"
 _SCHEMA_V4_FINGERPRINT = "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
 _SCHEMA_V5_FINGERPRINT = "be14f7bc658bf347c5f519d0483311ff23118e0c9569f5328939b546b1fe2f46"
 _MAX_PLAN_ROUNDS = 64
 _SCHEMA_V6_FINGERPRINT = "9bf51dac21ab9a519ff8461a030d0a87c7211191554f1c06024996bd4e95ff3a"
-_EXPECTED_SCHEMA_FINGERPRINT = "4391a86ee7f96c62c42280042b09de5e7b2fe0b59006ab58e3abbe6f77545bdf"
+_SCHEMA_V7_FINGERPRINT = "4391a86ee7f96c62c42280042b09de5e7b2fe0b59006ab58e3abbe6f77545bdf"
+_EXPECTED_SCHEMA_FINGERPRINT = "c57f9536975e14391ccad53d2d49ccecca60b052e9249e695d6f5af3cb4f2f71"
+_LEGACY_C3_PASS_REGISTRY_DIGEST = (  # immutable registry fingerprint
+    "f41a0b514dcf65e30a1fd4cab17cd3a151146f3c753786bd769e2a96e52026ae"  # noqa: S105
+)
 _SNAPSHOT_DOMAIN_SEPARATOR = "citeforge-task5c2-planner-snapshot-v1"
 _CORPUS_S2_ID = re.compile(r"[0-9a-f]{40}", re.I)
 _CORPUS_OPENALEX_ID = re.compile(r"(?:https://openalex\.org/)?(W\d+)", re.I)
@@ -81,6 +85,7 @@ _V6_AUTHORITY_TABLES = frozenset(
         "corpus_items",
         "corpus_snapshots",
         "corpus_scan_receipts",
+        "discovery_policy_authority",
         "intent_provenance",
         "materialization_intents",
         "planner_pass_expected_items",
@@ -155,6 +160,14 @@ _FAULT_POINTS = frozenset(
         "after_v6_planner_pass",
         "after_v6_planner_expected_items",
         "after_v6_migration_meta",
+        "after_c4_pass_receipt",
+        "after_c4_expected_items",
+        "after_c4_requests",
+        "after_c4_consumers",
+        "after_c4_tasks",
+        "after_c4_obligations",
+        "after_c4_round",
+        "after_c4_expansion",
     }
 ) | frozenset(f"after_v6_migration_statement_{index}" for index in range(55))
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,255}")
@@ -303,6 +316,7 @@ def _inventory_authority_content(value: Mapping[str, object], generation_id: str
         if capability["media_type"] not in {"json", "xml"} or capability["credential_kind"] not in {
             "none",
             "serpapi_key",
+            "s2_api_key",
         }:
             raise ValueError("invalid typed inventory capability value")
         requested_fields = capability["requested_fields"]
@@ -507,6 +521,10 @@ def _merge_proves_dominance(
 class ApplicabilityReason(str, Enum):
     NO_APPLICABLE_IDENTIFIER = "no_applicable_identifier"
     PROVIDER_NOT_SUPPORTED = "provider_not_supported"
+    PROVIDER_DISABLED = "provider_disabled"
+    PROVIDER_NOT_CONFIGURED = "provider_not_configured"
+    REDUNDANT_AUTHORITATIVE_EVIDENCE = "redundant_authoritative_evidence"
+    CONDITIONAL_NOT_TRIGGERED = "conditional_not_triggered"
 
 
 class DominanceRule(str, Enum):
@@ -836,6 +854,19 @@ class LedgerManifest:
 
 
 class Ledger:
+    @staticmethod
+    def _discovery_request_consumers(decisions: Sequence[object]) -> dict[str, tuple[str, ...]]:
+        from .discovery import DiscoveryDecision
+
+        grouped: dict[str, list[str]] = {}
+        for value in decisions:
+            if not isinstance(value, DiscoveryDecision):
+                raise TypeError("discovery consumer grouping requires typed decisions")
+            request = value.task.request
+            if request is not None:
+                grouped.setdefault(request.key, []).append(value.task.key)
+        return {key: tuple(sorted(values)) for key, values in grouped.items()}
+
     """Single-generation SQLite ledger with explicit durable transitions."""
 
     def __init__(self, path: Path, connection: sqlite3.Connection, corpus_repo_root: Path | None = None) -> None:
@@ -1044,10 +1075,7 @@ class Ledger:
             "receipt_digest TEXT NOT NULL, FOREIGN KEY (generation_id, snapshot_digest) "
             "REFERENCES corpus_snapshots(generation_id, snapshot_digest))"
         )
-        for suffix, action in (
-            ("append_only_update", "UPDATE"),
-            ("append_only_delete", "DELETE"),
-        ):
+        for suffix, action in (("append_only_update", "UPDATE"), ("append_only_delete", "DELETE")):
             connection.execute(
                 f"CREATE TRIGGER corpus_scan_receipts_{suffix} BEFORE {action} ON corpus_scan_receipts "
                 "BEGIN SELECT RAISE(ABORT, 'corpus_scan_receipts is append-only'); END"
@@ -1061,6 +1089,30 @@ class Ledger:
             "CREATE TRIGGER corpus_scan_receipts_authority_insert BEFORE INSERT ON corpus_scan_receipts WHEN "
             "citeforge_authority_write_enabled() != 1 BEGIN SELECT RAISE(ABORT, "
             "'corpus_scan_receipts requires guarded authority API'); END"
+        )
+
+    @staticmethod
+    def _install_schema_v8(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE discovery_policy_authority (generation_id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, "
+            "policy_digest TEXT NOT NULL, FOREIGN KEY (generation_id) REFERENCES generations(generation_id))"
+        )
+        for suffix, action in (("append_only_update", "UPDATE"), ("append_only_delete", "DELETE")):
+            connection.execute(
+                f"CREATE TRIGGER discovery_policy_authority_{suffix} BEFORE {action} ON "
+                "discovery_policy_authority BEGIN SELECT RAISE(ABORT, "
+                "'discovery_policy_authority is append-only'); END"
+            )
+        connection.execute(
+            "CREATE TRIGGER discovery_policy_authority_post_close_insert BEFORE INSERT ON "
+            "discovery_policy_authority WHEN (SELECT plan_closed FROM generations WHERE generation_id = "
+            "NEW.generation_id) != 0 BEGIN SELECT RAISE(ABORT, "
+            "'discovery_policy_authority rejects post-close evidence'); END"
+        )
+        connection.execute(
+            "CREATE TRIGGER discovery_policy_authority_authority_insert BEFORE INSERT ON discovery_policy_authority "
+            "WHEN citeforge_authority_write_enabled() != 1 BEGIN SELECT RAISE(ABORT, "
+            "'discovery_policy_authority requires guarded authority API'); END"
         )
 
     def _initialize_schema(self) -> None:
@@ -1110,7 +1162,7 @@ class Ledger:
                 expected = _SCHEMA_V6_FINGERPRINT
                 if actual != expected:
                     raise ValueError("structurally inconsistent schema version 6 fingerprint")
-                connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (_SCHEMA_VERSION,))
+                connection.execute("UPDATE schema_meta SET value = '6' WHERE key = 'schema_version'")
                 connection.execute(
                     "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'",
                     (expected,),
@@ -1123,7 +1175,19 @@ class Ledger:
                     raise ValueError("schema version 6 corpus lacks scanner-owned receipt authority")
                 self._install_schema_v7(connection)
                 actual = self._schema_fingerprint(connection)
-                expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
+                expected = _SCHEMA_V7_FINGERPRINT
+                if actual != expected:
+                    raise ValueError("structurally inconsistent schema version 7 fingerprint")
+                connection.execute("UPDATE schema_meta SET value = '7' WHERE key = 'schema_version'")
+                connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (expected,))
+                existing_version = ("7",)
+            if existing_version is not None and existing_version[0] == "7":
+                self._validate_schema_v7(connection)
+                self._install_schema_v8(connection)
+                actual = self._schema_fingerprint(connection)
+                expected = _EXPECTED_SCHEMA_FINGERPRINT
+                if actual != expected:
+                    raise ValueError("structurally inconsistent schema version 8 fingerprint")
                 connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (_SCHEMA_VERSION,))
                 connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (expected,))
                 existing_version = (_SCHEMA_VERSION,)
@@ -1132,7 +1196,7 @@ class Ledger:
                     f"unsupported or structurally inconsistent ledger schema version: {existing_version[0]}"
                 )
             if existing_version is not None:
-                self._validate_schema_v7(connection)
+                self._validate_schema_v8(connection)
                 return
             schema = """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -1557,8 +1621,9 @@ class Ledger:
             if existing_version is None:
                 self._install_schema_v6(connection)
                 self._install_schema_v7(connection)
+                self._install_schema_v8(connection)
                 actual = self._schema_fingerprint(connection)
-                expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
+                expected = _EXPECTED_SCHEMA_FINGERPRINT
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)", (_SCHEMA_VERSION,)
                 )
@@ -1566,7 +1631,7 @@ class Ledger:
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_fingerprint', ?)",
                     (expected,),
                 )
-            self._validate_schema_v7(connection)
+            self._validate_schema_v8(connection)
 
     @staticmethod
     def _schema_fingerprint(connection: sqlite3.Connection) -> str:
@@ -1721,9 +1786,33 @@ class Ledger:
             raise ValueError("structurally inconsistent schema version 7 receipt triggers")
         fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
         actual = Ledger._schema_fingerprint(connection)
-        expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
+        expected = _SCHEMA_V7_FINGERPRINT
         if fingerprint is None or fingerprint[0] != expected or actual != expected:
             raise ValueError("structurally inconsistent schema version 7 fingerprint")
+        Ledger._assert_task5a_authority_invariant(connection)
+        for row in connection.execute("SELECT generation_id FROM generations ORDER BY generation_id"):
+            generation_id = str(row[0])
+            Ledger._v6_evidence_content(connection, generation_id)
+            Ledger._verify_v6_relationships(connection, generation_id)
+
+    @staticmethod
+    def _validate_schema_v8(connection: sqlite3.Connection) -> None:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(discovery_policy_authority)")}
+        if {"generation_id", "policy_json", "policy_digest"} - columns:
+            raise ValueError("structurally inconsistent schema version 8 policy table")
+        triggers = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'discovery_policy_authority'"
+            )
+        }
+        if len(triggers) != 4:
+            raise ValueError("structurally inconsistent schema version 8 policy triggers")
+        fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
+        actual = Ledger._schema_fingerprint(connection)
+        expected = _EXPECTED_SCHEMA_FINGERPRINT
+        if fingerprint is None or fingerprint[0] != expected or actual != expected:
+            raise ValueError("structurally inconsistent schema version 8 fingerprint")
         Ledger._assert_task5a_authority_invariant(connection)
         for row in connection.execute("SELECT generation_id FROM generations ORDER BY generation_id"):
             generation_id = str(row[0])
@@ -2327,6 +2416,43 @@ class Ledger:
         )
 
     @staticmethod
+    def _shape_inventory_seed_tasks(
+        connection: sqlite3.Connection,
+        generation_id: str,
+        tasks: Sequence[TaskSpec],
+    ) -> tuple[tuple[TaskSpec, ...], dict[str, ApplicabilityReason]]:
+        policy_row = connection.execute(
+            "SELECT 1 FROM discovery_policy_authority WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        if policy_row is None:
+            return tuple(tasks), {}
+        authority = Ledger._load_discovery_authority(connection, generation_id)
+        mode = authority.resolved_provider_modes["s2"]
+        if mode == "applicable":
+            return tuple(tasks), {}
+        reason = (
+            ApplicabilityReason.PROVIDER_DISABLED if mode == "disabled" else ApplicabilityReason.PROVIDER_NOT_CONFIGURED
+        )
+        shaped = []
+        reasons = {}
+        for task in tasks:
+            if task.provider != "s2":
+                shaped.append(task)
+                continue
+            value = TaskSpec(
+                task.author_key,
+                task.publication_key,
+                task.provider,
+                task.operation,
+                None,
+                task.required,
+                "not_applicable",
+            )
+            shaped.append(value)
+            reasons[value.key] = reason
+        return tuple(shaped), reasons
+
+    @staticmethod
     def _reconstruct_inventory_authority(
         connection: sqlite3.Connection,
         generation_id: str,
@@ -2437,12 +2563,15 @@ class Ledger:
             raise ValueError("publication seed inventory snapshot changed")
         baseline_entries = inventory_baseline_entries(census_row, snapshot, policy)
         reduction = reduce_author_inventory(census_row, snapshot, policy)
+        shaped_seed_tasks, _reasons = Ledger._shape_inventory_seed_tasks(
+            connection, generation_id, reduction.seed_tasks
+        )
         expected_reduction_digest = _digest(
             {
                 "policy_digest": expected_policy_digest,
                 "publications": [Ledger._publication_content(item) for item in reduction.publications],
                 "reducer_version": str(authority_row[0]),
-                "seed_tasks": [item.identity_digest for item in reduction.seed_tasks],
+                "seed_tasks": [item.identity_digest for item in shaped_seed_tasks],
                 "snapshot_digest": snapshot.digest,
             }
         )
@@ -2465,14 +2594,18 @@ class Ledger:
         receipt_row = receipt[0]
         receipt_tasks = tuple(json.loads(str(receipt_row[3])))
         receipt_digests = tuple(json.loads(str(receipt_row[4])))
+        if len(receipt_tasks) != len(receipt_digests) or len(receipt_tasks) != len(set(receipt_tasks)):
+            raise ValueError("inventory authority reduction receipt membership changed")
+        receipt_evidence = dict(zip(receipt_tasks, receipt_digests, strict=True))
         expected_tasks = tuple(sorted(item.task_key for item in terminal))
-        expected_digests = tuple(item.observation_digest for item in sorted(terminal, key=lambda item: item.task_key))
+        expected_evidence = {
+            item.task_key: item.observation_digest for item in sorted(terminal, key=lambda item: item.task_key)
+        }
         if (
             str(receipt_row[0]) != PlanPhase.DISCOVERY.value
             or str(receipt_row[1]) != "inventory_union"
             or str(receipt_row[2]) != str(authority_row[0])
-            or receipt_tasks != expected_tasks
-            or receipt_digests != expected_digests
+            or any(receipt_evidence.get(task_key) != expected_evidence[task_key] for task_key in expected_tasks)
         ):
             raise ValueError("inventory authority reduction receipt changed")
         expected_publications = {publication.publication_key: publication for publication in reduction.publications}
@@ -2550,6 +2683,41 @@ class Ledger:
             seeds, publications = Ledger._reconstruct_inventory_authority(connection, generation_id, author_key)
             seed_cache.update(seeds)
             publication_cache.update(publications)
+        round_keys = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT round_key FROM inventory_authorities WHERE generation_id = ?",
+                (generation_id,),
+            )
+        }
+        if authors and len(round_keys) != 1:
+            raise ValueError("inventory authority aggregate round membership changed")
+        if round_keys:
+            receipt = connection.execute(
+                "SELECT source_task_keys_json, source_evidence_digests_json FROM reduction_receipts "
+                "WHERE generation_id = ? AND round_key = ?",
+                (generation_id, next(iter(round_keys))),
+            ).fetchall()
+            if len(receipt) != 1:
+                raise ValueError("inventory authority aggregate receipt changed")
+            tasks = tuple(json.loads(str(receipt[0][0])))
+            digests = tuple(json.loads(str(receipt[0][1])))
+            if len(tasks) != len(digests) or len(tasks) != len(set(tasks)):
+                raise ValueError("inventory authority aggregate receipt membership changed")
+            aggregate = dict(zip(tasks, digests, strict=True))
+            expected = {
+                str(row[0]): str(row[1])
+                for row in connection.execute(
+                    "SELECT contribution.task_key, contribution.observation_digest "
+                    "FROM inventory_contributions AS contribution JOIN tasks AS task "
+                    "ON task.generation_id = contribution.generation_id AND task.task_key = contribution.task_key "
+                    "WHERE contribution.generation_id = ? AND "
+                    "(task.provider != 'scholar' OR contribution.next_offset IS NULL)",
+                    (generation_id,),
+                )
+            }
+            if aggregate != expected:
+                raise ValueError("inventory authority aggregate receipt membership changed")
         return seed_cache, publication_cache
 
     def commit_corpus_snapshot(self, snapshot: CorpusSnapshot, items: Sequence[CorpusItemEvidence]) -> str:
@@ -2895,7 +3063,102 @@ class Ledger:
                 self._verify_trusted_corpus(connection, expected)
             return self._snapshot_for_pass(connection, self._generation_id(), pass_id)
 
+    @staticmethod
+    def _snapshot_for_discovery_pass(
+        connection: sqlite3.Connection,
+        generation_id: str,
+        pass_id: str,
+        *,
+        authority: object | None = None,
+        decisions: Sequence[object] = (),
+        adopted_keys: frozenset[str] = frozenset(),
+        source_items: Sequence[Mapping[str, object]] = (),
+    ) -> Mapping[str, object]:
+        definition = pass_for(pass_id)
+        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+            raise ValueError("unsupported discovery snapshot")
+        items: list[dict[str, object]] = []
+        for row in connection.execute(
+            "SELECT author_key, publication_key, seed_digest, evidence_json FROM publication_seed_evidence "
+            "WHERE generation_id = ? ORDER BY author_key, publication_key",
+            (generation_id,),
+        ):
+            payload = json.loads(str(row[3]))
+            items.append(
+                {
+                    "digest": str(row[2]),
+                    "key": f"seed:{row[0]}:{row[1]}",
+                    "kind": EvidenceKind.SEED.value,
+                    "payload": payload,
+                }
+            )
+        for source in source_items:
+            if set(source) != {"digest", "key", "kind", "payload"}:
+                raise ValueError("discovery source envelope is malformed")
+            payload = source["payload"]
+            if not isinstance(payload, Mapping) or evidence_digest(payload) != source["digest"]:
+                raise ValueError("discovery source envelope digest changed")
+            items.append(dict(source))
+        if authority is not None:
+            from .discovery import DiscoveryAuthority, DiscoveryDecision
+
+            if not isinstance(authority, DiscoveryAuthority) or not all(
+                isinstance(item, DiscoveryDecision) for item in decisions
+            ):
+                raise TypeError("discovery snapshot requires typed authority and decisions")
+            items.append(
+                {
+                    "digest": authority.digest,
+                    "key": f"authority:{authority.digest}",
+                    "kind": EvidenceKind.REDUCTION_RECEIPT.value,
+                    "payload": authority.canonical_content(),
+                }
+            )
+            consumers_by_request = Ledger._discovery_request_consumers(decisions)
+            for value in cast(Sequence[DiscoveryDecision], decisions):
+                task = value.task
+                payload = {
+                    "adopted": task.key in adopted_keys,
+                    "applicability": task.applicability,
+                    "author_key": task.author_key,
+                    "identity_digest": task.identity_digest,
+                    "request_consumers": (consumers_by_request[task.request.key] if task.request is not None else ()),
+                    "operation": task.operation,
+                    "provider": task.provider,
+                    "publication_key": task.publication_key,
+                    "reason": value.reason.value if value.reason is not None else None,
+                    "request_key": task.request.key if task.request is not None else None,
+                    "required": task.required,
+                    "task_key": task.key,
+                }
+                items.append(
+                    {
+                        "digest": evidence_digest(payload),
+                        "key": f"decision:{task.key}",
+                        "kind": EvidenceKind.APPLICABILITY.value,
+                        "payload": payload,
+                    }
+                )
+        ordered_items = tuple(sorted(items, key=lambda item: str(item["key"])))
+        frozen = _freeze_json(
+            {
+                "generation_id": generation_id,
+                "pass_id": pass_id,
+                "pass_version": definition.version,
+                "items": ordered_items,
+            }
+        )
+        if not isinstance(frozen, Mapping):
+            raise AssertionError("discovery planner snapshot must be a mapping")
+        return frozen
+
     def execute_registered_pass(self, pass_id: str) -> PlannerPassReceipt:
+        if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+            raise ValueError("C4 discovery passes require the atomic discovery wave API")
+        return self._execute_registered_pass_compatibility_fixture(pass_id)
+
+    def _execute_registered_pass_compatibility_fixture(self, pass_id: str) -> PlannerPassReceipt:
+        """Execute the pre-C4 generic pass contract for historical test fixtures."""
         generation_id = self._generation_id()
         receipt_count = self._connection.execute(
             "SELECT COUNT(*) FROM corpus_scan_receipts WHERE generation_id = ?", (generation_id,)
@@ -2910,21 +3173,73 @@ class Ledger:
             if trusted_expected is not None:
                 self._verify_trusted_corpus(connection, trusted_expected)
             initial_snapshot = self._snapshot_for_pass(connection, generation_id, pass_id)
-        receipt = _execute_authoritative_pass(pass_id, initial_snapshot)
+        legacy_c4 = pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}
+        if legacy_c4:
+            legacy_snapshot = _freeze_json({**dict(initial_snapshot), "pass_version": "1"})
+            if not isinstance(legacy_snapshot, Mapping):
+                raise AssertionError("legacy planner snapshot must be a mapping")
+            initial_snapshot = legacy_snapshot
+            legacy_items = tuple(
+                sorted(str(item["key"]) for item in cast(Sequence[Mapping[str, object]], initial_snapshot["items"]))
+            )
+            snapshot_digest = evidence_digest(initial_snapshot)
+            receipt = PlannerPassReceipt(
+                generation_id,
+                pass_id,
+                "1",
+                evidence_digest((generation_id, pass_id, "1", snapshot_digest)),
+                _LEGACY_C3_PASS_REGISTRY_DIGEST,
+                snapshot_digest,
+                legacy_items,
+                legacy_items,
+                evidence_digest((legacy_items, legacy_items)),
+            )
+        else:
+            receipt = _execute_authoritative_pass(pass_id, initial_snapshot)
         receipt_content = evidence_json(receipt.canonical_content())
         with self._transaction(immediate=True) as connection, self._authority_write():
             if trusted_expected is not None:
                 self._verify_trusted_corpus(connection, trusted_expected)
             current_snapshot = self._snapshot_for_pass(connection, generation_id, pass_id)
+            if legacy_c4:
+                legacy_snapshot = _freeze_json({**dict(current_snapshot), "pass_version": "1"})
+                if not isinstance(legacy_snapshot, Mapping):
+                    raise AssertionError("legacy planner snapshot must be a mapping")
+                current_snapshot = legacy_snapshot
             if evidence_digest(current_snapshot) != receipt.snapshot_digest:
                 raise StaleClaimError("planner input membership changed before commit")
-            if _execute_authoritative_pass(pass_id, current_snapshot) != receipt:
+            if not legacy_c4 and _execute_authoritative_pass(pass_id, current_snapshot) != receipt:
                 raise ValueError("planner pass receipt does not match code-owned authority")
             existing = connection.execute(
                 "SELECT receipt_json FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
                 (generation_id, pass_id),
             ).fetchone()
             if existing is not None:
+                stored_receipt = PlannerPassReceipt(**json.loads(str(existing[0])))
+                if (
+                    stored_receipt.pass_version == "1"  # noqa: S105 - immutable schema version
+                    and stored_receipt.registry_digest == _LEGACY_C3_PASS_REGISTRY_DIGEST
+                ):
+                    legacy_items = tuple(
+                        sorted(
+                            str(item["key"]) for item in cast(Sequence[Mapping[str, object]], current_snapshot["items"])
+                        )
+                    )
+                    legacy_snapshot_digest = evidence_digest(current_snapshot)
+                    expected_legacy = PlannerPassReceipt(
+                        generation_id,
+                        pass_id,
+                        "1",
+                        evidence_digest((generation_id, pass_id, "1", legacy_snapshot_digest)),
+                        _LEGACY_C3_PASS_REGISTRY_DIGEST,
+                        legacy_snapshot_digest,
+                        legacy_items,
+                        legacy_items,
+                        evidence_digest((legacy_items, legacy_items)),
+                    )
+                    if stored_receipt != expected_legacy:
+                        raise ValueError("conflicting legacy planner pass replay")
+                    return stored_receipt
                 if str(existing[0]) != receipt_content:
                     raise ValueError("conflicting planner pass replay")
                 return receipt
@@ -2961,7 +3276,7 @@ class Ledger:
                     receipt.pass_key,
                     receipt.pass_id,
                     receipt.pass_version,
-                    PASS_REGISTRY_DIGEST,
+                    receipt.registry_digest,
                     receipt.snapshot_digest,
                     receipt.output_digest,
                     receipt_content,
@@ -3757,7 +4072,12 @@ class Ledger:
         }
 
     @staticmethod
-    def _insert_task(connection: sqlite3.Connection, generation_id: str, task: TaskSpec) -> None:
+    def _insert_task(
+        connection: sqlite3.Connection,
+        generation_id: str,
+        task: TaskSpec,
+        fault_callback: Callable[[str], None] | None = None,
+    ) -> None:
         request_key = task.request.key if task.request is not None else None
         if task.request is not None:
             identity = _canonical(task.request.canonical_content())
@@ -3771,6 +4091,8 @@ class Ledger:
             ).fetchone()
             if stored is None or stored[0] != identity:
                 raise ValueError("exact request identity collision")
+            if fault_callback is not None:
+                fault_callback("after_c4_requests")
         if task.publication_key is not None:
             publication = connection.execute(
                 "SELECT 1 FROM publications WHERE generation_id = ? AND author_key = ? AND publication_key = ?",
@@ -3795,11 +4117,15 @@ class Ledger:
                 TaskDisposition.PENDING.value,
             ),
         )
+        if fault_callback is not None:
+            fault_callback("after_c4_tasks")
         if request_key is not None:
             connection.execute(
                 "INSERT INTO request_consumers(generation_id, request_key, task_key) VALUES (?, ?, ?)",
                 (generation_id, request_key, task.key),
             )
+            if fault_callback is not None:
+                fault_callback("after_c4_consumers")
 
     def _validate_mandatory_inventory(
         self, connection: sqlite3.Connection, generation_id: str, tasks: Sequence[TaskSpec]
@@ -3931,6 +4257,33 @@ class Ledger:
             epoch = self._validate_mandatory_inventory(connection, generation_id, [item.task for item in tasks])
             if canonical_authority is not None:
                 self._validate_inventory_authority_registry(connection, generation_id, canonical_authority)
+            discovery = connection.execute(
+                "SELECT policy_json, policy_digest FROM discovery_policy_authority WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if discovery is not None:
+                try:
+                    discovery_content = json.loads(str(discovery[0]))
+                except json.JSONDecodeError as exc:
+                    raise ValueError("stored discovery policy authority is malformed") from exc
+                discovery_policy = discovery_content.get("policy") if isinstance(discovery_content, Mapping) else None
+                inventory_policy = canonical_authority.get("policy") if canonical_authority is not None else None
+                seed_versions = (
+                    inventory_policy.get("seed_adapter_versions") if isinstance(inventory_policy, Mapping) else None
+                )
+                adapters = discovery_policy.get("adapter_versions") if isinstance(discovery_policy, Mapping) else None
+                if (
+                    not isinstance(discovery_policy, Mapping)
+                    or _digest(discovery_content) != discovery[1]
+                    or discovery_policy.get("freshness_epoch") != epoch
+                    or not isinstance(inventory_policy, Mapping)
+                    or discovery_policy.get("max_scholar_pages") != inventory_policy.get("max_scholar_pages")
+                    or not isinstance(seed_versions, Mapping)
+                    or not isinstance(adapters, Mapping)
+                    or seed_versions.get("doi_csl") != adapters.get("doi_csl")
+                    or seed_versions.get("s2") != adapters.get("s2")
+                ):
+                    raise ValueError("inventory authority conflicts with bound discovery policy")
             for publication in publications:
                 self._insert_publication(connection, generation_id, publication)
             self._inject("after_initial_round_publications")
@@ -4248,6 +4601,10 @@ class Ledger:
         reducer_id: str = "discovery_reducer",
         reducer_version: str = "1",
         _inventory_authorities: Sequence[tuple[object, str, str, str]] = (),
+        _applicability_reasons: Mapping[str, ApplicabilityReason] = MappingProxyType({}),
+        _connection: sqlite3.Connection | None = None,
+        _allow_empty_sources: bool = False,
+        _fault_callback: Callable[[str], None] | None = None,
     ) -> ReductionReceipt:
         generation_id = self._generation_id()
         source_keys = (
@@ -4255,12 +4612,49 @@ class Ledger:
             if isinstance(source_task_key, str)
             else tuple(sorted(_digest_text(key, "source task key") for key in source_task_key))
         )
-        if not source_keys or len(set(source_keys)) != len(source_keys):
+        if (not source_keys and not _allow_empty_sources) or len(set(source_keys)) != len(source_keys):
             raise ValueError("reduction requires unique source tasks")
         if len({item.task.key for item in tasks}) != len(tasks):
             raise ValueError("duplicate reduction task")
-        supplied_digest = _digest_text(source_evidence_digest, "source evidence digest")
-        with self._transaction(immediate=True) as connection:
+        if set(_applicability_reasons) != {item.task.key for item in tasks if item.task.request is None}:
+            raise ValueError("reduction applicability evidence membership changed")
+        supplied_digest = (
+            _digest_text(source_evidence_digest, "source evidence digest")
+            if source_keys
+            else _digest([])
+        )
+        manager = self._transaction(immediate=True) if _connection is None else nullcontext(_connection)
+        with manager as connection:
+            if _connection is None:
+                reserved = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT json_extract(item.input_json, '$.payload.task_key') "
+                        "FROM planner_passes AS pass JOIN planner_pass_expected_items AS item "
+                        "ON item.generation_id = pass.generation_id AND item.pass_key = pass.pass_key "
+                        "WHERE pass.generation_id = ? AND pass.pass_id IN "
+                        "('known_doi','broad_discovery','dynamic_expansion') AND item.kind = ?",
+                        (generation_id, EvidenceKind.APPLICABILITY.value),
+                    )
+                    if row[0] is not None
+                }
+                if reserved.intersection(source_keys):
+                    raise ValueError("C4 discovery sources require the private atomic reducer")
+                potential_adoptees = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT task.task_key FROM tasks AS task JOIN plan_obligations AS obligation "
+                        "ON obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
+                        "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                        "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
+                        "AND round.planner_id = 'inventory_union' AND "
+                        "((task.provider = 'doi_csl' AND task.operation = 'csl_lookup') OR "
+                        "(task.provider = 's2' AND task.operation = 'fuzzy_search'))",
+                        (generation_id,),
+                    )
+                }
+                if potential_adoptees.intersection(source_keys):
+                    raise ValueError("C4 discovery adoptees require the private atomic reducer")
             generation = connection.execute(
                 "SELECT state, plan_closed, plan_revision FROM generations WHERE generation_id = ?", (generation_id,)
             ).fetchone()
@@ -4384,8 +4778,22 @@ class Ledger:
                 self._insert_publication(connection, generation_id, publication)
             self._inject("after_reduction_publications")
             for item in sorted(tasks, key=lambda value: value.task.key):
-                self._insert_task(connection, generation_id, item.task)
+                self._insert_task(connection, generation_id, item.task, _fault_callback)
             self._inject("after_reduction_tasks")
+            for task_key, reason in sorted(_applicability_reasons.items()):
+                updated = connection.execute(
+                    "UPDATE tasks SET state = ?, applicability_reason = ? "
+                    "WHERE generation_id = ? AND task_key = ? AND request_key IS NULL AND state = ?",
+                    (
+                        TaskDisposition.NOT_APPLICABLE.value,
+                        reason.value,
+                        generation_id,
+                        task_key,
+                        TaskDisposition.PENDING.value,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("reduction applicability terminalization changed")
             connection.executemany(
                 "INSERT INTO plan_obligations(generation_id, task_key, identity_digest, author_key, provider, "
                 "operation, required, applicability, round_sequence, expands_plan) "
@@ -4633,6 +5041,7 @@ class Ledger:
         authorities = []
         publications: list[PublicationMetadata] = []
         seed_tasks: list[TaskSpec] = []
+        seed_reasons: dict[str, ApplicabilityReason] = {}
         evidence_by_task: dict[str, str] = {}
         existing_rounds = set()
         existing_count = 0
@@ -4641,13 +5050,18 @@ class Ledger:
             if not isinstance(snapshot, InventorySnapshot):
                 raise TypeError("ledger failed to reconstruct inventory snapshot")
             reduction = reduce_author_inventory(census_row, snapshot, policy)
-            if len(reduction.publications) != len(reduction.seed_tasks) or len(
-                {item.publication_key for item in reduction.seed_tasks}
-            ) != len(reduction.seed_tasks):
+            shaped_tasks, shaped_reasons = self._shape_inventory_seed_tasks(
+                self._connection, self._generation_id(), reduction.seed_tasks
+            )
+            if len(reduction.publications) != len(shaped_tasks) or len(
+                {item.publication_key for item in shaped_tasks}
+            ) != len(shaped_tasks):
                 raise ValueError("inventory union must emit exactly one seed per publication")
-            for task in reduction.seed_tasks:
+            for task in shaped_tasks:
                 if task.request is None:
-                    raise ValueError("inventory union seed lacks exact request")
+                    if task.key not in shaped_reasons:
+                        raise ValueError("inventory union seed lacks applicability authority")
+                    continue
                 capability = capability_for(task.provider, task.operation, task.request.adapter_version)
                 if (
                     task.request.requested_fields != capability.requested_fields
@@ -4659,7 +5073,7 @@ class Ledger:
                     "policy_digest": policy_digest,
                     "publications": [self._publication_content(item) for item in reduction.publications],
                     "reducer_version": reducer_version,
-                    "seed_tasks": [item.identity_digest for item in reduction.seed_tasks],
+                    "seed_tasks": [item.identity_digest for item in shaped_tasks],
                     "snapshot_digest": snapshot.digest,
                 }
             )
@@ -4675,7 +5089,8 @@ class Ledger:
                 existing_count += 1
             authorities.append((snapshot, census_row.row_key, policy_digest, semantic_digest))
             publications.extend(reduction.publications)
-            seed_tasks.extend(reduction.seed_tasks)
+            seed_tasks.extend(shaped_tasks)
+            seed_reasons.update(shaped_reasons)
             terminal = [
                 item for item in snapshot.contributions if item.logical_source != "scholar" or item.next_offset is None
             ]
@@ -4707,6 +5122,7 @@ class Ledger:
             reducer_id="inventory_union",
             reducer_version=reducer_version,
             _inventory_authorities=tuple(authorities),
+            _applicability_reasons=seed_reasons,
         )
 
     @staticmethod
@@ -4844,13 +5260,993 @@ class Ledger:
     @staticmethod
     def preflight_round_budget(max_scholar_pages: int, max_html_probe_waves: int) -> int:
         """Reject an impossible fixed discovery budget before any claim occurs."""
-        values = (max_scholar_pages, max_html_probe_waves)
-        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+        if (
+            isinstance(max_scholar_pages, bool)
+            or not isinstance(max_scholar_pages, int)
+            or max_scholar_pages < 1
+            or isinstance(max_html_probe_waves, bool)
+            or not isinstance(max_html_probe_waves, int)
+            or max_html_probe_waves < 0
+        ):
             raise ValueError("discovery round budget values must be nonnegative integers")
-        total = PASS_WAVE_COUNT + sum(values)
+        total = 1 + PASS_WAVE_COUNT + 2 + max_scholar_pages + max_html_probe_waves
         if total > _MAX_PLAN_ROUNDS:
             raise ValueError("discovery round budget exceeds the fixed generation maximum")
         return total
+
+    def bind_discovery_policy(self, policy: object, credentials: object) -> str:
+        """Bind one immutable nonsecret discovery policy before inventory planning."""
+        from .discovery import DiscoveryCredentials, DiscoveryPolicy, resolve_discovery_authority
+
+        if not isinstance(policy, DiscoveryPolicy) or not isinstance(credentials, DiscoveryCredentials):
+            raise TypeError("discovery policy authority requires typed policy and credentials")
+        authority = resolve_discovery_authority(policy, credentials)
+        if policy.openreview_mode == "authenticated" and credentials.openreview_username is None:
+            raise ValueError("authenticated OpenReview credentials are unavailable")
+        if policy.crossref_contact_enabled != (credentials.crossref_contact is not None):
+            raise ValueError("Crossref contact mode does not match runtime configuration")
+        if policy.openalex_contact_enabled != (credentials.openalex_contact is not None):
+            raise ValueError("OpenAlex contact mode does not match runtime configuration")
+        generation_id = self._generation_id()
+        content = dict(authority.canonical_content())
+        canonical = _canonical(content)
+        digest = _digest(content)
+        if digest != authority.digest:
+            raise ValueError("discovery authority digest changed")
+        with self._transaction(immediate=True) as connection:
+            generation = connection.execute(
+                "SELECT state, plan_revision, identity_json, inventory_freshness_epoch FROM generations "
+                "WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if generation is None or generation[0] not in {
+                GenerationState.PLANNING.value,
+                GenerationState.RUNNING.value,
+            }:
+                raise ValueError("discovery policy requires an open generation")
+            identity = json.loads(str(generation[2]))
+            adapter_versions = identity.get("adapter_versions")
+            if not isinstance(adapter_versions, Mapping) or any(
+                policy.adapter_versions[provider] != version
+                for provider, version in adapter_versions.items()
+                if provider in policy.adapter_versions
+            ):
+                raise ValueError("discovery policy adapter matrix does not match generation authority")
+            if int(generation[1]) == 0 and any(
+                adapter_versions.get(provider) != version for provider, version in policy.adapter_versions.items()
+            ):
+                raise ValueError("fresh generation lacks the complete discovery adapter matrix")
+            if generation[3] is not None and generation[3] != policy.freshness_epoch:
+                raise ValueError("discovery policy freshness does not match inventory authority")
+            inventory_authority = self._load_inventory_policy_authority(connection, generation_id)
+            if inventory_authority is not None:
+                inventory_content = inventory_authority["authority"]
+                inventory_policy = inventory_content.get("policy") if isinstance(inventory_content, Mapping) else None
+                seed_versions = (
+                    inventory_policy.get("seed_adapter_versions") if isinstance(inventory_policy, Mapping) else None
+                )
+                if (
+                    not isinstance(inventory_policy, Mapping)
+                    or inventory_policy.get("max_scholar_pages") != policy.max_scholar_pages
+                    or not isinstance(seed_versions, Mapping)
+                    or seed_versions.get("doi_csl") != policy.adapter_versions["doi_csl"]
+                    or seed_versions.get("s2") != policy.adapter_versions["s2"]
+                ):
+                    raise ValueError("discovery policy does not match durable inventory policy")
+            existing = connection.execute(
+                "SELECT policy_json, policy_digest FROM discovery_policy_authority WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if existing is not None:
+                loaded = self._load_discovery_authority(connection, generation_id)
+                if loaded.canonical_content() != authority.canonical_content() or loaded.digest != digest:
+                    raise ValueError("conflicting discovery policy replay")
+                return digest
+            if int(generation[1]) != 0:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM corpus_scan_receipts WHERE generation_id = ?", (generation_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise ValueError("late discovery policy bind requires trusted corpus authority")
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM planner_passes WHERE generation_id = ? AND pass_id IN "
+                        "('known_doi','broad_discovery','dynamic_expansion','venue_fallback','late_identifiers',"
+                        "'html_probe','late_doi','merge_intents') LIMIT 1",
+                        (generation_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise ValueError("discovery policy must precede C4 planner passes")
+                resolved = authority.resolved_provider_modes
+                if (
+                    resolved["s2"] != "applicable"
+                    and connection.execute(
+                        "SELECT 1 FROM tasks WHERE generation_id = ? AND provider = 's2' AND "
+                        "operation = 'fuzzy_search' AND applicability = 'applicable' LIMIT 1",
+                        (generation_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise ValueError("legacy S2 tasks conflict with resolved discovery policy")
+            with self._authority_write():
+                connection.execute(
+                    "INSERT INTO discovery_policy_authority(generation_id, policy_json, policy_digest) "
+                    "VALUES (?, ?, ?)",
+                    (generation_id, canonical, digest),
+                )
+            self._inject("after_discovery_policy_authority")
+        return digest
+
+    def load_discovery_authority(self) -> DiscoveryAuthority:
+        """Return the detached, typed nonsecret discovery authority for this generation."""
+        generation_id = self._generation_id()
+        with self._transaction(immediate=True) as connection:
+            return self._load_discovery_authority(connection, generation_id)
+
+    def assert_c3_discovery_ready(self) -> None:
+        """Fail closed unless trusted C3 evidence and seed binding are ready."""
+        generation_id = self._generation_id()
+        expected = self._trusted_corpus_expected()
+        with self._transaction(immediate=True) as connection:
+            generation = connection.execute(
+                "SELECT state, plan_closed FROM generations WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if generation is None or generation[0] != GenerationState.RUNNING.value or int(generation[1]):
+                raise ValueError("C3 discovery readiness requires an open running generation")
+            self._verify_trusted_corpus(connection, expected)
+            bind = connection.execute(
+                "SELECT 1 FROM planner_passes WHERE generation_id = ? AND pass_id = 'bind_corpus_seed'",
+                (generation_id,),
+            ).fetchone()
+            if bind is None:
+                raise ValueError("C3 discovery readiness requires the corpus seed binding pass")
+            self._verify_v6_relationships(connection, generation_id)
+
+    def assert_discovery_authority(self, supplied: object) -> DiscoveryAuthority:
+        """Reject caller authority values that differ from the durable generation binding."""
+        authoritative = self.load_discovery_authority()
+        if supplied != authoritative:
+            raise ValueError("discovery authority does not match durable generation binding")
+        return authoritative
+
+    def discovery_wave_task_keys(self, pass_id: str, *, now: datetime) -> frozenset[str]:
+        """Return exact pending request-backed membership for one committed C4 wave."""
+        return frozenset(self.discovery_wave_due_tasks(pass_id, now=now))
+
+    def discovery_wave_due_tasks(self, pass_id: str, *, now: datetime) -> Mapping[str, str]:
+        """Return one validated task-key to provider map for due C4 work."""
+        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+            raise ValueError("unsupported discovery wave")
+        generation_id = self._generation_id()
+        now_text = _timestamp(now)
+        trusted_expected = self._trusted_corpus_expected()
+        with self._transaction(immediate=True) as connection:
+            self._verify_trusted_corpus(connection, trusted_expected)
+            self._verify_v6_relationships(connection, generation_id)
+            pass_row = connection.execute(
+                "SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
+                (generation_id, pass_id),
+            ).fetchone()
+            if pass_row is None:
+                raise ValueError("discovery wave is not committed")
+            rows = connection.execute(
+                "SELECT task.task_key, task.provider, task.request_key, task.state, task.next_attempt_at, "
+                "task.lease_expires_at, json_extract(item.input_json, '$.payload.request_key') "
+                "FROM planner_pass_expected_items AS item JOIN tasks AS task "
+                "ON task.generation_id = item.generation_id AND "
+                "task.task_key = json_extract(item.input_json, '$.payload.task_key') "
+                "WHERE item.generation_id = ? AND item.pass_key = ? AND item.kind = ?",
+                (generation_id, str(pass_row[0]), EvidenceKind.APPLICABILITY.value),
+            ).fetchall()
+            if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
+                rows.extend(
+                    connection.execute(
+                    "SELECT task.task_key, task.provider, task.request_key, task.state, task.next_attempt_at, "
+                    "task.lease_expires_at FROM tasks AS task JOIN plan_obligations AS obligation "
+                    "ON obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
+                    "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                    "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
+                    "AND round.planner_id = 'doi_bibtex'",
+                    (generation_id,),
+                    ).fetchall()
+                )
+            due: dict[str, str] = {}
+            for row in rows:
+                if row[2] is None:
+                    continue
+                if len(row) == 7 and str(row[2]) != str(row[6]):
+                    raise ValueError("discovery wave task membership changed")
+                state = str(row[3])
+                if (
+                    state == TaskDisposition.PENDING.value
+                    or (state == TaskDisposition.RETRY_WAIT.value and row[4] is not None and str(row[4]) <= now_text)
+                    or (state == TaskDisposition.LEASED.value and row[5] is not None and str(row[5]) < now_text)
+                ):
+                    due[str(row[0])] = str(row[1])
+            return MappingProxyType(dict(sorted(due.items())))
+
+    def discovery_phase_status(self, pass_id: str, *, now: datetime) -> str:
+        """Classify one C4 phase without exposing mutable planner internals."""
+        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+            raise ValueError("unsupported discovery wave")
+        generation_id = self._generation_id()
+        if (
+            self._connection.execute(
+                "SELECT 1 FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
+                (generation_id, pass_id),
+            ).fetchone()
+            is None
+        ):
+            return "uncommitted"
+        with self._transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT task.state FROM planner_passes AS pass JOIN planner_pass_expected_items AS item "
+                "ON item.generation_id = pass.generation_id AND item.pass_key = pass.pass_key "
+                "JOIN tasks AS task ON task.generation_id = item.generation_id "
+                "AND task.task_key = json_extract(item.input_json, '$.payload.task_key') "
+                "WHERE pass.generation_id = ? AND pass.pass_id = ? AND item.kind = ?",
+                (generation_id, pass_id, EvidenceKind.APPLICABILITY.value),
+            ).fetchall()
+            states = [TaskDisposition(str(row[0])) for row in rows]
+            if any(state in _TERMINAL - _SATISFIED for state in states):
+                return "blocking"
+            if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM plan_rounds WHERE generation_id = ? AND planner_id = 'doi_bibtex'",
+                        (generation_id,),
+                    ).fetchone()
+                    is None
+                ):
+                    return "pending"
+                states.extend(
+                    TaskDisposition(str(row[0]))
+                    for row in connection.execute(
+                        "SELECT task.state FROM tasks AS task JOIN plan_obligations AS obligation "
+                        "ON obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
+                        "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                        "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
+                        "AND round.planner_id = 'doi_bibtex'",
+                        (generation_id,),
+                    )
+                )
+            if any(state in _TERMINAL - _SATISFIED for state in states):
+                return "blocking"
+            if any(state not in _SATISFIED for state in states):
+                return "pending"
+            return "complete"
+
+    @staticmethod
+    def _load_discovery_authority(connection: sqlite3.Connection, generation_id: str) -> DiscoveryAuthority:
+        from .discovery import DiscoveryAuthority, DiscoveryPolicy
+
+        row = connection.execute(
+            "SELECT policy_json, policy_digest FROM discovery_policy_authority WHERE generation_id = ?",
+            (generation_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("discovery policy authority is absent")
+        try:
+            content = json.loads(str(row[0]))
+            if not isinstance(content, Mapping) or set(content) != {
+                "capability_registry_digest",
+                "policy",
+                "resolved_provider_modes",
+            }:
+                raise ValueError("stored discovery policy authority is malformed")
+            policy_content = content["policy"]
+            modes = content["resolved_provider_modes"]
+            if not isinstance(policy_content, Mapping) or not isinstance(modes, Mapping):
+                raise ValueError("stored discovery policy authority is malformed")
+            policy_values = dict(policy_content)
+            stored_round_budget = policy_values.pop("round_budget", None)
+            policy = DiscoveryPolicy(**policy_values)
+            if stored_round_budget != policy.round_budget:
+                raise ValueError("stored discovery round budget changed")
+            authority = DiscoveryAuthority(policy, cast(Mapping[str, str], modes))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("stored discovery policy authority is malformed") from exc
+        if str(row[0]) != _canonical(authority.canonical_content()) or str(row[1]) != authority.digest:
+            raise ValueError("stored discovery policy authority integrity mismatch")
+        return authority
+
+    def execute_and_commit_discovery_wave(self, pass_id: str, policy: object, *, now: datetime) -> PlannerPassReceipt:
+        """Derive and atomically append one supported C4 discovery wave."""
+        from .discovery import (
+            DiscoveryObservation,
+            DiscoveryPolicy,
+            plan_broad_discovery,
+            plan_doi_bibtex,
+            plan_dynamic_expansion,
+            plan_known_doi,
+            reduce_current_doi_observations,
+        )
+
+        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+            raise ValueError("unsupported discovery wave")
+        if not isinstance(policy, DiscoveryPolicy):
+            raise TypeError("discovery wave requires a typed policy")
+        committed_at = _timestamp(now)
+        generation_id = self._generation_id()
+        trusted_expected = self._trusted_corpus_expected()
+        with self._transaction(immediate=True) as connection:
+            self._verify_trusted_corpus(connection, trusted_expected)
+            authority = self._load_discovery_authority(connection, generation_id)
+            if authority.policy != policy:
+                raise ValueError("discovery wave policy does not match bound authority")
+            generation = connection.execute(
+                "SELECT state, plan_closed, plan_revision, updated_at FROM generations WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if generation is None or generation[0] != GenerationState.RUNNING.value or int(generation[1]):
+                raise ValueError("discovery wave requires an open running generation")
+            seeds = []
+            for row in connection.execute(
+                "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+                "ORDER BY author_key, publication_key",
+                (generation_id,),
+            ):
+                content = json.loads(str(row[0]))
+                content["origin_kind"] = EvidenceKind(str(content["origin_kind"]))
+                seeds.append(PublicationSeedEvidence(**content))
+            known = plan_known_doi(seeds, authority)
+            source_items: list[Mapping[str, object]] = []
+            if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
+                wave = known
+            else:
+                bib_round = connection.execute(
+                    "SELECT 1 FROM plan_rounds WHERE generation_id = ? AND planner_id = 'doi_bibtex'",
+                    (generation_id,),
+                ).fetchone()
+                open_known = connection.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE generation_id = ? AND provider IN ('doi_csl','doi_bibtex') "
+                    "AND state NOT IN ('succeeded','confirmed_empty','not_applicable','dominated')",
+                    (generation_id,),
+                ).fetchone()[0]
+                if bib_round is None or open_known:
+                    raise ValueError("broad discovery requires complete DOI expansion")
+                known_observations = []
+                for decision in known.decisions:
+                    task = decision.task
+                    if task.request is None:
+                        continue
+                    stored = connection.execute(
+                        "SELECT observation.disposition, observation.response_json, observation.schema_version, "
+                        "observation.authoritative_empty FROM tasks AS task JOIN observations AS observation "
+                        "ON observation.generation_id = task.generation_id AND observation.request_key = "
+                        "task.request_key WHERE task.generation_id = ? AND task.task_key = ?",
+                        (generation_id, task.key),
+                    ).fetchone()
+                    if stored is None or TaskDisposition(str(stored[0])) not in _SATISFIED:
+                        raise ValueError("broad discovery requires terminal CSL evidence")
+                    known_observations.append(
+                        DiscoveryObservation(
+                            task,
+                            TaskDisposition(str(stored[0])),
+                            json.loads(str(stored[1])) if stored[1] is not None else {},
+                            bool(stored[3]),
+                            str(stored[2]),
+                        )
+                    )
+                bibtex = plan_doi_bibtex(seeds, known, known_observations, authority)
+                bibtex_observations = []
+                for decision in bibtex.decisions:
+                    task = decision.task
+                    if task.request is None:
+                        continue
+                    stored = connection.execute(
+                        "SELECT observation.disposition, observation.response_json, observation.schema_version, "
+                        "observation.authoritative_empty FROM tasks AS task JOIN observations AS observation "
+                        "ON observation.generation_id = task.generation_id AND observation.request_key = "
+                        "task.request_key WHERE task.generation_id = ? AND task.task_key = ?",
+                        (generation_id, task.key),
+                    ).fetchone()
+                    if stored is None or TaskDisposition(str(stored[0])) not in _SATISFIED:
+                        raise ValueError("broad discovery requires terminal BibTeX evidence")
+                    bibtex_observations.append(
+                        DiscoveryObservation(
+                            task,
+                            TaskDisposition(str(stored[0])),
+                            json.loads(str(stored[1])) if stored[1] is not None else {},
+                            bool(stored[3]),
+                            str(stored[2]),
+                        )
+                    )
+                reductions = reduce_current_doi_observations(
+                    seeds,
+                    known,
+                    known_observations,
+                    bibtex,
+                    bibtex_observations,
+                    authority,
+                )
+                authors = {
+                    str(row[0]): str(row[1])
+                    for row in connection.execute(
+                        "SELECT row_key, name FROM authors WHERE generation_id = ? AND enabled = 1",
+                        (generation_id,),
+                    )
+                }
+                for author_key, name in sorted(authors.items()):
+                    payload = {"author_key": author_key, "name": name}
+                    source_items.append(
+                        {
+                            "digest": evidence_digest(payload),
+                            "key": f"author:{author_key}",
+                            "kind": EvidenceKind.CORPUS.value,
+                            "payload": payload,
+                        }
+                    )
+                for reduction in reductions:
+                    reduction_payload: dict[str, object] = {
+                        "author_key": reduction.author_key,
+                        "publication_key": reduction.publication_key,
+                        "selected_metadata": json.loads(evidence_json(reduction.selected_metadata)),
+                        "source_task_key": reduction.source_task_key,
+                        "status": reduction.status,
+                    }
+                    source_items.append(
+                        {
+                            "digest": reduction.digest,
+                            "key": f"doi-reduction:{reduction.author_key}:{reduction.publication_key}",
+                            "kind": EvidenceKind.REDUCTION_RECEIPT.value,
+                            "payload": reduction_payload,
+                        }
+                    )
+                for observation in known_observations:
+                    observation_payload: dict[str, object] = {
+                        "authoritative_empty": observation.authoritative_empty,
+                        "disposition": observation.disposition.value,
+                        "request_key": observation.request_key,
+                        "response": json.loads(evidence_json(observation.response)),
+                        "response_digest": observation.response_digest,
+                        "schema_version": observation.schema_version,
+                        "task_key": observation.task.key,
+                    }
+                    source_items.append(
+                        {
+                            "digest": evidence_digest(observation_payload),
+                            "key": f"csl-observation:{observation.task.key}",
+                            "kind": EvidenceKind.OBSERVATION.value,
+                            "payload": observation_payload,
+                        }
+                    )
+                for observation in bibtex_observations:
+                    observation_payload = {
+                        "authoritative_empty": observation.authoritative_empty,
+                        "disposition": observation.disposition.value,
+                        "request_key": observation.request_key,
+                        "response": json.loads(evidence_json(observation.response)),
+                        "response_digest": observation.response_digest,
+                        "schema_version": observation.schema_version,
+                        "task_key": observation.task.key,
+                    }
+                    source_items.append(
+                        {
+                            "digest": evidence_digest(observation_payload),
+                            "key": f"bibtex-observation:{observation.task.key}",
+                            "kind": EvidenceKind.OBSERVATION.value,
+                            "payload": observation_payload,
+                        }
+                    )
+                broad = plan_broad_discovery(seeds, authors, authority, reductions)
+                if pass_id == "broad_discovery":  # noqa: S105 - planner pass identifier
+                    wave = broad
+                else:
+                    broad_observations = []
+                    for decision in broad.decisions:
+                        task = decision.task
+                        if task.request is None:
+                            continue
+                        stored = connection.execute(
+                            "SELECT observation.disposition, observation.response_json, observation.schema_version, "
+                            "observation.authoritative_empty FROM tasks AS task JOIN observations AS observation "
+                            "ON observation.generation_id = task.generation_id AND observation.request_key = "
+                            "task.request_key WHERE task.generation_id = ? AND task.task_key = ?",
+                            (generation_id, task.key),
+                        ).fetchone()
+                        if stored is None or TaskDisposition(str(stored[0])) not in _SATISFIED:
+                            raise ValueError("dynamic expansion requires terminal broad evidence")
+                        broad_observations.append(
+                            DiscoveryObservation(
+                                task,
+                                TaskDisposition(str(stored[0])),
+                                json.loads(str(stored[1])) if stored[1] is not None else {},
+                                bool(stored[3]),
+                                str(stored[2]),
+                            )
+                        )
+                    source_items = []
+                    for decision in broad.decisions:
+                        task = decision.task
+                        decision_payload: dict[str, object] = {
+                            "applicability": task.applicability,
+                            "identity_digest": task.identity_digest,
+                            "reason": decision.reason.value if decision.reason is not None else None,
+                            "request_key": task.request.key if task.request is not None else None,
+                            "task_key": task.key,
+                        }
+                        source_items.append(
+                            {
+                                "digest": evidence_digest(decision_payload),
+                                "key": f"broad-decision:{task.key}",
+                                "kind": EvidenceKind.APPLICABILITY.value,
+                                "payload": decision_payload,
+                            }
+                        )
+                    for observation in broad_observations:
+                        observation_payload = {
+                            "authoritative_empty": observation.authoritative_empty,
+                            "disposition": observation.disposition.value,
+                            "request_key": observation.request_key,
+                            "response": json.loads(evidence_json(observation.response)),
+                            "response_digest": observation.response_digest,
+                            "schema_version": observation.schema_version,
+                            "task_key": observation.task.key,
+                        }
+                        source_items.append(
+                            {
+                                "digest": evidence_digest(observation_payload),
+                                "key": f"broad-observation:{observation.task.key}",
+                                "kind": EvidenceKind.OBSERVATION.value,
+                                "payload": observation_payload,
+                            }
+                        )
+                    wave = plan_dynamic_expansion(broad, broad_observations, authority)
+            existing_pass = connection.execute(
+                "SELECT pass_key, receipt_json FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
+                (generation_id, pass_id),
+            ).fetchone()
+            if existing_pass is not None:
+                receipt = PlannerPassReceipt(**json.loads(str(existing_pass[1])))
+                adopted_values: set[str] = set()
+                for row in connection.execute(
+                        "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
+                        "AND pass_key = ? AND kind = ?",
+                        (generation_id, str(existing_pass[0]), EvidenceKind.APPLICABILITY.value),
+                    ):
+                    envelope_value = json.loads(str(row[0]))
+                    payload_value = envelope_value.get("payload") if isinstance(envelope_value, Mapping) else None
+                    if (
+                        isinstance(payload_value, Mapping)
+                        and payload_value.get("adopted") is True
+                        and isinstance(payload_value.get("task_key"), str)
+                    ):
+                        adopted_values.add(str(payload_value["task_key"]))
+                adopted_keys = frozenset(adopted_values)
+                replay_snapshot = self._snapshot_for_discovery_pass(
+                    connection,
+                    generation_id,
+                    pass_id,
+                    authority=authority,
+                    decisions=wave.decisions,
+                    adopted_keys=adopted_keys,
+                    source_items=source_items,
+                )
+                authoritative_receipt = _execute_authoritative_pass(pass_id, replay_snapshot)
+                stored_round = connection.execute(
+                    "SELECT source_evidence_digest FROM plan_rounds WHERE generation_id = ? AND planner_id = ?",
+                    (generation_id, pass_id),
+                ).fetchone()
+                if stored_round is None or receipt != authoritative_receipt:
+                    raise ValueError("conflicting discovery wave replay")
+                if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
+                    self._commit_known_doi_expansion(policy, receipt, now=now, _connection=connection)
+                else:
+                    return receipt
+                return receipt
+            definition = pass_for(pass_id)
+            earlier = tuple(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT pass_id FROM planner_passes WHERE generation_id = ? ORDER BY rowid",
+                    (generation_id,),
+                )
+            )
+            expected_earlier = tuple(
+                value.pass_id
+                for value in sorted((pass_for(key) for key in PASSES), key=lambda value: value.ordinal)
+                if value.ordinal < definition.ordinal
+            )
+            if earlier != expected_earlier:
+                raise ValueError("discovery wave phase sequence is skipped or backward")
+            if int(generation[2]) >= _MAX_PLAN_ROUNDS or policy.round_budget > _MAX_PLAN_ROUNDS:
+                raise ValueError("discovery wave exceeds the fixed plan round budget")
+            latest_round = connection.execute(
+                "SELECT committed_at FROM plan_rounds WHERE generation_id = ? ORDER BY sequence DESC LIMIT 1",
+                (generation_id,),
+            ).fetchone()
+            if committed_at < str(generation[3]) or (latest_round is not None and committed_at < str(latest_round[0])):
+                raise ValueError("discovery wave timestamp precedes durable generation history")
+            sequence = int(generation[2]) + 1
+            new_tasks: list[PlannedTask] = []
+            adopted_tasks: list[PlannedTask] = []
+            expected_consumers = self._discovery_request_consumers(wave.decisions)
+            for decision in wave.decisions:
+                task = decision.task
+                stored = connection.execute(
+                    "SELECT author_key, publication_key, provider, operation, request_key, required, applicability, "
+                    "identity_digest, state, applicability_reason FROM tasks "
+                    "WHERE generation_id = ? AND task_key = ?",
+                    (generation_id, task.key),
+                ).fetchone()
+                if stored is not None:
+                    expected_request = task.request.key if task.request is not None else None
+                    expected_reason = decision.reason.value if decision.reason is not None else ""
+                    expected_state = TaskDisposition.NOT_APPLICABLE.value if task.request is None else str(stored[8])
+                    if tuple(stored[:8]) != (
+                        task.author_key,
+                        task.publication_key,
+                        task.provider,
+                        task.operation,
+                        expected_request,
+                        int(task.required),
+                        task.applicability,
+                        task.identity_digest,
+                    ) or (
+                        task.request is None and (str(stored[8]) != expected_state or str(stored[9]) != expected_reason)
+                    ):
+                        raise ValueError("adopted discovery task identity changed")
+                    obligation = connection.execute(
+                        "SELECT obligation.identity_digest, round.planner_id FROM plan_obligations AS obligation "
+                        "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                        "AND round.sequence = obligation.round_sequence WHERE obligation.generation_id = ? "
+                        "AND obligation.task_key = ?",
+                        (generation_id, task.key),
+                    ).fetchone()
+                    if (
+                        obligation is None
+                        or str(obligation[0]) != task.identity_digest
+                        or str(obligation[1]) != "inventory_union"
+                    ):
+                        raise ValueError("adopted discovery task lacks permitted authoritative origin")
+                    if task.request is not None:
+                        if expected_request is None:
+                            raise AssertionError("request-backed task lacks a request key")
+                        request_row = connection.execute(
+                            "SELECT identity_json FROM requests WHERE generation_id = ? AND request_key = ?",
+                            (generation_id, expected_request),
+                        ).fetchone()
+                        consumers = connection.execute(
+                            "SELECT task_key FROM request_consumers WHERE generation_id = ? AND request_key = ? "
+                            "ORDER BY task_key",
+                            (generation_id, expected_request),
+                        ).fetchall()
+                        prior_consumers = tuple(
+                            task_key
+                            for task_key in expected_consumers[expected_request]
+                            if connection.execute(
+                                "SELECT 1 FROM tasks WHERE generation_id = ? AND task_key = ?",
+                                (generation_id, task_key),
+                            ).fetchone()
+                            is not None
+                        )
+                        if (
+                            request_row is None
+                            or str(request_row[0]) != _canonical(task.request.canonical_content())
+                            or tuple(str(row[0]) for row in consumers) != prior_consumers
+                        ):
+                            raise ValueError("adopted discovery task authority changed")
+                    adopted_tasks.append(PlannedTask(task, expands_plan=True))
+                    continue
+                new_tasks.append(PlannedTask(task, expands_plan=True))
+            content = self._round_content(
+                sequence,
+                PlanPhase.DISCOVERY,
+                pass_id,
+                policy.planner_version,
+                (),
+                wave.input_digest,
+                (),
+                new_tasks,
+            )
+            content_digest = _digest(content)
+            round_key = _digest({"generation_id": generation_id, "content_digest": content_digest})
+            snapshot = self._snapshot_for_discovery_pass(
+                connection,
+                generation_id,
+                pass_id,
+                authority=authority,
+                decisions=wave.decisions,
+                adopted_keys=frozenset(item.task.key for item in adopted_tasks),
+                source_items=source_items,
+            )
+            receipt = _execute_authoritative_pass(pass_id, snapshot)
+            predecessor = connection.execute(
+                "SELECT output_digest FROM planner_passes WHERE generation_id = ? ORDER BY rowid DESC LIMIT 1",
+                (generation_id,),
+            ).fetchone()
+            predecessor_digest = str(predecessor[0]) if predecessor is not None else None
+            with self._authority_write():
+                connection.execute(
+                    "INSERT INTO planner_passes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        receipt.pass_key,
+                        receipt.pass_id,
+                        receipt.pass_version,
+                        receipt.registry_digest,
+                        receipt.snapshot_digest,
+                        receipt.output_digest,
+                        evidence_json(receipt.canonical_content()),
+                        evidence_digest(
+                            {
+                                "domain": _SNAPSHOT_DOMAIN_SEPARATOR,
+                                "generation_id": generation_id,
+                                "pass_id": pass_id,
+                                "snapshot": snapshot,
+                                "predecessor_output_digest": predecessor_digest,
+                            }
+                        ),
+                        predecessor_digest,
+                    ),
+                )
+                self._inject("after_c4_pass_receipt")
+                connection.executemany(
+                    "INSERT INTO planner_pass_expected_items VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        (
+                            generation_id,
+                            receipt.pass_key,
+                            str(item["key"]),
+                            str(item["kind"]),
+                            str(item["digest"]),
+                            evidence_json(item),
+                            int(str(item["key"]) in receipt.unseen_keys),
+                        )
+                        for item in cast(Sequence[Mapping[str, object]], snapshot["items"])
+                        if str(item["key"]) in receipt.expected_items
+                    ),
+                )
+                self._inject("after_c4_expected_items")
+            if pass_id != "known_doi":  # noqa: S105 - planner pass identifier
+                if adopted_tasks and pass_id != "broad_discovery":  # noqa: S105 - planner pass identifier
+                    raise ValueError("dynamic discovery cannot adopt preexisting tasks")
+                if pass_id == "broad_discovery":  # noqa: S105 - planner pass identifier
+                    source_keys = tuple(
+                        str(row[0])
+                        for row in connection.execute(
+                            "SELECT obligation.task_key FROM plan_obligations AS obligation "
+                            "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                            "AND round.sequence = obligation.round_sequence WHERE obligation.generation_id = ? "
+                            "AND round.planner_id = 'doi_bibtex' ORDER BY obligation.task_key",
+                            (generation_id,),
+                        )
+                    )
+                else:
+                    broad_pass = connection.execute(
+                        "SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = 'broad_discovery'",
+                        (generation_id,),
+                    ).fetchone()
+                    if broad_pass is None:
+                        raise ValueError("dynamic expansion requires the authoritative broad pass")
+                    source_values: list[str] = []
+                    for row in connection.execute(
+                                "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
+                                "AND pass_key = ? AND kind = ?",
+                                (generation_id, str(broad_pass[0]), EvidenceKind.APPLICABILITY.value),
+                            ):
+                        envelope_value = json.loads(str(row[0]))
+                        payload_value = (
+                            envelope_value.get("payload") if isinstance(envelope_value, Mapping) else None
+                        )
+                        if isinstance(payload_value, Mapping) and isinstance(payload_value.get("task_key"), str):
+                            source_values.append(str(payload_value["task_key"]))
+                    source_keys = tuple(sorted(source_values))
+                if not source_keys and (seeds or wave.decisions):
+                    raise ValueError("discovery reduction source membership is empty")
+                durable_digests = tuple(
+                    self._source_evidence(connection, generation_id, key)[1] for key in source_keys
+                )
+                source_digest = (
+                    durable_digests[0] if len(durable_digests) == 1 else _digest(list(durable_digests))
+                )
+                new_task_keys = {item.task.key for item in new_tasks}
+                self.commit_reduction(
+                    source_keys,
+                    source_evidence_digest=source_digest,
+                    publications=(),
+                    tasks=tuple(
+                        PlannedTask(
+                            item.task,
+                            expands_plan=pass_id == "broad_discovery",  # noqa: S105 - planner pass identifier
+                        )
+                        for item in new_tasks
+                    ),
+                    now=now,
+                    reducer_id=pass_id,
+                    reducer_version=policy.reducer_version,
+                    _applicability_reasons={
+                        decision.task.key: decision.reason
+                        for decision in wave.decisions
+                        if decision.task.key in new_task_keys
+                        and decision.task.request is None
+                        and decision.reason is not None
+                    },
+                    _connection=connection,
+                    _allow_empty_sources=True,
+                    _fault_callback=self._inject,
+                )
+                self._inject("after_c4_expansion")
+                return receipt
+            for item in new_tasks:
+                self._insert_task(connection, generation_id, item.task, self._inject)
+            for request_key, expected in expected_consumers.items():
+                durable = tuple(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT task_key FROM request_consumers WHERE generation_id = ? AND request_key = ? "
+                        "ORDER BY task_key",
+                        (generation_id, request_key),
+                    )
+                )
+                if durable != expected:
+                    raise ValueError("discovery request consumer membership changed")
+            connection.executemany(
+                "INSERT INTO plan_obligations(generation_id, task_key, identity_digest, author_key, provider, "
+                "operation, required, applicability, round_sequence, expands_plan) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                (
+                    (
+                        generation_id,
+                        item.task.key,
+                        item.task.identity_digest,
+                        item.task.author_key,
+                        item.task.provider,
+                        item.task.operation,
+                        int(item.task.required),
+                        item.task.applicability,
+                        sequence,
+                    )
+                    for item in new_tasks
+                ),
+            )
+            self._inject("after_c4_obligations")
+            new_task_keys = {item.task.key for item in new_tasks}
+            for decision in wave.decisions:
+                if decision.task.request is None:
+                    if decision.task.key not in new_task_keys:
+                        continue
+                    updated = connection.execute(
+                        "UPDATE tasks SET state = ?, applicability_reason = ? WHERE generation_id = ? AND task_key = ?",
+                        (
+                            TaskDisposition.NOT_APPLICABLE.value,
+                            decision.reason.value if decision.reason is not None else "",
+                            generation_id,
+                            decision.task.key,
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        raise ValueError("not-applicable discovery task terminalization changed")
+            connection.execute(
+                "INSERT INTO plan_rounds(generation_id, sequence, round_key, phase, planner_id, planner_version, "
+                "source_task_keys_json, source_evidence_digest, task_set_digest, content_digest, committed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    sequence,
+                    round_key,
+                    PlanPhase.DISCOVERY.value,
+                    pass_id,
+                    policy.planner_version,
+                    wave.input_digest,
+                    content["task_set_digest"],
+                    content_digest,
+                    committed_at,
+                ),
+            )
+            self._inject("after_c4_round")
+            cumulative = _digest(
+                [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT content_digest FROM plan_rounds WHERE generation_id = ? ORDER BY sequence",
+                        (generation_id,),
+                    )
+                ]
+            )
+            connection.execute(
+                "UPDATE generations SET plan_revision = ?, plan_digest = ?, updated_at = ? WHERE generation_id = ?",
+                (sequence, cumulative, committed_at, generation_id),
+            )
+        return receipt
+
+    def _commit_known_doi_expansion(
+        self,
+        policy: object,
+        receipt: PlannerPassReceipt,
+        *,
+        now: datetime,
+        _connection: sqlite3.Connection | None = None,
+    ) -> None:
+        from .discovery import (
+            DiscoveryObservation,
+            DiscoveryPolicy,
+            plan_doi_bibtex,
+            plan_known_doi,
+        )
+
+        if not isinstance(policy, DiscoveryPolicy):
+            raise TypeError("discovery wave requires a typed policy")
+        generation_id = self._generation_id()
+        manager = self._transaction(immediate=True) if _connection is None else nullcontext(_connection)
+        with manager as connection:
+            authority = self._load_discovery_authority(connection, generation_id)
+            if authority.policy != policy:
+                raise ValueError("discovery wave policy does not match bound authority")
+            seeds = []
+            for row in connection.execute(
+                "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+                "ORDER BY author_key, publication_key",
+                (generation_id,),
+            ):
+                content = json.loads(str(row[0]))
+                content["origin_kind"] = EvidenceKind(str(content["origin_kind"]))
+                seeds.append(PublicationSeedEvidence(**content))
+            known = plan_known_doi(seeds, authority)
+            observations = []
+            source_keys = []
+            for decision in known.decisions:
+                task = decision.task
+                source_keys.append(task.key)
+                if task.request is None:
+                    continue
+                stored = connection.execute(
+                    "SELECT task.state, observation.disposition, observation.response_json, "
+                    "observation.schema_version, observation.authoritative_empty "
+                    "FROM tasks AS task LEFT JOIN observations AS observation "
+                    "ON observation.generation_id = task.generation_id AND observation.request_key = task.request_key "
+                    "WHERE task.generation_id = ? AND task.task_key = ?",
+                    (generation_id, task.key),
+                ).fetchone()
+                if stored is None:
+                    raise ValueError("known DOI task membership changed")
+                disposition = TaskDisposition(str(stored[0]))
+                if disposition not in _TERMINAL:
+                    return
+                if disposition not in _SATISFIED or stored[1] is None:
+                    raise ValueError("terminal CSL evidence is blocking")
+                response = json.loads(str(stored[2])) if stored[2] is not None else {}
+                observations.append(
+                    DiscoveryObservation(
+                        task,
+                        TaskDisposition(str(stored[1])),
+                        response,
+                        bool(stored[4]),
+                        str(stored[3]),
+                    )
+                )
+            existing = connection.execute(
+                "SELECT 1 FROM plan_rounds WHERE generation_id = ? AND planner_id = 'doi_bibtex'",
+                (generation_id,),
+            ).fetchone()
+            if existing is not None:
+                return
+            wave = plan_doi_bibtex(seeds, known, observations, authority)
+            durable = [self._source_evidence(connection, generation_id, key)[1] for key in sorted(source_keys)]
+            source_digest = durable[0] if len(durable) == 1 else _digest(durable)
+            self.commit_reduction(
+                tuple(source_keys),
+                source_evidence_digest=source_digest,
+                publications=(),
+                tasks=tuple(PlannedTask(decision.task, expands_plan=True) for decision in wave.decisions),
+                now=now,
+                reducer_id="doi_bibtex",
+                reducer_version=policy.reducer_version,
+                _applicability_reasons={
+                    decision.task.key: decision.reason
+                    for decision in wave.decisions
+                    if decision.task.request is None and decision.reason is not None
+                },
+                _connection=connection,
+                _allow_empty_sources=True,
+                _fault_callback=self._inject,
+            )
+            self._inject("after_c4_expansion")
 
     def _verify_structural_closure(self, connection: sqlite3.Connection, generation_id: str) -> None:
         sequences = [
@@ -4939,14 +6335,97 @@ class Ledger:
             index = keys.index(key)
             if json.loads(row[0])[index] != disposition.value or json.loads(row[1])[index] != evidence_digest:
                 raise ValueError("reduction receipt evidence mismatch")
-        later_rounds = connection.execute(
-            "SELECT COUNT(*) FROM plan_rounds WHERE generation_id = ? AND sequence > 1", (generation_id,)
-        ).fetchone()[0]
-        receipts = connection.execute(
-            "SELECT COUNT(*) FROM reduction_receipts WHERE generation_id = ?", (generation_id,)
-        ).fetchone()[0]
-        if later_rounds != receipts:
+        later_round_keys = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT round_key FROM plan_rounds WHERE generation_id = ? AND sequence > 1",
+                (generation_id,),
+            )
+        }
+        reduction_round_keys = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT round_key FROM reduction_receipts WHERE generation_id = ?",
+                (generation_id,),
+            )
+        }
+        discovery_round_keys = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT round_key FROM plan_rounds WHERE generation_id = ? AND planner_id IN "
+                "('known_doi', 'broad_discovery', 'dynamic_expansion')",
+                (generation_id,),
+            )
+        }
+        if later_round_keys != reduction_round_keys | discovery_round_keys:
             raise ValueError("noninitial round lacks exact reduction receipt")
+        for pass_id in ("known_doi", "broad_discovery", "dynamic_expansion"):
+            pass_count = connection.execute(
+                "SELECT COUNT(*) FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
+                (generation_id, pass_id),
+            ).fetchone()[0]
+            round_count = connection.execute(
+                "SELECT COUNT(*) FROM plan_rounds WHERE generation_id = ? AND planner_id = ?",
+                (generation_id, pass_id),
+            ).fetchone()[0]
+            if pass_count != round_count:
+                raise ValueError("discovery pass and round membership is not bijective")
+            if not pass_count:
+                continue
+            discovery_round = connection.execute(
+                "SELECT round_key FROM plan_rounds WHERE generation_id = ? AND planner_id = ?",
+                (generation_id, pass_id),
+            ).fetchone()
+            if discovery_round is None:
+                raise ValueError("discovery pass lacks its exact round")
+            round_key = str(discovery_round[0])
+            has_reduction = round_key in reduction_round_keys
+            if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
+                if has_reduction:
+                    raise ValueError("known DOI pass round cannot be a reduction round")
+                continue
+            if not has_reduction:
+                raise ValueError("later discovery pass lacks its exact reduction receipt")
+            receipt_row = connection.execute(
+                "SELECT source_task_keys_json FROM reduction_receipts WHERE generation_id = ? AND round_key = ?",
+                (generation_id, round_key),
+            ).fetchone()
+            if receipt_row is None:
+                raise ValueError("later discovery reduction receipt is absent")
+            actual_sources = tuple(json.loads(str(receipt_row[0])))
+            if pass_id == "broad_discovery":  # noqa: S105 - planner pass identifier
+                expected_sources = tuple(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT obligation.task_key FROM plan_obligations AS obligation "
+                        "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                        "AND round.sequence = obligation.round_sequence WHERE obligation.generation_id = ? "
+                        "AND round.planner_id = 'doi_bibtex' ORDER BY obligation.task_key",
+                        (generation_id,),
+                    )
+                )
+            else:
+                broad_pass = connection.execute(
+                    "SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = 'broad_discovery'",
+                    (generation_id,),
+                ).fetchone()
+                if broad_pass is None:
+                    raise ValueError("dynamic expansion lacks its broad predecessor")
+                expected_sources = tuple(
+                    sorted(
+                        str(payload["task_key"])
+                        for row in connection.execute(
+                            "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
+                            "AND pass_key = ? AND kind = ?",
+                            (generation_id, str(broad_pass[0]), EvidenceKind.APPLICABILITY.value),
+                        )
+                        if isinstance((envelope := json.loads(str(row[0]))), Mapping)
+                        and isinstance((payload := envelope.get("payload")), Mapping)
+                        and isinstance(payload.get("task_key"), str)
+                    )
+                )
+            if actual_sources != expected_sources:
+                raise ValueError("discovery reduction predecessor membership changed")
         generation = connection.execute(
             "SELECT plan_closed, closure_digest FROM generations WHERE generation_id = ?", (generation_id,)
         ).fetchone()
@@ -5274,9 +6753,24 @@ class Ledger:
             raise ValueError("sealed plan obligation digest mismatch")
 
     def claim_due(self, owner: str, now: datetime, lease_for: timedelta) -> TaskClaim | None:
+        return self.claim_due_for_operations(owner, now, lease_for, None)
+
+    def claim_due_for_operations(
+        self,
+        owner: str,
+        now: datetime,
+        lease_for: timedelta,
+        eligible: frozenset[str] | None,
+    ) -> TaskClaim | None:
+        """Claim one task only from the code-owned provider-operation phase set."""
         owner = _identifier(owner, "lease owner")
         if lease_for <= timedelta(0):
             raise ValueError("claim owner and positive lease are required")
+        if eligible is not None:
+            for task_key in eligible:
+                _digest_text(task_key, "eligible task key")
+            if not eligible:
+                return None
         generation_id = self._generation_id()
         now_text = _timestamp(now)
         expires = now + lease_for
@@ -5286,17 +6780,25 @@ class Ledger:
             ).fetchone()
             if generation is None or generation[0] != GenerationState.RUNNING.value:
                 return None
-            candidate = connection.execute(
-                "SELECT task.task_key FROM tasks AS task JOIN plan_obligations AS obligation ON "
+            eligibility_sql = ""
+            eligibility_values: list[str] = []
+            if eligible is not None:
+                eligibility_sql = "task.task_key IN (" + ",".join("?" for _ in eligible) + ") AND "
+                eligibility_values = sorted(eligible)
+            query = (
+                "SELECT task.task_key FROM tasks AS task JOIN plan_obligations AS obligation ON "  # noqa: S608
                 "obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
                 "WHERE task.generation_id = ? AND obligation.round_sequence IS NOT NULL AND "
-                "task.request_key IS NOT NULL AND "
-                "((task.state IN (?, ?) AND "
+                "task.request_key IS NOT NULL AND " + eligibility_sql + "((task.state IN (?, ?) AND "
                 "(task.next_attempt_at IS NULL OR task.next_attempt_at <= ?)) OR "
                 "(task.state = ? AND task.lease_expires_at <= ?)) "
-                "ORDER BY task.task_key LIMIT 1",
+                "ORDER BY task.task_key LIMIT 1"
+            )
+            candidate = connection.execute(
+                query,
                 (
                     generation_id,
+                    *eligibility_values,
                     TaskDisposition.PENDING.value,
                     TaskDisposition.RETRY_WAIT.value,
                     now_text,
@@ -6735,6 +8237,7 @@ class Ledger:
         specs = {
             "corpus_scan_receipts": "snapshot_digest",
             "corpus_snapshots": "snapshot_digest",
+            "discovery_policy_authority": "policy_digest",
             "corpus_items": "source_path COLLATE NOCASE",
             "publication_seed_evidence": "author_key, publication_key",
             "aggregate_inputs": "pass_key, reduction_id, ordinal",
@@ -6751,7 +8254,7 @@ class Ledger:
                 connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
                 is None
             ):
-                if table == "corpus_scan_receipts":
+                if table in {"corpus_scan_receipts", "discovery_policy_authority"}:
                     result[table] = []
                     continue
                 raise ValueError(f"missing Task5C evidence table: {table}")
@@ -6778,6 +8281,21 @@ class Ledger:
 
     @staticmethod
     def _verify_v6_relationships(connection: sqlite3.Connection, generation_id: str) -> None:
+        if connection.execute(
+            "SELECT 1 FROM inventory_authorities WHERE generation_id = ? LIMIT 1", (generation_id,)
+        ).fetchone() is not None:
+            Ledger._inventory_authority_maps(connection, generation_id)
+        if (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'discovery_policy_authority'"
+            ).fetchone()
+            is not None
+            and connection.execute(
+                "SELECT 1 FROM discovery_policy_authority WHERE generation_id = ?", (generation_id,)
+            ).fetchone()
+            is not None
+        ):
+            Ledger._load_discovery_authority(connection, generation_id)
         snapshot = connection.execute(
             "SELECT snapshot_digest, item_set_digest, evidence_json FROM corpus_snapshots WHERE generation_id = ?",
             (generation_id,),
@@ -7049,7 +8567,26 @@ class Ledger:
             )
             if not isinstance(historical_snapshot, Mapping):
                 raise AssertionError("historical planner snapshot must be a mapping")
-            authoritative = _execute_authoritative_pass(str(pass_row[1]), historical_snapshot)
+            if receipt.get("pass_version") == "1" and receipt.get("registry_digest") == (
+                _LEGACY_C3_PASS_REGISTRY_DIGEST
+            ):
+                legacy_items = tuple(
+                    sorted(str(item["key"]) for item in cast(Sequence[Mapping[str, object]], stored_items))
+                )
+                legacy_snapshot_digest = evidence_digest(historical_snapshot)
+                authoritative = PlannerPassReceipt(
+                    generation_id,
+                    str(pass_row[1]),
+                    "1",
+                    evidence_digest((generation_id, str(pass_row[1]), "1", legacy_snapshot_digest)),
+                    _LEGACY_C3_PASS_REGISTRY_DIGEST,
+                    legacy_snapshot_digest,
+                    legacy_items,
+                    legacy_items,
+                    evidence_digest((legacy_items, legacy_items)),
+                )
+            else:
+                authoritative = _execute_authoritative_pass(str(pass_row[1]), historical_snapshot)
             if evidence_json(authoritative.canonical_content()) != evidence_json(receipt):
                 raise ValueError("planner pass receipt is not code-authoritative")
             expected_authority = evidence_digest(
@@ -7064,6 +8601,97 @@ class Ledger:
             if pass_row[3] != expected_authority or pass_row[4] != previous_output:
                 raise ValueError("planner pass snapshot authority chain mismatch")
             previous_output = authoritative.output_digest
+            policy_table_exists = (
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'discovery_policy_authority'"
+                ).fetchone()
+                is not None
+            )
+            has_discovery_policy = (
+                policy_table_exists
+                and connection.execute(
+                    "SELECT 1 FROM discovery_policy_authority WHERE generation_id = ?", (generation_id,)
+                ).fetchone()
+                is not None
+            )
+            if str(pass_row[1]) == "known_doi" and has_discovery_policy:
+                from .discovery import plan_known_doi
+
+                authority = Ledger._load_discovery_authority(connection, generation_id)
+                seed_values = []
+                decision_payloads: dict[str, Mapping[str, object]] = {}
+                for stored_item in stored_items:
+                    if not isinstance(stored_item, Mapping):
+                        raise ValueError("known DOI pass source evidence is malformed")
+                    if stored_item.get("kind") == EvidenceKind.APPLICABILITY.value:
+                        payload = stored_item.get("payload")
+                        if not isinstance(payload, Mapping) or not isinstance(payload.get("task_key"), str):
+                            raise ValueError("known DOI pass decision evidence is malformed")
+                        decision_payloads[str(payload["task_key"])] = payload
+                        continue
+                    if stored_item.get("kind") != EvidenceKind.SEED.value:
+                        continue
+                    payload = stored_item.get("payload")
+                    if not isinstance(payload, Mapping):
+                        raise ValueError("known DOI pass seed payload is malformed")
+                    seed_content = dict(payload)
+                    seed_content["origin_kind"] = EvidenceKind(str(seed_content["origin_kind"]))
+                    seed_values.append(PublicationSeedEvidence(**seed_content))
+                wave = plan_known_doi(tuple(seed_values), authority)
+                expected_tasks = {decision.task.key: decision for decision in wave.decisions}
+                if set(decision_payloads) != set(expected_tasks):
+                    raise ValueError("known DOI decision membership changed")
+                stored_tasks = {
+                    str(row[0]): row
+                    for row in connection.execute(
+                        "SELECT task_key, author_key, publication_key, provider, operation, request_key, required, "
+                        "applicability, identity_digest, state, applicability_reason FROM tasks "
+                        "WHERE generation_id = ?",
+                        (generation_id,),
+                    )
+                    if str(row[0]) in expected_tasks
+                }
+                if set(stored_tasks) != set(expected_tasks):
+                    raise ValueError("known DOI output task membership changed")
+                for task_key, decision in expected_tasks.items():
+                    task = decision.task
+                    row = stored_tasks[task_key]
+                    expected_reason = decision.reason.value if decision.reason is not None else ""
+                    decision_payload = decision_payloads[task_key]
+                    if decision_payload.get("identity_digest") != task.identity_digest or decision_payload.get(
+                        "reason"
+                    ) != (expected_reason or None):
+                        raise ValueError("known DOI decision authority changed")
+                    if task.request is not None:
+                        durable_consumers = tuple(
+                            str(value[0])
+                            for value in connection.execute(
+                                "SELECT task_key FROM request_consumers WHERE generation_id = ? AND request_key = ? "
+                                "ORDER BY task_key",
+                                (generation_id, task.request.key),
+                            )
+                        )
+                        claimed_consumers = decision_payload.get("request_consumers")
+                        if not isinstance(claimed_consumers, Sequence) or isinstance(
+                            claimed_consumers, (str, bytes, bytearray)
+                        ):
+                            raise ValueError("known DOI request consumer evidence is malformed")
+                        if tuple(str(value) for value in claimed_consumers) != durable_consumers:
+                            raise ValueError("known DOI request consumer membership changed")
+                    if tuple(row[1:9]) != (
+                        task.author_key,
+                        task.publication_key,
+                        task.provider,
+                        task.operation,
+                        task.request.key if task.request is not None else None,
+                        int(task.required),
+                        task.applicability,
+                        task.identity_digest,
+                    ) or (
+                        task.request is None
+                        and (str(row[9]) != TaskDisposition.NOT_APPLICABLE.value or str(row[10]) != expected_reason)
+                    ):
+                        raise ValueError("known DOI output task authority changed")
         duplicate_consumption = connection.execute(
             "SELECT 1 FROM aggregate_inputs WHERE generation_id = ? GROUP BY pass_key, kind, stable_key "
             "HAVING COUNT(DISTINCT reduction_id) > 1 LIMIT 1",
@@ -7139,7 +8767,11 @@ class Ledger:
                     raise ValueError(f"Task5C evidence column mismatch: {key}")
 
         try:
-            if table == "corpus_snapshots":
+            if table == "discovery_policy_authority":
+                policy = item.get("policy")
+                if not isinstance(policy, Mapping) or evidence_digest(policy) != item.get("policy_digest"):
+                    raise ValueError("corrupt discovery policy authority")
+            elif table == "corpus_snapshots":
                 if not isinstance(evidence, Mapping):
                     raise ValueError("missing corpus snapshot evidence")
                 snapshot_value = CorpusSnapshot(**evidence)

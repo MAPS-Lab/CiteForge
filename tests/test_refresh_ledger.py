@@ -112,14 +112,15 @@ def _open_ready(path: Path, *, enabled: bool = False) -> Ledger:
     return ledger
 
 
-def test_schema_v7_contains_exact_append_only_evidence_substrate(tmp_path: Path) -> None:
+def test_schema_v8_contains_exact_append_only_evidence_substrate(tmp_path: Path) -> None:
     path = tmp_path / "v6.db"
     with Ledger.open(path):
         pass
     connection = sqlite3.connect(path)
-    assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+    assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
     expected = {
         "corpus_snapshots",
+        "discovery_policy_authority",
         "corpus_scan_receipts",
         "corpus_items",
         "publication_seed_evidence",
@@ -338,7 +339,7 @@ def test_provenance_and_intent_commit_is_atomic_exact_and_non_materializing(tmp_
             (TaskDisposition.NOT_APPLICABLE.value, spec.id),
         )
         for pass_id in tuple(PASSES)[:-1]:
-            ledger.execute_registered_pass(pass_id)
+            ledger._execute_registered_pass_compatibility_fixture(pass_id)
         receipt = ledger.execute_registered_pass("merge_intents")
         snapshot = ledger.snapshot_for_pass("merge_intents")
         inputs = tuple(
@@ -486,7 +487,7 @@ def test_provenance_preserves_distinct_requests_with_identical_observation_diges
 
         receipt = None
         for pass_id in PASSES:
-            receipt = ledger.execute_registered_pass(pass_id)
+            receipt = ledger._execute_registered_pass_compatibility_fixture(pass_id)
         assert receipt is not None
         snapshot = ledger.snapshot_for_pass("merge_intents")
         inputs = tuple(
@@ -639,7 +640,7 @@ def test_remove_intent_requires_exact_path_digest_and_no_emitted_provenance(tmp_
         )
         receipt = None
         for pass_id in PASSES:
-            receipt = ledger.execute_registered_pass(pass_id)
+            receipt = ledger._execute_registered_pass_compatibility_fixture(pass_id)
         assert receipt is not None
         snapshot_for_pass = ledger.snapshot_for_pass("merge_intents")
         inputs = tuple(
@@ -687,12 +688,32 @@ def test_remove_intent_requires_exact_path_digest_and_no_emitted_provenance(tmp_
 
 
 def test_fixed_wave_preflight_accepts_64_and_rejects_65_without_ledger_work(tmp_path: Path) -> None:
-    assert Ledger.preflight_round_budget(50, 5) == 64
+    assert Ledger.preflight_round_budget(44, 8) == 64
     with pytest.raises(ValueError, match="exceeds"):
-        Ledger.preflight_round_budget(51, 5)
+        Ledger.preflight_round_budget(45, 8)
     with pytest.raises(ValueError, match="nonnegative"):
         Ledger.preflight_round_budget(True, 1)
     assert not (tmp_path / "ledger.db").exists()
+
+
+def test_phase_scoped_claim_never_leases_ineligible_seed_task(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "phase-claim.db") as ledger:
+        request = _request()
+        task = TaskSpec("author-ada", None, "crossref", "lookup", request)
+        ledger.commit_initial_round(
+            [PlannedTask(task, expands_plan=True)],
+            source_evidence_digest="a" * 64,
+            now=NOW,
+        )
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        assert ledger.claim_due_for_operations("owner", NOW, timedelta(minutes=1), frozenset()) is None
+        claim = ledger.claim_due_for_operations(
+            "owner",
+            NOW,
+            timedelta(minutes=1),
+            frozenset({task.key}),
+        )
+        assert claim is not None and claim.key == task.key
 
 
 def test_registered_pass_rejects_membership_drift_before_receipt_commit(
@@ -798,8 +819,10 @@ def test_registered_pass_rejects_forged_zero_expected_receipt_and_skipped_phase(
         monkeypatch.setattr(authority_module, "execute_pass", lambda _pass_id, _snapshot: forged)
         monkeypatch.setattr(authority_module, "validate_pass_receipt", lambda _pass_id, _snapshot, _receipt: forged)
         assert ledger.execute_registered_pass("bind_corpus_seed") == legitimate
-        with pytest.raises(ValueError, match="phase sequence"):
+        with pytest.raises(ValueError, match="atomic discovery wave API"):
             ledger.execute_registered_pass("broad_discovery")
+        with pytest.raises(ValueError, match="phase sequence"):
+            ledger._execute_registered_pass_compatibility_fixture("broad_discovery")
 
 
 def test_manifest_rejects_raw_internally_valid_pass_without_api_snapshot_authority(tmp_path: Path) -> None:
@@ -1128,11 +1151,12 @@ def test_recomputed_stored_fingerprint_cannot_bless_alien_schema(tmp_path: Path)
     assert path.read_bytes() == before
 
 
-def test_exact_v4_ledger_migrates_atomically_to_v7(tmp_path: Path) -> None:
+def test_exact_v4_ledger_migrates_atomically_to_v8(tmp_path: Path) -> None:
     path = tmp_path / "v4.db"
     with Ledger.open(path):
         pass
     connection = sqlite3.connect(path)
+    connection.execute("DROP TABLE discovery_policy_authority")
     connection.execute("DROP TABLE corpus_scan_receipts")
     for table in (
         "intent_provenance",
@@ -1170,11 +1194,12 @@ def test_exact_v4_ledger_migrates_atomically_to_v7(tmp_path: Path) -> None:
     with Ledger.open(path) as migrated:
         assert migrated.pragma("integrity_check") == "ok"
         version = migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        assert version[0] == "7"
+        assert version[0] == "8"
 
 
 def _downgrade_exact_v6_to_v5(path: Path) -> None:
     connection = sqlite3.connect(path)
+    connection.execute("DROP TABLE discovery_policy_authority")
     connection.execute("DROP TABLE corpus_scan_receipts")
     for table in (
         "intent_provenance",
@@ -1209,7 +1234,7 @@ def _downgrade_exact_v6_to_v5(path: Path) -> None:
     connection.close()
 
 
-def test_exact_v5_ledger_migrates_atomically_to_v7(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_exact_v5_ledger_migrates_atomically_to_v8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "v5.db"
     with Ledger.open(path):
         pass
@@ -1230,7 +1255,7 @@ def test_exact_v5_ledger_migrates_atomically_to_v7(tmp_path: Path, monkeypatch: 
         assert migrated.pragma("integrity_check") == "ok"
         assert (
             migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
-            == "7"
+            == "8"
         )
 
 
@@ -1245,6 +1270,7 @@ def test_populated_v6_generation_without_corpus_migrates_to_v7(tmp_path: Path) -
         )
     connection = sqlite3.connect(path)
     connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
+    connection.execute("DROP TABLE discovery_policy_authority")
     connection.execute("DROP TABLE corpus_scan_receipts")
     objects = [
         {
@@ -1270,8 +1296,54 @@ def test_populated_v6_generation_without_corpus_migrates_to_v7(tmp_path: Path) -
         assert migrated._connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
         assert (
             migrated._connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
-            == "7"
+            == "8"
         )
+
+
+def test_populated_v7_legacy_bind_receipt_validates_before_v8_policy_install(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-bind-v7.db"
+    with Ledger.open(path) as ledger:
+        census = _census(enabled=False)
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        ledger.commit_initial_round([], source_evidence_digest="a" * 64, now=NOW)
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        current = ledger.execute_registered_pass("bind_corpus_seed")
+
+    legacy = replace(current, registry_digest=ledger_module._LEGACY_C3_PASS_REGISTRY_DIGEST)
+    connection = sqlite3.connect(path)
+    update_trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'planner_passes_append_only_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER planner_passes_append_only_update")
+    connection.execute(
+        "UPDATE planner_passes SET registry_digest = ?, receipt_json = ? WHERE pass_id = ?",
+        (
+            legacy.registry_digest,
+            json.dumps(dict(legacy.canonical_content()), sort_keys=True, separators=(",", ":")),
+            "bind_corpus_seed",
+        ),
+    )
+    connection.execute(str(update_trigger))
+    connection.execute("DROP TABLE discovery_policy_authority")
+    connection.execute("UPDATE schema_meta SET value = '7' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'",
+        (ledger_module._SCHEMA_V7_FINGERPRINT,),
+    )
+    connection.commit()
+    connection.close()
+
+    with Ledger.open(path) as migrated:
+        assert (
+            migrated._connection.execute("SELECT registry_digest FROM planner_passes").fetchone()[0]
+            == ledger_module._LEGACY_C3_PASS_REGISTRY_DIGEST
+        )
+        assert (
+            migrated._connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
+            == "8"
+        )
+        assert migrated.execute_registered_pass("bind_corpus_seed") == legacy
 
 
 def test_v6_migration_rejects_orphaned_c2_evidence(tmp_path: Path) -> None:
@@ -1281,6 +1353,7 @@ def test_v6_migration_rejects_orphaned_c2_evidence(tmp_path: Path) -> None:
     connection = sqlite3.connect(path)
     connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
     connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("DROP TABLE discovery_policy_authority")
     connection.execute("DROP TABLE corpus_scan_receipts")
     connection.execute(
         "INSERT INTO corpus_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

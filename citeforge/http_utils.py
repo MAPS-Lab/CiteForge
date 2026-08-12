@@ -338,10 +338,12 @@ def _send_once(
     *,
     stream: bool = False,
     allow_redirects: bool = True,
+    isolated_session: bool = False,
 ) -> requests.Response:
     """Send one physical attempt through rate, pool, and concurrency controls."""
-    session = _get_session()
-    _THREAD_LOCAL.session_request_count += 1
+    session = requests.Session() if isolated_session else _get_session()
+    if not isolated_session:
+        _THREAD_LOCAL.session_request_count += 1
     _GLOBAL_SEMAPHORE.acquire()
     try:
         if method == "POST":
@@ -357,9 +359,13 @@ def _send_once(
                 url, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
             )
     except Exception:
+        if isolated_session:
+            session.close()
         _GLOBAL_SEMAPHORE.release()
         raise
     if not stream:
+        if isolated_session:
+            session.close()
         _GLOBAL_SEMAPHORE.release()
         return response
     original_close = getattr(response, "close", lambda: None)
@@ -370,6 +376,8 @@ def _send_once(
         try:
             original_close()
         finally:
+            if isolated_session:
+                session.close()
             if not released:
                 released = True
                 _GLOBAL_SEMAPHORE.release()
@@ -387,6 +395,7 @@ def send_http_once(
     *,
     stream: bool = False,
     allow_redirects: bool = True,
+    isolated_session: bool = False,
 ) -> requests.Response:
     """Send exactly one physical HTTP attempt for the durable refresh transport."""
     method = method.upper()
@@ -405,6 +414,7 @@ def send_http_once(
         json_payload,
         stream=stream,
         allow_redirects=allow_redirects,
+        isolated_session=isolated_session,
     )
 
 

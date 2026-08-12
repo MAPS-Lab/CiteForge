@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from citeforge.refresh.capabilities import ResponseMediaType
@@ -139,6 +141,23 @@ def test_reducer_used_provider_type_fields_reject_wrong_types(decoder_id: str, b
         decode_response(decoder_id, _raw(body, "application/json"))
 
 
+@pytest.mark.parametrize(
+    ("decoder_id", "body"),
+    [
+        ("s2.fuzzy_search.v2.decoder", b'{"total":1,"data":[{"paperId":"p","title":"   "}]}'),
+        ("openalex.fuzzy_search.v1.decoder", b'{"meta":{"count":1},"results":[{"id":"W1","title":"   "}]}'),
+        ("serply.scholar_search.v1.decoder", b'{"articles":[{"title":"   "}]}'),
+        (
+            "europepmc.fuzzy_search.v1.decoder",
+            b'{"hitCount":1,"resultList":{"result":[{"title":"   "}]}}',
+        ),
+    ],
+)
+def test_candidate_decoders_reject_whitespace_only_required_titles(decoder_id: str, body: bytes) -> None:
+    with pytest.raises(SchemaChangedError, match="required reducer evidence"):
+        decode_response(decoder_id, _raw(body, "application/json"))
+
+
 def test_doi_bibtex_requires_expected_media_and_exactly_one_entry() -> None:
     body = b"@article{Ada2024, title={Analytical Engine}, author={Lovelace, Ada}, year={2024}, doi={10.1/x}}"
     normalized, empty = decode_response("doi_bibtex.bibtex_lookup.v1.decoder", _raw(body, "application/x-bibtex"))
@@ -149,6 +168,54 @@ def test_doi_bibtex_requires_expected_media_and_exactly_one_entry() -> None:
             decode_response("doi_bibtex.bibtex_lookup.v1.decoder", _raw(invalid, "application/x-bibtex"))
     with pytest.raises(SchemaChangedError, match="media"):
         decode_response("doi_bibtex.bibtex_lookup.v1.decoder", _raw(body, "text/html"))
+
+
+@pytest.mark.parametrize("returned", ("", "doi:"))
+def test_doi_decoders_reject_present_invalid_returned_identifier(returned: str) -> None:
+    context = {"doi": "10.1234/requested"}
+    csl = ('{"title":"Safe","DOI":"' + returned + '"}').encode()
+    with pytest.raises(SchemaChangedError, match="identity is invalid"):
+        decode_response(
+            "doi_csl.csl_lookup.v1.decoder",
+            _raw(csl, "application/json"),
+            context,
+        )
+    bibtex = f"@article{{Key, title={{Safe}}, doi={{{returned}}}}}".encode()
+    with pytest.raises(SchemaChangedError, match="identity is invalid"):
+        decode_response(
+            "doi_bibtex.bibtex_lookup.v1.decoder",
+            _raw(bibtex, "application/x-bibtex"),
+            context,
+        )
+
+
+@pytest.mark.parametrize(
+    "member",
+    (
+        '"author":[]',
+        '"author":[{}]',
+        '"author":[{"given":"","family":""}]',
+        '"issued":{"date-parts":[]}',
+    ),
+)
+def test_doi_csl_rejects_present_empty_completeness_members(member: str) -> None:
+    body = ('{"title":"Safe",' + member + "}").encode()
+    with pytest.raises(SchemaChangedError, match="member types"):
+        decode_response("doi_csl.csl_lookup.v1.decoder", _raw(body, "application/json"))
+
+
+@pytest.mark.parametrize(
+    "member",
+    (
+        '"publisher":"   "',
+        '"container-title":[]',
+        '"container-title":["   "]',
+    ),
+)
+def test_doi_csl_rejects_present_empty_venue_members(member: str) -> None:
+    body = ('{"title":"Safe",' + member + "}").encode()
+    with pytest.raises(SchemaChangedError, match="member types"):
+        decode_response("doi_csl.csl_lookup.v1.decoder", _raw(body, "application/json"))
 
 
 @pytest.mark.parametrize(
@@ -164,6 +231,48 @@ def test_doi_bibtex_requires_expected_media_and_exactly_one_entry() -> None:
 def test_doi_bibtex_rejects_unconsumed_arbitrary_text(body: bytes) -> None:
     with pytest.raises(ValueError, match="BibTeX"):
         decode_response("doi_bibtex.bibtex_lookup.v1.decoder", _raw(body, "application/x-bibtex"))
+
+
+def test_pubmed_search_rejects_membership_beyond_requested_bound() -> None:
+    body = b'{"esearchresult":{"count":"6","idlist":["1","2","3","4","5","6"]}}'
+    with pytest.raises(SchemaChangedError, match="exceeds requested"):
+        decode_response(
+            "pubmed.title_search.v1.decoder",
+            _raw(body, "application/json"),
+            {"retmax": 5},
+        )
+    normalized, empty = decode_response(
+        "pubmed.title_search.v1.decoder",
+        _raw(b'{"esearchresult":{"count":"5","idlist":["1","2","3","4","5"]}}', "application/json"),
+        {"retmax": 5},
+    )
+    assert not empty and normalized["pmids"] == ["1", "2", "3", "4", "5"]
+
+
+@pytest.mark.parametrize(
+    "decoder",
+    ("openreview.term_search.v1.decoder", "openreview.fallback_search.v1.decoder"),
+)
+def test_openreview_decoders_reject_membership_beyond_fixed_bound(decoder: str) -> None:
+    notes = [{"id": str(index), "content": {"title": f"Title {index}"}} for index in range(21)]
+    with pytest.raises(SchemaChangedError, match="fixed result bound"):
+        decode_response(decoder, _raw(json.dumps({"notes": notes}).encode(), "application/json"))
+
+
+@pytest.mark.parametrize(
+    "note",
+    (
+        {"id": "n1", "cdate": "bad", "content": {"title": "Title"}},
+        {"id": "n1", "authors": "Ada", "content": {"title": "Title"}},
+        {"id": "n1", "content": {"title": "Title", "authors": "Ada"}},
+        {"id": "n1", "content": {"title": "Title", "doi": 123}},
+    ),
+)
+def test_openreview_decoders_reject_malformed_note_members(note: dict[str, object]) -> None:
+    body = json.dumps({"notes": [note]}).encode()
+    for decoder in ("openreview.term_search.v1.decoder", "openreview.fallback_search.v1.decoder"):
+        with pytest.raises(SchemaChangedError, match="OpenReview note"):
+            decode_response(decoder, _raw(body, "application/json"))
 
 
 @pytest.mark.parametrize(
