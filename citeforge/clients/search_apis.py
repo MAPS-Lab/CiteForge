@@ -683,6 +683,44 @@ def _dblp_extract_names(parent: ElementTree.Element, tag: str) -> list[str]:
     return names
 
 
+def normalize_dblp_person_xml(xml: str, pid: str) -> list[dict[str, Any]]:
+    """Strictly normalize one exact DBLP person envelope without I/O or cache state."""
+    from ..refresh.inventory import decode_dblp_inventory
+
+    normalized, _empty = decode_dblp_inventory(xml.encode(), pid)
+    records = normalized.get("articles")
+    if not isinstance(records, list):
+        raise ValueError("normalized DBLP envelope is malformed")
+    articles: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ValueError("normalized DBLP record is malformed")
+        doi = _norm_doi(str(record.get("doi") or ""))
+        title = trim_title_default(str(record["title"]))
+        article: dict[str, Any] = {
+            "title": title,
+            "authors": list(record.get("authors") or record.get("editors") or ()),
+            "year": record.get("year") or 0,
+            "publication": record.get("publication") or "",
+            "link": record.get("url") or "",
+            "snippet": ", ".join(
+                value
+                for value in (
+                    str(record.get("publication") or ""),
+                    str(record.get("year") or ""),
+                    doi or "",
+                )
+                if value
+            ),
+            "source": "dblp",
+        }
+        article["result_id"] = (
+            f"dblp:doi:{doi}" if doi else f"dblp:{_NON_WORD_RE.sub('_', normalize_title(title))[:64]}"
+        )
+        articles.append(article)
+    return articles
+
+
 def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     """Download a DBLP author XML record and convert entries into publication dicts."""
     if not pid:
@@ -702,60 +740,9 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     except NETWORK_ERRORS:
         return []
     try:
-        root = safe_xml_fromstring(xml)
-    except XML_PARSE_ERRORS:
+        articles = normalize_dblp_person_xml(xml, pid)
+    except (ValueError, TypeError):
         return []
-    articles: list[dict[str, Any]] = []
-    for r in root.findall("r"):
-        child = None
-        for ch in r:
-            if isinstance(ch.tag, str):
-                child = ch
-                break
-        if child is None:
-            continue
-        tag_name = str(child.tag)
-        allowed = tag_name in _DBLP_ALLOWED_TAGS
-        title_el = child.find("title")
-        title_val = "".join(title_el.itertext()) if title_el is not None else ""
-        title = trim_title_default(title_val or "") if allowed else ""
-        logger.debug(
-            f"dblp | ENTRY_FILTER | tag={tag_name} | allowed={allowed} | title={title_val[:50]}",
-            category=LogCategory.SCORE,
-        )
-        if not allowed:
-            continue
-        if not title:
-            continue
-        year = 0
-        year_el = child.find("year")
-        if year_el is not None and year_el.text and _DBLP_YEAR_RE.match(year_el.text.strip()):
-            try:
-                year = int(year_el.text.strip())
-            except PARSE_ERRORS:
-                year = 0
-        authors_list: list[str] = _dblp_extract_names(child, "author")
-        if not authors_list:
-            authors_list = _dblp_extract_names(child, "editor")
-        ee = _xml_text(child.find("ee"))
-        dburl = _xml_text(child.find("url"))
-        doi = _norm_doi(find_doi_in_text(ee) or find_doi_in_text(dburl))
-        abs_or_url = ee or dburl
-        venue = _xml_text(child.find("journal")) or _xml_text(child.find("booktitle"))
-        art: dict[str, Any] = {
-            "title": title,
-            "authors": authors_list,
-            "year": year,
-            "publication": venue,
-            "link": abs_or_url,
-            "snippet": ", ".join([v for v in [venue, str(year) if year else "", doi or ""] if v]),
-            "source": "dblp",
-        }
-        if doi:
-            art["result_id"] = f"dblp:doi:{doi}"
-        else:
-            art["result_id"] = f"dblp:{_NON_WORD_RE.sub('_', normalize_title(title))[:64]}"
-        articles.append(art)
     if articles:
         response_cache.put("dblp", cache_key, {"articles": articles}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         logger.debug(

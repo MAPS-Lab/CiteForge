@@ -7,7 +7,7 @@ import json
 import math
 import random
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -24,6 +24,7 @@ from .types import TaskDisposition
 JsonMapping = Mapping[str, object]
 EnvelopeValidator = Callable[[dict[str, object]], Mapping[str, object]]
 EmptyValidator = Callable[[dict[str, object]], bool]
+ResponseDecoder = Callable[[bytes], tuple[Mapping[str, object], bool]]
 Clock = Callable[[], datetime]
 Jitter = Callable[[float], float]
 
@@ -87,16 +88,17 @@ class SendOperation:
     """Send-time details kept outside the durable non-secret request identity."""
 
     request: RequestSpec
-    url: str
+    url: str = field(repr=False)
     timeout: float
     validator: EnvelopeValidator
     empty_validator: EmptyValidator
-    headers: Mapping[str, str] | None = None
-    json_payload: Mapping[str, object] | None = None
+    headers: Mapping[str, str] | None = field(default=None, repr=False)
+    json_payload: Mapping[str, object] | None = field(default=None, repr=False)
     idempotent: bool | None = None
     idempotency_key: str | None = None
     idempotency_header: str | None = None
     max_attempts: int = HTTP_MAX_RETRIES + 1
+    response_decoder: ResponseDecoder | None = None
 
     def __post_init__(self) -> None:
         if self.timeout <= 0:
@@ -180,7 +182,20 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object
 
 
 def _canonical_digest(payload: Mapping[str, object]) -> str:
-    encoded = json.dumps(payload, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    def thaw(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {str(key): thaw(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [thaw(item) for item in value]
+        if value is None or isinstance(value, str | bool | int):
+            return value
+        if isinstance(value, float) and math.isfinite(value):
+            return value
+        raise TypeError("canonical provider evidence must be strict JSON")
+
+    encoded = json.dumps(
+        thaw(payload), allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -435,6 +450,39 @@ class LedgerTransport:
                 status,
                 "unsupported provider status",
             )
+        if operation.response_decoder is not None:
+            try:
+                normalized, is_empty = operation.response_decoder(raw.content)
+                if not isinstance(is_empty, bool):
+                    raise SchemaChangedError("provider decoder did not return boolean empty evidence")
+                _canonical_digest(normalized)
+            except SchemaChangedError:
+                return self._finish_terminal(
+                    task_claim,
+                    operation,
+                    started,
+                    finished,
+                    TaskDisposition.SCHEMA_CHANGED,
+                    OutcomeClass.SCHEMA_CHANGED,
+                    status,
+                    "provider envelope failed schema validation",
+                )
+            except Exception:
+                return self._finish_terminal(
+                    task_claim,
+                    operation,
+                    started,
+                    finished,
+                    TaskDisposition.MALFORMED,
+                    OutcomeClass.MALFORMED,
+                    status,
+                    "provider returned malformed encoded response",
+                )
+            if is_empty:
+                return self._finish_observation(
+                    task_claim, operation, started, finished, {}, status, authoritative_empty=True
+                )
+            return self._finish_observation(task_claim, operation, started, finished, normalized, status)
         try:
             decoded = json.loads(
                 raw.content.decode("utf-8"),

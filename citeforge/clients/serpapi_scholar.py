@@ -112,7 +112,7 @@ def _serpapi_get(
         return {}
 
 
-def _convert_article(item: dict[str, Any]) -> dict[str, Any]:
+def normalize_serpapi_article(item: dict[str, Any]) -> dict[str, Any]:
     """Convert a SerpAPI article to CiteForge format.
 
     SerpAPI provides structured fields (no description parsing needed):
@@ -200,7 +200,7 @@ def serpapi_fetch_author_publications(
 
         page_start = len(articles)
         for item in page_articles:
-            converted = _convert_article(item)
+            converted = normalize_serpapi_article(item)
             if converted:
                 articles.append(converted)
 

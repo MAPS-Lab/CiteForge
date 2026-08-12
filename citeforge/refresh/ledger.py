@@ -23,9 +23,9 @@ from ..text_utils import has_placeholder
 from .census import AuthorCensus
 from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
-_SCHEMA_VERSION = "3"
+_SCHEMA_VERSION = "4"
 _MAX_PLAN_ROUNDS = 64
-_EXPECTED_SCHEMA_FINGERPRINT = "afca98d2aa1807fc082a629ca37b908db40ed47e788a9e131c87774b9591105c"
+_EXPECTED_SCHEMA_FINGERPRINT = "3b94b0456caec32bfb886386f07c23f1314383fd5d490cc81f348264645540f8"
 _SATISFIED = frozenset(
     {
         TaskDisposition.SUCCEEDED,
@@ -653,9 +653,11 @@ class Ledger:
                 if existing_version is None:
                     raise ValueError("refusing to initialize nonempty database without schema version")
             if existing_version is not None and existing_version[0] != _SCHEMA_VERSION:
-                raise ValueError(f"unsupported ledger schema version: {existing_version[0]}")
+                raise ValueError(
+                    f"unsupported or structurally inconsistent ledger schema version: {existing_version[0]}"
+                )
             if existing_version is not None:
-                self._validate_schema_v3(connection)
+                self._validate_schema_v4(connection)
                 return
             schema = """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -875,6 +877,38 @@ class Ledger:
                     FOREIGN KEY (generation_id, reduction_digest)
                         REFERENCES reduction_receipts(generation_id, reduction_digest)
                 );
+                CREATE TABLE IF NOT EXISTS inventory_authorities (
+                    generation_id TEXT NOT NULL,
+                    author_key TEXT NOT NULL,
+                    reducer_version TEXT NOT NULL,
+                    policy_digest TEXT NOT NULL,
+                    snapshot_digest TEXT NOT NULL,
+                    reduction_digest TEXT NOT NULL,
+                    round_key TEXT NOT NULL,
+                    PRIMARY KEY (generation_id, author_key, reducer_version),
+                    UNIQUE (generation_id, reduction_digest),
+                    FOREIGN KEY (generation_id, author_key) REFERENCES authors(generation_id, row_key),
+                    FOREIGN KEY (generation_id, round_key) REFERENCES plan_rounds(generation_id, round_key)
+                );
+                CREATE TABLE IF NOT EXISTS inventory_contributions (
+                    generation_id TEXT NOT NULL,
+                    author_key TEXT NOT NULL,
+                    reducer_version TEXT NOT NULL,
+                    task_key TEXT NOT NULL,
+                    request_key TEXT NOT NULL,
+                    capability_id TEXT NOT NULL,
+                    disposition TEXT NOT NULL,
+                    decoder_schema TEXT NOT NULL,
+                    observation_digest TEXT NOT NULL,
+                    page_offset INTEGER,
+                    next_offset INTEGER,
+                    topology_digest TEXT NOT NULL,
+                    PRIMARY KEY (generation_id, author_key, reducer_version, task_key),
+                    FOREIGN KEY (generation_id, author_key, reducer_version)
+                        REFERENCES inventory_authorities(generation_id, author_key, reducer_version),
+                    FOREIGN KEY (generation_id, task_key) REFERENCES tasks(generation_id, task_key),
+                    FOREIGN KEY (generation_id, request_key) REFERENCES requests(generation_id, request_key)
+                );
                 CREATE TABLE IF NOT EXISTS validation_obligations (
                     generation_id TEXT NOT NULL REFERENCES generations(generation_id),
                     check_name TEXT NOT NULL,
@@ -999,6 +1033,8 @@ class Ledger:
                 "reduction_receipts",
                 "reduction_sources",
                 "round_publications",
+                "inventory_authorities",
+                "inventory_contributions",
             ):
                 for operation in ("UPDATE", "DELETE"):
                     connection.execute(
@@ -1040,7 +1076,7 @@ class Ledger:
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_fingerprint', ?)",
                     (_EXPECTED_SCHEMA_FINGERPRINT,),
                 )
-            self._validate_schema_v3(connection)
+            self._validate_schema_v4(connection)
 
     @staticmethod
     def _schema_fingerprint(connection: sqlite3.Connection) -> str:
@@ -1058,7 +1094,7 @@ class Ledger:
         return _digest(objects)
 
     @staticmethod
-    def _validate_schema_v3(connection: sqlite3.Connection) -> None:
+    def _validate_schema_v4(connection: sqlite3.Connection) -> None:
         required_columns = {
             "generations": {
                 "plan_closed",
@@ -1088,11 +1124,32 @@ class Ledger:
             },
             "reduction_sources": {"source_task_key", "reduction_digest"},
             "round_publications": {"round_sequence", "author_key", "publication_key"},
+            "inventory_authorities": {
+                "author_key",
+                "reducer_version",
+                "policy_digest",
+                "snapshot_digest",
+                "reduction_digest",
+                "round_key",
+            },
+            "inventory_contributions": {
+                "author_key",
+                "reducer_version",
+                "task_key",
+                "request_key",
+                "capability_id",
+                "disposition",
+                "decoder_schema",
+                "observation_digest",
+                "page_offset",
+                "next_offset",
+                "topology_digest",
+            },
         }
         for table, required in required_columns.items():
             columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             if not required <= columns:
-                raise ValueError(f"structurally inconsistent schema version 3 table: {table}")
+                raise ValueError(f"structurally inconsistent schema version 4 table: {table}")
         fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
         actual = Ledger._schema_fingerprint(connection)
         if (
@@ -1100,7 +1157,7 @@ class Ledger:
             or fingerprint[0] != _EXPECTED_SCHEMA_FINGERPRINT
             or actual != _EXPECTED_SCHEMA_FINGERPRINT
         ):
-            raise ValueError("structurally inconsistent schema version 3 fingerprint")
+            raise ValueError("structurally inconsistent schema version 4 fingerprint")
         Ledger._assert_task5a_authority_invariant(connection)
 
     @staticmethod
@@ -1430,12 +1487,24 @@ class Ledger:
         if len(epochs) != 1:
             raise ValueError("canonical inventory obligations require one explicit freshness epoch")
         epoch = next(iter(epochs))
-        canonical = []
+        canonical_keys = []
         for author_key, provider, profile_id in mandatory:
             version = generation_identity["adapter_versions"].get(provider)
             if version is None:
                 raise ValueError(f"generation lacks adapter version for inventory provider {provider}")
-            request = RequestSpec(
+            matches = [
+                task
+                for task in declared_inventory
+                if task.author_key == author_key and task.provider == provider and task.publication_key is None
+            ]
+            if len(matches) != 1 or matches[0].request is None:
+                raise ValueError("declared tasks do not match full canonical inventory obligations")
+            task = matches[0]
+            request = task.request
+            if request is None:
+                raise ValueError("declared inventory lacks exact request")
+            payload = dict(request.normalized_payload)
+            legacy_request = RequestSpec(
                 provider,
                 "inventory",
                 "GET",
@@ -1445,8 +1514,33 @@ class Ledger:
                 epoch,
                 provider,
             )
-            canonical.append(TaskSpec(author_key, None, provider, "inventory", request))
-        if sorted(task.key for task in declared_inventory) != sorted(task.key for task in canonical):
+            if request.key == legacy_request.key:
+                canonical_keys.append(task.key)
+                continue
+            identifier_matches = (
+                payload.get("profile_id") == profile_id if provider == "scholar" else payload.get("pid") == profile_id
+            )
+            expected_fields = ("articles",)
+            if (
+                request.adapter_version != version
+                or request.freshness_epoch != epoch
+                or request.quota_scope != ("serpapi" if provider == "scholar" else "dblp")
+                or request.requested_fields != expected_fields
+                or payload.get("author_key") != author_key
+                or not identifier_matches
+                or (
+                    provider == "scholar"
+                    and (
+                        payload.get("start") != 0
+                        or payload.get("num") != 100
+                        or payload.get("sort") != "pubdate"
+                        or not isinstance(payload.get("min_year"), int)
+                    )
+                )
+            ):
+                raise ValueError("declared tasks do not match full canonical inventory obligations")
+            canonical_keys.append(task.key)
+        if sorted(task.key for task in declared_inventory) != sorted(canonical_keys):
             raise ValueError("declared tasks do not match full canonical inventory obligations")
         return epoch
 
@@ -1487,9 +1581,9 @@ class Ledger:
                 if existing[0] != round_key or existing[1] != content_digest:
                     raise ValueError("conflicting initial round replay")
                 return self._load_round(connection, generation_id, 1)
-            epoch = self._validate_mandatory_inventory(connection, generation_id, [item.task for item in tasks])
             if any(item.task.operation == "inventory" and not item.expands_plan for item in tasks):
                 raise ValueError("every mandatory inventory must expand the plan")
+            epoch = self._validate_mandatory_inventory(connection, generation_id, [item.task for item in tasks])
             for publication in publications:
                 self._insert_publication(connection, generation_id, publication)
             self._inject("after_initial_round_publications")
@@ -1707,6 +1801,7 @@ class Ledger:
         phase: PlanPhase = PlanPhase.DISCOVERY,
         reducer_id: str = "discovery_reducer",
         reducer_version: str = "1",
+        _inventory_authority: tuple[object, str, str, str] | None = None,
     ) -> ReductionReceipt:
         generation_id = self._generation_id()
         source_keys = (
@@ -1907,6 +2002,50 @@ class Ledger:
                 "INSERT INTO reduction_sources(generation_id, source_task_key, reduction_digest) VALUES (?, ?, ?)",
                 [(generation_id, key, reduction_digest) for key in source_keys],
             )
+            if _inventory_authority is not None:
+                snapshot, author_key, policy_digest, semantic_digest = _inventory_authority
+                from .inventory import InventorySnapshot
+
+                if not isinstance(snapshot, InventorySnapshot):
+                    raise TypeError("inventory authority requires a typed snapshot")
+                live_snapshot = self.load_inventory_snapshot(author_key)
+                if not isinstance(live_snapshot, InventorySnapshot) or live_snapshot.digest != snapshot.digest:
+                    raise ValueError("inventory snapshot changed during union commit")
+                connection.execute(
+                    "INSERT INTO inventory_authorities(generation_id, author_key, reducer_version, policy_digest, "
+                    "snapshot_digest, reduction_digest, round_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        author_key,
+                        reducer_version,
+                        policy_digest,
+                        snapshot.digest,
+                        semantic_digest,
+                        round_key,
+                    ),
+                )
+                connection.executemany(
+                    "INSERT INTO inventory_contributions(generation_id, author_key, reducer_version, task_key, "
+                    "request_key, capability_id, disposition, decoder_schema, observation_digest, page_offset, "
+                    "next_offset, topology_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            generation_id,
+                            author_key,
+                            reducer_version,
+                            item.task_key,
+                            item.request_key,
+                            item.capability_id,
+                            item.disposition.value,
+                            item.decoder_schema,
+                            item.observation_digest,
+                            item.offset,
+                            item.next_offset,
+                            item.topology_digest,
+                        )
+                        for item in snapshot.contributions
+                    ],
+                )
             self._inject("after_reduction_receipt")
             cumulative = _digest(
                 [
@@ -1923,6 +2062,95 @@ class Ledger:
             )
         self._inject("after_reduction_commit")
         return self._load_receipt(self._connection, generation_id, reduction_digest)
+
+    def commit_inventory_union(
+        self,
+        census_row: object,
+        policy: object,
+        *,
+        reducer_version: str,
+        now: datetime,
+    ) -> ReductionReceipt:
+        """Atomically bind live inventory evidence to publications and one seed each."""
+        from .census import AuthorCensusRow
+        from .inventory import InventoryPolicy, InventorySnapshot, capability_for, reduce_author_inventory
+
+        if not isinstance(census_row, AuthorCensusRow) or not isinstance(policy, InventoryPolicy):
+            raise TypeError("inventory union requires typed census and policy")
+        reducer_version = _identifier(reducer_version, "inventory reducer version")
+        snapshot = self.load_inventory_snapshot(census_row.row_key)
+        if not isinstance(snapshot, InventorySnapshot):
+            raise TypeError("ledger failed to reconstruct inventory snapshot")
+        reduction = reduce_author_inventory(census_row, snapshot, policy)
+        generation_identity = json.loads(
+            self._connection.execute(
+                "SELECT identity_json FROM generations WHERE generation_id = ?", (self._generation_id(),)
+            ).fetchone()[0]
+        )
+        if len(reduction.publications) != len(reduction.seed_tasks) or len(
+            {item.publication_key for item in reduction.seed_tasks}
+        ) != len(reduction.seed_tasks):
+            raise ValueError("inventory union must emit exactly one seed per publication")
+        for task in reduction.seed_tasks:
+            if task.request is None:
+                raise ValueError("inventory union seed lacks exact request")
+            capability = capability_for(task.provider, task.operation, task.request.adapter_version)
+            if (
+                task.request.requested_fields != capability.requested_fields
+                or generation_identity["adapter_versions"].get(task.provider) != task.request.adapter_version
+            ):
+                raise ValueError("inventory seed lacks one exact durable capability")
+        policy_digest = _digest(
+            {
+                "max_publications": policy.max_publications,
+                "max_scholar_pages": policy.max_scholar_pages,
+                "min_year": policy.min_year,
+            }
+        )
+        semantic_digest = _digest(
+            {
+                "publications": [self._publication_content(item) for item in reduction.publications],
+                "reducer_version": reducer_version,
+                "seed_tasks": [item.identity_digest for item in reduction.seed_tasks],
+                "snapshot_digest": snapshot.digest,
+            }
+        )
+        existing = self._connection.execute(
+            "SELECT reduction_digest, round_key FROM inventory_authorities WHERE generation_id = ? "
+            "AND author_key = ? AND reducer_version = ?",
+            (self._generation_id(), census_row.row_key, reducer_version),
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != semantic_digest:
+                raise ValueError("conflicting inventory union replay")
+            receipt = self._connection.execute(
+                "SELECT reduction_digest FROM reduction_receipts WHERE generation_id = ? AND round_key = ?",
+                (self._generation_id(), existing[1]),
+            ).fetchone()
+            if receipt is None:
+                raise ValueError("inventory authority lacks reduction receipt")
+            return self._load_receipt(self._connection, self._generation_id(), str(receipt[0]))
+        terminal_contributions = [
+            item for item in snapshot.contributions if item.logical_source != "scholar" or item.next_offset is None
+        ]
+        evidence_by_task = {item.task_key: item.observation_digest for item in terminal_contributions}
+        source_keys = tuple(sorted(evidence_by_task))
+        source_digest = (
+            evidence_by_task[source_keys[0]]
+            if len(source_keys) == 1
+            else _digest([evidence_by_task[key] for key in source_keys])
+        )
+        return self.commit_reduction(
+            source_keys,
+            source_evidence_digest=source_digest,
+            publications=reduction.publications,
+            tasks=tuple(PlannedTask(task, expands_plan=True) for task in reduction.seed_tasks),
+            now=now,
+            phase=PlanPhase.DISCOVERY,
+            reducer_id="inventory_union",
+            reducer_version=reducer_version,
+            _inventory_authority=(snapshot, census_row.row_key, policy_digest, semantic_digest),
+        )
 
     @staticmethod
     def _load_receipt(connection: sqlite3.Connection, generation_id: str, reduction_digest: str) -> ReductionReceipt:
@@ -2573,6 +2801,169 @@ class Ledger:
             if cursor.rowcount != 1:
                 return None
         return RequestClaim(str(task[0]), owner, expires)
+
+    def reconstruct_claimed_task(self, claim: TaskClaim, now: datetime) -> TaskSpec:
+        """Reconstruct immutable task identity only for its current committed owner."""
+        generation_id = self._generation_id()
+        with self._transaction(immediate=True) as connection:
+            self._assert_owner("tasks", "task_key", claim.key, claim.owner, now)
+            row = connection.execute(
+                "SELECT task.request_key, obligation.round_sequence FROM tasks AS task "
+                "JOIN plan_obligations AS obligation ON obligation.generation_id = task.generation_id "
+                "AND obligation.task_key = task.task_key WHERE task.generation_id = ? AND task.task_key = ?",
+                (generation_id, claim.key),
+            ).fetchone()
+            if row is None or row[1] is None or row[0] != claim.request_key:
+                raise ValueError("claim is not bound to an exact committed request")
+            task = self._load_task(connection, generation_id, claim.key)
+            if task.request is None or task.request.key != claim.request_key:
+                raise ValueError("claimed request identity mismatch")
+            return task
+
+    def load_inventory_snapshot(self, author_key: str) -> object:
+        """Rebuild immutable inventory evidence exclusively from durable live rows."""
+        from .inventory import InventorySnapshot, SnapshotContribution, capability_for
+
+        author_key = _identifier(author_key, "author key")
+        generation_id = self._generation_id()
+        author = self._connection.execute(
+            "SELECT scholar_id, dblp_id FROM authors WHERE generation_id = ? AND row_key = ? AND enabled = 1",
+            (generation_id, author_key),
+        ).fetchone()
+        if author is None:
+            raise ValueError("inventory snapshot requires an enabled census author")
+        expected_sources = {name for name, value in (("scholar", author[0]), ("dblp", author[1])) if value}
+        rows = self._connection.execute(
+            "SELECT task.task_key, task.provider, task.operation, task.request_key, task.state, "
+            "request.identity_json, observation.response_json, observation.response_digest, "
+            "observation.schema_version, observation.disposition FROM tasks AS task "
+            "JOIN plan_obligations AS obligation ON obligation.generation_id = task.generation_id "
+            "AND obligation.task_key = task.task_key JOIN requests AS request ON "
+            "request.generation_id = task.generation_id AND request.request_key = task.request_key "
+            "LEFT JOIN observations AS observation ON observation.generation_id = task.generation_id "
+            "AND observation.request_key = task.request_key WHERE task.generation_id = ? AND task.author_key = ? "
+            "AND task.operation = 'inventory' ORDER BY task.provider, task.task_key",
+            (generation_id, author_key),
+        ).fetchall()
+        if {str(row[1]) for row in rows} != expected_sources:
+            raise ValueError("inventory snapshot is missing an applicable source")
+        contributions = []
+        scholar_topology: dict[int, int | None] = {}
+        for row in rows:
+            disposition = TaskDisposition(str(row[4]))
+            if disposition not in {TaskDisposition.SUCCEEDED, TaskDisposition.CONFIRMED_EMPTY}:
+                raise ValueError("inventory snapshot contains open or blocking work")
+            if row[6] is None or row[7] is None or row[9] != disposition.value:
+                raise ValueError("terminal inventory lacks exact observation evidence")
+            response = json.loads(row[6])
+            if not isinstance(response, dict) or _digest(response) != row[7]:
+                raise ValueError("inventory observation digest mismatch")
+            request = RequestSpec(**json.loads(row[5]))
+            capability = capability_for(str(row[1]), "inventory", request.adapter_version)
+            if request.requested_fields != capability.requested_fields or request.quota_scope != capability.quota_scope:
+                raise ValueError("inventory request capability mismatch")
+            payload = dict(request.normalized_payload)
+            start_value = payload.get("start")
+            if row[1] == "scholar" and (isinstance(start_value, bool) or not isinstance(start_value, int)):
+                raise ValueError("Scholar inventory offset is malformed")
+            offset = start_value if isinstance(start_value, int) else None
+            next_offset = response.get("next_offset") if row[1] == "scholar" else None
+            if next_offset is not None and not isinstance(next_offset, int):
+                raise ValueError("inventory continuation is malformed")
+            if row[1] == "scholar":
+                if offset is None:
+                    raise ValueError("Scholar inventory offset is missing")
+                if offset in scholar_topology:
+                    raise ValueError("duplicate Scholar page offset")
+                scholar_topology[offset] = next_offset
+            articles = response.get("articles", [])
+            if not isinstance(articles, list):
+                raise ValueError("inventory evidence lacks normalized articles")
+            topology = _digest({"offset": offset, "next_offset": next_offset, "task_key": row[0]})
+            contributions.append(
+                SnapshotContribution(
+                    str(row[0]),
+                    str(row[1]),
+                    disposition,
+                    capability.decoder_schema,
+                    str(row[7]),
+                    tuple(articles),
+                    offset,
+                    next_offset,
+                    str(row[3]),
+                    capability.capability_id,
+                    topology,
+                )
+            )
+        if scholar_topology:
+            offset = 0
+            visited = set()
+            while offset in scholar_topology:
+                if offset in visited:
+                    raise ValueError("Scholar page chain cycles")
+                visited.add(offset)
+                next_offset = scholar_topology[offset]
+                if next_offset is None:
+                    break
+                if next_offset != offset + 100:
+                    raise ValueError("Scholar page chain is non-contiguous")
+                offset = next_offset
+            if visited != set(scholar_topology):
+                raise ValueError("Scholar page chain has gaps or forks")
+            if scholar_topology[next(iter(sorted(visited, reverse=True)))] is not None:
+                raise ValueError("Scholar page chain is incomplete")
+        return InventorySnapshot(author_key, tuple(contributions))
+
+    def load_pending_scholar_wave(self) -> Mapping[str, tuple[object, ...]]:
+        """Return terminal continuing Scholar pages not yet expansion-consumed."""
+        from .inventory import SnapshotContribution, capability_for
+
+        generation_id = self._generation_id()
+        grouped: dict[str, list[SnapshotContribution]] = {}
+        rows = self._connection.execute(
+            "SELECT task.author_key, task.task_key, task.request_key, request.identity_json, "
+            "observation.response_json, observation.response_digest FROM tasks AS task "
+            "JOIN plan_obligations AS obligation ON obligation.generation_id = task.generation_id "
+            "AND obligation.task_key = task.task_key JOIN requests AS request ON request.generation_id = "
+            "task.generation_id AND request.request_key = task.request_key JOIN observations AS observation ON "
+            "observation.generation_id = task.generation_id AND observation.request_key = task.request_key "
+            "LEFT JOIN reduction_sources AS consumed ON consumed.generation_id = task.generation_id "
+            "AND consumed.source_task_key = task.task_key WHERE task.generation_id = ? AND task.provider = 'scholar' "
+            "AND task.operation = 'inventory' AND consumed.source_task_key IS NULL AND task.state = ?",
+            (generation_id, TaskDisposition.SUCCEEDED.value),
+        ).fetchall()
+        for row in rows:
+            response = json.loads(row[4])
+            next_offset = response.get("next_offset")
+            if next_offset is None:
+                continue
+            request = RequestSpec(**json.loads(row[3]))
+            capability = capability_for("scholar", "inventory", request.adapter_version)
+            payload = dict(request.normalized_payload)
+            topology = _digest({"offset": payload["start"], "next_offset": next_offset, "task_key": row[1]})
+            start = payload.get("start")
+            if isinstance(start, bool) or not isinstance(start, int) or not isinstance(next_offset, int):
+                raise ValueError("Scholar page topology is malformed")
+            articles = response.get("articles", [])
+            if not isinstance(articles, list):
+                raise ValueError("Scholar page evidence is malformed")
+            contribution = SnapshotContribution(
+                str(row[1]),
+                "scholar",
+                TaskDisposition.SUCCEEDED,
+                capability.decoder_schema,
+                str(row[5]),
+                tuple(articles),
+                start,
+                next_offset,
+                str(row[2]),
+                capability.capability_id,
+                topology,
+            )
+            grouped.setdefault(str(row[0]), []).append(contribution)
+        return MappingProxyType(
+            {key: tuple(sorted(value, key=lambda item: item.task_key)) for key, value in grouped.items()}
+        )
 
     def _assert_owner(self, table: str, key_column: str, key: str, owner: str, at: datetime) -> sqlite3.Row:
         generation_id = self._generation_id()
@@ -3250,6 +3641,25 @@ class Ledger:
                 for row in connection.execute(
                     "SELECT staged_path, manifest_digest, corpus_counts_json, validation_state FROM materializations "
                     "WHERE generation_id = ? ORDER BY staged_path",
+                    (generation_id,),
+                )
+            ],
+            "inventory_authorities": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT author_key, reducer_version, policy_digest, snapshot_digest, reduction_digest, "
+                    "round_key FROM inventory_authorities WHERE generation_id = ? "
+                    "ORDER BY author_key, reducer_version",
+                    (generation_id,),
+                )
+            ],
+            "inventory_contributions": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT author_key, reducer_version, task_key, request_key, capability_id, disposition, "
+                    "decoder_schema, observation_digest, page_offset, next_offset, topology_digest "
+                    "FROM inventory_contributions WHERE generation_id = ? "
+                    "ORDER BY author_key, reducer_version, task_key",
                     (generation_id,),
                 )
             ],
