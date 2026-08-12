@@ -309,7 +309,10 @@ class LedgerTransport:
                 from_ledger=True,
             )
 
-        started = self.clock()
+        try:
+            started = self.clock()
+        except Exception:
+            return self._finish_classification_failure(task_claim, operation)
         try:
             raw = self._send_once(operation)
         except requests.Timeout:
@@ -319,28 +322,39 @@ class LedgerTransport:
                 task_claim, operation, started, OutcomeClass.CONNECTION_FAILURE, "provider connection failed"
             )
         except requests.RequestException:
+            try:
+                finished = self.clock()
+            except Exception:
+                return self._finish_classification_failure(task_claim, operation, started)
             return self._finish_terminal(
                 task_claim,
                 operation,
                 started,
-                self.clock(),
+                finished,
                 TaskDisposition.PERMANENT_FAILURE,
                 OutcomeClass.INVALID_REQUEST,
                 None,
                 "provider request was invalid",
             )
         except Exception:
+            try:
+                finished = self.clock()
+            except Exception:
+                return self._finish_classification_failure(task_claim, operation, started)
             return self._finish_terminal(
                 task_claim,
                 operation,
                 started,
-                self.clock(),
+                finished,
                 TaskDisposition.PERMANENT_FAILURE,
                 OutcomeClass.INVALID_REQUEST,
                 None,
                 "provider send callback failed",
             )
-        finished = self.clock()
+        try:
+            finished = self.clock()
+        except Exception:
+            return self._finish_classification_failure(task_claim, operation, started)
         if not isinstance(raw, requests.Response):
             return self._finish_terminal(
                 task_claim,
@@ -353,6 +367,8 @@ class LedgerTransport:
                 "provider send callback returned invalid response",
             )
         status = raw.status_code
+        if not isinstance(status, int):
+            return self._finish_classification_failure(task_claim, operation, started)
         if status in {401, 403}:
             return self._finish_terminal(
                 task_claim,
@@ -505,8 +521,19 @@ class LedgerTransport:
         diagnostic: str,
         response: requests.Response | None = None,
     ) -> ProviderResponse:
-        finished = self.clock()
-        status = response.status_code if response is not None else None
+        try:
+            finished = self.clock()
+            status = response.status_code if response is not None else None
+            if status is not None and not isinstance(status, int):
+                raise TypeError("invalid response status")
+            previous_attempts = self.ledger.request_attempt_count(operation.request.key)
+            attempt_number = previous_attempts + 1
+            exhausted = attempt_number >= operation.max_attempts
+            retry_after = _retry_after(response.headers.get("Retry-After"), finished) if response is not None else None
+            base = min(HTTP_BACKOFF_INITIAL * (2 ** (attempt_number - 1)), HTTP_BACKOFF_MAX)
+            delay = retry_after if retry_after is not None else min(HTTP_BACKOFF_MAX, base + self._jitter(base))
+        except Exception:
+            return self._finish_classification_failure(task_claim, operation, started)
         if not operation.retryable:
             return self._finish_terminal(
                 task_claim,
@@ -518,12 +545,6 @@ class LedgerTransport:
                 status,
                 "non-idempotent operation has ambiguous provider outcome",
             )
-        previous_attempts = self.ledger.request_attempt_count(operation.request.key)
-        attempt_number = previous_attempts + 1
-        exhausted = attempt_number >= operation.max_attempts
-        retry_after = _retry_after(response.headers.get("Retry-After"), finished) if response is not None else None
-        base = min(HTTP_BACKOFF_INITIAL * (2 ** (attempt_number - 1)), HTTP_BACKOFF_MAX)
-        delay = retry_after if retry_after is not None else min(HTTP_BACKOFF_MAX, base + self._jitter(base))
         durable_outcome = OutcomeClass.RETRY_EXHAUSTED if exhausted else outcome
         self.ledger.record_attempt(
             operation.request.key,
@@ -559,6 +580,23 @@ class LedgerTransport:
             status=status,
             retry_delay=delay if not exhausted else None,
             safe_diagnostic=diagnostic,
+        )
+
+    def _finish_classification_failure(
+        self, task_claim: TaskClaim, operation: SendOperation, started: datetime | None = None
+    ) -> ProviderResponse:
+        """Release a claimed request without consulting injected timing helpers."""
+        fallback_finished = datetime.now(timezone.utc)
+        fallback_started = started or fallback_finished
+        return self._finish_terminal(
+            task_claim,
+            operation,
+            fallback_started,
+            fallback_finished,
+            TaskDisposition.PERMANENT_FAILURE,
+            OutcomeClass.INVALID_REQUEST,
+            None,
+            "provider response classification failed",
         )
 
     def _finish_terminal(

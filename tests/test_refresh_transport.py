@@ -406,6 +406,62 @@ def test_transient_outcomes_persist_retry_without_secret(
     ledger.close()
 
 
+class _RaisingHeaders(dict[str, str]):
+    def get(self, _key: str, _default: object = None) -> str | None:
+        raise RuntimeError("token=secret")
+
+
+@pytest.mark.parametrize("failure", ["jitter", "retry_headers", "status_none"])
+def test_post_claim_retry_helper_failure_terminalizes_exactly_once(tmp_path: Path, failure: str) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    raw = _response(500, {"error": "down"})
+
+    def jitter(_delay: float) -> float:
+        if failure == "jitter":
+            raise RuntimeError("token=secret")
+        return 0.0
+
+    if failure == "retry_headers":
+        raw.status_code = 429
+        raw.headers = _RaisingHeaders()
+    else:
+        raw.status_code = None
+    response = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW, jitter=jitter).send_claim(
+        _claim(ledger, "worker"), _operation(request)
+    )
+    assert response.disposition is TaskDisposition.PERMANENT_FAILURE
+    assert response.safe_diagnostic == "provider response classification failed"
+    assert len(ledger.manifest().data["attempts"]) == 1
+    assert "secret" not in json.dumps(ledger.manifest().data).casefold()
+    assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    ledger.close()
+
+
+@pytest.mark.parametrize("fail_on_call", [2, 3, 4])
+def test_post_claim_clock_failure_terminalizes_exactly_once(tmp_path: Path, fail_on_call: int) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    calls = 0
+
+    def clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls == fail_on_call:
+            raise RuntimeError("api_key=secret")
+        return NOW
+
+    response = LedgerTransport(
+        ledger, send_once=lambda _operation: _response(500, {"error": "down"}), clock=clock, jitter=lambda _d: 0
+    ).send_claim(_claim(ledger, "worker"), _operation(request))
+    assert response.disposition is TaskDisposition.PERMANENT_FAILURE
+    assert response.safe_diagnostic == "provider response classification failed"
+    assert len(ledger.manifest().data["attempts"]) == 1
+    assert "secret" not in json.dumps(ledger.manifest().data).casefold()
+    assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    ledger.close()
+
+
 @pytest.mark.parametrize(
     ("raised", "expected"),
     [
