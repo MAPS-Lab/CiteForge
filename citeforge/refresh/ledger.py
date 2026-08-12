@@ -20,13 +20,50 @@ from ..config import PREPRINT_ONLY_PUBLISHERS, PREPRINT_SERVERS
 from ..id_utils import is_secondary_doi
 from ..merge_utils import merge_with_policy
 from ..text_utils import has_placeholder
+from .authority import (
+    PASS_REGISTRY_DIGEST,
+    PASS_WAVE_COUNT,
+    PASSES,
+    AggregateInput,
+    CorpusItemEvidence,
+    CorpusSnapshot,
+    EvidenceKind,
+    IntentKind,
+    MaterializationIntent,
+    PlannerPassReceipt,
+    ProvenanceContribution,
+    ProvenanceDecision,
+    PublicationSeedEvidence,
+    _execute_authoritative_pass,
+    evidence_digest,
+    pass_for,
+)
+from .authority import (
+    canonical_json as evidence_json,
+)
 from .census import AuthorCensus
 from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
-_SCHEMA_VERSION = "5"
+_SCHEMA_VERSION = "6"
 _SCHEMA_V4_FINGERPRINT = "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
+_SCHEMA_V5_FINGERPRINT = "be14f7bc658bf347c5f519d0483311ff23118e0c9569f5328939b546b1fe2f46"
 _MAX_PLAN_ROUNDS = 64
-_EXPECTED_SCHEMA_FINGERPRINT = "be14f7bc658bf347c5f519d0483311ff23118e0c9569f5328939b546b1fe2f46"
+_EXPECTED_SCHEMA_FINGERPRINT = "9bf51dac21ab9a519ff8461a030d0a87c7211191554f1c06024996bd4e95ff3a"
+_SNAPSHOT_DOMAIN_SEPARATOR = "citeforge-task5c2-planner-snapshot-v1"
+_V6_AUTHORITY_TABLES = frozenset(
+    {
+        "aggregate_inputs",
+        "corpus_items",
+        "corpus_snapshots",
+        "intent_provenance",
+        "materialization_intents",
+        "planner_pass_expected_items",
+        "planner_passes",
+        "provenance_contributions",
+        "provenance_decisions",
+        "publication_seed_evidence",
+    }
+)
 _SATISFIED = frozenset(
     {
         TaskDisposition.SUCCEEDED,
@@ -76,8 +113,20 @@ _FAULT_POINTS = frozenset(
         "after_reduction_commit",
         "after_plan_close_validations",
         "after_plan_close_commit",
+        "after_v6_migration_ddl",
+        "after_v6_aggregate_inputs",
+        "after_v6_provenance_decisions",
+        "after_v6_provenance_contributions",
+        "after_v6_materialization_intents",
+        "after_v6_intent_provenance",
+        "after_v6_corpus_snapshot",
+        "after_v6_corpus_items",
+        "after_v6_seed_evidence",
+        "after_v6_planner_pass",
+        "after_v6_planner_expected_items",
+        "after_v6_migration_meta",
     }
-)
+) | frozenset(f"after_v6_migration_statement_{index}" for index in range(55))
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,255}")
 _PROVIDER_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _FIELD_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,127}")
@@ -697,11 +746,34 @@ class Ledger:
         self._connection = connection
         self._fault: str | None = None
         self._manifest_probe: Callable[[], None] | None = None
+        self.__authority_write_depth = 0
+        connection.create_function(
+            "citeforge_authority_write_enabled",
+            0,
+            lambda: int(self.__authority_write_depth > 0),
+        )
+        connection.set_authorizer(self._authorize_sqlite)
+
+    def _authorize_sqlite(
+        self,
+        action_code: int,
+        table_name: str | None,
+        _column_name: str | None,
+        _database_name: str | None,
+        _trigger_name: str | None,
+    ) -> int:
+        if (
+            action_code == sqlite3.SQLITE_INSERT
+            and table_name in _V6_AUTHORITY_TABLES
+            and self.__authority_write_depth == 0
+        ):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
     @classmethod
     def open(cls, path: Path) -> Ledger:
         path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(path, timeout=30, isolation_level=None)
+        connection = sqlite3.connect(path, timeout=30, isolation_level=None, cached_statements=0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 30000")
         connection.execute("PRAGMA foreign_keys = ON")
@@ -738,6 +810,130 @@ class Ledger:
         else:
             self._connection.commit()
 
+    @contextmanager
+    def _authority_write(self) -> Iterator[None]:
+        self.__authority_write_depth += 1
+        try:
+            yield
+        finally:
+            self.__authority_write_depth -= 1
+
+    @staticmethod
+    def _schema_v6_statements() -> tuple[str, ...]:
+        tables = (
+            "CREATE TABLE corpus_snapshots (generation_id TEXT NOT NULL, snapshot_digest TEXT NOT NULL, "
+            "base_commit TEXT NOT NULL, output_tree_digest TEXT NOT NULL, baseline_digest TEXT NOT NULL, "
+            "scanner_id TEXT NOT NULL, scanner_version TEXT NOT NULL, parser_id TEXT NOT NULL, "
+            "parser_version TEXT NOT NULL, item_set_digest TEXT NOT NULL, derived_a2i2_digest TEXT, "
+            "evidence_json TEXT NOT NULL, PRIMARY KEY (generation_id, snapshot_digest), "
+            "UNIQUE (generation_id), FOREIGN KEY (generation_id) REFERENCES generations(generation_id))",
+            "CREATE TABLE corpus_items (generation_id TEXT NOT NULL, snapshot_digest TEXT NOT NULL, "
+            "source_path TEXT NOT NULL COLLATE NOCASE, author_key TEXT NOT NULL, before_digest TEXT NOT NULL, "
+            "parse_digest TEXT NOT NULL, publication_keys_json TEXT NOT NULL, disposition TEXT NOT NULL, "
+            "exact_identifiers_json TEXT NOT NULL, evidence_digest TEXT NOT NULL, evidence_json TEXT NOT NULL, "
+            "PRIMARY KEY (generation_id, source_path), "
+            "UNIQUE (generation_id, evidence_digest), FOREIGN KEY (generation_id, snapshot_digest) "
+            "REFERENCES corpus_snapshots(generation_id, snapshot_digest), FOREIGN KEY (generation_id, author_key) "
+            "REFERENCES authors(generation_id, row_key))",
+            "CREATE TABLE publication_seed_evidence (generation_id TEXT NOT NULL, author_key TEXT NOT NULL, "
+            "publication_key TEXT NOT NULL, origin_kind TEXT NOT NULL, origin_evidence_key TEXT NOT NULL, "
+            "origin_evidence_digest TEXT NOT NULL, baseline_digest TEXT, exact_identifiers_json TEXT NOT NULL, "
+            "seed_digest TEXT NOT NULL, evidence_json TEXT NOT NULL, PRIMARY KEY (generation_id, author_key, "
+            "publication_key), UNIQUE (generation_id, origin_kind, origin_evidence_key, publication_key), "
+            "FOREIGN KEY (generation_id, author_key) REFERENCES authors(generation_id, row_key))",
+            "CREATE TABLE planner_passes (generation_id TEXT NOT NULL, pass_key TEXT NOT NULL, pass_id TEXT NOT NULL, "
+            "pass_version TEXT NOT NULL, registry_digest TEXT NOT NULL, snapshot_digest TEXT NOT NULL, "
+            "output_digest TEXT NOT NULL, receipt_json TEXT NOT NULL, snapshot_authority_digest TEXT NOT NULL, "
+            "predecessor_output_digest TEXT, PRIMARY KEY (generation_id, pass_key), "
+            "UNIQUE (generation_id, pass_id), FOREIGN KEY (generation_id) REFERENCES generations(generation_id))",
+            "CREATE TABLE planner_pass_expected_items (generation_id TEXT NOT NULL, pass_key TEXT NOT NULL, "
+            "item_key TEXT NOT NULL, kind TEXT NOT NULL, source_digest TEXT NOT NULL, input_json TEXT NOT NULL, "
+            "unseen INTEGER NOT NULL CHECK(unseen IN (0, 1)), PRIMARY KEY (generation_id, "
+            "pass_key, item_key), FOREIGN KEY (generation_id, pass_key) REFERENCES planner_passes(generation_id, "
+            "pass_key))",
+            "CREATE TABLE aggregate_inputs (generation_id TEXT NOT NULL, pass_key TEXT NOT NULL, "
+            "reduction_id TEXT NOT NULL, kind TEXT NOT NULL, stable_key TEXT NOT NULL, source_digest TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL CHECK(ordinal >= 0), input_digest TEXT NOT NULL, input_json TEXT NOT NULL, "
+            "PRIMARY KEY (generation_id, pass_key, reduction_id, kind, stable_key), UNIQUE (generation_id, "
+            "pass_key, reduction_id, ordinal), FOREIGN KEY (generation_id, pass_key) REFERENCES "
+            "planner_passes(generation_id, pass_key))",
+            "CREATE TABLE provenance_decisions (generation_id TEXT NOT NULL, decision_key TEXT NOT NULL, "
+            "pass_key TEXT NOT NULL, author_key TEXT NOT NULL, publication_key TEXT NOT NULL, "
+            "field_name TEXT NOT NULL, "
+            "selected_value_digest TEXT NOT NULL, rule TEXT NOT NULL, contribution_set_digest TEXT NOT NULL, "
+            "reducer_id TEXT NOT NULL, reducer_version TEXT NOT NULL, evidence_json TEXT NOT NULL, PRIMARY KEY "
+            "(generation_id, decision_key), UNIQUE (generation_id, pass_key, author_key, publication_key, field_name), "
+            "FOREIGN KEY (generation_id, pass_key) REFERENCES planner_passes(generation_id, pass_key), FOREIGN KEY "
+            "(generation_id, author_key, publication_key) REFERENCES publications(generation_id, author_key, "
+            "publication_key))",
+            "CREATE TABLE provenance_contributions (generation_id TEXT NOT NULL, contribution_key TEXT NOT NULL, "
+            "decision_key TEXT NOT NULL, source_kind TEXT NOT NULL, provider TEXT, schema_version TEXT, "
+            "request_key TEXT, "
+            "observation_digest TEXT NOT NULL, value_digest TEXT, selected INTEGER NOT NULL CHECK(selected IN (0, 1)), "
+            "rejection_reason TEXT NOT NULL, evidence_json TEXT NOT NULL, "
+            "PRIMARY KEY (generation_id, contribution_key), "
+            "FOREIGN KEY (generation_id, decision_key) REFERENCES provenance_decisions(generation_id, decision_key), "
+            "FOREIGN KEY (generation_id, request_key) REFERENCES requests(generation_id, request_key))",
+            "CREATE TABLE materialization_intents (generation_id TEXT NOT NULL, intent_key TEXT NOT NULL, "
+            "pass_key TEXT NOT NULL, author_key TEXT NOT NULL, publication_key TEXT NOT NULL, "
+            "source_path TEXT NOT NULL COLLATE NOCASE, "
+            "target_path TEXT NOT NULL COLLATE NOCASE, kind TEXT NOT NULL CHECK(kind IN ('keep', 'upsert', 'remove')), "
+            "before_digest TEXT, after_digest TEXT, reducer_id TEXT NOT NULL, reducer_version TEXT NOT NULL, "
+            "provenance_set_digest TEXT NOT NULL, evidence_json TEXT NOT NULL, "
+            "final_fields_json TEXT NOT NULL, final_content_digest TEXT, removal_reason TEXT NOT NULL, "
+            "PRIMARY KEY (generation_id, intent_key), "
+            "UNIQUE (generation_id, target_path), UNIQUE (generation_id, author_key, publication_key), FOREIGN KEY "
+            "(generation_id, pass_key) REFERENCES planner_passes(generation_id, pass_key), FOREIGN KEY (generation_id, "
+            "author_key, publication_key) REFERENCES publications(generation_id, author_key, publication_key))",
+            "CREATE TABLE intent_provenance (generation_id TEXT NOT NULL, intent_key TEXT NOT NULL, decision_key TEXT "
+            "NOT NULL, PRIMARY KEY (generation_id, intent_key, decision_key), FOREIGN KEY (generation_id, intent_key) "
+            "REFERENCES materialization_intents(generation_id, intent_key), FOREIGN KEY (generation_id, decision_key) "
+            "REFERENCES provenance_decisions(generation_id, decision_key))",
+        )
+        indexes = (
+            "CREATE INDEX corpus_items_author_idx ON corpus_items(generation_id, author_key)",
+            "CREATE INDEX seeds_origin_idx ON publication_seed_evidence"
+            "(generation_id, origin_kind, origin_evidence_key)",
+            "CREATE INDEX aggregate_inputs_kind_idx ON aggregate_inputs(generation_id, pass_key, kind, ordinal)",
+            "CREATE INDEX provenance_contributions_decision_idx ON provenance_contributions"
+            "(generation_id, decision_key)",
+            "CREATE INDEX intents_source_idx ON materialization_intents(generation_id, source_path)",
+        )
+        triggers: list[str] = []
+        for table in (
+            "corpus_snapshots",
+            "corpus_items",
+            "publication_seed_evidence",
+            "aggregate_inputs",
+            "planner_passes",
+            "planner_pass_expected_items",
+            "provenance_decisions",
+            "provenance_contributions",
+            "materialization_intents",
+            "intent_provenance",
+        ):
+            triggers.extend(
+                (
+                    f"CREATE TRIGGER {table}_append_only_update BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, "
+                    f"'{table} is append-only'); END",
+                    f"CREATE TRIGGER {table}_append_only_delete BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT, "
+                    f"'{table} is append-only'); END",
+                    f"CREATE TRIGGER {table}_post_close_insert BEFORE INSERT ON {table} WHEN "  # noqa: S608
+                    f"(SELECT plan_closed FROM generations WHERE generation_id = NEW.generation_id) != 0 "
+                    f"BEGIN SELECT RAISE(ABORT, '{table} rejects post-close evidence'); END",
+                    f"CREATE TRIGGER {table}_authority_insert BEFORE INSERT ON {table} WHEN "
+                    "citeforge_authority_write_enabled() != 1 BEGIN SELECT RAISE(ABORT, "
+                    f"'{table} requires guarded authority API'); END",
+                )
+            )
+        return (*tables, *indexes, *triggers)
+
+    def _install_schema_v6(self, connection: sqlite3.Connection) -> None:
+        for index, statement in enumerate(self._schema_v6_statements()):
+            connection.execute(statement)
+            self._inject(f"after_v6_migration_statement_{index}")
+        self._inject("after_v6_migration_ddl")
+
     def _initialize_schema(self) -> None:
         with self._transaction(immediate=True) as connection:
             user_objects = connection.execute(
@@ -770,18 +966,32 @@ class Ledger:
                     "FOREIGN KEY (generation_id, request_key) "
                     "REFERENCES requests(generation_id, request_key))"
                 )
+                connection.execute("UPDATE schema_meta SET value = '5' WHERE key = 'schema_version'")
+                connection.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'",
+                    (_SCHEMA_V5_FINGERPRINT,),
+                )
+                existing_version = ("5",)
+            if existing_version is not None and existing_version[0] == "5":
+                self._validate_schema_v5(connection)
+                self._install_schema_v6(connection)
+                actual = self._schema_fingerprint(connection)
+                expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
+                if actual != expected:
+                    raise ValueError("structurally inconsistent schema version 6 fingerprint")
                 connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (_SCHEMA_VERSION,))
                 connection.execute(
                     "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'",
-                    (_EXPECTED_SCHEMA_FINGERPRINT,),
+                    (expected,),
                 )
+                self._inject("after_v6_migration_meta")
                 existing_version = (_SCHEMA_VERSION,)
             if existing_version is not None and existing_version[0] != _SCHEMA_VERSION:
                 raise ValueError(
                     f"unsupported or structurally inconsistent ledger schema version: {existing_version[0]}"
                 )
             if existing_version is not None:
-                self._validate_schema_v5(connection)
+                self._validate_schema_v6(connection)
                 return
             schema = """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -1204,14 +1414,17 @@ class Ledger:
                 "BEGIN SELECT RAISE(ABORT, 'Task 5A cannot establish discovery authority'); END"
             )
             if existing_version is None:
+                self._install_schema_v6(connection)
+                actual = self._schema_fingerprint(connection)
+                expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)", (_SCHEMA_VERSION,)
                 )
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_fingerprint', ?)",
-                    (_EXPECTED_SCHEMA_FINGERPRINT,),
+                    (expected,),
                 )
-            self._validate_schema_v5(connection)
+            self._validate_schema_v6(connection)
 
     @staticmethod
     def _schema_fingerprint(connection: sqlite3.Connection) -> str:
@@ -1289,13 +1502,68 @@ class Ledger:
                 raise ValueError(f"structurally inconsistent schema version 5 table: {table}")
         fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
         actual = Ledger._schema_fingerprint(connection)
-        if (
-            fingerprint is None
-            or fingerprint[0] != _EXPECTED_SCHEMA_FINGERPRINT
-            or actual != _EXPECTED_SCHEMA_FINGERPRINT
-        ):
+        if fingerprint is None or fingerprint[0] != _SCHEMA_V5_FINGERPRINT or actual != _SCHEMA_V5_FINGERPRINT:
             raise ValueError("structurally inconsistent schema version 5 fingerprint")
         Ledger._assert_task5a_authority_invariant(connection)
+
+    @staticmethod
+    def _validate_schema_v6(connection: sqlite3.Connection) -> None:
+        required_columns = {
+            "corpus_snapshots": {"snapshot_digest", "item_set_digest", "evidence_json"},
+            "corpus_items": {"source_path", "author_key", "evidence_digest", "evidence_json"},
+            "publication_seed_evidence": {"publication_key", "origin_evidence_digest", "seed_digest"},
+            "planner_passes": {
+                "pass_key",
+                "pass_id",
+                "registry_digest",
+                "snapshot_digest",
+                "output_digest",
+                "snapshot_authority_digest",
+                "predecessor_output_digest",
+            },
+            "planner_pass_expected_items": {"pass_key", "item_key", "kind", "source_digest", "input_json", "unseen"},
+            "aggregate_inputs": {"reduction_id", "kind", "stable_key", "source_digest", "ordinal"},
+            "provenance_decisions": {"decision_key", "contribution_set_digest", "evidence_json"},
+            "provenance_contributions": {"contribution_key", "decision_key", "observation_digest"},
+            "materialization_intents": {
+                "intent_key",
+                "source_path",
+                "target_path",
+                "kind",
+                "final_fields_json",
+                "final_content_digest",
+                "removal_reason",
+            },
+            "intent_provenance": {"intent_key", "decision_key"},
+        }
+        for table, required in required_columns.items():
+            columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            if not required <= columns:
+                raise ValueError(f"structurally inconsistent schema version 6 table: {table}")
+            triggers = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?", (table,)
+                )
+            }
+            expected_triggers = {
+                f"{table}_append_only_update",
+                f"{table}_append_only_delete",
+                f"{table}_post_close_insert",
+                f"{table}_authority_insert",
+            }
+            if not expected_triggers <= triggers:
+                raise ValueError(f"structurally inconsistent schema version 6 triggers: {table}")
+        fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
+        actual = Ledger._schema_fingerprint(connection)
+        expected = _EXPECTED_SCHEMA_FINGERPRINT or actual
+        if fingerprint is None or fingerprint[0] != expected or actual != expected:
+            raise ValueError("structurally inconsistent schema version 6 fingerprint")
+        Ledger._assert_task5a_authority_invariant(connection)
+        for row in connection.execute("SELECT generation_id FROM generations ORDER BY generation_id"):
+            generation_id = str(row[0])
+            Ledger._v6_evidence_content(connection, generation_id)
+            Ledger._verify_v6_relationships(connection, generation_id)
 
     @staticmethod
     def _assert_task5a_authority_invariant(connection: sqlite3.Connection) -> None:
@@ -1311,6 +1579,952 @@ class Ledger:
         if len(rows) != 1:
             raise ValueError("ledger must contain exactly one generation")
         return str(rows[0][0])
+
+    def commit_corpus_snapshot(self, snapshot: CorpusSnapshot, items: Sequence[CorpusItemEvidence]) -> str:
+        """Atomically persist the one immutable corpus snapshot and exact membership."""
+        generation_id = self._generation_id()
+        if snapshot.generation_id != generation_id:
+            raise ValueError("corpus snapshot generation mismatch")
+        ordered = tuple(sorted(items, key=lambda item: item.source_path.casefold()))
+        if len({item.source_path.casefold() for item in ordered}) != len(ordered):
+            raise ValueError("duplicate corpus source path")
+        if any(item.generation_id != generation_id or item.snapshot_digest != snapshot.digest for item in ordered):
+            raise ValueError("corpus item snapshot mismatch")
+        if snapshot.item_set_digest != evidence_digest([item.digest for item in ordered]):
+            raise ValueError("corpus item-set digest mismatch")
+        snapshot_content = evidence_json(snapshot.canonical_content())
+        with self._transaction(immediate=True) as connection, self._authority_write():
+            generation = connection.execute(
+                "SELECT base_commit FROM generations WHERE generation_id = ?", (generation_id,)
+            ).fetchone()
+            if generation is None or str(generation[0]) != snapshot.base_commit:
+                raise ValueError("corpus snapshot base commit mismatch")
+            enabled_authors = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT row_key FROM authors WHERE generation_id = ? AND enabled = 1", (generation_id,)
+                )
+            }
+            if {item.author_key for item in ordered} != enabled_authors:
+                raise ValueError("corpus snapshot does not match exact enabled census membership")
+            existing = connection.execute(
+                "SELECT snapshot_digest, evidence_json FROM corpus_snapshots WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if existing is not None:
+                stored_items = connection.execute(
+                    "SELECT evidence_json FROM corpus_items WHERE generation_id = ? "
+                    "ORDER BY source_path COLLATE NOCASE",
+                    (generation_id,),
+                ).fetchall()
+                if (
+                    str(existing[0]) != snapshot.digest
+                    or str(existing[1]) != snapshot_content
+                    or tuple(str(row[0]) for row in stored_items)
+                    != tuple(evidence_json(item.canonical_content()) for item in ordered)
+                ):
+                    raise ValueError("conflicting corpus snapshot replay")
+                return snapshot.digest
+            connection.execute(
+                "INSERT INTO corpus_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    snapshot.digest,
+                    snapshot.base_commit,
+                    snapshot.output_tree_digest,
+                    snapshot.baseline_digest,
+                    snapshot.scanner_id,
+                    snapshot.scanner_version,
+                    snapshot.parser_id,
+                    snapshot.parser_version,
+                    snapshot.item_set_digest,
+                    snapshot.derived_a2i2_digest,
+                    snapshot_content,
+                ),
+            )
+            self._inject("after_v6_corpus_snapshot")
+            for item in ordered:
+                connection.execute(
+                    "INSERT INTO corpus_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        snapshot.digest,
+                        item.source_path,
+                        item.author_key,
+                        item.before_digest,
+                        item.parse_digest,
+                        evidence_json(item.publication_keys),
+                        item.disposition,
+                        evidence_json(item.exact_identifiers),
+                        item.digest,
+                        evidence_json(item.canonical_content()),
+                    ),
+                )
+            self._inject("after_v6_corpus_items")
+        return snapshot.digest
+
+    def commit_publication_seed_evidence(self, seeds: Sequence[PublicationSeedEvidence]) -> None:
+        """Persist exact seed origins without implying discovery completeness."""
+        generation_id = self._generation_id()
+        ordered = tuple(sorted(seeds, key=lambda seed: (seed.author_key, seed.publication_key)))
+        if len({(seed.author_key, seed.publication_key) for seed in ordered}) != len(ordered):
+            raise ValueError("duplicate publication seed")
+        if any(seed.generation_id != generation_id for seed in ordered):
+            raise ValueError("publication seed generation mismatch")
+        with self._transaction(immediate=True) as connection, self._authority_write():
+            for seed in ordered:
+                author = connection.execute(
+                    "SELECT enabled FROM authors WHERE generation_id = ? AND row_key = ?",
+                    (generation_id, seed.author_key),
+                ).fetchone()
+                if author is None or int(author[0]) != 1:
+                    raise ValueError("publication seed author is absent or disabled")
+                if seed.origin_kind is EvidenceKind.CORPUS:
+                    origin_rows = connection.execute(
+                        "SELECT evidence_digest, evidence_json FROM corpus_items WHERE generation_id = ?",
+                        (generation_id,),
+                    ).fetchall()
+                    valid_origin = False
+                    for origin in origin_rows:
+                        content = json.loads(str(origin[1]))
+                        reconstructed = CorpusItemEvidence(**content)
+                        if (
+                            reconstructed.key == seed.origin_evidence_key
+                            and str(origin[0]) == seed.origin_evidence_digest
+                            and seed.publication_key in reconstructed.publication_keys
+                            and seed.author_key == reconstructed.author_key
+                        ):
+                            valid_origin = True
+                    if not valid_origin:
+                        raise ValueError("publication seed lacks exact corpus origin")
+                    if seed.baseline_digest != next(
+                        (
+                            CorpusItemEvidence(**json.loads(str(origin[1]))).before_digest
+                            for origin in origin_rows
+                            if CorpusItemEvidence(**json.loads(str(origin[1]))).key == seed.origin_evidence_key
+                        ),
+                        None,
+                    ):
+                        raise ValueError("publication seed baseline does not match corpus origin")
+                    origin_item = next(
+                        CorpusItemEvidence(**json.loads(str(origin[1])))
+                        for origin in origin_rows
+                        if CorpusItemEvidence(**json.loads(str(origin[1]))).key == seed.origin_evidence_key
+                    )
+                    if evidence_json(seed.exact_identifiers) != evidence_json(origin_item.exact_identifiers):
+                        raise ValueError("corpus seed identifiers do not match immutable parsed authority")
+                elif seed.origin_kind is EvidenceKind.PUBLICATION:
+                    publication = connection.execute(
+                        "SELECT author_key, publication_key, discovery_source, normalized_title, year, "
+                        "exact_identifiers_json, baseline_output_path, freshness_policy FROM publications "
+                        "WHERE generation_id = ? AND author_key = ? AND publication_key = ?",
+                        (generation_id, seed.author_key, seed.publication_key),
+                    ).fetchone()
+                    if publication is None:
+                        raise ValueError("publication seed lacks immutable publication origin")
+                    payload = dict(publication)
+                    if seed.origin_evidence_key not in {
+                        seed.publication_key,
+                        f"publication:{seed.author_key}:{seed.publication_key}",
+                    } or seed.origin_evidence_digest != evidence_digest(payload):
+                        raise ValueError("publication seed origin does not match immutable publication")
+                    identifiers = json.loads(str(publication["exact_identifiers_json"]))
+                    if evidence_json(seed.exact_identifiers) != evidence_json(identifiers):
+                        raise ValueError("publication seed identifiers do not match immutable publication")
+                    baseline_path = str(publication["baseline_output_path"])
+                    expected_baseline = evidence_digest(baseline_path) if baseline_path else None
+                    if seed.baseline_digest != expected_baseline:
+                        raise ValueError("publication seed baseline does not match immutable publication")
+                if seed.seed_digest != seed.derived_seed_digest:
+                    raise ValueError("publication seed digest is not derived from immutable evidence")
+                content = evidence_json(seed.canonical_content())
+                existing = connection.execute(
+                    "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+                    "AND author_key = ? AND publication_key = ?",
+                    (generation_id, seed.author_key, seed.publication_key),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing[0]) != content:
+                        raise ValueError("conflicting seed evidence replay")
+                    continue
+                connection.execute(
+                    "INSERT INTO publication_seed_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        seed.author_key,
+                        seed.publication_key,
+                        seed.origin_kind.value,
+                        seed.origin_evidence_key,
+                        seed.origin_evidence_digest,
+                        seed.baseline_digest,
+                        evidence_json(seed.exact_identifiers),
+                        seed.seed_digest,
+                        content,
+                    ),
+                )
+            self._inject("after_v6_seed_evidence")
+
+    def load_seed_snapshot(self) -> tuple[PublicationSeedEvidence, ...]:
+        generation_id = self._generation_id()
+        rows = self._connection.execute(
+            "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+            "ORDER BY author_key, publication_key",
+            (generation_id,),
+        ).fetchall()
+        result: list[PublicationSeedEvidence] = []
+        for row in rows:
+            try:
+                content = json.loads(str(row[0]))
+                content["origin_kind"] = EvidenceKind(content["origin_kind"])
+                result.append(PublicationSeedEvidence(**content))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("corrupt publication seed evidence") from exc
+        return tuple(result)
+
+    @staticmethod
+    def _snapshot_for_pass(connection: sqlite3.Connection, generation_id: str, pass_id: str) -> Mapping[str, object]:
+        definition = pass_for(pass_id)
+        items: list[dict[str, object]] = []
+
+        def add(kind: EvidenceKind, key: str, digest: str, payload: object) -> None:
+            _identifier(key, "planner snapshot item key")
+            if not _HEX_DIGEST_RE.fullmatch(digest):
+                raise ValueError("invalid planner snapshot source digest")
+            items.append({"kind": kind.value, "key": key, "digest": digest, "payload": payload})
+
+        for row in connection.execute(
+            "SELECT source_path, evidence_digest, evidence_json FROM corpus_items "
+            "WHERE generation_id = ? ORDER BY source_path COLLATE NOCASE",
+            (generation_id,),
+        ):
+            try:
+                payload = json.loads(str(row[2]))
+            except json.JSONDecodeError as exc:
+                raise ValueError("corrupt corpus item evidence") from exc
+            if evidence_json(payload) != str(row[2]):
+                raise ValueError("noncanonical corpus item evidence")
+            add(EvidenceKind.CORPUS, f"corpus:{row[0]}", str(row[1]), payload)
+        for row in connection.execute(
+            "SELECT author_key, publication_key, seed_digest, evidence_json FROM publication_seed_evidence "
+            "WHERE generation_id = ? ORDER BY author_key, publication_key",
+            (generation_id,),
+        ):
+            try:
+                payload = json.loads(str(row[3]))
+            except json.JSONDecodeError as exc:
+                raise ValueError("corrupt publication seed evidence") from exc
+            add(EvidenceKind.SEED, f"seed:{row[0]}:{row[1]}", str(row[2]), payload)
+        for row in connection.execute(
+            "SELECT author_key, publication_key, discovery_source, normalized_title, year, exact_identifiers_json, "
+            "baseline_output_path, freshness_policy FROM publications WHERE generation_id = ? "
+            "ORDER BY author_key, publication_key",
+            (generation_id,),
+        ):
+            payload = dict(row)
+            payload["exact_identifiers"] = json.loads(str(payload.pop("exact_identifiers_json")))
+            key = f"publication:{row['author_key']}:{row['publication_key']}"
+            add(EvidenceKind.PUBLICATION, key, evidence_digest(payload), payload)
+        for row in connection.execute(
+            "SELECT request_key, provider, schema_version, disposition, response_json, response_digest, "
+            "authoritative_empty, safe_diagnostic "
+            "FROM observations WHERE generation_id = ? ORDER BY request_key",
+            (generation_id,),
+        ):
+            payload = dict(row)
+            if payload.get("response_json") is not None:
+                payload["response"] = json.loads(str(payload.pop("response_json")))
+            digest = str(row["response_digest"] or evidence_digest(payload))
+            add(EvidenceKind.OBSERVATION, f"observation:{row['request_key']}", digest, payload)
+        for row in connection.execute(
+            "SELECT task_key, author_key, publication_key, provider, operation, request_key, required, applicability, "
+            "applicability_reason, state, identity_digest FROM tasks "
+            "WHERE generation_id = ? ORDER BY task_key",
+            (generation_id,),
+        ):
+            payload = dict(row)
+            add(EvidenceKind.APPLICABILITY, f"applicability:{row['task_key']}", str(row["identity_digest"]), payload)
+        for row in connection.execute(
+            "SELECT request_key, identity_json, state, response_digest FROM requests "
+            "WHERE generation_id = ? ORDER BY request_key",
+            (generation_id,),
+        ):
+            try:
+                identity = json.loads(str(row[1]))
+            except json.JSONDecodeError as exc:
+                raise ValueError("corrupt request identity") from exc
+            add(
+                EvidenceKind.APPLICABILITY,
+                f"request:{row[0]}",
+                evidence_digest(identity),
+                {
+                    "request_key": str(row[0]),
+                    "identity": identity,
+                    "state": str(row[2]),
+                    "response_digest": row[3],
+                    "consumers": tuple(
+                        str(consumer[0])
+                        for consumer in connection.execute(
+                            "SELECT task_key FROM request_consumers WHERE generation_id = ? AND request_key = ? "
+                            "ORDER BY task_key",
+                            (generation_id, str(row[0])),
+                        )
+                    ),
+                },
+            )
+        for row in connection.execute(
+            "SELECT reduction_digest, round_key, source_task_keys_json, source_dispositions_json, "
+            "source_evidence_digests_json FROM reduction_receipts WHERE generation_id = ? "
+            "ORDER BY reduction_digest",
+            (generation_id,),
+        ):
+            try:
+                payload = {
+                    "round_key": str(row[1]),
+                    "source_task_keys": json.loads(str(row[2])),
+                    "source_dispositions": json.loads(str(row[3])),
+                    "source_evidence_digests": json.loads(str(row[4])),
+                }
+            except json.JSONDecodeError as exc:
+                raise ValueError("corrupt reduction receipt") from exc
+            add(EvidenceKind.REDUCTION_RECEIPT, f"reduction:{row[0]}", str(row[0]), payload)
+        for row in connection.execute(
+            "SELECT decision_key, evidence_json FROM provenance_decisions WHERE generation_id = ? AND pass_key != "
+            "COALESCE((SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = ?), '') "
+            "ORDER BY decision_key",
+            (generation_id, generation_id, pass_id),
+        ):
+            payload = json.loads(str(row[1]))
+            add(EvidenceKind.PROVENANCE, f"provenance:{row[0]}", evidence_digest(payload), payload)
+        for row in connection.execute(
+            "SELECT intent_key, evidence_json FROM materialization_intents WHERE generation_id = ? AND pass_key != "
+            "COALESCE((SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = ?), '') "
+            "ORDER BY intent_key",
+            (generation_id, generation_id, pass_id),
+        ):
+            payload = json.loads(str(row[1]))
+            add(EvidenceKind.INTENT, f"intent:{row[0]}", evidence_digest(payload), payload)
+        ordered = tuple(sorted(items, key=lambda item: str(item["key"])))
+        if len({str(item["key"]) for item in ordered}) != len(ordered):
+            raise ValueError("duplicate planner snapshot item")
+        frozen = _freeze_json(
+            {
+                "generation_id": generation_id,
+                "pass_id": definition.pass_id,
+                "pass_version": definition.version,
+                "items": ordered,
+            }
+        )
+        if not isinstance(frozen, Mapping):
+            raise AssertionError("planner snapshot must be a mapping")
+        return frozen
+
+    def snapshot_for_pass(self, pass_id: str) -> Mapping[str, object]:
+        return self._snapshot_for_pass(self._connection, self._generation_id(), pass_id)
+
+    def execute_registered_pass(self, pass_id: str) -> PlannerPassReceipt:
+        generation_id = self._generation_id()
+        initial_snapshot = self._snapshot_for_pass(self._connection, generation_id, pass_id)
+        receipt = _execute_authoritative_pass(pass_id, initial_snapshot)
+        receipt_content = evidence_json(receipt.canonical_content())
+        with self._transaction(immediate=True) as connection, self._authority_write():
+            current_snapshot = self._snapshot_for_pass(connection, generation_id, pass_id)
+            if evidence_digest(current_snapshot) != receipt.snapshot_digest:
+                raise StaleClaimError("planner input membership changed before commit")
+            if _execute_authoritative_pass(pass_id, current_snapshot) != receipt:
+                raise ValueError("planner pass receipt does not match code-owned authority")
+            existing = connection.execute(
+                "SELECT receipt_json FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
+                (generation_id, pass_id),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != receipt_content:
+                    raise ValueError("conflicting planner pass replay")
+                return receipt
+            definition = pass_for(pass_id)
+            earlier = connection.execute(
+                "SELECT pass_id FROM planner_passes WHERE generation_id = ? ORDER BY rowid",
+                (generation_id,),
+            ).fetchall()
+            expected_earlier = tuple(
+                value.pass_id
+                for value in sorted((pass_for(key) for key in PASSES), key=lambda value: value.ordinal)
+                if value.ordinal < definition.ordinal
+            )
+            if tuple(str(row[0]) for row in earlier) != expected_earlier:
+                raise ValueError("planner pass phase sequence is skipped or backward")
+            predecessor = connection.execute(
+                "SELECT output_digest FROM planner_passes WHERE generation_id = ? ORDER BY rowid DESC LIMIT 1",
+                (generation_id,),
+            ).fetchone()
+            predecessor_digest = str(predecessor[0]) if predecessor is not None else None
+            snapshot_authority_digest = evidence_digest(
+                {
+                    "domain": _SNAPSHOT_DOMAIN_SEPARATOR,
+                    "generation_id": generation_id,
+                    "pass_id": pass_id,
+                    "snapshot": current_snapshot,
+                    "predecessor_output_digest": predecessor_digest,
+                }
+            )
+            connection.execute(
+                "INSERT INTO planner_passes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    receipt.pass_key,
+                    receipt.pass_id,
+                    receipt.pass_version,
+                    PASS_REGISTRY_DIGEST,
+                    receipt.snapshot_digest,
+                    receipt.output_digest,
+                    receipt_content,
+                    snapshot_authority_digest,
+                    predecessor_digest,
+                ),
+            )
+            self._inject("after_v6_planner_pass")
+            unseen = set(receipt.unseen_keys)
+            snapshot_items = {
+                str(item["key"]): item for item in cast(Sequence[Mapping[str, object]], current_snapshot["items"])
+            }
+            connection.executemany(
+                "INSERT INTO planner_pass_expected_items VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    (
+                        generation_id,
+                        receipt.pass_key,
+                        key,
+                        snapshot_items[key]["kind"],
+                        snapshot_items[key]["digest"],
+                        evidence_json(snapshot_items[key]),
+                        int(key in unseen),
+                    )
+                    for key in receipt.expected_items
+                ),
+            )
+            self._inject("after_v6_planner_expected_items")
+        return receipt
+
+    def commit_aggregate_inputs(self, pass_key: str, reduction_id: str, inputs: Sequence[AggregateInput]) -> None:
+        generation_id = self._generation_id()
+        _identifier(pass_key, "planner pass key")
+        _identifier(reduction_id, "reduction ID")
+        ordered = tuple(sorted(inputs, key=lambda item: item.ordinal))
+        with self._transaction(immediate=True) as connection, self._authority_write():
+            self._commit_aggregate_inputs(connection, generation_id, pass_key, reduction_id, ordered)
+
+    def _commit_aggregate_inputs(
+        self,
+        connection: sqlite3.Connection,
+        generation_id: str,
+        pass_key: str,
+        reduction_id: str,
+        ordered: Sequence[AggregateInput],
+    ) -> None:
+        if any(
+            item.generation_id != generation_id or item.pass_key != pass_key or item.reduction_id != reduction_id
+            for item in ordered
+        ):
+            raise ValueError("aggregate input authority mismatch")
+        pass_row = connection.execute(
+            "SELECT pass_id, pass_version, snapshot_digest, receipt_json FROM planner_passes "
+            "WHERE generation_id = ? AND pass_key = ?",
+            (generation_id, pass_key),
+        ).fetchone()
+        if pass_row is None:
+            raise ValueError("aggregate input planner pass is absent")
+        stored_items = connection.execute(
+            "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? AND pass_key = ? "
+            "ORDER BY item_key",
+            (generation_id, pass_key),
+        ).fetchall()
+        snapshot = _freeze_json(
+            {
+                "generation_id": generation_id,
+                "pass_id": str(pass_row[0]),
+                "pass_version": str(pass_row[1]),
+                "items": tuple(json.loads(str(row[0])) for row in stored_items),
+            }
+        )
+        if not isinstance(snapshot, Mapping) or evidence_digest(snapshot) != str(pass_row[2]):
+            raise ValueError("stored planner snapshot membership is corrupt")
+        stored_receipt = json.loads(str(pass_row[3]))
+        authoritative = _execute_authoritative_pass(str(pass_row[0]), snapshot)
+        if evidence_json(authoritative.canonical_content()) != evidence_json(stored_receipt):
+            raise ValueError("stored planner receipt is not code-authoritative")
+        expected_items = tuple(cast(Sequence[Mapping[str, object]], snapshot["items"]))
+        if len(ordered) != len(expected_items):
+            raise ValueError("aggregate input membership is incomplete")
+        for ordinal, (item, expected) in enumerate(zip(ordered, expected_items, strict=True)):
+            if (
+                item.ordinal != ordinal
+                or item.kind.value != expected["kind"]
+                or item.stable_key != expected["key"]
+                or item.source_digest != expected["digest"]
+                or evidence_json(item.payload) != evidence_json(expected)
+            ):
+                raise ValueError("aggregate input membership mismatch")
+            expected_payload = expected.get("payload")
+            if (
+                item.kind is EvidenceKind.APPLICABILITY
+                and isinstance(expected_payload, Mapping)
+                and str(item.stable_key).startswith("applicability:")
+                and expected_payload.get("state") not in {state.value for state in _TERMINAL}
+            ):
+                raise ValueError("aggregate input includes nonterminal task evidence")
+            consumed = connection.execute(
+                "SELECT reduction_id FROM aggregate_inputs WHERE generation_id = ? AND pass_key = ? "
+                "AND kind = ? AND stable_key = ? AND reduction_id != ?",
+                (generation_id, pass_key, item.kind.value, item.stable_key, reduction_id),
+            ).fetchone()
+            if consumed is not None:
+                raise ValueError("aggregate input source was already consumed by another reduction")
+            content = evidence_json(item.canonical_content())
+            existing = connection.execute(
+                "SELECT input_json FROM aggregate_inputs WHERE generation_id = ? AND pass_key = ? "
+                "AND reduction_id = ? AND kind = ? AND stable_key = ?",
+                (generation_id, pass_key, reduction_id, item.kind.value, item.stable_key),
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != content:
+                    raise ValueError("conflicting aggregate input replay")
+                continue
+            connection.execute(
+                "INSERT INTO aggregate_inputs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    pass_key,
+                    reduction_id,
+                    item.kind.value,
+                    item.stable_key,
+                    item.source_digest,
+                    item.ordinal,
+                    item.key,
+                    content,
+                ),
+            )
+
+    def commit_provenance_and_intents(
+        self,
+        pass_key: str,
+        inputs: Sequence[AggregateInput],
+        decisions: Sequence[ProvenanceDecision],
+        contributions: Sequence[ProvenanceContribution],
+        intents: Sequence[MaterializationIntent],
+        intent_provenance: Sequence[tuple[str, str]],
+    ) -> None:
+        """Persist reducer evidence and file intents atomically without applying them."""
+        generation_id = self._generation_id()
+        if not inputs:
+            raise ValueError("provenance requires complete aggregate inputs")
+        reduction_ids = {item.reduction_id for item in inputs}
+        if len(reduction_ids) != 1:
+            raise ValueError("provenance inputs require one reduction ID")
+        ordered_inputs = tuple(sorted(inputs, key=lambda item: item.ordinal))
+        ordered_decisions = tuple(sorted(decisions, key=lambda item: item.key))
+        ordered_contributions = tuple(sorted(contributions, key=lambda item: item.key))
+        ordered_intents = tuple(sorted(intents, key=lambda item: item.key))
+        links = tuple(sorted(intent_provenance))
+        if any(item.generation_id != generation_id or item.pass_key != pass_key for item in ordered_decisions):
+            raise ValueError("provenance decision authority mismatch")
+        if any(item.generation_id != generation_id for item in ordered_contributions):
+            raise ValueError("provenance contribution generation mismatch")
+        if any(item.generation_id != generation_id or item.pass_key != pass_key for item in ordered_intents):
+            raise ValueError("materialization intent authority mismatch")
+        for values, message in (
+            (tuple(item.key for item in ordered_decisions), "duplicate provenance decision"),
+            (tuple(item.key for item in ordered_contributions), "duplicate provenance contribution"),
+            (tuple(item.key for item in ordered_intents), "duplicate materialization intent"),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(message)
+        if len({item.target_path.casefold() for item in ordered_intents}) != len(ordered_intents):
+            raise ValueError("materialization target path collision")
+        if len({item.source_path.casefold() for item in ordered_intents}) != len(ordered_intents):
+            raise ValueError("materialization source path collision")
+        publication_members = {
+            (
+                str(cast(Mapping[str, object], item.payload["payload"])["author_key"]),
+                str(cast(Mapping[str, object], item.payload["payload"])["publication_key"]),
+            )
+            for item in ordered_inputs
+            if item.kind is EvidenceKind.PUBLICATION and isinstance(item.payload.get("payload"), Mapping)
+        }
+        if publication_members != {(item.author_key, item.publication_key) for item in ordered_intents}:
+            raise ValueError("materialization intents do not cover exact publication membership")
+        corpus_paths = {
+            str(cast(Mapping[str, object], item.payload["payload"])["source_path"]).casefold()
+            for item in ordered_inputs
+            if item.kind is EvidenceKind.CORPUS and isinstance(item.payload.get("payload"), Mapping)
+        }
+        if not corpus_paths <= {item.source_path.casefold() for item in ordered_intents}:
+            raise ValueError("materialization intents omit a bound corpus path")
+        contribution_by_decision: dict[str, list[ProvenanceContribution]] = {}
+        for contribution in ordered_contributions:
+            contribution_by_decision.setdefault(contribution.decision_key, []).append(contribution)
+        inputs_by_identity = {(item.kind.value, item.stable_key, item.source_digest): item for item in ordered_inputs}
+        if set(contribution_by_decision) != {item.key for item in ordered_decisions}:
+            raise ValueError("contribution references unknown provenance decision")
+        for decision in ordered_decisions:
+            members = contribution_by_decision.get(decision.key, [])
+            if not members or evidence_digest(sorted(item.key for item in members)) != decision.contribution_set_digest:
+                raise ValueError("incomplete provenance contribution set")
+
+            def bound_contribution(
+                contribution: ProvenanceContribution,
+                provenance_decision: ProvenanceDecision,
+            ) -> tuple[tuple[str, str, str], AggregateInput]:
+                if contribution.request_key is not None:
+                    identity = (
+                        contribution.source_kind,
+                        f"observation:{contribution.request_key}",
+                        contribution.observation_digest,
+                    )
+                    bound = inputs_by_identity.get(identity)
+                    if bound is None:
+                        raise ValueError("provenance contribution is not bound to exact aggregate input")
+                    return identity, bound
+                candidates = [
+                    (identity, item)
+                    for identity, item in inputs_by_identity.items()
+                    if identity[0] == contribution.source_kind and identity[2] == contribution.observation_digest
+                ]
+                if contribution.source_kind == EvidenceKind.PUBLICATION.value:
+                    candidates = [
+                        (identity, item)
+                        for identity, item in candidates
+                        if isinstance(item.payload.get("payload"), Mapping)
+                        and cast(Mapping[str, object], item.payload["payload"]).get("author_key")
+                        == provenance_decision.author_key
+                        and cast(Mapping[str, object], item.payload["payload"]).get("publication_key")
+                        == provenance_decision.publication_key
+                    ]
+                if len(candidates) != 1:
+                    raise ValueError("provenance contribution lacks exact stable source identity")
+                return candidates[0]
+
+            bound_members = [(contribution, *bound_contribution(contribution, decision)) for contribution in members]
+            member_identities = {identity for _, identity, _ in bound_members}
+            if len(member_identities) != len(members):
+                raise ValueError("duplicate provenance contribution source identity")
+            selected = [item for item in members if item.selected]
+            if len(selected) != 1 or selected[0].value_digest != decision.selected_value_digest:
+                raise ValueError("selected provenance is not bound to aggregate input")
+            for contribution, _source_identity, bound_input in bound_members:
+                bound_payload = bound_input.payload.get("payload")
+                if bound_input.kind is EvidenceKind.PUBLICATION and (
+                    not isinstance(bound_payload, Mapping)
+                    or bound_payload.get("author_key") != decision.author_key
+                    or bound_payload.get("publication_key") != decision.publication_key
+                ):
+                    raise ValueError("publication provenance belongs to another publication")
+                if bound_input.kind is EvidenceKind.PUBLICATION:
+                    field_key = "normalized_title" if decision.field_name == "title" else decision.field_name
+                    publication_value = (
+                        cast(Mapping[str, object], bound_payload.get("exact_identifiers", {})).get(decision.field_name)
+                        if isinstance(bound_payload, Mapping)
+                        and isinstance(bound_payload.get("exact_identifiers"), Mapping)
+                        and decision.field_name in cast(Mapping[str, object], bound_payload["exact_identifiers"])
+                        else bound_payload.get(field_key)
+                        if isinstance(bound_payload, Mapping)
+                        else None
+                    )
+                    if publication_value is None:
+                        raise ValueError("publication provenance field is absent")
+                    if contribution.value_digest != evidence_digest(publication_value):
+                        raise ValueError("publication provenance value digest mismatch")
+                if bound_input.kind is EvidenceKind.OBSERVATION:
+                    if (
+                        not isinstance(bound_payload, Mapping)
+                        or contribution.request_key is None
+                        or bound_input.stable_key != f"observation:{contribution.request_key}"
+                        or bound_payload.get("provider") != contribution.provider
+                        or bound_payload.get("schema_version") != contribution.schema_version
+                    ):
+                        raise ValueError("observation provenance is not exact provider evidence")
+                    response = bound_payload.get("response")
+                    successful_field = (
+                        bound_payload.get("disposition") == TaskDisposition.SUCCEEDED.value
+                        and not bool(bound_payload.get("authoritative_empty"))
+                        and isinstance(response, Mapping)
+                        and decision.field_name in response
+                    )
+                    if successful_field and isinstance(response, Mapping):
+                        if contribution.value_digest != evidence_digest(response[decision.field_name]):
+                            raise ValueError("observation provenance value digest mismatch")
+                        if contribution.selected != (contribution.rejection_reason == "selected"):
+                            raise ValueError("observation selection reason mismatch")
+                    elif contribution.selected:
+                        raise ValueError("selected observation provenance is not successful field evidence")
+                    elif contribution.value_digest is not None or contribution.rejection_reason == "selected":
+                        raise ValueError("rejected or absent observation must have no value digest and a reason")
+                    consumer_tasks = [
+                        item.payload.get("payload")
+                        for item in ordered_inputs
+                        if item.kind is EvidenceKind.APPLICABILITY
+                        and item.stable_key.startswith("applicability:")
+                        and isinstance(item.payload.get("payload"), Mapping)
+                        and cast(Mapping[str, object], item.payload["payload"]).get("request_key")
+                        == contribution.request_key
+                    ]
+                    if not any(
+                        isinstance(task, Mapping)
+                        and task.get("author_key") == decision.author_key
+                        and task.get("publication_key") == decision.publication_key
+                        and task.get("provider") == contribution.provider
+                        for task in consumer_tasks
+                    ):
+                        raise ValueError("observation provenance lacks exact publication consumer")
+                if contribution.request_key is not None:
+                    observation_inputs = [
+                        item
+                        for item in ordered_inputs
+                        if item.kind is EvidenceKind.OBSERVATION
+                        and item.stable_key == f"observation:{contribution.request_key}"
+                    ]
+                    if len(observation_inputs) != 1:
+                        raise ValueError("provenance request lacks exact observation input")
+                    envelope = observation_inputs[0].payload.get("payload")
+                    if not isinstance(envelope, Mapping) or (
+                        envelope.get("provider") != contribution.provider
+                        or envelope.get("schema_version") != contribution.schema_version
+                    ):
+                        raise ValueError("provenance provider schema does not match observation input")
+            eligible_identities: set[tuple[str, str, str]] = set()
+            for candidate in ordered_inputs:
+                candidate_payload = candidate.payload.get("payload")
+                if candidate.kind is EvidenceKind.PUBLICATION and isinstance(candidate_payload, Mapping):
+                    field_key = "normalized_title" if decision.field_name == "title" else decision.field_name
+                    identifiers = candidate_payload.get("exact_identifiers", {})
+                    if (
+                        candidate_payload.get("author_key") == decision.author_key
+                        and candidate_payload.get("publication_key") == decision.publication_key
+                        and (
+                            field_key in candidate_payload
+                            or (isinstance(identifiers, Mapping) and decision.field_name in identifiers)
+                        )
+                    ):
+                        eligible_identities.add((candidate.kind.value, candidate.stable_key, candidate.source_digest))
+                elif candidate.kind is EvidenceKind.OBSERVATION and isinstance(candidate_payload, Mapping):
+                    candidate_request = str(candidate_payload.get("request_key", ""))
+                    has_consumer = any(
+                        item.kind is EvidenceKind.APPLICABILITY
+                        and item.stable_key.startswith("applicability:")
+                        and isinstance(item.payload.get("payload"), Mapping)
+                        and cast(Mapping[str, object], item.payload["payload"]).get("request_key") == candidate_request
+                        and cast(Mapping[str, object], item.payload["payload"]).get("author_key") == decision.author_key
+                        and cast(Mapping[str, object], item.payload["payload"]).get("publication_key")
+                        == decision.publication_key
+                        for item in ordered_inputs
+                    )
+                    request_inputs = [
+                        item.payload.get("payload")
+                        for item in ordered_inputs
+                        if item.kind is EvidenceKind.APPLICABILITY
+                        and item.stable_key == f"request:{candidate_request}"
+                        and isinstance(item.payload.get("payload"), Mapping)
+                    ]
+                    requested = (
+                        cast(Mapping[str, object], request_inputs[0]).get("identity")
+                        if len(request_inputs) == 1
+                        else None
+                    )
+                    relevant_field = isinstance(requested, Mapping) and decision.field_name in cast(
+                        Sequence[object], requested.get("requested_fields", ())
+                    )
+                    if has_consumer and relevant_field:
+                        eligible_identities.add((candidate.kind.value, candidate.stable_key, candidate.source_digest))
+            if member_identities != eligible_identities:
+                raise ValueError("provenance alternatives are incomplete or include ineligible evidence")
+        expected_links = {
+            (intent.key, decision.key)
+            for intent in ordered_intents
+            for decision in ordered_decisions
+            if (decision.author_key, decision.publication_key) == (intent.author_key, intent.publication_key)
+        }
+        if set(links) != expected_links or len(links) != len(set(links)):
+            raise ValueError("intent provenance membership mismatch")
+        for intent in ordered_intents:
+            intent_decisions = [
+                decision
+                for decision in ordered_decisions
+                if (decision.author_key, decision.publication_key) == (intent.author_key, intent.publication_key)
+            ]
+            if intent.kind is IntentKind.REMOVE and (intent_decisions or intent.final_fields):
+                raise ValueError("REMOVE intent cannot carry emitted-field provenance")
+            if intent.kind is not IntentKind.REMOVE and {decision.field_name for decision in intent_decisions} != set(
+                intent.final_fields
+            ):
+                raise ValueError("provenance decisions do not cover exact final emitted field set")
+            publication_inputs = [
+                item.payload.get("payload")
+                for item in ordered_inputs
+                if item.kind is EvidenceKind.PUBLICATION
+                and isinstance(item.payload.get("payload"), Mapping)
+                and cast(Mapping[str, object], item.payload["payload"]).get("author_key") == intent.author_key
+                and cast(Mapping[str, object], item.payload["payload"]).get("publication_key") == intent.publication_key
+            ]
+            if len(publication_inputs) != 1:
+                raise ValueError("intent lacks exact final publication input")
+            publication_payload = cast(Mapping[str, object], publication_inputs[0])
+            required_fields = {
+                key
+                for key, value in {
+                    "title": publication_payload.get("normalized_title"),
+                    "year": publication_payload.get("year"),
+                }.items()
+                if value not in {None, ""}
+            }
+            identifiers = publication_payload.get("exact_identifiers", {})
+            if isinstance(identifiers, Mapping):
+                required_fields.update(str(key) for key, value in identifiers.items() if value not in {None, ""})
+            if intent.kind is not IntentKind.REMOVE and set(intent.final_fields) != required_fields:
+                raise ValueError("intent final fields do not match code-owned publication field set")
+            linked = sorted(decision_key for intent_key, decision_key in links if intent_key == intent.key)
+            if intent.kind is IntentKind.REMOVE:
+                if linked or intent.provenance_set_digest != evidence_digest(()):
+                    raise ValueError("REMOVE intent requires empty emitted-field provenance")
+            elif (intent.final_fields and not linked) or evidence_digest(linked) != intent.provenance_set_digest:
+                raise ValueError("intent provenance-set digest mismatch")
+            if intent.kind is IntentKind.REMOVE:
+                if intent.source_path.casefold() != intent.target_path.casefold():
+                    raise ValueError("REMOVE intent requires the same source and target path")
+                matching_removals = [
+                    cast(Mapping[str, object], item.payload["payload"])
+                    for item in ordered_inputs
+                    if item.kind is EvidenceKind.CORPUS
+                    and isinstance(item.payload.get("payload"), Mapping)
+                    and str(cast(Mapping[str, object], item.payload["payload"]).get("source_path", "")).casefold()
+                    == intent.source_path.casefold()
+                    and intent.publication_key
+                    in cast(
+                        Sequence[object],
+                        cast(Mapping[str, object], item.payload["payload"]).get("publication_keys", ()),
+                    )
+                ]
+                if (
+                    len(matching_removals) != 1
+                    or matching_removals[0].get("author_key") != intent.author_key
+                    or matching_removals[0].get("before_digest") != intent.before_digest
+                ):
+                    raise ValueError("REMOVE intent lacks exact corpus removal proof")
+            matching_corpus = [
+                cast(Mapping[str, object], item.payload["payload"])
+                for item in ordered_inputs
+                if item.kind is EvidenceKind.CORPUS
+                and isinstance(item.payload.get("payload"), Mapping)
+                and str(cast(Mapping[str, object], item.payload["payload"])["source_path"]).casefold()
+                == intent.source_path.casefold()
+            ]
+            if intent.kind in {IntentKind.KEEP, IntentKind.UPSERT}:
+                expected_before = matching_corpus[0].get("before_digest") if matching_corpus else None
+                if intent.before_digest != expected_before:
+                    raise ValueError("materialization before digest does not match corpus evidence")
+        with self._transaction(immediate=True) as connection, self._authority_write():
+            self._commit_aggregate_inputs(
+                connection, generation_id, pass_key, next(iter(reduction_ids)), ordered_inputs
+            )
+            self._inject("after_v6_aggregate_inputs")
+            for decision in ordered_decisions:
+                content = evidence_json(decision.canonical_content())
+                existing = connection.execute(
+                    "SELECT evidence_json FROM provenance_decisions WHERE generation_id = ? AND decision_key = ?",
+                    (generation_id, decision.key),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing[0]) != content:
+                        raise ValueError("conflicting provenance decision replay")
+                    continue
+                connection.execute(
+                    "INSERT INTO provenance_decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        decision.key,
+                        decision.pass_key,
+                        decision.author_key,
+                        decision.publication_key,
+                        decision.field_name,
+                        decision.selected_value_digest,
+                        decision.rule,
+                        decision.contribution_set_digest,
+                        decision.reducer_id,
+                        decision.reducer_version,
+                        content,
+                    ),
+                )
+            self._inject("after_v6_provenance_decisions")
+            for contribution in ordered_contributions:
+                content = evidence_json(contribution.canonical_content())
+                existing = connection.execute(
+                    "SELECT evidence_json FROM provenance_contributions WHERE generation_id = ? "
+                    "AND contribution_key = ?",
+                    (generation_id, contribution.key),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing[0]) != content:
+                        raise ValueError("conflicting provenance contribution replay")
+                    continue
+                connection.execute(
+                    "INSERT INTO provenance_contributions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        contribution.key,
+                        contribution.decision_key,
+                        contribution.source_kind,
+                        contribution.provider,
+                        contribution.schema_version,
+                        contribution.request_key,
+                        contribution.observation_digest,
+                        contribution.value_digest,
+                        int(contribution.selected),
+                        contribution.rejection_reason,
+                        content,
+                    ),
+                )
+            self._inject("after_v6_provenance_contributions")
+            for intent in ordered_intents:
+                content = evidence_json(intent.canonical_content())
+                existing = connection.execute(
+                    "SELECT evidence_json FROM materialization_intents WHERE generation_id = ? AND intent_key = ?",
+                    (generation_id, intent.key),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing[0]) != content:
+                        raise ValueError("conflicting materialization intent replay")
+                    continue
+                connection.execute(
+                    "INSERT INTO materialization_intents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        intent.key,
+                        intent.pass_key,
+                        intent.author_key,
+                        intent.publication_key,
+                        intent.source_path,
+                        intent.target_path,
+                        intent.kind.value,
+                        intent.before_digest,
+                        intent.after_digest,
+                        intent.reducer_id,
+                        intent.reducer_version,
+                        intent.provenance_set_digest,
+                        content,
+                        evidence_json(intent.final_fields),
+                        intent.final_content_digest,
+                        intent.removal_reason,
+                    ),
+                )
+            self._inject("after_v6_materialization_intents")
+            for intent_key, decision_key in links:
+                existing = connection.execute(
+                    "SELECT 1 FROM intent_provenance WHERE generation_id = ? AND intent_key = ? AND decision_key = ?",
+                    (generation_id, intent_key, decision_key),
+                ).fetchone()
+                if existing is None:
+                    connection.execute(
+                        "INSERT INTO intent_provenance VALUES (?, ?, ?)",
+                        (generation_id, intent_key, decision_key),
+                    )
+            self._inject("after_v6_intent_provenance")
 
     def create_or_resume(self, spec: GenerationSpec, census: AuthorCensus) -> None:
         if spec.census.canonical_content() != census.canonical_content():
@@ -2526,6 +3740,7 @@ class Ledger:
     def closure_content(self, required_validations: Sequence[ValidationSpec] = ()) -> Mapping[str, object]:
         generation_id = self._generation_id()
         connection = self._connection
+        self._verify_v6_relationships(connection, generation_id)
         rounds = [
             {
                 "content_digest": row["content_digest"],
@@ -2633,9 +3848,21 @@ class Ledger:
                 "rounds": rounds,
                 "structural_authority_version": "1",
                 "task_outcomes": task_outcomes,
+                "task5c_evidence": self._v6_evidence_content(connection, generation_id),
                 "typed_dominance": dominance,
             }
         )
+
+    @staticmethod
+    def preflight_round_budget(max_scholar_pages: int, max_html_probe_waves: int) -> int:
+        """Reject an impossible fixed discovery budget before any claim occurs."""
+        values = (max_scholar_pages, max_html_probe_waves)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+            raise ValueError("discovery round budget values must be nonnegative integers")
+        total = PASS_WAVE_COUNT + sum(values)
+        if total > _MAX_PLAN_ROUNDS:
+            raise ValueError("discovery round budget exceeds the fixed generation maximum")
+        return total
 
     def _verify_structural_closure(self, connection: sqlite3.Connection, generation_id: str) -> None:
         sequences = [
@@ -4060,6 +5287,7 @@ class Ledger:
         with self._transaction(immediate=True) as connection:
             generation_id = self._generation_id()
             self._verify_plan_integrity(connection, generation_id)
+            self._verify_v6_relationships(connection, generation_id)
             connection.execute(
                 "INSERT INTO checkpoints(generation_id, sequence, ciphertext_digest, key_id, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -4260,6 +5488,7 @@ class Ledger:
             self._assert_task5a_authority_invariant(connection)
             generation_id = self._generation_id()
             self._verify_plan_integrity(connection, generation_id)
+            self._verify_v6_relationships(connection, generation_id)
             closure = connection.execute(
                 "SELECT plan_closed, plan_authority_mode FROM generations WHERE generation_id = ?", (generation_id,)
             ).fetchone()
@@ -4504,8 +5733,279 @@ class Ledger:
                     (generation_id,),
                 )
             ],
+            "task5c_evidence": Ledger._v6_evidence_content(connection, generation_id),
         }
         return data
+
+    @staticmethod
+    def _v6_evidence_content(connection: sqlite3.Connection, generation_id: str) -> dict[str, object]:
+        specs = {
+            "corpus_snapshots": "snapshot_digest",
+            "corpus_items": "source_path COLLATE NOCASE",
+            "publication_seed_evidence": "author_key, publication_key",
+            "aggregate_inputs": "pass_key, reduction_id, ordinal",
+            "planner_passes": "pass_key",
+            "planner_pass_expected_items": "pass_key, item_key",
+            "provenance_decisions": "decision_key",
+            "provenance_contributions": "contribution_key",
+            "materialization_intents": "intent_key",
+            "intent_provenance": "intent_key, decision_key",
+        }
+        result: dict[str, object] = {}
+        for table, order_by in specs.items():
+            values: list[dict[str, object]] = []
+            for row in connection.execute(
+                f"SELECT * FROM {table} WHERE generation_id = ? ORDER BY {order_by}",  # noqa: S608
+                (generation_id,),
+            ):
+                item = {key: value for key, value in dict(row).items() if key != "generation_id"}
+                for key, value in tuple(item.items()):
+                    if key.endswith("_json") and value is not None:
+                        try:
+                            parsed = json.loads(str(value))
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(f"corrupt Task5C evidence JSON in {table}.{key}") from exc
+                        if _canonical(parsed) != str(value):
+                            raise ValueError(f"noncanonical Task5C evidence JSON in {table}.{key}")
+                        item[key.removesuffix("_json")] = parsed
+                        del item[key]
+                Ledger._validate_v6_evidence_row(table, item)
+                values.append(item)
+            result[table] = values
+        return result
+
+    @staticmethod
+    def _verify_v6_relationships(connection: sqlite3.Connection, generation_id: str) -> None:
+        snapshot = connection.execute(
+            "SELECT snapshot_digest, item_set_digest FROM corpus_snapshots WHERE generation_id = ?",
+            (generation_id,),
+        ).fetchone()
+        if snapshot is not None:
+            enabled = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT row_key FROM authors WHERE generation_id = ? AND enabled = 1", (generation_id,)
+                )
+            }
+            items = connection.execute(
+                "SELECT author_key, evidence_digest FROM corpus_items WHERE generation_id = ? "
+                "ORDER BY source_path COLLATE NOCASE",
+                (generation_id,),
+            ).fetchall()
+            if {str(row[0]) for row in items} != enabled or evidence_digest([str(row[1]) for row in items]) != str(
+                snapshot[1]
+            ):
+                raise ValueError("corpus snapshot membership is incomplete or substituted")
+        pass_rows = connection.execute(
+            "SELECT pass_key, pass_id, receipt_json, snapshot_authority_digest, predecessor_output_digest "
+            "FROM planner_passes WHERE generation_id = ? ORDER BY rowid",
+            (generation_id,),
+        ).fetchall()
+        ordinals = [pass_for(str(row[1])).ordinal for row in pass_rows]
+        if ordinals != list(range(len(ordinals))):
+            raise ValueError("planner pass phase sequence is skipped or backward")
+        previous_output: str | None = None
+        for pass_row in pass_rows:
+            receipt = json.loads(str(pass_row[2]))
+            expected = tuple(str(value) for value in receipt["expected_items"])
+            unseen = {str(value) for value in receipt["unseen_keys"]}
+            stored = connection.execute(
+                "SELECT item_key, kind, source_digest, input_json, unseen FROM planner_pass_expected_items "
+                "WHERE generation_id = ? AND pass_key = ? "
+                "ORDER BY item_key",
+                (generation_id, str(pass_row[0])),
+            ).fetchall()
+            if (
+                tuple(str(row[0]) for row in stored) != expected
+                or {str(row[0]) for row in stored if bool(row[4])} != unseen
+            ):
+                raise ValueError("planner pass expected-item membership mismatch")
+            stored_items: list[object] = []
+            for row in stored:
+                input_value = json.loads(str(row[3]))
+                if (
+                    not isinstance(input_value, Mapping)
+                    or input_value.get("key") != row[0]
+                    or input_value.get("kind") != row[1]
+                    or input_value.get("digest") != row[2]
+                ):
+                    raise ValueError("planner pass input envelope mismatch")
+                stored_items.append(input_value)
+            historical_snapshot = _freeze_json(
+                {
+                    "generation_id": generation_id,
+                    "pass_id": str(pass_row[1]),
+                    "pass_version": receipt["pass_version"],
+                    "items": stored_items,
+                }
+            )
+            if not isinstance(historical_snapshot, Mapping):
+                raise AssertionError("historical planner snapshot must be a mapping")
+            authoritative = _execute_authoritative_pass(str(pass_row[1]), historical_snapshot)
+            if evidence_json(authoritative.canonical_content()) != evidence_json(receipt):
+                raise ValueError("planner pass receipt is not code-authoritative")
+            expected_authority = evidence_digest(
+                {
+                    "domain": _SNAPSHOT_DOMAIN_SEPARATOR,
+                    "generation_id": generation_id,
+                    "pass_id": str(pass_row[1]),
+                    "snapshot": historical_snapshot,
+                    "predecessor_output_digest": previous_output,
+                }
+            )
+            if pass_row[3] != expected_authority or pass_row[4] != previous_output:
+                raise ValueError("planner pass snapshot authority chain mismatch")
+            previous_output = authoritative.output_digest
+        duplicate_consumption = connection.execute(
+            "SELECT 1 FROM aggregate_inputs WHERE generation_id = ? GROUP BY pass_key, kind, stable_key "
+            "HAVING COUNT(DISTINCT reduction_id) > 1 LIMIT 1",
+            (generation_id,),
+        ).fetchone()
+        if duplicate_consumption is not None:
+            raise ValueError("aggregate input was consumed by multiple reductions")
+        for aggregate in connection.execute(
+            "SELECT a.pass_key, a.kind, a.stable_key, a.source_digest, a.input_json, "
+            "p.kind, p.source_digest, p.input_json FROM aggregate_inputs a "
+            "LEFT JOIN planner_pass_expected_items p ON p.generation_id = a.generation_id "
+            "AND p.pass_key = a.pass_key AND p.item_key = a.stable_key WHERE a.generation_id = ?",
+            (generation_id,),
+        ):
+            try:
+                aggregate_content = json.loads(str(aggregate[4]))
+                expected_input = json.loads(str(aggregate[7]))
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("aggregate input JSON is corrupt") from exc
+            if (
+                aggregate[5] is None
+                or aggregate[1] != aggregate[5]
+                or aggregate[3] != aggregate[6]
+                or not isinstance(aggregate_content, Mapping)
+                or evidence_json(aggregate_content.get("payload")) != evidence_json(expected_input)
+            ):
+                raise ValueError("aggregate input does not match stored pass membership")
+        for intent in connection.execute(
+            "SELECT intent_key, author_key, publication_key, provenance_set_digest, kind "
+            "FROM materialization_intents "
+            "WHERE generation_id = ? ORDER BY intent_key",
+            (generation_id,),
+        ):
+            decisions = connection.execute(
+                "SELECT p.decision_key, p.author_key, p.publication_key FROM intent_provenance i "
+                "JOIN provenance_decisions p ON p.generation_id = i.generation_id "
+                "AND p.decision_key = i.decision_key WHERE i.generation_id = ? AND i.intent_key = ? "
+                "ORDER BY p.decision_key",
+                (generation_id, str(intent[0])),
+            ).fetchall()
+            valid_remove = (
+                str(intent[4]) == IntentKind.REMOVE.value and not decisions and str(intent[3]) == evidence_digest(())
+            )
+            valid_emitted = (
+                str(intent[4]) != IntentKind.REMOVE.value
+                and bool(decisions)
+                and all((str(row[1]), str(row[2])) == (str(intent[1]), str(intent[2])) for row in decisions)
+                and evidence_digest([str(row[0]) for row in decisions]) == str(intent[3])
+            )
+            if not valid_remove and not valid_emitted:
+                raise ValueError("intent provenance relationship is incomplete or substituted")
+
+    @staticmethod
+    def _validate_v6_evidence_row(table: str, item: Mapping[str, object]) -> None:
+        evidence = item.get("evidence")
+
+        def require_matching_columns(
+            value: CorpusSnapshot
+            | CorpusItemEvidence
+            | PublicationSeedEvidence
+            | AggregateInput
+            | PlannerPassReceipt
+            | ProvenanceDecision
+            | ProvenanceContribution
+            | MaterializationIntent,
+        ) -> None:
+            canonical_content = value.canonical_content()
+            for key, expected in canonical_content.items():
+                actual = item.get(key)
+                if isinstance(expected, bool) and isinstance(actual, int):
+                    actual = bool(actual)
+                if key in item and evidence_json(expected) != evidence_json(actual):
+                    raise ValueError(f"Task5C evidence column mismatch: {key}")
+
+        try:
+            if table == "corpus_snapshots":
+                if not isinstance(evidence, Mapping):
+                    raise ValueError("missing corpus snapshot evidence")
+                snapshot_value = CorpusSnapshot(**evidence)
+                require_matching_columns(snapshot_value)
+                if snapshot_value.digest != item.get("snapshot_digest"):
+                    raise ValueError("corrupt corpus snapshot digest")
+            elif table == "corpus_items":
+                if not isinstance(evidence, Mapping):
+                    raise ValueError("missing corpus item evidence")
+                corpus_item = CorpusItemEvidence(**evidence)
+                require_matching_columns(corpus_item)
+                if corpus_item.digest != item.get("evidence_digest"):
+                    raise ValueError("corrupt corpus item digest")
+            elif table == "publication_seed_evidence":
+                if not isinstance(evidence, Mapping):
+                    raise ValueError("missing publication seed evidence")
+                content = dict(evidence)
+                content["origin_kind"] = EvidenceKind(content["origin_kind"])
+                seed_value = PublicationSeedEvidence(**content)
+                require_matching_columns(seed_value)
+                if seed_value.seed_digest != item.get("seed_digest"):
+                    raise ValueError("corrupt publication seed digest")
+            elif table == "aggregate_inputs":
+                if not isinstance(item.get("input"), Mapping):
+                    raise ValueError("missing aggregate input evidence")
+                content = dict(cast(Mapping[str, object], item["input"]))
+                content["kind"] = EvidenceKind(content["kind"])
+                aggregate_value = AggregateInput(**content)
+                require_matching_columns(aggregate_value)
+                if aggregate_value.key != item.get("input_digest"):
+                    raise ValueError("corrupt aggregate input digest")
+            elif table == "planner_passes":
+                if not isinstance(item.get("receipt"), Mapping):
+                    raise ValueError("missing planner pass receipt")
+                receipt = cast(Mapping[str, object], item["receipt"])
+                pass_value = PlannerPassReceipt(
+                    str(receipt["generation_id"]),
+                    str(receipt["pass_id"]),
+                    str(receipt["pass_version"]),
+                    str(receipt["pass_key"]),
+                    str(receipt["registry_digest"]),
+                    str(receipt["snapshot_digest"]),
+                    tuple(str(value) for value in cast(Sequence[object], receipt["expected_items"])),
+                    tuple(str(value) for value in cast(Sequence[object], receipt["unseen_keys"])),
+                    str(receipt["output_digest"]),
+                )
+                require_matching_columns(pass_value)
+                if pass_value.pass_key != item.get("pass_key") or pass_value.output_digest != item.get("output_digest"):
+                    raise ValueError("corrupt planner pass receipt")
+            elif table == "provenance_decisions":
+                if not isinstance(evidence, Mapping):
+                    raise ValueError("missing provenance decision evidence")
+                decision_value = ProvenanceDecision(**evidence)
+                require_matching_columns(decision_value)
+                if decision_value.key != item.get("decision_key"):
+                    raise ValueError("corrupt provenance decision key")
+            elif table == "provenance_contributions":
+                if not isinstance(evidence, Mapping):
+                    raise ValueError("missing provenance contribution evidence")
+                contribution_value = ProvenanceContribution(**evidence)
+                require_matching_columns(contribution_value)
+                if contribution_value.key != item.get("contribution_key"):
+                    raise ValueError("corrupt provenance contribution key")
+            elif table == "materialization_intents":
+                if not isinstance(evidence, Mapping):
+                    raise ValueError("missing materialization intent evidence")
+                content = dict(evidence)
+                content["kind"] = IntentKind(content["kind"])
+                intent_value = MaterializationIntent(**content)
+                require_matching_columns(intent_value)
+                if intent_value.key != item.get("intent_key"):
+                    raise ValueError("corrupt materialization intent key")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"corrupt Task5C evidence row in {table}") from exc
 
     def _set_manifest_probe_for_test(self, probe: Callable[[], None]) -> None:
         if not callable(probe):

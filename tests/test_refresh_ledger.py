@@ -3,13 +3,32 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
 
 import pytest
 
+import citeforge.refresh.authority as authority_module
+import citeforge.refresh.ledger as ledger_module
+from citeforge.refresh.authority import (
+    PASSES,
+    AggregateInput,
+    CorpusItemEvidence,
+    CorpusSnapshot,
+    EvidenceKind,
+    IntentKind,
+    MaterializationIntent,
+    PlannerPassReceipt,
+    ProvenanceContribution,
+    ProvenanceDecision,
+    PublicationSeedEvidence,
+    evidence_digest,
+    execute_pass,
+)
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
 from citeforge.refresh.ledger import (
     ApplicabilityReason,
@@ -22,6 +41,7 @@ from citeforge.refresh.ledger import (
     ProviderObservation,
     PublicationMetadata,
     RequestSpec,
+    StaleClaimError,
     TaskSpec,
     ValidationSpec,
     inventory_tasks,
@@ -90,6 +110,762 @@ def _open_ready(path: Path, *, enabled: bool = False) -> Ledger:
     census = _census(enabled=enabled)
     ledger.create_or_resume(_generation(census), census)
     return ledger
+
+
+def test_schema_v6_contains_exact_append_only_evidence_substrate(tmp_path: Path) -> None:
+    path = tmp_path / "v6.db"
+    with Ledger.open(path):
+        pass
+    connection = sqlite3.connect(path)
+    assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "6"
+    expected = {
+        "corpus_snapshots",
+        "corpus_items",
+        "publication_seed_evidence",
+        "aggregate_inputs",
+        "planner_passes",
+        "planner_pass_expected_items",
+        "provenance_decisions",
+        "provenance_contributions",
+        "materialization_intents",
+        "intent_provenance",
+    }
+    actual = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    }
+    assert expected <= actual
+    for table in expected:
+        triggers = connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (table,)
+        ).fetchone()[0]
+        assert triggers == 4
+    connection.close()
+
+
+def test_every_v6_authority_table_rejects_raw_insert(tmp_path: Path) -> None:
+    tables = (
+        "corpus_snapshots",
+        "corpus_items",
+        "publication_seed_evidence",
+        "aggregate_inputs",
+        "planner_passes",
+        "planner_pass_expected_items",
+        "provenance_decisions",
+        "provenance_contributions",
+        "materialization_intents",
+        "intent_provenance",
+    )
+    with _open_ready(tmp_path / "raw-authority-inserts.db") as ledger:
+        for table in tables:
+            with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+                ledger._connection.execute(
+                    f"INSERT INTO {table} (generation_id) VALUES (?)",  # noqa: S608 - fixed table matrix
+                    (ledger._generation_id(),),
+                )
+
+
+def test_authority_write_scope_does_not_leak_after_fault_rollback(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "authority-fault.db", enabled=True) as ledger:
+        generation = ledger._generation_id()
+        provisional = CorpusItemEvidence(
+            generation,
+            "a" * 64,
+            "output/ada/item.bib",
+            "author-ada",
+            "b" * 64,
+            "c" * 64,
+            (),
+            "parsed",
+        )
+        snapshot = CorpusSnapshot(
+            generation,
+            "abc123",
+            "d" * 64,
+            "e" * 64,
+            "scanner",
+            "1",
+            "parser",
+            "1",
+            evidence_digest([provisional.digest]),
+        )
+        ledger.set_fault("after_v6_corpus_snapshot")
+        with pytest.raises(FaultInjectedError, match="after_v6_corpus_snapshot"):
+            ledger.commit_corpus_snapshot(
+                snapshot,
+                [replace(provisional, snapshot_digest=snapshot.digest)],
+            )
+        assert ledger._connection.execute("SELECT COUNT(*) FROM corpus_snapshots").fetchone()[0] == 0
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            ledger._connection.execute(
+                "INSERT INTO corpus_snapshots (generation_id) VALUES (?)",
+                (generation,),
+            )
+
+
+def test_corpus_snapshot_and_seed_evidence_commit_replay_and_reject_mismatch(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "evidence.db") as ledger:
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        generation = spec.id
+        provisional = CorpusItemEvidence(
+            generation,
+            "a" * 64,
+            "output/ada/item.bib",
+            "author-ada",
+            "b" * 64,
+            "c" * 64,
+            ("pub-1", "pub-2"),
+            "parsed",
+            {"doi": "10.1/example"},
+        )
+        snapshot = CorpusSnapshot(
+            generation,
+            "abc123",
+            "d" * 64,
+            "e" * 64,
+            "scanner",
+            "1",
+            "parser",
+            "1",
+            evidence_digest([provisional.digest]),
+        )
+        item = replace(provisional, snapshot_digest=snapshot.digest)
+        assert ledger.commit_corpus_snapshot(snapshot, [item]) == snapshot.digest
+        assert ledger.commit_corpus_snapshot(snapshot, [item]) == snapshot.digest
+
+        seed = PublicationSeedEvidence(
+            generation,
+            "author-ada",
+            "pub-1",
+            EvidenceKind.CORPUS,
+            item.key,
+            item.digest,
+            item.before_digest,
+            {"doi": "10.1/example"},
+            "f" * 64,
+        )
+        seed = replace(seed, seed_digest=seed.derived_seed_digest)
+        second_seed = replace(seed, publication_key="pub-2", seed_digest="1" * 64)
+        second_seed = replace(second_seed, seed_digest=second_seed.derived_seed_digest)
+        ledger.commit_publication_seed_evidence([seed, second_seed])
+        assert ledger.load_seed_snapshot() == (seed, second_seed)
+        ledger.commit_publication_seed_evidence([seed, second_seed])
+
+        conflicting = replace(seed, baseline_digest="0" * 64, seed_digest="0" * 64)
+        with pytest.raises(ValueError, match=r"baseline|conflicting seed"):
+            ledger.commit_publication_seed_evidence([conflicting])
+
+
+def test_registered_pass_snapshots_exact_membership_and_commits_inputs_without_closure(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "pass.db") as ledger:
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        provisional = CorpusItemEvidence(
+            spec.id,
+            "a" * 64,
+            "output/ada/item.bib",
+            "author-ada",
+            "b" * 64,
+            "c" * 64,
+            ("pub-1",),
+            "parsed",
+        )
+        snapshot = CorpusSnapshot(
+            spec.id,
+            spec.base_commit,
+            "d" * 64,
+            "e" * 64,
+            "scanner",
+            "1",
+            "parser",
+            "1",
+            evidence_digest([provisional.digest]),
+        )
+        ledger.commit_corpus_snapshot(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
+
+        pass_snapshot = ledger.snapshot_for_pass("bind_corpus_seed")
+        with pytest.raises(TypeError):
+            pass_snapshot["generation_id"] = "forged"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            pass_snapshot["items"][0]["payload"]["author_key"] = "forged"  # type: ignore[index]
+        receipt = ledger.execute_registered_pass("bind_corpus_seed")
+        assert receipt == ledger.execute_registered_pass("bind_corpus_seed")
+        items = pass_snapshot["items"]
+        inputs = tuple(
+            AggregateInput(
+                spec.id,
+                receipt.pass_key,
+                "bind-seeds",
+                EvidenceKind(str(item["kind"])),
+                str(item["key"]),
+                str(item["digest"]),
+                ordinal,
+                item,
+            )
+            for ordinal, item in enumerate(items)
+        )
+        ledger.commit_aggregate_inputs(receipt.pass_key, "bind-seeds", inputs)
+        ledger.commit_aggregate_inputs(receipt.pass_key, "bind-seeds", inputs)
+        row = ledger._connection.execute(
+            "SELECT discovery_closed, plan_authority_mode, state FROM generations"
+        ).fetchone()
+        assert tuple(row) == (0, "phased", GenerationState.PLANNING.value)
+        assert not ledger.all_required_satisfied()
+
+
+def test_provenance_and_intent_commit_is_atomic_exact_and_non_materializing(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "intent.db") as ledger:
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        publication = PublicationMetadata(
+            "author-ada", "pub-1", "corpus", "A title", 2026, {"doi": "10.1/example"}, "", "monthly"
+        )
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        ledger.commit_initial_round(
+            [PlannedTask(inventory, expands_plan=True)],
+            publications=(publication,),
+            source_evidence_digest="a" * 64,
+            now=NOW,
+        )
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        ledger._connection.execute(
+            "UPDATE tasks SET state = ? WHERE generation_id = ?",
+            (TaskDisposition.NOT_APPLICABLE.value, spec.id),
+        )
+        for pass_id in tuple(PASSES)[:-1]:
+            ledger.execute_registered_pass(pass_id)
+        receipt = ledger.execute_registered_pass("merge_intents")
+        snapshot = ledger.snapshot_for_pass("merge_intents")
+        inputs = tuple(
+            AggregateInput(
+                spec.id,
+                receipt.pass_key,
+                "merge",
+                EvidenceKind(str(item["kind"])),
+                str(item["key"]),
+                str(item["digest"]),
+                ordinal,
+                item,
+            )
+            for ordinal, item in enumerate(snapshot["items"])
+        )
+        publication_digest = next(item.source_digest for item in inputs if item.kind is EvidenceKind.PUBLICATION)
+        decisions = []
+        contributions = []
+        for field_name, value in (("title", "A title"), ("year", 2026), ("doi", "10.1/example")):
+            template = ProvenanceDecision(
+                spec.id,
+                receipt.pass_key,
+                "author-ada",
+                "pub-1",
+                field_name,
+                evidence_digest(value),
+                "prefer_baseline",
+                "c" * 64,
+                "merge",
+                "1",
+            )
+            contribution = ProvenanceContribution(
+                spec.id,
+                template.key,
+                "publication",
+                None,
+                None,
+                None,
+                publication_digest,
+                evidence_digest(value),
+                True,
+                "selected",
+            )
+            decisions.append(replace(template, contribution_set_digest=evidence_digest([contribution.key])))
+            contributions.append(contribution)
+        intent = MaterializationIntent(
+            spec.id,
+            receipt.pass_key,
+            "author-ada",
+            "pub-1",
+            "output/ada/old.bib",
+            "output/ada/new.bib",
+            IntentKind.UPSERT,
+            None,
+            "d" * 64,
+            "merge",
+            "1",
+            evidence_digest(sorted(decision.key for decision in decisions)),
+            ("title", "year", "doi"),
+            "d" * 64,
+        )
+        incomplete_intent = replace(
+            intent,
+            final_fields=("title",),
+            provenance_set_digest=evidence_digest([decisions[0].key]),
+        )
+        borrowed_before = replace(intent, before_digest="e" * 64)
+        with pytest.raises(ValueError, match="before digest does not match corpus evidence"):
+            ledger.commit_provenance_and_intents(
+                receipt.pass_key,
+                inputs,
+                decisions,
+                contributions,
+                [borrowed_before],
+                [(borrowed_before.key, decision.key) for decision in decisions],
+            )
+        with pytest.raises(ValueError, match=r"exact final emitted field set|code-owned publication field set"):
+            ledger.commit_provenance_and_intents(
+                receipt.pass_key,
+                inputs,
+                [decisions[0]],
+                [contributions[0]],
+                [incomplete_intent],
+                [(incomplete_intent.key, decisions[0].key)],
+            )
+        ledger.commit_provenance_and_intents(
+            receipt.pass_key,
+            inputs,
+            decisions,
+            contributions,
+            [intent],
+            [(intent.key, decision.key) for decision in decisions],
+        )
+        ledger.commit_provenance_and_intents(
+            receipt.pass_key,
+            inputs,
+            decisions,
+            contributions,
+            [intent],
+            [(intent.key, decision.key) for decision in decisions],
+        )
+        assert ledger._connection.execute("SELECT COUNT(*) FROM materializations").fetchone()[0] == 0
+        assert ledger._connection.execute("SELECT COUNT(*) FROM validations").fetchone()[0] == 0
+        assert ledger.generation_state() is GenerationState.RUNNING
+        assert not ledger.all_required_satisfied()
+        manifest = ledger.manifest()
+        evidence = manifest.data["task5c_evidence"]
+        assert len(evidence["provenance_decisions"]) == 3
+        assert len(evidence["materialization_intents"]) == 1
+        assert ledger.closure_content()["task5c_evidence"] == evidence
+
+
+def test_provenance_preserves_distinct_requests_with_identical_observation_digest(tmp_path: Path) -> None:
+    census = _census(enabled=False)
+    with Ledger.open(tmp_path / "duplicate-observation-digest.db") as ledger:
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        publication = PublicationMetadata("author-ada", "pub-shared", "crossref", "Same title", 2026, {}, "", "monthly")
+        requests = tuple(
+            RequestSpec("crossref", "lookup", "GET", {"query": query}, ("title", "year"), "1", "2026-08", "public")
+            for query in ("first", "second")
+        )
+        tasks = tuple(TaskSpec("author-ada", "pub-shared", "crossref", "lookup", request) for request in requests)
+        ledger.commit_initial_round(
+            [PlannedTask(task) for task in tasks],
+            publications=(publication,),
+            source_evidence_digest="a" * 64,
+            now=NOW,
+        )
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        for index in range(2):
+            owner = f"worker-{index}"
+            claim = ledger.claim_due(owner, NOW, timedelta(minutes=1))
+            assert claim
+            request_claim = ledger.claim_request(claim.key, owner, NOW, timedelta(minutes=1))
+            assert request_claim
+            ledger.finish_request(
+                request_claim.key,
+                owner,
+                TaskDisposition.SUCCEEDED,
+                NOW,
+                observation=ProviderObservation("crossref", "1", {"title": "Same title", "year": 2026}),
+            )
+            ledger.finish_task(claim.key, owner, TaskDisposition.SUCCEEDED, NOW)
+
+        receipt = None
+        for pass_id in PASSES:
+            receipt = ledger.execute_registered_pass(pass_id)
+        assert receipt is not None
+        snapshot = ledger.snapshot_for_pass("merge_intents")
+        inputs = tuple(
+            AggregateInput(
+                spec.id,
+                receipt.pass_key,
+                "merge-shared",
+                EvidenceKind(str(item["kind"])),
+                str(item["key"]),
+                str(item["digest"]),
+                ordinal,
+                item,
+            )
+            for ordinal, item in enumerate(snapshot["items"])
+        )
+        publication_input = next(item for item in inputs if item.kind is EvidenceKind.PUBLICATION)
+        observation_inputs = [item for item in inputs if item.kind is EvidenceKind.OBSERVATION]
+        assert len(observation_inputs) == 2
+        assert len({item.stable_key for item in observation_inputs}) == 2
+        assert len({item.source_digest for item in observation_inputs}) == 1
+
+        decisions = []
+        contributions = []
+        for field_name, value in (("title", "Same title"), ("year", 2026)):
+            template = ProvenanceDecision(
+                spec.id,
+                receipt.pass_key,
+                "author-ada",
+                "pub-shared",
+                field_name,
+                evidence_digest(value),
+                "prefer_provider",
+                "b" * 64,
+                "merge",
+                "1",
+            )
+            field_contributions = [
+                ProvenanceContribution(
+                    spec.id,
+                    template.key,
+                    EvidenceKind.PUBLICATION.value,
+                    None,
+                    None,
+                    None,
+                    publication_input.source_digest,
+                    evidence_digest(value),
+                    False,
+                    "provider-selected",
+                )
+            ]
+            field_contributions.extend(
+                ProvenanceContribution(
+                    spec.id,
+                    template.key,
+                    EvidenceKind.OBSERVATION.value,
+                    "crossref",
+                    "1",
+                    item.stable_key.removeprefix("observation:"),
+                    item.source_digest,
+                    evidence_digest(value),
+                    index == 0,
+                    "selected" if index == 0 else "equivalent",
+                )
+                for index, item in enumerate(observation_inputs)
+            )
+            decisions.append(
+                replace(
+                    template,
+                    contribution_set_digest=evidence_digest(sorted(item.key for item in field_contributions)),
+                )
+            )
+            contributions.extend(field_contributions)
+        intent = MaterializationIntent(
+            spec.id,
+            receipt.pass_key,
+            "author-ada",
+            "pub-shared",
+            "output/ada/shared.bib",
+            "output/ada/shared.bib",
+            IntentKind.UPSERT,
+            None,
+            "c" * 64,
+            "merge",
+            "1",
+            evidence_digest(sorted(decision.key for decision in decisions)),
+            ("title", "year"),
+            "c" * 64,
+        )
+        ledger.commit_provenance_and_intents(
+            receipt.pass_key,
+            inputs,
+            decisions,
+            contributions,
+            [intent],
+            [(intent.key, decision.key) for decision in decisions],
+        )
+        stored = ledger.manifest().data["task5c_evidence"]["provenance_contributions"]
+        assert len(stored) == 6
+        assert {item["request_key"] for item in stored if item["request_key"]} == {request.key for request in requests}
+
+
+def test_remove_intent_requires_exact_path_digest_and_no_emitted_provenance(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "remove-intent.db") as ledger:
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        provisional = CorpusItemEvidence(
+            spec.id,
+            "a" * 64,
+            "output/ada/removed.bib",
+            "author-ada",
+            "b" * 64,
+            "c" * 64,
+            ("pub-remove",),
+            "parsed",
+        )
+        snapshot = CorpusSnapshot(
+            spec.id,
+            spec.base_commit,
+            "d" * 64,
+            "e" * 64,
+            "scanner",
+            "1",
+            "parser",
+            "1",
+            evidence_digest([provisional.digest]),
+        )
+        ledger.commit_corpus_snapshot(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
+        publication = PublicationMetadata(
+            "author-ada",
+            "pub-remove",
+            "corpus",
+            "Removed title",
+            2026,
+            {},
+            "output/ada/removed.bib",
+            "monthly",
+        )
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        ledger.commit_initial_round(
+            [PlannedTask(inventory, expands_plan=True)],
+            publications=(publication,),
+            source_evidence_digest="f" * 64,
+            now=NOW,
+        )
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        ledger._connection.execute(
+            "UPDATE tasks SET state = ? WHERE generation_id = ?",
+            (TaskDisposition.NOT_APPLICABLE.value, spec.id),
+        )
+        receipt = None
+        for pass_id in PASSES:
+            receipt = ledger.execute_registered_pass(pass_id)
+        assert receipt is not None
+        snapshot_for_pass = ledger.snapshot_for_pass("merge_intents")
+        inputs = tuple(
+            AggregateInput(
+                spec.id,
+                receipt.pass_key,
+                "remove",
+                EvidenceKind(str(item["kind"])),
+                str(item["key"]),
+                str(item["digest"]),
+                ordinal,
+                item,
+            )
+            for ordinal, item in enumerate(snapshot_for_pass["items"])
+        )
+        intent = MaterializationIntent(
+            spec.id,
+            receipt.pass_key,
+            "author-ada",
+            "pub-remove",
+            "output/ada/removed.bib",
+            "output/ada/removed.bib",
+            IntentKind.REMOVE,
+            "b" * 64,
+            None,
+            "merge",
+            "1",
+            evidence_digest(()),
+            (),
+            None,
+            "publication-retired",
+        )
+        borrowed = replace(
+            intent,
+            source_path="output/ada/other.bib",
+            target_path="output/ada/other.bib",
+        )
+        with pytest.raises(ValueError, match="same source and target path"):
+            replace(intent, target_path="output/ada/unrelated.bib")
+        with pytest.raises(ValueError, match=r"bound corpus path|exact corpus removal proof"):
+            ledger.commit_provenance_and_intents(receipt.pass_key, inputs, (), (), [borrowed], ())
+        ledger.commit_provenance_and_intents(receipt.pass_key, inputs, (), (), [intent], ())
+        stored = ledger.manifest().data["task5c_evidence"]["materialization_intents"]
+        assert stored[0]["removal_reason"] == "publication-retired"
+
+
+def test_fixed_wave_preflight_accepts_64_and_rejects_65_without_ledger_work(tmp_path: Path) -> None:
+    assert Ledger.preflight_round_budget(50, 5) == 64
+    with pytest.raises(ValueError, match="exceeds"):
+        Ledger.preflight_round_budget(51, 5)
+    with pytest.raises(ValueError, match="nonnegative"):
+        Ledger.preflight_round_budget(True, 1)
+    assert not (tmp_path / "ledger.db").exists()
+
+
+def test_registered_pass_rejects_membership_drift_before_receipt_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "stale-pass.db"
+    census = _census()
+    with Ledger.open(path) as ledger:
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        original = ledger_module._execute_authoritative_pass
+
+        def mutate_then_execute(pass_id: str, snapshot: Mapping[str, object]) -> PlannerPassReceipt:
+            with Ledger.open(path) as concurrent:
+                inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+                concurrent.commit_initial_round(
+                    [PlannedTask(inventory, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW
+                )
+            return original(pass_id, snapshot)
+
+        monkeypatch.setattr(ledger_module, "_execute_authoritative_pass", mutate_then_execute)
+        with pytest.raises(StaleClaimError, match="membership changed"):
+            ledger.execute_registered_pass("bind_corpus_seed")
+        assert ledger._connection.execute("SELECT COUNT(*) FROM planner_passes").fetchone()[0] == 0
+
+
+def test_malformed_raw_v6_json_is_detected_by_manifest_and_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "corrupt-v6.db"
+    census = _census()
+    ledger = Ledger.open(path)
+    spec = _generation(census)
+    ledger.create_or_resume(spec, census)
+    with ledger._authority_write():
+        ledger._connection.execute(
+            "INSERT INTO corpus_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                spec.id,
+                "a" * 64,
+                spec.base_commit,
+                "b" * 64,
+                "c" * 64,
+                "scanner",
+                "1",
+                "parser",
+                "1",
+                "d" * 64,
+                None,
+                "{",
+            ),
+        )
+    with pytest.raises(ValueError, match=r"evidence JSON|membership"):
+        ledger.manifest()
+    ledger.close()
+    with pytest.raises(ValueError, match=r"evidence JSON|membership"):
+        Ledger.open(path)
+
+
+def test_corpus_snapshot_rejects_omitted_enabled_census_author(tmp_path: Path) -> None:
+    rows = (
+        _census().rows[0],
+        replace(
+            _census().rows[0],
+            physical_row=3,
+            row_key="author-grace",
+            name="Grace",
+            normalized_name="grace",
+            scholar_id="Scholar456",
+        ),
+    )
+    census = AuthorCensus(rows)
+    with Ledger.open(tmp_path / "omitted.db") as ledger:
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        provisional = CorpusItemEvidence(
+            spec.id, "a" * 64, "output/ada/item.bib", "author-ada", "b" * 64, "c" * 64, (), "parsed"
+        )
+        snapshot = CorpusSnapshot(
+            spec.id,
+            spec.base_commit,
+            "d" * 64,
+            "e" * 64,
+            "scanner",
+            "1",
+            "parser",
+            "1",
+            evidence_digest([provisional.digest]),
+        )
+        with pytest.raises(ValueError, match="exact enabled census"):
+            ledger.commit_corpus_snapshot(snapshot, [replace(provisional, snapshot_digest=snapshot.digest)])
+
+
+def test_registered_pass_rejects_forged_zero_expected_receipt_and_skipped_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _open_ready(tmp_path / "forged-pass.db", enabled=True) as ledger:
+        inventory = inventory_tasks(_census(), {"scholar": "1"}, "2026-08")[0]
+        ledger.commit_initial_round(
+            [PlannedTask(inventory, expands_plan=True)], source_evidence_digest="a" * 64, now=NOW
+        )
+        snapshot = ledger.snapshot_for_pass("bind_corpus_seed")
+        legitimate = ledger_module._execute_authoritative_pass("bind_corpus_seed", snapshot)
+        forged = replace(legitimate, expected_items=(), unseen_keys=(), output_digest=evidence_digest(((), ())))
+        monkeypatch.setattr(authority_module, "execute_pass", lambda _pass_id, _snapshot: forged)
+        monkeypatch.setattr(authority_module, "validate_pass_receipt", lambda _pass_id, _snapshot, _receipt: forged)
+        assert ledger.execute_registered_pass("bind_corpus_seed") == legitimate
+        with pytest.raises(ValueError, match="phase sequence"):
+            ledger.execute_registered_pass("broad_discovery")
+
+
+def test_manifest_rejects_raw_internally_valid_pass_without_api_snapshot_authority(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "raw-pass.db") as ledger:
+        ledger.execute_registered_pass("bind_corpus_seed")
+        snapshot = {
+            "generation_id": ledger._generation_id(),
+            "pass_id": "known_doi",
+            "pass_version": "1",
+            "items": (),
+        }
+        receipt = execute_pass("known_doi", snapshot)
+        ledger._connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            ledger._connection.execute(
+                "INSERT INTO planner_passes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ledger._generation_id(),
+                    receipt.pass_key,
+                    receipt.pass_id,
+                    receipt.pass_version,
+                    receipt.registry_digest,
+                    receipt.snapshot_digest,
+                    receipt.output_digest,
+                    json.dumps(dict(receipt.canonical_content()), separators=(",", ":"), sort_keys=True),
+                    "0" * 64,
+                    ledger._connection.execute(
+                        "SELECT output_digest FROM planner_passes WHERE pass_id = 'bind_corpus_seed'"
+                    ).fetchone()[0],
+                ),
+            )
+
+
+def test_authority_write_permission_is_connection_local_and_survives_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "connection-local-authority.db"
+    with _open_ready(path):
+        pass
+    authority_active = Event()
+    release_authority = Event()
+
+    def hold_authority_on_independent_connection() -> None:
+        with Ledger.open(path) as first, first._authority_write():
+            authority_active.set()
+            assert release_authority.wait(timeout=5)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(hold_authority_on_independent_connection)
+        assert authority_active.wait(timeout=5)
+        second = Ledger.open(path)
+        second._connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
+        try:
+            with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+                second._connection.execute(
+                    "INSERT INTO corpus_snapshots (generation_id) VALUES (?)",
+                    (second._generation_id(),),
+                )
+        finally:
+            second.close()
+            release_authority.set()
+        holder.result(timeout=5)
+    with Ledger.open(path) as reopened:
+        reopened._connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            reopened._connection.execute(
+                "INSERT INTO corpus_snapshots (generation_id) VALUES (?)",
+                (reopened._generation_id(),),
+            )
 
 
 def _finish_request_and_task(ledger: Ledger, disposition: TaskDisposition) -> None:
@@ -351,11 +1127,24 @@ def test_recomputed_stored_fingerprint_cannot_bless_alien_schema(tmp_path: Path)
     assert path.read_bytes() == before
 
 
-def test_exact_v4_ledger_migrates_atomically_to_v5(tmp_path: Path) -> None:
+def test_exact_v4_ledger_migrates_atomically_to_v6(tmp_path: Path) -> None:
     path = tmp_path / "v4.db"
     with Ledger.open(path):
         pass
     connection = sqlite3.connect(path)
+    for table in (
+        "intent_provenance",
+        "materialization_intents",
+        "provenance_contributions",
+        "provenance_decisions",
+        "aggregate_inputs",
+        "planner_pass_expected_items",
+        "planner_passes",
+        "publication_seed_evidence",
+        "corpus_items",
+        "corpus_snapshots",
+    ):
+        connection.execute(f"DROP TABLE {table}")
     connection.execute("DROP TABLE physical_send_markers")
     objects = [
         {
@@ -379,7 +1168,67 @@ def test_exact_v4_ledger_migrates_atomically_to_v5(tmp_path: Path) -> None:
     with Ledger.open(path) as migrated:
         assert migrated.pragma("integrity_check") == "ok"
         version = migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        assert version[0] == "5"
+        assert version[0] == "6"
+
+
+def _downgrade_exact_v6_to_v5(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    for table in (
+        "intent_provenance",
+        "materialization_intents",
+        "provenance_contributions",
+        "provenance_decisions",
+        "aggregate_inputs",
+        "planner_pass_expected_items",
+        "planner_passes",
+        "publication_seed_evidence",
+        "corpus_items",
+        "corpus_snapshots",
+    ):
+        connection.execute(f"DROP TABLE {table}")
+    objects = [
+        {
+            "name": row[1],
+            "sql": " ".join(str(row[3]).split()) if row[3] is not None else None,
+            "table": row[2],
+            "type": row[0],
+        }
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    ]
+    assert _canonical_digest(objects) == "be14f7bc658bf347c5f519d0483311ff23118e0c9569f5328939b546b1fe2f46"
+    connection.execute("UPDATE schema_meta SET value = '5' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (_canonical_digest(objects),)
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_exact_v5_ledger_migrates_atomically_to_v6(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "v5.db"
+    with Ledger.open(path):
+        pass
+    _downgrade_exact_v6_to_v5(path)
+    before = path.read_bytes()
+    original = Ledger._install_schema_v6
+
+    def interrupted(self: Ledger, connection: sqlite3.Connection) -> None:
+        original(self, connection)
+        raise FaultInjectedError("migration interruption")
+
+    monkeypatch.setattr(Ledger, "_install_schema_v6", interrupted)
+    with pytest.raises(FaultInjectedError, match="interruption"):
+        Ledger.open(path)
+    assert path.read_bytes() == before
+    monkeypatch.setattr(Ledger, "_install_schema_v6", original)
+    with Ledger.open(path) as migrated:
+        assert migrated.pragma("integrity_check") == "ok"
+        assert (
+            migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
+            == "6"
+        )
 
 
 def _canonical_digest(value: object) -> str:
