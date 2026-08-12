@@ -25,7 +25,7 @@ from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
 _SCHEMA_VERSION = "4"
 _MAX_PLAN_ROUNDS = 64
-_EXPECTED_SCHEMA_FINGERPRINT = "3b94b0456caec32bfb886386f07c23f1314383fd5d490cc81f348264645540f8"
+_EXPECTED_SCHEMA_FINGERPRINT = "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
 _SATISFIED = frozenset(
     {
         TaskDisposition.SUCCEEDED,
@@ -145,6 +145,104 @@ def _contains_secret(value: object, *, key: str = "") -> bool:
         ):
             return True
     return False
+
+
+def _inventory_authority_contains_secret(value: object, *, key: str = "") -> bool:
+    """Inspect typed authority while allowing its non-secret credential-kind field."""
+    if key != "credential_kind" and key and _SECRET_KEY.search(key):
+        return True
+    if isinstance(value, Mapping):
+        return any(_inventory_authority_contains_secret(item, key=str(item_key)) for item_key, item in value.items())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_inventory_authority_contains_secret(item) for item in value)
+    return isinstance(value, str) and _contains_secret(value)
+
+
+def _inventory_authority_content(value: Mapping[str, object], generation_id: str) -> dict[str, object]:
+    """Validate the one canonical, public-data-only inventory authority schema."""
+    if _inventory_authority_contains_secret(value):
+        raise ValueError("secret material cannot be persisted in inventory authority")
+    if set(value) != {"capabilities", "generation", "planner_version", "policy", "reducer_version"}:
+        raise ValueError("invalid typed inventory authority schema")
+    if value.get("generation") != generation_id:
+        raise ValueError("typed inventory authority generation mismatch")
+    planner_version = value.get("planner_version")
+    reducer_version = value.get("reducer_version")
+    if not isinstance(planner_version, str) or not isinstance(reducer_version, str):
+        raise ValueError("invalid typed inventory authority versions")
+    _identifier(planner_version, "inventory planner version")
+    _identifier(reducer_version, "inventory reducer version")
+    raw_policy = value.get("policy")
+    if not isinstance(raw_policy, Mapping) or set(raw_policy) != {
+        "max_publications",
+        "max_scholar_pages",
+        "min_year",
+        "seed_adapter_versions",
+    }:
+        raise ValueError("invalid typed inventory authority policy")
+    for field_name in ("max_publications", "max_scholar_pages", "min_year"):
+        field_value = raw_policy.get(field_name)
+        if not isinstance(field_value, int) or isinstance(field_value, bool) or field_value < 1:
+            raise ValueError("invalid typed inventory authority policy")
+    seed_versions = raw_policy.get("seed_adapter_versions")
+    if not isinstance(seed_versions, Mapping) or set(seed_versions) != {"doi_csl", "s2"}:
+        raise ValueError("invalid typed inventory seed authority")
+    for source in ("doi_csl", "s2"):
+        version = seed_versions.get(source)
+        if not isinstance(version, str):
+            raise ValueError("invalid typed inventory seed authority")
+        _identifier(version, "inventory seed adapter version")
+    raw_capabilities = value.get("capabilities")
+    if not isinstance(raw_capabilities, Sequence) or isinstance(raw_capabilities, (str, bytes, bytearray)):
+        raise ValueError("invalid typed inventory capabilities")
+    capability_keys = {
+        "adapter_version",
+        "capability_id",
+        "credential_kind",
+        "decoder_schema",
+        "logical_source",
+        "media_type",
+        "operation",
+        "quota_scope",
+        "requested_fields",
+        "wire_provider",
+    }
+    capabilities: list[dict[str, object]] = []
+    for raw_capability in raw_capabilities:
+        if not isinstance(raw_capability, Mapping) or set(raw_capability) != capability_keys:
+            raise ValueError("invalid typed inventory capability schema")
+        capability = dict(raw_capability)
+        for field_name in capability_keys - {"requested_fields"}:
+            field_value = capability[field_name]
+            if not isinstance(field_value, str) or not field_value:
+                raise ValueError("invalid typed inventory capability value")
+        if capability["media_type"] not in {"json", "xml"} or capability["credential_kind"] not in {
+            "none",
+            "serpapi_key",
+        }:
+            raise ValueError("invalid typed inventory capability value")
+        requested_fields = capability["requested_fields"]
+        if not isinstance(requested_fields, Sequence) or isinstance(requested_fields, (str, bytes, bytearray)):
+            raise ValueError("invalid typed inventory requested fields")
+        if not all(isinstance(item, str) and item for item in requested_fields):
+            raise ValueError("invalid typed inventory requested fields")
+        capability["requested_fields"] = list(requested_fields)
+        capabilities.append(capability)
+    ids = [str(item["capability_id"]) for item in capabilities]
+    if len(ids) != len(set(ids)) or ids != sorted(ids):
+        raise ValueError("typed inventory capabilities must be unique and canonical")
+    return {
+        "capabilities": capabilities,
+        "generation": generation_id,
+        "planner_version": planner_version,
+        "policy": {
+            "max_publications": raw_policy["max_publications"],
+            "max_scholar_pages": raw_policy["max_scholar_pages"],
+            "min_year": raw_policy["min_year"],
+            "seed_adapter_versions": {"doi_csl": seed_versions["doi_csl"], "s2": seed_versions["s2"]},
+        },
+        "reducer_version": reducer_version,
+    }
 
 
 def _identifier(value: str, purpose: str) -> str:
@@ -890,6 +988,11 @@ class Ledger:
                     FOREIGN KEY (generation_id, author_key) REFERENCES authors(generation_id, row_key),
                     FOREIGN KEY (generation_id, round_key) REFERENCES plan_rounds(generation_id, round_key)
                 );
+                CREATE TABLE IF NOT EXISTS inventory_policy_authority (
+                    generation_id TEXT PRIMARY KEY REFERENCES generations(generation_id),
+                    authority_json TEXT NOT NULL,
+                    authority_digest TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS inventory_contributions (
                     generation_id TEXT NOT NULL,
                     author_key TEXT NOT NULL,
@@ -1035,6 +1138,7 @@ class Ledger:
                 "round_publications",
                 "inventory_authorities",
                 "inventory_contributions",
+                "inventory_policy_authority",
             ):
                 for operation in ("UPDATE", "DELETE"):
                     connection.execute(
@@ -1145,6 +1249,7 @@ class Ledger:
                 "next_offset",
                 "topology_digest",
             },
+            "inventory_policy_authority": {"authority_json", "authority_digest"},
         }
         for table, required in required_columns.items():
             columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -1551,8 +1656,14 @@ class Ledger:
         source_evidence_digest: str,
         publications: Sequence[PublicationMetadata] = (),
         now: datetime,
+        inventory_authority: Mapping[str, object] | None = None,
     ) -> PlanRound:
         generation_id = self._generation_id()
+        canonical_authority: dict[str, object] | None = None
+        if inventory_authority is not None:
+            canonical_authority = _inventory_authority_content(inventory_authority, generation_id)
+            if _digest(canonical_authority) != source_evidence_digest:
+                raise ValueError("initial round source and typed authority digests differ")
         if len({item.task.key for item in tasks}) != len(tasks):
             raise ValueError("duplicate initial round task")
         content = self._round_content(
@@ -1584,6 +1695,8 @@ class Ledger:
             if any(item.task.operation == "inventory" and not item.expands_plan for item in tasks):
                 raise ValueError("every mandatory inventory must expand the plan")
             epoch = self._validate_mandatory_inventory(connection, generation_id, [item.task for item in tasks])
+            if canonical_authority is not None:
+                self._validate_inventory_authority_registry(connection, generation_id, canonical_authority)
             for publication in publications:
                 self._insert_publication(connection, generation_id, publication)
             self._inject("after_initial_round_publications")
@@ -1626,6 +1739,13 @@ class Ledger:
                     _timestamp(now),
                 ),
             )
+            if canonical_authority is not None:
+                authority_json = _canonical(canonical_authority)
+                connection.execute(
+                    "INSERT INTO inventory_policy_authority(generation_id, authority_json, authority_digest) "
+                    "VALUES (?, ?, ?)",
+                    (generation_id, authority_json, _digest(json.loads(authority_json))),
+                )
             connection.executemany(
                 "INSERT INTO round_publications(generation_id, round_sequence, author_key, publication_key) "
                 "VALUES (?, 1, ?, ?)",
@@ -1768,6 +1888,80 @@ class Ledger:
         if row is None or row[0] != evidence_digest:
             raise ValueError("inventory policy or capability authority mismatch")
 
+    def assert_typed_inventory_authority(self, authority: Mapping[str, object]) -> None:
+        canonical = _canonical(_inventory_authority_content(authority, self._generation_id()))
+        stored = self._load_inventory_policy_authority(self._connection, self._generation_id())
+        if stored is None or _canonical(stored["authority"]) != canonical:
+            raise ValueError("typed inventory policy authority mismatch")
+
+    @staticmethod
+    def _validate_inventory_authority_registry(
+        connection: sqlite3.Connection, generation_id: str, authority: Mapping[str, object]
+    ) -> None:
+        from .inventory import capability_for
+
+        identity_row = connection.execute(
+            "SELECT identity_json FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        if identity_row is None:
+            raise ValueError("generation authority is missing")
+        adapter_versions = json.loads(identity_row[0])["adapter_versions"]
+        policy = cast(Mapping[str, object], authority["policy"])
+        seed_versions = cast(Mapping[str, str], policy["seed_adapter_versions"])
+        if any(adapter_versions.get(source) != seed_versions[source] for source in ("doi_csl", "s2")):
+            raise ValueError("typed inventory seed authority does not match generation")
+        sources: set[str] = set()
+        for row in connection.execute(
+            "SELECT scholar_id, dblp_id FROM authors WHERE generation_id = ? AND enabled = 1", (generation_id,)
+        ):
+            if row[0]:
+                sources.add("scholar")
+            if row[1]:
+                sources.add("dblp")
+        if any(source not in adapter_versions for source in sources):
+            raise ValueError("typed inventory source authority lacks an adapter version")
+        expected = [capability_for(source, "inventory", adapter_versions[source]) for source in sorted(sources)] + [
+            capability_for("doi_csl", "csl_lookup", seed_versions["doi_csl"]),
+            capability_for("s2", "fuzzy_search", seed_versions["s2"]),
+        ]
+        expected_content = [
+            cast(dict[str, object], _plain_json(capability.canonical_content()))
+            for capability in sorted(expected, key=lambda item: item.capability_id)
+        ]
+        if authority["capabilities"] != expected_content:
+            raise ValueError("typed inventory capabilities do not match the code-owned registry")
+        if authority["planner_version"] != "1" or authority["reducer_version"] != "1":
+            raise ValueError("typed inventory planner or reducer version is unsupported")
+
+    @staticmethod
+    def _load_inventory_policy_authority(
+        connection: sqlite3.Connection, generation_id: str
+    ) -> dict[str, object] | None:
+        row = connection.execute(
+            "SELECT authority_json, authority_digest FROM inventory_policy_authority WHERE generation_id = ?",
+            (generation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            raw = json.loads(row["authority_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("stored inventory policy authority is malformed") from exc
+        if not isinstance(raw, Mapping):
+            raise ValueError("stored inventory policy authority is malformed")
+        authority = _inventory_authority_content(raw, generation_id)
+        Ledger._validate_inventory_authority_registry(connection, generation_id, authority)
+        digest = _digest(authority)
+        initial = connection.execute(
+            "SELECT source_evidence_digest FROM plan_rounds WHERE generation_id = ? AND sequence = 1",
+            (generation_id,),
+        ).fetchone()
+        if row["authority_json"] != _canonical(authority) or row["authority_digest"] != digest:
+            raise ValueError("stored inventory policy authority integrity mismatch")
+        if initial is None or initial[0] != digest:
+            raise ValueError("stored inventory policy authority is not bound to the initial round")
+        return {"authority": authority, "authority_digest": digest}
+
     @staticmethod
     def _source_evidence(
         connection: sqlite3.Connection, generation_id: str, task_key: str
@@ -1819,7 +2013,7 @@ class Ledger:
         phase: PlanPhase = PlanPhase.DISCOVERY,
         reducer_id: str = "discovery_reducer",
         reducer_version: str = "1",
-        _inventory_authority: tuple[object, str, str, str] | None = None,
+        _inventory_authorities: Sequence[tuple[object, str, str, str]] = (),
     ) -> ReductionReceipt:
         generation_id = self._generation_id()
         source_keys = (
@@ -2020,8 +2214,7 @@ class Ledger:
                 "INSERT INTO reduction_sources(generation_id, source_task_key, reduction_digest) VALUES (?, ?, ?)",
                 [(generation_id, key, reduction_digest) for key in source_keys],
             )
-            if _inventory_authority is not None:
-                snapshot, author_key, policy_digest, semantic_digest = _inventory_authority
+            for snapshot, author_key, policy_digest, semantic_digest in _inventory_authorities:
                 from .inventory import InventorySnapshot
 
                 if not isinstance(snapshot, InventorySnapshot):
@@ -2089,70 +2282,181 @@ class Ledger:
         reducer_version: str,
         now: datetime,
     ) -> ReductionReceipt:
-        """Atomically bind live inventory evidence to publications and one seed each."""
+        """Compatibility wrapper for one-author aggregate inventory union."""
+        return self.commit_inventory_union_wave((census_row,), policy, reducer_version=reducer_version, now=now)
+
+    def commit_inventory_union_wave(
+        self,
+        census_rows: Sequence[object],
+        policy: object,
+        *,
+        reducer_version: str,
+        now: datetime,
+    ) -> ReductionReceipt:
+        """Atomically bind every ready author union in one phase wave and round."""
         from .census import AuthorCensusRow
         from .inventory import InventoryPolicy, InventorySnapshot, capability_for, reduce_author_inventory
 
-        if not isinstance(census_row, AuthorCensusRow) or not isinstance(policy, InventoryPolicy):
+        if (
+            not census_rows
+            or not all(isinstance(row, AuthorCensusRow) for row in census_rows)
+            or not isinstance(policy, InventoryPolicy)
+        ):
             raise TypeError("inventory union requires typed census and policy")
+        typed_rows = tuple(cast(AuthorCensusRow, row) for row in census_rows)
+        if len({row.row_key for row in typed_rows}) != len(typed_rows):
+            raise ValueError("inventory union wave requires unique authors")
+        durable_enabled = {
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT row_key FROM authors WHERE generation_id = ? AND enabled = 1",
+                (self._generation_id(),),
+            )
+        }
+        if {row.row_key for row in typed_rows} != durable_enabled:
+            raise ValueError("inventory union wave must include every enabled author exactly once")
         reducer_version = _identifier(reducer_version, "inventory reducer version")
-        snapshot = self.load_inventory_snapshot(census_row.row_key)
-        if not isinstance(snapshot, InventorySnapshot):
-            raise TypeError("ledger failed to reconstruct inventory snapshot")
-        reduction = reduce_author_inventory(census_row, snapshot, policy)
         generation_identity = json.loads(
             self._connection.execute(
                 "SELECT identity_json FROM generations WHERE generation_id = ?", (self._generation_id(),)
             ).fetchone()[0]
         )
-        if len(reduction.publications) != len(reduction.seed_tasks) or len(
-            {item.publication_key for item in reduction.seed_tasks}
-        ) != len(reduction.seed_tasks):
-            raise ValueError("inventory union must emit exactly one seed per publication")
-        for task in reduction.seed_tasks:
-            if task.request is None:
-                raise ValueError("inventory union seed lacks exact request")
-            capability = capability_for(task.provider, task.operation, task.request.adapter_version)
-            if (
-                task.request.requested_fields != capability.requested_fields
-                or generation_identity["adapter_versions"].get(task.provider) != task.request.adapter_version
-            ):
-                raise ValueError("inventory seed lacks one exact durable capability")
+        generation_freshness = self._connection.execute(
+            "SELECT inventory_freshness_epoch FROM generations WHERE generation_id = ?",
+            (self._generation_id(),),
+        ).fetchone()[0]
+        if (
+            policy.freshness_epoch != generation_freshness
+            or policy.doi_adapter_version != generation_identity["adapter_versions"].get("doi_csl")
+            or policy.s2_adapter_version != generation_identity["adapter_versions"].get("s2")
+        ):
+            raise ValueError("inventory union policy does not match generation authority")
+        durable_sources: set[str] = set()
+        for author in self._connection.execute(
+            "SELECT scholar_id, dblp_id FROM authors WHERE generation_id = ? AND enabled = 1",
+            (self._generation_id(),),
+        ):
+            if author[0]:
+                durable_sources.add("scholar")
+            if author[1]:
+                durable_sources.add("dblp")
+        bound_capabilities = [
+            capability_for(source, "inventory", generation_identity["adapter_versions"][source])
+            for source in sorted(durable_sources)
+        ] + [
+            capability_for("doi_csl", "csl_lookup", policy.doi_adapter_version),
+            capability_for("s2", "fuzzy_search", policy.s2_adapter_version),
+        ]
+        self.assert_typed_inventory_authority(
+            {
+                "capabilities": [
+                    dict(item.canonical_content())
+                    for item in sorted(bound_capabilities, key=lambda item: item.capability_id)
+                ],
+                "generation": self._generation_id(),
+                "planner_version": "1",
+                "policy": {
+                    "max_publications": policy.max_publications,
+                    "max_scholar_pages": policy.max_scholar_pages,
+                    "min_year": policy.min_year,
+                    "seed_adapter_versions": {
+                        "doi_csl": policy.doi_adapter_version,
+                        "s2": policy.s2_adapter_version,
+                    },
+                },
+                "reducer_version": reducer_version,
+            }
+        )
+        for census_row in typed_rows:
+            durable = self._connection.execute(
+                "SELECT physical_row, row_key, name, normalized_name, scholar_id, dblp_id, enabled, "
+                "exclusion_reason, disposition FROM authors WHERE generation_id = ? AND row_key = ?",
+                (self._generation_id(), census_row.row_key),
+            ).fetchone()
+            supplied = (
+                census_row.physical_row,
+                census_row.row_key,
+                census_row.name,
+                census_row.normalized_name,
+                census_row.scholar_id,
+                census_row.dblp_id,
+                int(census_row.enabled),
+                census_row.exclusion_reason,
+                census_row.disposition.value,
+            )
+            if durable is None or tuple(durable) != supplied:
+                raise ValueError("inventory union census row substitution rejected")
         policy_digest = _digest(
             {
+                "doi_adapter_version": policy.doi_adapter_version,
+                "freshness_epoch": policy.freshness_epoch,
                 "max_publications": policy.max_publications,
                 "max_scholar_pages": policy.max_scholar_pages,
                 "min_year": policy.min_year,
+                "s2_adapter_version": policy.s2_adapter_version,
             }
         )
-        semantic_digest = _digest(
-            {
-                "policy_digest": policy_digest,
-                "publications": [self._publication_content(item) for item in reduction.publications],
-                "reducer_version": reducer_version,
-                "seed_tasks": [item.identity_digest for item in reduction.seed_tasks],
-                "snapshot_digest": snapshot.digest,
-            }
-        )
-        existing = self._connection.execute(
-            "SELECT reduction_digest, round_key FROM inventory_authorities WHERE generation_id = ? "
-            "AND author_key = ? AND reducer_version = ?",
-            (self._generation_id(), census_row.row_key, reducer_version),
-        ).fetchone()
-        if existing is not None:
-            if existing[0] != semantic_digest:
-                raise ValueError("conflicting inventory union replay")
+        authorities = []
+        publications: list[PublicationMetadata] = []
+        seed_tasks: list[TaskSpec] = []
+        evidence_by_task: dict[str, str] = {}
+        existing_rounds = set()
+        existing_count = 0
+        for census_row in sorted(typed_rows, key=lambda item: item.row_key):
+            snapshot = self.load_inventory_snapshot(census_row.row_key)
+            if not isinstance(snapshot, InventorySnapshot):
+                raise TypeError("ledger failed to reconstruct inventory snapshot")
+            reduction = reduce_author_inventory(census_row, snapshot, policy)
+            if len(reduction.publications) != len(reduction.seed_tasks) or len(
+                {item.publication_key for item in reduction.seed_tasks}
+            ) != len(reduction.seed_tasks):
+                raise ValueError("inventory union must emit exactly one seed per publication")
+            for task in reduction.seed_tasks:
+                if task.request is None:
+                    raise ValueError("inventory union seed lacks exact request")
+                capability = capability_for(task.provider, task.operation, task.request.adapter_version)
+                if (
+                    task.request.requested_fields != capability.requested_fields
+                    or generation_identity["adapter_versions"].get(task.provider) != task.request.adapter_version
+                ):
+                    raise ValueError("inventory seed lacks one exact durable capability")
+            semantic_digest = _digest(
+                {
+                    "policy_digest": policy_digest,
+                    "publications": [self._publication_content(item) for item in reduction.publications],
+                    "reducer_version": reducer_version,
+                    "seed_tasks": [item.identity_digest for item in reduction.seed_tasks],
+                    "snapshot_digest": snapshot.digest,
+                }
+            )
+            existing = self._connection.execute(
+                "SELECT reduction_digest, round_key FROM inventory_authorities WHERE generation_id = ? "
+                "AND author_key = ? AND reducer_version = ?",
+                (self._generation_id(), census_row.row_key, reducer_version),
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != semantic_digest:
+                    raise ValueError("conflicting inventory union replay")
+                existing_rounds.add(str(existing[1]))
+                existing_count += 1
+            authorities.append((snapshot, census_row.row_key, policy_digest, semantic_digest))
+            publications.extend(reduction.publications)
+            seed_tasks.extend(reduction.seed_tasks)
+            terminal = [
+                item for item in snapshot.contributions if item.logical_source != "scholar" or item.next_offset is None
+            ]
+            evidence_by_task.update({item.task_key: item.observation_digest for item in terminal})
+        if existing_rounds:
+            if len(existing_rounds) != 1 or existing_count != len(typed_rows):
+                raise ValueError("partial or conflicting inventory union wave replay")
+            round_key = next(iter(existing_rounds))
             receipt = self._connection.execute(
                 "SELECT reduction_digest FROM reduction_receipts WHERE generation_id = ? AND round_key = ?",
-                (self._generation_id(), existing[1]),
+                (self._generation_id(), round_key),
             ).fetchone()
             if receipt is None:
                 raise ValueError("inventory authority lacks reduction receipt")
             return self._load_receipt(self._connection, self._generation_id(), str(receipt[0]))
-        terminal_contributions = [
-            item for item in snapshot.contributions if item.logical_source != "scholar" or item.next_offset is None
-        ]
-        evidence_by_task = {item.task_key: item.observation_digest for item in terminal_contributions}
         source_keys = tuple(sorted(evidence_by_task))
         source_digest = (
             evidence_by_task[source_keys[0]]
@@ -2162,13 +2466,13 @@ class Ledger:
         return self.commit_reduction(
             source_keys,
             source_evidence_digest=source_digest,
-            publications=reduction.publications,
-            tasks=tuple(PlannedTask(task, expands_plan=True) for task in reduction.seed_tasks),
+            publications=tuple(publications),
+            tasks=tuple(PlannedTask(task, expands_plan=True) for task in seed_tasks),
             now=now,
             phase=PlanPhase.DISCOVERY,
             reducer_id="inventory_union",
             reducer_version=reducer_version,
-            _inventory_authority=(snapshot, census_row.row_key, policy_digest, semantic_digest),
+            _inventory_authorities=tuple(authorities),
         )
 
     @staticmethod
@@ -2283,10 +2587,12 @@ class Ledger:
         freshness = connection.execute(
             "SELECT inventory_freshness_epoch FROM generations WHERE generation_id = ?", (generation_id,)
         ).fetchone()[0]
+        inventory_policy_authority = self._load_inventory_policy_authority(connection, generation_id)
         return MappingProxyType(
             {
                 "generation_id": generation_id,
                 "inventory_freshness_epoch": freshness,
+                "inventory_policy_authority": inventory_policy_authority,
                 "obligations": obligations,
                 "observations": observations,
                 "publications": publications,
@@ -2845,6 +3151,70 @@ class Ledger:
                 raise ValueError("claimed request identity mismatch")
             return task
 
+    def validate_claimed_inventory_request(self, task: TaskSpec) -> None:
+        """Fail closed before wire construction when a claimed inventory is not census-authorized."""
+        from .inventory import capability_for
+
+        if task.operation != "inventory" or task.provider not in {"scholar", "dblp"} or task.request is None:
+            raise ValueError("claim is not a canonical inventory request")
+        generation_id = self._generation_id()
+        author = self._connection.execute(
+            "SELECT scholar_id, dblp_id, enabled FROM authors WHERE generation_id = ? AND row_key = ?",
+            (generation_id, task.author_key),
+        ).fetchone()
+        generation = self._connection.execute(
+            "SELECT identity_json, inventory_freshness_epoch FROM generations WHERE generation_id = ?",
+            (generation_id,),
+        ).fetchone()
+        if author is None or not author[2] or generation is None:
+            raise ValueError("claimed inventory author is not enabled in the durable census")
+        authority_record = self._load_inventory_policy_authority(self._connection, generation_id)
+        if authority_record is None:
+            raise ValueError("claimed inventory lacks typed policy authority")
+        authority = cast(Mapping[str, object], authority_record["authority"])
+        policy = cast(Mapping[str, object], authority["policy"])
+        identity = json.loads(generation[0])
+        request = task.request
+        capability = capability_for(task.provider, "inventory", request.adapter_version)
+        registered = cast(Sequence[Mapping[str, object]], authority["capabilities"])
+        canonical_capability = cast(dict[str, object], _plain_json(capability.canonical_content()))
+        if (
+            request.provider != task.provider
+            or request.operation != "inventory"
+            or request.adapter_version != identity["adapter_versions"].get(task.provider)
+            or request.freshness_epoch != generation[1]
+            or request.requested_fields != capability.requested_fields
+            or request.quota_scope != capability.quota_scope
+            or canonical_capability not in registered
+        ):
+            raise ValueError("claimed inventory request does not match durable capability authority")
+        payload = dict(request.normalized_payload)
+        expected_identifier = author[0] if task.provider == "scholar" else author[1]
+        expected_keys = (
+            {"author_key", "profile_id", "start", "num", "sort", "min_year"}
+            if task.provider == "scholar"
+            else {"author_key", "pid"}
+        )
+        identifier = payload.get("profile_id") if task.provider == "scholar" else payload.get("pid")
+        if (
+            set(payload) != expected_keys
+            or payload.get("author_key") != task.author_key
+            or identifier != expected_identifier
+        ):
+            raise ValueError("claimed inventory request substitutes durable author identity")
+        if task.provider == "scholar":
+            start = payload.get("start")
+            if (
+                not isinstance(start, int)
+                or isinstance(start, bool)
+                or start < 0
+                or start % 100
+                or payload.get("num") != 100
+                or payload.get("sort") != "pubdate"
+                or payload.get("min_year") != policy["min_year"]
+            ):
+                raise ValueError("claimed Scholar request does not match durable policy authority")
+
     def load_inventory_snapshot(self, author_key: str) -> object:
         """Rebuild immutable inventory evidence exclusively from durable live rows."""
         from .inventory import InventorySnapshot, SnapshotContribution, capability_for
@@ -2857,6 +3227,14 @@ class Ledger:
         ).fetchone()
         if author is None:
             raise ValueError("inventory snapshot requires an enabled census author")
+        generation = self._connection.execute(
+            "SELECT identity_json, inventory_freshness_epoch FROM generations WHERE generation_id = ?",
+            (generation_id,),
+        ).fetchone()
+        if generation is None or generation[1] is None:
+            raise ValueError("inventory snapshot lacks generation authority")
+        adapter_versions = json.loads(generation[0])["adapter_versions"]
+        freshness_epoch = str(generation[1])
         expected_sources = {name for name, value in (("scholar", author[0]), ("dblp", author[1])) if value}
         rows = self._connection.execute(
             "SELECT task.task_key, task.provider, task.operation, task.request_key, task.state, "
@@ -2872,8 +3250,11 @@ class Ledger:
         ).fetchall()
         if {str(row[1]) for row in rows} != expected_sources:
             raise ValueError("inventory snapshot is missing an applicable source")
+        if sum(row[1] == "dblp" for row in rows) > 1:
+            raise ValueError("inventory snapshot has duplicate DBLP contributions")
         contributions = []
         scholar_topology: dict[int, int | None] = {}
+        scholar_min_year: int | None = None
         for row in rows:
             disposition = TaskDisposition(str(row[4]))
             if disposition not in {TaskDisposition.SUCCEEDED, TaskDisposition.CONFIRMED_EMPTY}:
@@ -2885,14 +3266,38 @@ class Ledger:
                 raise ValueError("inventory observation digest mismatch")
             request = RequestSpec(**json.loads(row[5]))
             capability = capability_for(str(row[1]), "inventory", request.adapter_version)
-            if request.requested_fields != capability.requested_fields or request.quota_scope != capability.quota_scope:
+            payload = dict(request.normalized_payload)
+            expected_identifier = author[0] if row[1] == "scholar" else author[1]
+            identifier_matches = (
+                payload.get("profile_id") == expected_identifier
+                if row[1] == "scholar"
+                else payload.get("pid") == expected_identifier
+            )
+            if (
+                request.requested_fields != capability.requested_fields
+                or request.quota_scope != capability.quota_scope
+                or adapter_versions.get(str(row[1])) != request.adapter_version
+                or request.freshness_epoch != freshness_epoch
+                or payload.get("author_key") != author_key
+                or not identifier_matches
+            ):
                 raise ValueError("inventory request capability mismatch")
             if row[8] != capability.decoder_schema:
                 raise ValueError("inventory observation decoder schema mismatch")
-            payload = dict(request.normalized_payload)
             start_value = payload.get("start")
             if row[1] == "scholar" and (isinstance(start_value, bool) or not isinstance(start_value, int)):
                 raise ValueError("Scholar inventory offset is malformed")
+            if row[1] == "scholar":
+                page_min_year = payload.get("min_year")
+                if (
+                    payload.get("num") != 100
+                    or payload.get("sort") != "pubdate"
+                    or isinstance(page_min_year, bool)
+                    or not isinstance(page_min_year, int)
+                    or (scholar_min_year is not None and scholar_min_year != page_min_year)
+                ):
+                    raise ValueError("Scholar inventory request policy mismatch")
+                scholar_min_year = page_min_year
             offset = start_value if isinstance(start_value, int) else None
             next_offset = response.get("next_offset") if row[1] == "scholar" else None
             if next_offset is not None and not isinstance(next_offset, int):
@@ -2949,11 +3354,15 @@ class Ledger:
         grouped: dict[str, list[SnapshotContribution]] = {}
         rows = self._connection.execute(
             "SELECT task.author_key, task.task_key, task.request_key, request.identity_json, "
-            "observation.response_json, observation.response_digest FROM tasks AS task "
+            "observation.response_json, observation.response_digest, observation.schema_version, "
+            "observation.disposition, author.scholar_id, generation.identity_json, "
+            "generation.inventory_freshness_epoch FROM tasks AS task "
             "JOIN plan_obligations AS obligation ON obligation.generation_id = task.generation_id "
             "AND obligation.task_key = task.task_key JOIN requests AS request ON request.generation_id = "
             "task.generation_id AND request.request_key = task.request_key JOIN observations AS observation ON "
             "observation.generation_id = task.generation_id AND observation.request_key = task.request_key "
+            "JOIN authors AS author ON author.generation_id = task.generation_id AND author.row_key = task.author_key "
+            "JOIN generations AS generation ON generation.generation_id = task.generation_id "
             "LEFT JOIN reduction_sources AS consumed ON consumed.generation_id = task.generation_id "
             "AND consumed.source_task_key = task.task_key WHERE task.generation_id = ? AND task.provider = 'scholar' "
             "AND task.operation = 'inventory' AND consumed.source_task_key IS NULL AND task.state = ?",
@@ -2961,12 +3370,34 @@ class Ledger:
         ).fetchall()
         for row in rows:
             response = json.loads(row[4])
+            if (
+                row[7] != TaskDisposition.SUCCEEDED.value
+                or _digest(response) != row[5]
+                or not isinstance(row[8], str)
+                or not isinstance(row[9], str)
+            ):
+                raise ValueError("Scholar page observation authority is malformed")
             next_offset = response.get("next_offset")
             if next_offset is None:
                 continue
             request = RequestSpec(**json.loads(row[3]))
             capability = capability_for("scholar", "inventory", request.adapter_version)
             payload = dict(request.normalized_payload)
+            generation_adapters = json.loads(row[9])["adapter_versions"]
+            if (
+                row[6] != capability.decoder_schema
+                or request.requested_fields != capability.requested_fields
+                or request.quota_scope != capability.quota_scope
+                or request.adapter_version != generation_adapters.get("scholar")
+                or request.freshness_epoch != row[10]
+                or payload.get("author_key") != row[0]
+                or payload.get("profile_id") != row[8]
+                or payload.get("num") != 100
+                or payload.get("sort") != "pubdate"
+                or isinstance(payload.get("min_year"), bool)
+                or not isinstance(payload.get("min_year"), int)
+            ):
+                raise ValueError("Scholar page request authority mismatch")
             topology = _digest({"offset": payload["start"], "next_offset": next_offset, "task_key": row[1]})
             start = payload.get("start")
             if isinstance(start, bool) or not isinstance(start, int) or not isinstance(next_offset, int):
@@ -3595,6 +4026,7 @@ class Ledger:
                 )
             ]
             requests.append(item)
+        inventory_policy_authority = Ledger._load_inventory_policy_authority(connection, generation_id)
         data: dict[str, object] = {
             "attempts": [
                 {
@@ -3644,6 +4076,7 @@ class Ledger:
                 **{key: value for key, value in dict(generation).items() if key != "identity_json"},
                 "identity": json.loads(generation["identity_json"]),
             },
+            "inventory_policy_authority": inventory_policy_authority,
             "publications": [
                 dict(row)
                 for row in connection.execute(

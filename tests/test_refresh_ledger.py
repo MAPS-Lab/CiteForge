@@ -203,6 +203,46 @@ def test_initial_round_exact_replay_and_conflict(tmp_path: Path) -> None:
             ledger.commit_initial_round(declared, source_evidence_digest="b" * 64, now=NOW)
 
 
+def test_typed_inventory_authority_is_bound_and_secret_safe(tmp_path: Path) -> None:
+    census = _census()
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        ledger.create_or_resume(_generation(census), census)
+        inventory = inventory_tasks(census, {"scholar": "1"}, "2026-08")[0]
+        declared = [PlannedTask(inventory, expands_plan=True)]
+        authority = {"api_key": "wire-secret"}
+        authority_digest = hashlib.sha256(
+            json.dumps(authority, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+        with pytest.raises(ValueError, match="secret"):
+            ledger.commit_initial_round(
+                declared,
+                source_evidence_digest=authority_digest,
+                inventory_authority=authority,
+                now=NOW,
+            )
+        assert "wire-secret" not in (tmp_path / "ledger.db").read_bytes().decode(errors="ignore")
+        valid_shape = {
+            "capabilities": [],
+            "generation": _generation(census).id,
+            "planner_version": "1",
+            "policy": {
+                "max_publications": 1000,
+                "max_scholar_pages": 10,
+                "min_year": 2020,
+                "seed_adapter_versions": {"doi_csl": "1", "s2": "1"},
+            },
+            "reducer_version": "1",
+        }
+        with pytest.raises(ValueError, match="authority digest"):
+            ledger.commit_initial_round(
+                declared,
+                source_evidence_digest="a" * 64,
+                inventory_authority=valid_shape,
+                now=NOW,
+            )
+        assert ledger.plan_status().revision == 0
+
+
 def test_initial_round_rejects_missing_or_forged_mandatory_inventory(tmp_path: Path) -> None:
     census = _census()
     with Ledger.open(tmp_path / "ledger.db") as ledger:

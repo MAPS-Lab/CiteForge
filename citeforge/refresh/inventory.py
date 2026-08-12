@@ -279,7 +279,7 @@ def _strict_object(body: bytes) -> dict[str, object]:
         parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid constant {value}")),
     )
     if not isinstance(value, dict):
-        raise ValueError("inventory response must be an object")
+        raise SchemaChangedError("inventory response must be an object")
     return value
 
 
@@ -387,16 +387,18 @@ def decode_scholar_inventory(
         try:
             candidate = int(query["cstart"][0])
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise ValueError("Scholar continuation lacks trusted offset") from exc
+            raise SchemaChangedError("Scholar continuation lacks trusted offset") from exc
         if (
             parsed.scheme != "https"
             or parsed.hostname not in {"serpapi.com", "www.serpapi.com"}
             or parsed.path not in {"/search", "/search.json"}
+            or query.get("cstart") != [str(candidate)]
             or candidate != offset + page_size
             or query.get("engine") != ["google_scholar_author"]
             or query.get("author_id") != [profile_id]
             or query.get("num", [str(page_size)]) != [str(page_size)]
             or query.get("sort", ["pubdate"]) != ["pubdate"]
+            or any(len(query.get(name, [])) > 1 for name in ("api_key", "hl", "num", "sort"))
             or not set(query) <= {"api_key", "author_id", "cstart", "engine", "hl", "num", "sort"}
         ):
             raise SchemaChangedError("Scholar continuation identity is inconsistent")
@@ -413,7 +415,7 @@ def decode_scholar_inventory(
 
 
 _DBLP_TAGS = frozenset(
-    {"article", "inproceedings", "incollection", "book", "proceedings", "phdthesis", "mastersthesis"}
+    {"article", "inproceedings", "incollection", "book", "data", "proceedings", "phdthesis", "mastersthesis"}
 )
 _YEAR = re.compile(r"\d{4}")
 
@@ -426,9 +428,21 @@ def decode_dblp_inventory(body: bytes, pid: str) -> tuple[Mapping[str, object], 
         root = safe_xml_fromstring(body)
     except Exception as exc:
         raise ValueError("DBLP returned unsafe or malformed XML") from exc
-    exact_pid = root.attrib.get("pid") == pid or root.attrib.get("key") == f"homepages/{pid}"
+    pid_evidence = root.attrib.get("pid")
+    key_evidence = root.attrib.get("key")
+    exact_pid = (
+        (pid_evidence is not None or key_evidence is not None)
+        and (pid_evidence is None or pid_evidence == pid)
+        and (key_evidence is None or key_evidence == f"homepages/{pid}")
+    )
     if root.tag != "dblpperson" or not exact_pid:
         raise SchemaChangedError("DBLP root or PID mismatch")
+    count_evidence = root.attrib.get("n")
+    if count_evidence is not None and (not count_evidence.isdigit() or int(count_evidence) < 0):
+        raise SchemaChangedError("DBLP root publication count is malformed")
+    record_wrappers = [child for child in root if child.tag == "r"]
+    if count_evidence is not None and int(count_evidence) != len(record_wrappers):
+        raise SchemaChangedError("DBLP root publication count is incomplete")
     articles = []
     saw_person = False
     for wrapper in root:
@@ -462,7 +476,13 @@ def decode_dblp_inventory(body: bytes, pid: str) -> tuple[Mapping[str, object], 
                 "authors": [name for name in authors if name],
                 "doi": doi or "",
                 "editors": [name for name in editors if name],
-                "publication": (record.findtext("journal") or record.findtext("booktitle") or "").strip(),
+                "publication": (
+                    record.findtext("journal")
+                    or record.findtext("booktitle")
+                    or record.findtext("publisher")
+                    or record.findtext("school")
+                    or ""
+                ).strip(),
                 "record_key": record.attrib["key"],
                 "record_type": record.tag,
                 "title": title,
@@ -483,6 +503,7 @@ def build_claimed_inventory_operation(
 ) -> SendOperation:
     """Reconstruct a claimed logical inventory and add wire-only credentials."""
     task = ledger.reconstruct_claimed_task(claim, now)
+    ledger.validate_claimed_inventory_request(task)
     if task.request is None:
         raise ValueError("claimed inventory lacks exact request")
     request = task.request
@@ -499,6 +520,13 @@ def build_claimed_inventory_operation(
             raise ValueError("Scholar capability has invalid physical transport binding")
         if not credentials.serpapi_key:
             raise ValueError("missing SerpAPI credential")
+        if (
+            payload.get("num") != 100
+            or payload.get("sort") != "pubdate"
+            or isinstance(payload.get("min_year"), bool)
+            or not isinstance(payload.get("min_year"), int)
+        ):
+            raise ValueError("Scholar request identity is not canonical")
         query = {
             "api_key": credentials.serpapi_key,
             "author_id": payload["profile_id"],
@@ -515,7 +543,7 @@ def build_claimed_inventory_operation(
                 str(payload["profile_id"]),
                 _integer(payload["start"], "Scholar start"),
                 _integer(payload["num"], "Scholar page size"),
-                policy.min_year,
+                _integer(payload["min_year"], "Scholar minimum year"),
             )
 
     elif capability.logical_source == "dblp":

@@ -51,7 +51,8 @@ class RefreshEngine:
             return RunResult(RunStatus.INVALID_CONFIGURATION, spec.id, detail=str(exc))
 
         status = self._ledger.plan_status()
-        digest = self._authority_digest(spec, capabilities)
+        authority = self._authority_content(spec, capabilities)
+        digest = hashlib.sha256(json.dumps(authority, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
         if status.revision == 0:
             epoch = datetime.now(timezone.utc).strftime("%Y-%m")
             tasks = []
@@ -63,7 +64,12 @@ class RefreshEngine:
                     tasks.append(
                         PlannedTask(build_inventory_task(row, capability, epoch, self._policy), expands_plan=True)
                     )
-            self._ledger.commit_initial_round(tasks, source_evidence_digest=digest, now=datetime.now(timezone.utc))
+            self._ledger.commit_initial_round(
+                tasks,
+                source_evidence_digest=digest,
+                now=datetime.now(timezone.utc),
+                inventory_authority=authority,
+            )
             self._ledger.transition_generation(
                 GenerationState.PLANNING, GenerationState.RUNNING, datetime.now(timezone.utc)
             )
@@ -91,13 +97,24 @@ class RefreshEngine:
                 claim = self._ledger.claim_due(self._owner, datetime.now(timezone.utc), timedelta(minutes=5))
                 if claim is None:
                     break
-                operation = build_claimed_inventory_operation(
-                    self._ledger,
-                    claim,
-                    credentials,
-                    self._policy,
-                    now=datetime.now(timezone.utc),
-                )
+                try:
+                    operation = build_claimed_inventory_operation(
+                        self._ledger,
+                        claim,
+                        credentials,
+                        self._policy,
+                        now=datetime.now(timezone.utc),
+                    )
+                except ValueError as exc:
+                    state = self._ledger.generation_state()
+                    if state in {GenerationState.RUNNING, GenerationState.WAITING}:
+                        self._ledger.transition_generation(
+                            state,
+                            GenerationState.BLOCKED,
+                            datetime.now(timezone.utc),
+                            blocking_reason="claimed inventory failed durable authority validation",
+                        )
+                    return RunResult(RunStatus.BLOCKED, spec.id, completed_tasks=completed, detail=str(exc))
                 self._transport.send(operation, task_claim=claim)
                 completed += 1
             try:
@@ -207,8 +224,12 @@ class RefreshEngine:
             spec.adapter_versions["s2"],
             generation["inventory_freshness_epoch"],
         )
-        for row in spec.census.enabled_rows:
-            self._ledger.commit_inventory_union(row, policy, reducer_version="1", now=datetime.now(timezone.utc))
+        self._ledger.commit_inventory_union_wave(
+            spec.census.enabled_rows,
+            policy,
+            reducer_version="1",
+            now=datetime.now(timezone.utc),
+        )
 
     def _inventory_work_open(self) -> bool:
         tasks = _manifest_rows(self._ledger.manifest().data.get("tasks"), "tasks")
@@ -216,8 +237,8 @@ class RefreshEngine:
             item["operation"] == "inventory" and item["state"] not in {"succeeded", "confirmed_empty"} for item in tasks
         )
 
-    def _authority_digest(self, spec: GenerationSpec, capabilities: dict[str, AdapterCapability]) -> str:
-        content = {
+    def _authority_content(self, spec: GenerationSpec, capabilities: dict[str, AdapterCapability]) -> dict[str, object]:
+        return {
             "capabilities": [
                 dict(item.canonical_content())
                 for item in sorted(capabilities.values(), key=lambda value: value.capability_id)
@@ -235,7 +256,6 @@ class RefreshEngine:
             "planner_version": "1",
             "reducer_version": "1",
         }
-        return hashlib.sha256(json.dumps(content, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
 
     @staticmethod
     def _preflight(spec: GenerationSpec, credentials: RefreshCredentials) -> dict[str, AdapterCapability]:

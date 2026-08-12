@@ -96,6 +96,10 @@ def test_scholar_decoder_is_strict_and_derives_trusted_next_offset() -> None:
     malformed["search_parameters"]["cstart"] = True
     with pytest.raises(ValueError, match="offset"):
         decode_scholar_inventory(json.dumps(malformed).encode(), "Scholar123", 0, 100, 2020)
+    forked = json.loads(body)
+    forked["serpapi_pagination"]["next"] += "&cstart=200"
+    with pytest.raises(ValueError, match="identity"):
+        decode_scholar_inventory(json.dumps(forked).encode(), "Scholar123", 0, 100, 2020)
 
 
 def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> None:
@@ -110,6 +114,8 @@ def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> No
     assert normalized["articles"][0]["record_key"] == "journals/x/1"
     with pytest.raises(ValueError, match="PID"):
         decode_dblp_inventory(xml, "99/wrong")
+    with pytest.raises(ValueError, match="PID"):
+        decode_dblp_inventory(b'<dblpperson pid="99/999" key="homepages/12/345"/>', "12/345")
     with pytest.raises(ValueError):
         decode_dblp_inventory(b'<!DOCTYPE x [<!ENTITY y SYSTEM "file:///etc/passwd">]><dblpperson/>', "12/345")
     with pytest.raises(ValueError, match="forbidden"):
@@ -118,10 +124,19 @@ def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> No
             b'<dblpperson pid="12/345">&xxe;</dblpperson>',
             "12/345",
         )
+    with pytest.raises(ValueError, match="count"):
+        decode_dblp_inventory(b'<dblpperson pid="12/345" n="1"/>', "12/345")
     relative = b"""<dblpperson key="homepages/12/345"><r><article key="conf/x/one">
     <title>Relative URL</title><year>2024</year><url>db/conf/x/one.html</url></article></r></dblpperson>"""
     relative_normalized, _ = decode_dblp_inventory(relative, "12/345")
     assert relative_normalized["articles"][0]["url"] == "https://dblp.org/rec/conf/x/one"
+    data_xml = b"""<dblpperson key="homepages/35/5521"><r><data key="data/11/AdjeiZHSN25">
+    <author>Malcolm Heywood</author><title>Benchmark Dataset</title><year>2025</year>
+    <publisher>IEEE DataPort</publisher><url>db/data/11/AdjeiZHSN25.html</url></data></r></dblpperson>"""
+    data_normalized, _ = decode_dblp_inventory(data_xml, "35/5521")
+    assert data_normalized["articles"][0]["record_type"] == "data"
+    assert data_normalized["articles"][0]["publication"] == "IEEE DataPort"
+    assert data_normalized["articles"][0]["url"] == "https://dblp.org/rec/data/11/AdjeiZHSN25"
 
 
 def test_pure_union_is_order_independent_and_seeds_every_publication() -> None:
