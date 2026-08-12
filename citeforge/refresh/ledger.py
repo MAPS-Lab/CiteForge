@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -57,6 +57,24 @@ _FAULT_POINTS = frozenset(
         "after_manifest_commit",
     }
 )
+_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,255}")
+_PROVIDER_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+_FIELD_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,127}")
+_HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_LEGAL_GENERATION_TRANSITIONS = {
+    GenerationState.PLANNING: frozenset({GenerationState.RUNNING, GenerationState.SUPERSEDED}),
+    GenerationState.RUNNING: frozenset(
+        {GenerationState.WAITING, GenerationState.BLOCKED, GenerationState.VALIDATING, GenerationState.SUPERSEDED}
+    ),
+    GenerationState.WAITING: frozenset({GenerationState.RUNNING, GenerationState.BLOCKED, GenerationState.SUPERSEDED}),
+    GenerationState.BLOCKED: frozenset({GenerationState.RUNNING, GenerationState.SUPERSEDED}),
+    GenerationState.VALIDATING: frozenset(
+        {GenerationState.COMPLETE, GenerationState.BLOCKED, GenerationState.SUPERSEDED}
+    ),
+    GenerationState.COMPLETE: frozenset({GenerationState.PUBLISHED, GenerationState.SUPERSEDED}),
+    GenerationState.PUBLISHED: frozenset(),
+    GenerationState.SUPERSEDED: frozenset(),
+}
 
 
 class FaultInjectedError(RuntimeError):
@@ -93,9 +111,35 @@ def _contains_secret(value: object, *, key: str = "") -> bool:
     return False
 
 
-def _safe_text(value: str) -> str:
+def _identifier(value: str, purpose: str) -> str:
+    if _SECRET_KEY.search(value) or _contains_secret(value):
+        raise ValueError(f"secret material cannot be persisted as {purpose}")
+    if not _IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(f"invalid {purpose}")
+    return value
+
+
+def _provider(value: str) -> str:
+    if _SECRET_KEY.search(value) or _contains_secret(value):
+        raise ValueError("secret material cannot be persisted as provider")
+    if not _PROVIDER_RE.fullmatch(value):
+        raise ValueError("invalid provider")
+    return value
+
+
+def _free_text(value: str, purpose: str, *, required: bool = False) -> str:
+    if required and not value.strip():
+        raise ValueError(f"{purpose} is required")
+    if len(value) > 2000 or "\x00" in value:
+        raise ValueError(f"invalid {purpose}")
     if _contains_secret(value):
-        raise ValueError("secret material cannot be persisted")
+        raise ValueError(f"secret material cannot be persisted as {purpose}")
+    return value
+
+
+def _digest_text(value: str, purpose: str) -> str:
+    if not _HEX_DIGEST_RE.fullmatch(value):
+        raise ValueError(f"invalid {purpose}")
     return value
 
 
@@ -127,17 +171,34 @@ class RequestSpec:
         if _contains_secret(payload):
             raise ValueError("secret material cannot be persisted in a request")
         fields = tuple(sorted(set(self.requested_fields)))
+        provider = _provider(self.provider)
+        operation = _identifier(self.operation, "operation")
+        if self.method.upper() not in {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"}:
+            raise ValueError("invalid HTTP method")
+        for requested_field in fields:
+            if _SECRET_KEY.search(requested_field) or _contains_secret(requested_field):
+                raise ValueError("secret material cannot be persisted as requested field")
+            if not _FIELD_RE.fullmatch(requested_field):
+                raise ValueError("invalid requested field")
+        adapter_version = _identifier(self.adapter_version, "adapter version")
+        freshness_epoch = _identifier(self.freshness_epoch, "freshness epoch")
+        quota_scope = _identifier(self.quota_scope, "quota scope")
         canonical = {
-            "adapter_version": self.adapter_version,
-            "freshness_epoch": self.freshness_epoch,
+            "adapter_version": adapter_version,
+            "freshness_epoch": freshness_epoch,
             "method": self.method.upper(),
             "normalized_payload": payload,
-            "operation": self.operation,
-            "provider": self.provider,
-            "quota_scope": self.quota_scope,
+            "operation": operation,
+            "provider": provider,
+            "quota_scope": quota_scope,
             "requested_fields": fields,
         }
         object.__setattr__(self, "method", self.method.upper())
+        object.__setattr__(self, "provider", provider)
+        object.__setattr__(self, "operation", operation)
+        object.__setattr__(self, "adapter_version", adapter_version)
+        object.__setattr__(self, "freshness_epoch", freshness_epoch)
+        object.__setattr__(self, "quota_scope", quota_scope)
         payload_json = _canonical(payload)
         object.__setattr__(self, "normalized_payload", _freeze_json(payload))
         object.__setattr__(self, "requested_fields", fields)
@@ -161,19 +222,43 @@ class RequestSpec:
 class TaskSpec:
     """One author-scoped logical consumer of an exact request."""
 
-    key: str
     author_key: str
     publication_key: str | None
     provider: str
     operation: str
     request: RequestSpec
     required: bool = True
+    applicability: str = "applicable"
+    key: str = field(init=False)
+    identity_digest: str = field(init=False)
 
     def __post_init__(self) -> None:
-        if not self.key or not self.author_key:
-            raise ValueError("task key and author key must be non-empty")
+        author_key = _identifier(self.author_key, "author key")
+        publication_key = (
+            _identifier(self.publication_key, "publication key") if self.publication_key is not None else None
+        )
+        provider = _provider(self.provider)
+        operation = _identifier(self.operation, "operation")
+        applicability = _identifier(self.applicability, "applicability")
         if self.provider != self.request.provider or self.operation != self.request.operation:
             raise ValueError("task and request provider operation must match")
+        identity = {
+            "applicability": applicability,
+            "author_key": author_key,
+            "operation": operation,
+            "provider": provider,
+            "publication_key": publication_key,
+            "request_key": self.request.key,
+            "required": self.required,
+        }
+        identity_digest = _digest(identity)
+        object.__setattr__(self, "author_key", author_key)
+        object.__setattr__(self, "publication_key", publication_key)
+        object.__setattr__(self, "provider", provider)
+        object.__setattr__(self, "operation", operation)
+        object.__setattr__(self, "applicability", applicability)
+        object.__setattr__(self, "identity_digest", identity_digest)
+        object.__setattr__(self, "key", identity_digest)
 
 
 @dataclass(frozen=True)
@@ -213,6 +298,7 @@ class Ledger:
         self.path = path
         self._connection = connection
         self._fault: str | None = None
+        self._manifest_probe: Callable[[], None] | None = None
 
     @classmethod
     def open(cls, path: Path) -> Ledger:
@@ -265,8 +351,20 @@ class Ledger:
                     generation_id TEXT PRIMARY KEY,
                     identity_json TEXT NOT NULL,
                     census_digest TEXT NOT NULL,
+                    authors_digest TEXT NOT NULL,
+                    base_commit TEXT NOT NULL,
+                    input_digest TEXT NOT NULL,
+                    policy_digest TEXT NOT NULL,
+                    adapter_digest TEXT NOT NULL,
                     state TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    published_at TEXT,
+                    checkpoint_sequence INTEGER NOT NULL DEFAULT 0,
+                    blocking_reason TEXT NOT NULL DEFAULT '',
+                    plan_sealed INTEGER NOT NULL DEFAULT 0 CHECK(plan_sealed IN (0, 1)),
+                    plan_digest TEXT
                 );
                 CREATE TABLE IF NOT EXISTS authors (
                     generation_id TEXT NOT NULL REFERENCES generations(generation_id),
@@ -301,13 +399,21 @@ class Ledger:
                     provider TEXT NOT NULL,
                     operation TEXT NOT NULL,
                     request_key TEXT NOT NULL,
+                    identity_digest TEXT NOT NULL,
                     required INTEGER NOT NULL CHECK(required IN (0, 1)),
+                    applicability TEXT NOT NULL,
+                    applicability_reason TEXT NOT NULL DEFAULT '',
+                    dominance_reason TEXT NOT NULL DEFAULT '',
                     state TEXT NOT NULL,
                     reason TEXT NOT NULL DEFAULT '',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error_class TEXT,
+                    safe_diagnostic TEXT NOT NULL DEFAULT '',
                     next_attempt_at TEXT,
                     lease_owner TEXT,
                     lease_expires_at TEXT,
                     PRIMARY KEY (generation_id, task_key),
+                    UNIQUE (generation_id, identity_digest),
                     FOREIGN KEY (generation_id, author_key) REFERENCES authors(generation_id, row_key),
                     FOREIGN KEY (generation_id, author_key, publication_key)
                         REFERENCES publications(generation_id, author_key, publication_key),
@@ -341,6 +447,8 @@ class Ledger:
                     disposition TEXT NOT NULL,
                     response_json TEXT,
                     response_digest TEXT,
+                    provider TEXT NOT NULL,
+                    schema_version TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
                     safe_diagnostic TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (generation_id, request_key),
@@ -358,6 +466,12 @@ class Ledger:
                     generation_id TEXT NOT NULL,
                     author_key TEXT NOT NULL,
                     publication_key TEXT NOT NULL,
+                    discovery_source TEXT NOT NULL DEFAULT '',
+                    normalized_title TEXT NOT NULL DEFAULT '',
+                    year INTEGER,
+                    exact_identifiers_json TEXT NOT NULL DEFAULT '{}',
+                    baseline_output_path TEXT NOT NULL DEFAULT '',
+                    freshness_policy TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (generation_id, author_key, publication_key),
                     FOREIGN KEY (generation_id, author_key) REFERENCES authors(generation_id, row_key)
                 );
@@ -373,6 +487,70 @@ class Ledger:
                     digest TEXT NOT NULL,
                     canonical_json TEXT NOT NULL,
                     PRIMARY KEY (generation_id, digest)
+                );
+                CREATE TABLE IF NOT EXISTS plan_obligations (
+                    generation_id TEXT NOT NULL,
+                    task_key TEXT NOT NULL,
+                    identity_digest TEXT NOT NULL,
+                    author_key TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    required INTEGER NOT NULL CHECK(required IN (0, 1)),
+                    applicability TEXT NOT NULL,
+                    PRIMARY KEY (generation_id, task_key),
+                    UNIQUE (generation_id, identity_digest),
+                    FOREIGN KEY (generation_id, task_key) REFERENCES tasks(generation_id, task_key)
+                );
+                CREATE TABLE IF NOT EXISTS census_obligations (
+                    generation_id TEXT NOT NULL,
+                    author_key TEXT NOT NULL,
+                    disposition TEXT NOT NULL,
+                    proof TEXT NOT NULL,
+                    PRIMARY KEY (generation_id, author_key),
+                    FOREIGN KEY (generation_id, author_key) REFERENCES authors(generation_id, row_key)
+                );
+                CREATE TABLE IF NOT EXISTS field_provenance (
+                    generation_id TEXT NOT NULL,
+                    author_key TEXT NOT NULL,
+                    publication_key TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    selected_value_digest TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    request_key TEXT NOT NULL,
+                    decision_rule TEXT NOT NULL,
+                    PRIMARY KEY (generation_id, author_key, publication_key, field_name),
+                    FOREIGN KEY (generation_id, author_key, publication_key)
+                        REFERENCES publications(generation_id, author_key, publication_key),
+                    FOREIGN KEY (generation_id, request_key) REFERENCES requests(generation_id, request_key)
+                );
+                CREATE TABLE IF NOT EXISTS provider_state (
+                    generation_id TEXT NOT NULL REFERENCES generations(generation_id),
+                    provider TEXT NOT NULL,
+                    quota_pool TEXT NOT NULL,
+                    current_concurrency INTEGER NOT NULL,
+                    rate_limit_deadline TEXT,
+                    circuit_state TEXT NOT NULL,
+                    success_count INTEGER NOT NULL,
+                    failure_count INTEGER NOT NULL,
+                    async_job_id TEXT,
+                    request_digest TEXT,
+                    PRIMARY KEY (generation_id, provider, quota_pool)
+                );
+                CREATE TABLE IF NOT EXISTS materializations (
+                    generation_id TEXT NOT NULL REFERENCES generations(generation_id),
+                    staged_path TEXT NOT NULL,
+                    manifest_digest TEXT NOT NULL,
+                    corpus_counts_json TEXT NOT NULL,
+                    validation_state TEXT NOT NULL,
+                    PRIMARY KEY (generation_id, staged_path)
+                );
+                CREATE TABLE IF NOT EXISTS validations (
+                    generation_id TEXT NOT NULL REFERENCES generations(generation_id),
+                    check_name TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    evidence_digest TEXT NOT NULL,
+                    safe_detail TEXT NOT NULL,
+                    PRIMARY KEY (generation_id, check_name)
                 );
                 """
             for statement in schema.split(";"):
@@ -411,9 +589,29 @@ class Ledger:
         }
         identity_json = _canonical(identity)
         census_digest = _digest(census.canonical_content())
+        durable_census = self._census_rows(census)
+        for row in durable_census:
+            _identifier(str(row["row_key"]), "census row key")
+            _free_text(str(row["name"]), "author name", required=True)
+            _free_text(str(row["normalized_name"]), "normalized author name", required=True)
+            if row["scholar_id"]:
+                _identifier(str(row["scholar_id"]), "Scholar identifier")
+            if row["dblp_id"]:
+                _identifier(str(row["dblp_id"]), "DBLP identifier")
+            _free_text(str(row["exclusion_reason"]), "exclusion reason")
+        authors_digest = _digest(durable_census)
+        base_commit = _identifier(spec.base_commit.strip(), "base commit")
+        policy_version = _identifier(spec.refresh_policy_version.strip(), "refresh policy version")
+        adapters = dict(spec.adapter_versions)
+        for provider_name, adapter_version in adapters.items():
+            _provider(provider_name)
+            _identifier(adapter_version, "adapter version")
+        policy_digest = _digest(policy_version)
+        adapter_digest = _digest(dict(sorted(adapters.items())))
+        created_at = _timestamp(datetime.now(timezone.utc))
         with self._transaction(immediate=True) as connection:
             existing = connection.execute(
-                "SELECT generation_id, identity_json, census_digest FROM generations"
+                "SELECT generation_id, identity_json, census_digest, authors_digest FROM generations"
             ).fetchall()
             if existing:
                 row = existing[0]
@@ -421,16 +619,33 @@ class Ledger:
                     raise ValueError("generation identity mismatch")
                 if row[2] != census_digest:
                     raise ValueError("census mismatch")
+                stored_rows = [
+                    dict(item)
+                    for item in connection.execute(
+                        "SELECT row_key, physical_row, name, normalized_name, scholar_id, dblp_id, enabled, "
+                        "exclusion_reason, disposition FROM authors WHERE generation_id = ? ORDER BY row_key",
+                        (spec.id,),
+                    )
+                ]
+                if row[3] != authors_digest or _digest(stored_rows) != authors_digest or stored_rows != durable_census:
+                    raise ValueError("durable census mismatch")
                 return
             connection.execute(
-                "INSERT INTO generations(generation_id, identity_json, census_digest, state, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO generations(generation_id, identity_json, census_digest, authors_digest, base_commit, "
+                "input_digest, policy_digest, adapter_digest, state, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     spec.id,
                     identity_json,
                     census_digest,
+                    authors_digest,
+                    base_commit,
+                    census_digest,
+                    policy_digest,
+                    adapter_digest,
                     GenerationState.PLANNING.value,
-                    _timestamp(datetime.now(timezone.utc)),
+                    created_at,
+                    created_at,
                 ),
             )
             connection.executemany(
@@ -453,11 +668,45 @@ class Ledger:
                 ],
             )
 
-    def transition_generation(self, expected: GenerationState, new: GenerationState) -> None:
+    def transition_generation(
+        self,
+        expected: GenerationState,
+        new: GenerationState,
+        now: datetime,
+        *,
+        blocking_reason: str = "",
+    ) -> None:
+        if new not in _LEGAL_GENERATION_TRANSITIONS[expected]:
+            raise ValueError(f"illegal generation transition from {expected.value} to {new.value}")
+        safe_reason = _free_text(blocking_reason, "blocking reason", required=new is GenerationState.BLOCKED)
+        if new is not GenerationState.BLOCKED and safe_reason:
+            raise ValueError("blocking reason only applies to blocked generation state")
+        now_text = _timestamp(now)
         with self._transaction(immediate=True) as connection:
+            generation_id = self._generation_id()
+            if new is GenerationState.VALIDATING and not self._all_required_satisfied(connection, generation_id):
+                raise ValueError("generation cannot validate before sealed complete plan")
+            if new is GenerationState.COMPLETE:
+                valid = connection.execute(
+                    "SELECT COUNT(*) FROM validations WHERE generation_id = ? AND state = 'succeeded'",
+                    (generation_id,),
+                ).fetchone()[0]
+                if not valid:
+                    raise ValueError("generation cannot complete without successful validation evidence")
+            if new is GenerationState.PUBLISHED:
+                published = connection.execute(
+                    "SELECT COUNT(*) FROM publication_evidence WHERE generation_id = ?",
+                    (generation_id,),
+                ).fetchone()[0]
+                if not published:
+                    raise ValueError("generation cannot publish without publication evidence")
+            completed_at = now_text if new is GenerationState.COMPLETE else None
+            published_at = now_text if new is GenerationState.PUBLISHED else None
             cursor = connection.execute(
-                "UPDATE generations SET state = ? WHERE generation_id = ? AND state = ?",
-                (new.value, self._generation_id(), expected.value),
+                "UPDATE generations SET state = ?, updated_at = ?, completed_at = COALESCE(?, completed_at), "
+                "published_at = COALESCE(?, published_at), blocking_reason = ? "
+                "WHERE generation_id = ? AND state = ?",
+                (new.value, now_text, completed_at, published_at, safe_reason, generation_id, expected.value),
             )
             if cursor.rowcount != 1:
                 raise ValueError("generation state transition rejected")
@@ -483,6 +732,11 @@ class Ledger:
         generation_id = self._generation_id()
         request_identity = _canonical(task.request.canonical_content())
         with self._transaction(immediate=True) as connection:
+            sealed = connection.execute(
+                "SELECT plan_sealed FROM generations WHERE generation_id = ?", (generation_id,)
+            ).fetchone()
+            if sealed is None or sealed[0]:
+                raise ValueError("generation plan is sealed")
             connection.execute(
                 "INSERT OR IGNORE INTO requests(generation_id, request_key, identity_json, state) VALUES (?, ?, ?, ?)",
                 (generation_id, task.request.key, request_identity, TaskDisposition.PENDING.value),
@@ -494,7 +748,8 @@ class Ledger:
             if stored_request is None or stored_request[0] != request_identity:
                 raise ValueError("exact request identity collision")
             existing = connection.execute(
-                "SELECT author_key, publication_key, provider, operation, request_key, required FROM tasks "
+                "SELECT author_key, publication_key, provider, operation, request_key, required, applicability, "
+                "identity_digest FROM tasks "
                 "WHERE generation_id = ? AND task_key = ?",
                 (generation_id, task.key),
             ).fetchone()
@@ -505,6 +760,8 @@ class Ledger:
                 task.operation,
                 task.request.key,
                 int(task.required),
+                task.applicability,
+                task.identity_digest,
             )
             if existing is not None and tuple(existing) != expected:
                 raise ValueError("task identity mismatch")
@@ -517,7 +774,8 @@ class Ledger:
                     )
                 connection.execute(
                     "INSERT INTO tasks(generation_id, task_key, author_key, publication_key, provider, operation, "
-                    "request_key, required, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "request_key, required, applicability, identity_digest, state) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (generation_id, task.key, *expected, TaskDisposition.PENDING.value),
                 )
                 connection.execute(
@@ -526,8 +784,93 @@ class Ledger:
                 )
         return TaskClaim(task.key, task.request.key, "", datetime.min.replace(tzinfo=timezone.utc))
 
+    def seal_plan(
+        self,
+        expected_tasks: list[TaskSpec],
+        *,
+        empty_author_proofs: Mapping[str, str] | None = None,
+    ) -> None:
+        generation_id = self._generation_id()
+        declared = {task.key: task for task in expected_tasks}
+        if len(declared) != len(expected_tasks):
+            raise ValueError("duplicate expected obligations")
+        proofs = dict(empty_author_proofs or {})
+        with self._transaction(immediate=True) as connection:
+            sealed = connection.execute(
+                "SELECT plan_sealed FROM generations WHERE generation_id = ?", (generation_id,)
+            ).fetchone()
+            if sealed is None or sealed[0]:
+                raise ValueError("generation plan is sealed")
+            actual = {
+                row[0]: tuple(row[1:])
+                for row in connection.execute(
+                    "SELECT task_key, identity_digest, author_key, provider, operation, required, applicability "
+                    "FROM tasks WHERE generation_id = ? ORDER BY task_key",
+                    (generation_id,),
+                )
+            }
+            expected = {
+                task.key: (
+                    task.identity_digest,
+                    task.author_key,
+                    task.provider,
+                    task.operation,
+                    int(task.required),
+                    task.applicability,
+                )
+                for task in expected_tasks
+            }
+            if actual != expected:
+                raise ValueError("expected obligations do not exactly match planned tasks")
+            enabled_authors = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT row_key FROM authors WHERE generation_id = ? AND enabled = 1", (generation_id,)
+                )
+            }
+            obligated_authors = {task.author_key for task in expected_tasks if task.required}
+            missing = enabled_authors - obligated_authors
+            if set(proofs) != missing:
+                raise ValueError("empty enabled-author obligations require exact explicit proof")
+            for author_key, proof in sorted(proofs.items()):
+                connection.execute(
+                    "INSERT INTO census_obligations(generation_id, author_key, disposition, proof) VALUES (?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        _identifier(author_key, "author key"),
+                        TaskDisposition.NOT_APPLICABLE.value,
+                        _free_text(proof, "empty author proof", required=True),
+                    ),
+                )
+            connection.executemany(
+                "INSERT INTO plan_obligations(generation_id, task_key, identity_digest, author_key, provider, "
+                "operation, required, applicability) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        generation_id,
+                        task.key,
+                        task.identity_digest,
+                        task.author_key,
+                        task.provider,
+                        task.operation,
+                        int(task.required),
+                        task.applicability,
+                    )
+                    for task in sorted(expected_tasks, key=lambda item: item.key)
+                ],
+            )
+            plan_content = {
+                "empty_author_proofs": dict(sorted(proofs.items())),
+                "tasks": sorted(declared),
+            }
+            connection.execute(
+                "UPDATE generations SET plan_sealed = 1, plan_digest = ?, updated_at = ? WHERE generation_id = ?",
+                (_digest(plan_content), _timestamp(datetime.now(timezone.utc)), generation_id),
+            )
+
     def claim_due(self, owner: str, now: datetime, lease_for: timedelta) -> TaskClaim | None:
-        if not owner or lease_for <= timedelta(0):
+        owner = _identifier(owner, "lease owner")
+        if lease_for <= timedelta(0):
             raise ValueError("claim owner and positive lease are required")
         generation_id = self._generation_id()
         now_text = _timestamp(now)
@@ -575,6 +918,10 @@ class Ledger:
         return TaskClaim(str(candidate[0]), str(row[0]), owner, expires)
 
     def claim_request(self, task_key: str, owner: str, now: datetime, lease_for: timedelta) -> RequestClaim | None:
+        task_key = _digest_text(task_key, "task key")
+        owner = _identifier(owner, "lease owner")
+        if lease_for <= timedelta(0):
+            raise ValueError("positive request lease is required")
         generation_id = self._generation_id()
         now_text = _timestamp(now)
         expires = now + lease_for
@@ -631,7 +978,16 @@ class Ledger:
         response_digest: str | None = None,
         safe_diagnostic: str = "",
     ) -> int:
-        diagnostic = _safe_text(safe_diagnostic)
+        request_key = _digest_text(request_key, "request key")
+        owner = _identifier(owner, "lease owner")
+        diagnostic = _free_text(safe_diagnostic, "attempt diagnostic")
+        outcome = _identifier(outcome, "attempt outcome")
+        if http_status is not None and not 100 <= http_status <= 599:
+            raise ValueError("invalid HTTP status")
+        if retry_delay is not None and retry_delay < 0:
+            raise ValueError("invalid retry delay")
+        if response_digest is not None:
+            _digest_text(response_digest, "response digest")
         generation_id = self._generation_id()
         with self._transaction(immediate=True) as connection:
             self._assert_owner("requests", "request_key", request_key, owner, finished_at)
@@ -659,6 +1015,10 @@ class Ledger:
                     diagnostic,
                 ),
             )
+            connection.execute(
+                "UPDATE tasks SET attempt_count = attempt_count + 1 WHERE generation_id = ? AND request_key = ?",
+                (generation_id, request_key),
+            )
         self._inject("after_attempt_commit")
         return number
 
@@ -674,11 +1034,13 @@ class Ledger:
         normalized_response: Mapping[str, object] | None = None,
         safe_diagnostic: str = "",
     ) -> None:
+        request_key = _digest_text(request_key, "request key")
+        owner = _identifier(owner, "lease owner")
         if disposition not in _TERMINAL | {TaskDisposition.RETRY_WAIT}:
             raise ValueError("invalid request finish disposition")
         if disposition is TaskDisposition.RETRY_WAIT and retry_at is None:
             raise ValueError("retry wait requires a durable retry deadline")
-        diagnostic = _safe_text(safe_diagnostic)
+        diagnostic = _free_text(safe_diagnostic, "request diagnostic")
         if (
             disposition
             in {
@@ -716,15 +1078,24 @@ class Ledger:
                 ),
             )
             if disposition in _TERMINAL:
+                request_identity = connection.execute(
+                    "SELECT identity_json FROM requests WHERE generation_id = ? AND request_key = ?",
+                    (generation_id, request_key),
+                ).fetchone()
+                if request_identity is None:
+                    raise ValueError("request identity missing")
+                identity = json.loads(request_identity[0])
                 connection.execute(
                     "INSERT INTO observations(generation_id, request_key, disposition, response_json, response_digest, "
-                    "observed_at, safe_diagnostic) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "provider, schema_version, observed_at, safe_diagnostic) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         generation_id,
                         request_key,
                         disposition.value,
                         response_json,
                         response_digest,
+                        identity["provider"],
+                        identity["adapter_version"],
                         _timestamp(now),
                         diagnostic,
                     ),
@@ -752,6 +1123,8 @@ class Ledger:
         retry_at: datetime | None = None,
         reason: str = "",
     ) -> None:
+        task_key = _digest_text(task_key, "task key")
+        owner = _identifier(owner, "lease owner")
         generation_id = self._generation_id()
         current = self._connection.execute(
             "SELECT task.state, request.state FROM tasks AS task JOIN requests AS request "
@@ -775,7 +1148,7 @@ class Ledger:
             and not reason
         ):
             raise ValueError("terminal disposition requires proof reason")
-        safe_reason = _safe_text(reason)
+        safe_reason = _free_text(reason, "task reason")
         with self._transaction(immediate=True) as connection:
             self._assert_owner("tasks", "task_key", task_key, owner, now)
             if (
@@ -786,11 +1159,14 @@ class Ledger:
                 raise ValueError("task disposition does not match durable request disposition")
             connection.execute(
                 "UPDATE tasks SET state = ?, reason = ?, next_attempt_at = ?, lease_owner = NULL, "
-                "lease_expires_at = NULL WHERE generation_id = ? AND task_key = ?",
+                "lease_expires_at = NULL, last_error_class = ?, safe_diagnostic = ? "
+                "WHERE generation_id = ? AND task_key = ?",
                 (
                     disposition.value,
                     safe_reason,
                     _timestamp(retry_at) if retry_at else None,
+                    disposition.value if disposition not in _SATISFIED else None,
+                    safe_reason,
                     generation_id,
                     task_key,
                 ),
@@ -800,52 +1176,121 @@ class Ledger:
 
     def all_required_satisfied(self) -> bool:
         generation_id = self._generation_id()
-        missing_author_work = self._connection.execute(
-            "SELECT COUNT(*) FROM authors AS author WHERE author.generation_id = ? AND author.enabled = 1 "
-            "AND NOT EXISTS (SELECT 1 FROM tasks AS task WHERE task.generation_id = author.generation_id "
-            "AND task.author_key = author.row_key AND task.required = 1)",
+        return self._all_required_satisfied(self._connection, generation_id)
+
+    @staticmethod
+    def _all_required_satisfied(connection: sqlite3.Connection, generation_id: str) -> bool:
+        sealed = connection.execute(
+            "SELECT plan_sealed FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        if sealed is None or not sealed[0]:
+            return False
+        missing_obligations = connection.execute(
+            "SELECT COUNT(*) FROM plan_obligations AS obligation LEFT JOIN tasks AS task "
+            "ON task.generation_id = obligation.generation_id AND task.task_key = obligation.task_key "
+            "WHERE obligation.generation_id = ? AND (task.task_key IS NULL OR task.identity_digest != "
+            "obligation.identity_digest)",
             (generation_id,),
         ).fetchone()[0]
-        if int(missing_author_work) != 0:
+        if int(missing_obligations) != 0:
+            return False
+        unclassified_authors = connection.execute(
+            "SELECT COUNT(*) FROM authors AS author WHERE author.generation_id = ? AND author.enabled = 1 "
+            "AND NOT EXISTS (SELECT 1 FROM plan_obligations AS obligation WHERE obligation.generation_id = "
+            "author.generation_id AND obligation.author_key = author.row_key AND obligation.required = 1) "
+            "AND NOT EXISTS (SELECT 1 FROM census_obligations AS census WHERE census.generation_id = "
+            "author.generation_id AND census.author_key = author.row_key AND census.disposition = ?)",
+            (generation_id, TaskDisposition.NOT_APPLICABLE.value),
+        ).fetchone()[0]
+        if int(unclassified_authors) != 0:
             return False
         placeholders = ",".join("?" for _ in _SATISFIED)
-        count = self._connection.execute(
-            f"SELECT COUNT(*) FROM tasks WHERE generation_id = ? AND required = 1 AND state NOT IN ({placeholders})",  # noqa: S608
+        count = connection.execute(
+            f"SELECT COUNT(*) FROM plan_obligations AS obligation JOIN tasks AS task "  # noqa: S608
+            f"ON task.generation_id = obligation.generation_id AND task.task_key = obligation.task_key "
+            f"WHERE obligation.generation_id = ? AND obligation.required = 1 AND task.state NOT IN ({placeholders})",
             (generation_id, *(state.value for state in sorted(_SATISFIED, key=lambda item: item.value))),
         ).fetchone()[0]
         return int(count) == 0
 
     def record_checkpoint(self, sequence: int, ciphertext_digest: str, key_id: str, created_at: datetime) -> None:
+        if sequence < 1:
+            raise ValueError("checkpoint sequence must be positive")
+        _digest_text(ciphertext_digest, "ciphertext digest")
+        key_id = _identifier(key_id, "checkpoint key identifier")
         with self._transaction(immediate=True) as connection:
+            generation_id = self._generation_id()
             connection.execute(
                 "INSERT INTO checkpoints(generation_id, sequence, ciphertext_digest, key_id, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (self._generation_id(), sequence, ciphertext_digest, _safe_text(key_id), _timestamp(created_at)),
+                (generation_id, sequence, ciphertext_digest, key_id, _timestamp(created_at)),
+            )
+            connection.execute(
+                "UPDATE generations SET checkpoint_sequence = ?, updated_at = ? WHERE generation_id = ? "
+                "AND checkpoint_sequence < ?",
+                (sequence, _timestamp(created_at), generation_id, sequence),
             )
 
     def record_publication(self, kind: str, commit_sha: str, created_at: datetime) -> None:
+        kind = _identifier(kind, "publication evidence kind")
+        if not re.fullmatch(r"[0-9a-f]{7,64}", commit_sha):
+            raise ValueError("invalid publication commit SHA")
         with self._transaction(immediate=True) as connection:
             connection.execute(
                 "INSERT INTO publication_evidence(generation_id, kind, commit_sha, created_at) VALUES (?, ?, ?, ?)",
                 (self._generation_id(), kind, commit_sha, _timestamp(created_at)),
             )
 
+    def record_validation(self, check_name: str, state: str, evidence_digest: str, safe_detail: str = "") -> None:
+        check_name = _identifier(check_name, "validation check name")
+        state = _identifier(state, "validation state")
+        _digest_text(evidence_digest, "validation evidence digest")
+        detail = _free_text(safe_detail, "validation detail")
+        with self._transaction(immediate=True) as connection:
+            connection.execute(
+                "INSERT INTO validations(generation_id, check_name, state, evidence_digest, safe_detail) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (self._generation_id(), check_name, state, evidence_digest, detail),
+            )
+
     def manifest(self) -> LedgerManifest:
-        generation_id = self._generation_id()
-        generation = self._connection.execute(
-            "SELECT generation_id, identity_json, census_digest, state FROM generations WHERE generation_id = ?",
-            (generation_id,),
-        ).fetchone()
+        with self._transaction(immediate=True) as connection:
+            generation_id = self._generation_id()
+            generation = connection.execute(
+                "SELECT generation_id, identity_json, census_digest, authors_digest, base_commit, input_digest, "
+                "policy_digest, adapter_digest, state, created_at, updated_at, completed_at, published_at, "
+                "checkpoint_sequence, blocking_reason, plan_sealed, plan_digest FROM generations "
+                "WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if self._manifest_probe is not None:
+                probe = self._manifest_probe
+                probe()
+                self._manifest_probe = None
+            data = self._manifest_data(connection, generation_id, generation)
+            canonical_json = _canonical(data)
+            digest = hashlib.sha256(canonical_json.encode()).hexdigest()
+            connection.execute(
+                "INSERT OR IGNORE INTO manifests(generation_id, digest, canonical_json) VALUES (?, ?, ?)",
+                (generation_id, digest, canonical_json),
+            )
+        self._inject("after_manifest_commit")
+        return LedgerManifest(data, canonical_json, digest)
+
+    @staticmethod
+    def _manifest_data(
+        connection: sqlite3.Connection, generation_id: str, generation: sqlite3.Row
+    ) -> dict[str, object]:
         census = [
             dict(row)
-            for row in self._connection.execute(
+            for row in connection.execute(
                 "SELECT row_key, physical_row, name, normalized_name, scholar_id, dblp_id, enabled, exclusion_reason, "
                 "disposition FROM authors WHERE generation_id = ? ORDER BY row_key",
                 (generation_id,),
             )
         ]
         requests = []
-        for row in self._connection.execute(
+        for row in connection.execute(
             "SELECT request_key, identity_json, state, next_attempt_at, response_digest, safe_diagnostic "
             "FROM requests WHERE generation_id = ? ORDER BY request_key",
             (generation_id,),
@@ -854,7 +1299,7 @@ class Ledger:
             item["identity"] = json.loads(item.pop("identity_json"))
             item["consumers"] = [
                 consumer[0]
-                for consumer in self._connection.execute(
+                for consumer in connection.execute(
                     "SELECT task_key FROM request_consumers WHERE generation_id = ? AND request_key = ? "
                     "ORDER BY task_key",
                     (generation_id, row["request_key"]),
@@ -867,7 +1312,7 @@ class Ledger:
                     **{key: value for key, value in dict(row).items() if key != "attempt_number"},
                     "number": row["attempt_number"],
                 }
-                for row in self._connection.execute(
+                for row in connection.execute(
                     "SELECT request_key, attempt_number, started_at, finished_at, outcome, http_status, "
                     "retry_delay_seconds, response_digest, safe_diagnostic FROM attempts WHERE generation_id = ? "
                     "ORDER BY request_key, attempt_number",
@@ -877,53 +1322,111 @@ class Ledger:
             "census": census,
             "checkpoints": [
                 dict(row)
-                for row in self._connection.execute(
+                for row in connection.execute(
                     "SELECT sequence, ciphertext_digest, key_id, created_at FROM checkpoints WHERE generation_id = ? "
                     "ORDER BY sequence",
                     (generation_id,),
                 )
             ],
+            "census_obligations": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT author_key, disposition, proof FROM census_obligations WHERE generation_id = ? "
+                    "ORDER BY author_key",
+                    (generation_id,),
+                )
+            ],
+            "field_provenance": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT author_key, publication_key, field_name, selected_value_digest, provider, request_key, "
+                    "decision_rule FROM field_provenance WHERE generation_id = ? "
+                    "ORDER BY author_key, publication_key, field_name",
+                    (generation_id,),
+                )
+            ],
             "generation": {
-                "census_digest": generation["census_digest"],
-                "generation_id": generation["generation_id"],
+                **{key: value for key, value in dict(generation).items() if key != "identity_json"},
                 "identity": json.loads(generation["identity_json"]),
-                "state": generation["state"],
             },
             "publications": [
                 dict(row)
-                for row in self._connection.execute(
-                    "SELECT author_key, publication_key FROM publications WHERE generation_id = ? "
+                for row in connection.execute(
+                    "SELECT author_key, publication_key, discovery_source, normalized_title, year, "
+                    "exact_identifiers_json, baseline_output_path, freshness_policy FROM publications "
+                    "WHERE generation_id = ? "
                     "ORDER BY author_key, publication_key",
                     (generation_id,),
                 )
             ],
             "publication_evidence": [
                 dict(row)
-                for row in self._connection.execute(
+                for row in connection.execute(
                     "SELECT kind, commit_sha, created_at FROM publication_evidence WHERE generation_id = ? "
                     "ORDER BY kind, commit_sha",
+                    (generation_id,),
+                )
+            ],
+            "materializations": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT staged_path, manifest_digest, corpus_counts_json, validation_state FROM materializations "
+                    "WHERE generation_id = ? ORDER BY staged_path",
+                    (generation_id,),
+                )
+            ],
+            "observations": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT request_key, disposition, response_digest, provider, schema_version, observed_at, "
+                    "safe_diagnostic FROM observations WHERE generation_id = ? ORDER BY request_key",
+                    (generation_id,),
+                )
+            ],
+            "plan_obligations": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT task_key, identity_digest, author_key, provider, operation, required, applicability "
+                    "FROM plan_obligations WHERE generation_id = ? ORDER BY task_key",
+                    (generation_id,),
+                )
+            ],
+            "provider_state": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT provider, quota_pool, current_concurrency, rate_limit_deadline, circuit_state, "
+                    "success_count, failure_count, async_job_id, request_digest FROM provider_state "
+                    "WHERE generation_id = ? ORDER BY provider, quota_pool",
                     (generation_id,),
                 )
             ],
             "requests": requests,
             "tasks": [
                 dict(row)
-                for row in self._connection.execute(
-                    "SELECT task_key, author_key, publication_key, provider, operation, request_key, required, state, "
-                    "reason, next_attempt_at FROM tasks WHERE generation_id = ? ORDER BY task_key",
+                for row in connection.execute(
+                    "SELECT task_key, identity_digest, author_key, publication_key, provider, operation, request_key, "
+                    "required, applicability, applicability_reason, dominance_reason, state, reason, attempt_count, "
+                    "last_error_class, safe_diagnostic, next_attempt_at, lease_owner, lease_expires_at "
+                    "FROM tasks WHERE generation_id = ? "
+                    "ORDER BY task_key",
+                    (generation_id,),
+                )
+            ],
+            "validations": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT check_name, state, evidence_digest, safe_detail FROM validations WHERE generation_id = ? "
+                    "ORDER BY check_name",
                     (generation_id,),
                 )
             ],
         }
-        canonical_json = _canonical(data)
-        digest = hashlib.sha256(canonical_json.encode()).hexdigest()
-        with self._transaction(immediate=True) as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO manifests(generation_id, digest, canonical_json) VALUES (?, ?, ?)",
-                (generation_id, digest, canonical_json),
-            )
-        self._inject("after_manifest_commit")
-        return LedgerManifest(data, canonical_json, digest)
+        return data
+
+    def _set_manifest_probe_for_test(self, probe: Callable[[], None]) -> None:
+        if not callable(probe):
+            raise TypeError("manifest probe must be callable")
+        self._manifest_probe = probe
 
     def set_fault(self, name: str) -> None:
         if name not in _FAULT_POINTS:

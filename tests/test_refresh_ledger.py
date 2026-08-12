@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -54,15 +55,23 @@ def _request(*, query: str = "doi:10.1/example", freshness: str = "2026-08") -> 
     )
 
 
-def _task(key: str = "task-1", *, request: RequestSpec | None = None, required: bool = True) -> TaskSpec:
+def _task(
+    label: str = "1",
+    *,
+    request: RequestSpec | None = None,
+    required: bool = True,
+    author_key: str = "author-ada",
+    publication_key: str | None = None,
+    applicability: str = "applicable",
+) -> TaskSpec:
     return TaskSpec(
-        key=key,
-        author_key="author-ada",
-        publication_key="pub-1",
+        author_key=author_key,
+        publication_key=publication_key or f"pub-{label}",
         provider="crossref",
         operation="lookup",
         request=request or _request(),
         required=required,
+        applicability=applicability,
     )
 
 
@@ -105,9 +114,9 @@ def test_schema_pragmas_and_generation_resume_are_fail_closed(tmp_path: Path) ->
     with Ledger.open(path) as ledger:
         ledger.create_or_resume(_generation(census), census)
         assert ledger.manifest().data["generation"]["state"] == "planning"
-        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING)
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
         with pytest.raises(ValueError, match="state transition"):
-            ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING)
+            ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
         assert ledger.pragma("journal_mode") == "delete"
         assert ledger.pragma("synchronous") == 2
         assert ledger.pragma("foreign_keys") == 1
@@ -160,11 +169,10 @@ def test_task_and_exact_request_uniqueness_with_multiple_consumers(tmp_path: Pat
         second = ledger.plan_task(_task("task-b"))
         assert first.request_key == second.request_key
         assert ledger.plan_task(_task("task-a")) == first
-        with pytest.raises(ValueError, match="task identity"):
-            ledger.plan_task(_task("task-a", request=_request(query="different")))
         manifest = ledger.manifest().data
         assert len(manifest["requests"]) == 1
-        assert manifest["requests"][0]["consumers"] == ["task-a", "task-b"]
+        assert manifest["requests"][0]["consumers"] == sorted([first.key, second.key])
+        assert len({item["publication_key"] for item in manifest["tasks"]}) == 2
 
 
 def test_exact_request_scope_changes_identity(tmp_path: Path) -> None:
@@ -257,11 +265,13 @@ def test_attempts_are_append_only_monotonic_and_require_request_owner(tmp_path: 
 )
 def test_only_proven_terminal_states_satisfy_required_work(tmp_path: Path, disposition: TaskDisposition) -> None:
     with _open_ready(tmp_path / f"{disposition.value}.db") as ledger:
-        ledger.plan_task(_task())
+        task = _task()
+        planned = ledger.plan_task(task)
+        ledger.seal_plan([task])
         _finish_request_and_task(ledger, disposition)
         assert ledger.all_required_satisfied()
         with pytest.raises(ValueError, match="terminal"):
-            ledger.finish_task("task-1", "worker", TaskDisposition.RETRY_WAIT, NOW)
+            ledger.finish_task(planned.key, "worker", TaskDisposition.RETRY_WAIT, NOW)
 
 
 @pytest.mark.parametrize(
@@ -280,7 +290,9 @@ def test_only_proven_terminal_states_satisfy_required_work(tmp_path: Path, dispo
 )
 def test_failures_never_satisfy_required_work(tmp_path: Path, disposition: TaskDisposition) -> None:
     with _open_ready(tmp_path / f"{disposition.value}.db") as ledger:
-        ledger.plan_task(_task())
+        task = _task()
+        ledger.plan_task(task)
+        ledger.seal_plan([task])
         _finish_request_and_task(ledger, disposition)
         assert not ledger.all_required_satisfied()
 
@@ -307,18 +319,18 @@ def test_task_cannot_claim_success_from_unfinished_or_contradictory_request(tmp_
 
 def test_manifest_is_canonical_deterministic_and_records_checkpoint_and_publication(tmp_path: Path) -> None:
     with _open_ready(tmp_path / "ledger.db") as ledger:
-        ledger.plan_task(_task("z-task"))
-        ledger.plan_task(_task("a-task"))
-        ledger.record_checkpoint(1, "cipher-digest", "key-id", NOW)
+        z_task = ledger.plan_task(_task("z-task"))
+        a_task = ledger.plan_task(_task("a-task"))
+        ledger.record_checkpoint(1, "c" * 64, "key-id", NOW)
         ledger.record_publication("candidate", "deadbeef", NOW)
         first = ledger.manifest()
         second = ledger.manifest()
         assert first == second
         assert json.dumps(first.data, sort_keys=True, separators=(",", ":")) == first.canonical_json
         assert len(first.digest) == 64
-        assert [item["task_key"] for item in first.data["tasks"]] == ["a-task", "z-task"]
+        assert [item["task_key"] for item in first.data["tasks"]] == sorted([a_task.key, z_task.key])
         assert first.data["checkpoints"][0]["sequence"] == 1
-        assert first.data["publications"] == [{"author_key": "author-ada", "publication_key": "pub-1"}]
+        assert [item["publication_key"] for item in first.data["publications"]] == ["pub-a-task", "pub-z-task"]
         assert first.data["publication_evidence"][0]["commit_sha"] == "deadbeef"
 
 
@@ -387,9 +399,25 @@ def test_fault_injection_occurs_after_durable_boundary(tmp_path: Path, fault_nam
 
     with Ledger.open(path) as reopened:
         assert reopened.pragma("integrity_check") == "ok"
-        manifest = reopened.manifest().data
+        durable_manifest = reopened.manifest()
+        manifest = durable_manifest.data
+        if fault_name == "after_claim_commit":
+            assert manifest["tasks"][0]["state"] == "leased"
+            assert manifest["tasks"][0]["lease_owner"] == "replacement"
         if fault_name == "after_attempt_commit":
-            assert len(manifest["attempts"]) == 1
+            assert manifest["attempts"] == [
+                {
+                    "finished_at": NOW.isoformat(timespec="microseconds"),
+                    "http_status": 200,
+                    "number": 1,
+                    "outcome": "success",
+                    "request_key": request_claim.key,
+                    "response_digest": None,
+                    "retry_delay_seconds": None,
+                    "safe_diagnostic": "",
+                    "started_at": NOW.isoformat(timespec="microseconds"),
+                }
+            ]
         if fault_name == "after_response_commit":
             assert manifest["requests"][0]["state"] == "succeeded"
             result = reopened.request_result(manifest["requests"][0]["request_key"])
@@ -397,3 +425,195 @@ def test_fault_injection_occurs_after_durable_boundary(tmp_path: Path, fault_nam
             assert result.normalized_response == {"title": "A durable response"}
         if fault_name == "after_task_terminalization":
             assert manifest["tasks"][0]["state"] == "succeeded"
+        if fault_name == "after_manifest_commit":
+            connection = sqlite3.connect(path)
+            stored = connection.execute(
+                "SELECT digest, canonical_json FROM manifests WHERE generation_id = ? ORDER BY rowid LIMIT 1",
+                (manifest["generation"]["generation_id"],),
+            ).fetchone()
+            connection.close()
+            assert stored is not None
+            assert len(stored[0]) == 64
+            assert hashlib.sha256(stored[1].encode()).hexdigest() == stored[0]
+
+
+def test_task_identity_is_canonical_and_caller_cannot_alias() -> None:
+    first = _task("same")
+    assert first.key == _task("same").key
+    assert first.key != _task("other-publication").key
+    assert first.key != _task("same", request=_request(freshness="2026-09")).key
+    assert first.key != _task("same", applicability="not_applicable").key
+    with pytest.raises(TypeError, match="key"):
+        TaskSpec(  # type: ignore[call-arg]
+            key="caller-alias",
+            author_key="author-ada",
+            publication_key="pub-same",
+            provider="crossref",
+            operation="lookup",
+            request=_request(),
+        )
+
+
+def test_resume_detects_fk_valid_census_tamper(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    census = _census()
+    spec = _generation(census)
+    with Ledger.open(path) as ledger:
+        ledger.create_or_resume(spec, census)
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "UPDATE authors SET normalized_name = ? WHERE generation_id = ? AND row_key = ?",
+        ("tampered", spec.id, "author-ada"),
+    )
+    connection.commit()
+    connection.close()
+    with Ledger.open(path) as ledger, pytest.raises(ValueError, match="census"):
+        ledger.create_or_resume(spec, census)
+
+
+def test_plan_must_be_declared_and_sealed_exactly_once(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        first = _task("first")
+        second = _task("second")
+        ledger.plan_task(first)
+        assert not ledger.all_required_satisfied()
+        with pytest.raises(ValueError, match="expected obligations"):
+            ledger.seal_plan([second])
+        ledger.seal_plan([first])
+        with pytest.raises(ValueError, match="sealed"):
+            ledger.plan_task(second)
+        with pytest.raises(ValueError, match="sealed"):
+            ledger.seal_plan([first])
+
+
+def test_empty_enabled_author_plan_requires_explicit_not_applicable_proof(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        with pytest.raises(ValueError, match="proof"):
+            ledger.seal_plan([])
+        ledger.seal_plan([], empty_author_proofs={"author-ada": "No applicable provider operation"})
+        assert ledger.all_required_satisfied()
+
+
+def test_manifest_holds_one_immediate_snapshot_against_independent_writer(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    with _open_ready(path) as ledger:
+        first = _task("first")
+        second = _task("second")
+        ledger.plan_task(first)
+
+        def probe() -> None:
+            writer = sqlite3.connect(path, timeout=0, isolation_level=None)
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                writer.execute("BEGIN IMMEDIATE")
+            writer.close()
+
+        ledger._set_manifest_probe_for_test(probe)
+        snapshot = ledger.manifest()
+        ledger.plan_task(second)
+        assert [task["task_key"] for task in snapshot.data["tasks"]] == [first.key]
+        assert [task["task_key"] for task in ledger.manifest().data["tasks"]] == sorted([first.key, second.key])
+
+
+def test_parallel_logical_alias_planning_collapses_to_one_identity(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    task = _task("same")
+    with _open_ready(path):
+        pass
+
+    def plan() -> str:
+        with Ledger.open(path) as ledger:
+            return ledger.plan_task(task).key
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        keys = list(executor.map(lambda _: plan(), range(16)))
+    assert set(keys) == {task.key}
+    connection = sqlite3.connect(path)
+    assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+    assert connection.execute("SELECT COUNT(*) FROM request_consumers").fetchone()[0] == 1
+    connection.close()
+
+
+def test_schema_v1_represents_every_architecture_evidence_class(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        connection = sqlite3.connect(ledger.path)
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert {
+            "field_provenance",
+            "provider_state",
+            "materializations",
+            "validations",
+            "plan_obligations",
+            "census_obligations",
+        } <= tables
+        generation_columns = {row[1] for row in connection.execute("PRAGMA table_info(generations)")}
+        assert {
+            "base_commit",
+            "input_digest",
+            "policy_digest",
+            "adapter_digest",
+            "updated_at",
+            "completed_at",
+            "published_at",
+            "checkpoint_sequence",
+            "blocking_reason",
+        } <= generation_columns
+        publication_columns = {row[1] for row in connection.execute("PRAGMA table_info(publications)")}
+        assert {"discovery_source", "normalized_title", "year", "exact_identifiers_json", "baseline_output_path"} <= (
+            publication_columns
+        )
+        connection.close()
+
+
+def test_generation_lifecycle_rejects_skips_and_terminal_reentry(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        with pytest.raises(ValueError, match="illegal"):
+            ledger.transition_generation(GenerationState.PLANNING, GenerationState.PUBLISHED, NOW)
+        task = _task()
+        ledger.plan_task(task)
+        ledger.seal_plan([task])
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        with pytest.raises(ValueError, match="illegal"):
+            ledger.transition_generation(GenerationState.RUNNING, GenerationState.COMPLETE, NOW)
+        ledger.transition_generation(
+            GenerationState.RUNNING,
+            GenerationState.BLOCKED,
+            NOW,
+            blocking_reason="Provider schema changed",
+        )
+        ledger.transition_generation(GenerationState.BLOCKED, GenerationState.SUPERSEDED, NOW)
+        with pytest.raises(ValueError, match="illegal"):
+            ledger.transition_generation(GenerationState.SUPERSEDED, GenerationState.RUNNING, NOW)
+
+
+def test_complete_and_published_generation_are_forward_only(tmp_path: Path) -> None:
+    with _open_ready(tmp_path / "ledger.db") as ledger:
+        ledger.seal_plan([], empty_author_proofs={"author-ada": "No applicable provider operation"})
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        ledger.transition_generation(GenerationState.RUNNING, GenerationState.VALIDATING, NOW)
+        ledger.record_validation("corpus", "succeeded", "e" * 64, "All checks passed")
+        ledger.transition_generation(GenerationState.VALIDATING, GenerationState.COMPLETE, NOW)
+        with pytest.raises(ValueError, match="illegal"):
+            ledger.transition_generation(GenerationState.COMPLETE, GenerationState.PLANNING, NOW)
+        ledger.record_publication("merged", "deadbeef", NOW)
+        ledger.transition_generation(GenerationState.COMPLETE, GenerationState.PUBLISHED, NOW)
+        with pytest.raises(ValueError, match="illegal"):
+            ledger.transition_generation(GenerationState.PUBLISHED, GenerationState.RUNNING, NOW)
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: RequestSpec("authorization", "lookup", "GET", {}, (), "1", "epoch", "public"),
+        lambda: RequestSpec("crossref", "lookup", "GET", {}, ("api_key",), "1", "epoch", "public"),
+        lambda: RequestSpec("crossref", "lookup", "GET", {}, (), "1", "epoch", "access_token"),
+        lambda: _task(applicability="credential=/private/key"),
+    ],
+)
+def test_every_request_and_task_identity_string_rejects_secrets(factory: object) -> None:
+    with pytest.raises(ValueError, match="secret"):
+        factory()  # type: ignore[operator]
