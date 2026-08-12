@@ -133,6 +133,7 @@ def test_engine_executes_exact_inventory_and_commits_union_seed(tmp_path: Path) 
     def send_once(_operation: object) -> requests.Response:
         response = requests.Response()
         response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
         response._content = json.dumps(body).encode()
         return response
 
@@ -171,6 +172,7 @@ def test_unused_inventory_adapter_version_does_not_change_bound_capabilities(tmp
     def send_once(_operation: object) -> requests.Response:
         response = requests.Response()
         response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
         response._content = json.dumps(body).encode()
         return response
 
@@ -221,6 +223,7 @@ def test_engine_paginates_in_durable_waves_without_repeating_success(tmp_path: P
             }
         response = requests.Response()
         response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
         response._content = json.dumps(envelope).encode()
         return response
 
@@ -270,6 +273,7 @@ def test_engine_rejects_nonzero_scholar_page_without_echoed_offset(tmp_path: Pat
             }
         response = requests.Response()
         response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
         response._content = json.dumps(envelope).encode()
         return response
 
@@ -314,6 +318,7 @@ def test_inventory_union_authority_and_seed_round_are_atomic(tmp_path: Path) -> 
     def send_once(_operation: SendOperation) -> requests.Response:
         response = requests.Response()
         response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
         response._content = json.dumps(envelope).encode()
         return response
 
@@ -570,6 +575,7 @@ def test_sixty_four_author_unions_commit_in_one_phase_wave(tmp_path: Path) -> No
         pid = dict(operation.request.normalized_payload)["pid"]
         response = requests.Response()
         response.status_code = 200
+        response.headers["Content-Type"] = "application/xml"
         response._content = f'<dblpperson key="homepages/{pid}"/>'.encode()
         return response
 

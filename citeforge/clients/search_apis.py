@@ -503,19 +503,23 @@ def _or_fetch_candidates(
     headers: dict[str, str],
     *,
     durable_router: DurableJsonRouter | None = None,
+    author_key: str | None = None,
     freshness_epoch: str = "legacy",
     adapter_version: str = "1",
 ) -> list[dict[str, Any]]:
     """Fetch OpenReview candidate notes via term lookup, falling back to search."""
+    if durable_router is not None and not author_key:
+        raise ValueError("durable OpenReview search requires stable census author key")
     candidates: list[dict[str, Any]] = []
 
     def _extend(req_url: str, semantic_query: dict[str, object]) -> None:
         if durable_router is not None:
+            adapter_name = "openreview.fallback" if semantic_query.get("kind") == "search" else "openreview.term"
             normalized = route_json(
                 durable_router,
-                "openreview.notes",
+                adapter_name,
                 url=req_url,
-                normalized_payload={"author_scope": title, **semantic_query},
+                normalized_payload={"author_key": author_key, **semantic_query},
                 freshness_epoch=freshness_epoch,
                 adapter_version=adapter_version,
                 timeout=30.0,
@@ -799,6 +803,7 @@ def _pubmed_fetch_articles(
     timeout: float,
     *,
     durable_router: DurableJsonRouter | None = None,
+    author_key: str | None = None,
     freshness_epoch: str = "legacy",
     adapter_version: str = "1",
 ) -> tuple[list[dict[str, Any]], int] | None:
@@ -814,11 +819,13 @@ def _pubmed_fetch_articles(
     )
     try:
         if durable_router is not None:
+            if not author_key:
+                raise ValueError("durable PubMed search requires stable census author key")
             normalized_search = route_json(
                 durable_router,
                 "pubmed.search",
                 url=search_url,
-                normalized_payload={"query": search_query, "retmax": retmax},
+                normalized_payload={"author_key": author_key, "query": search_query, "retmax": retmax},
                 freshness_epoch=freshness_epoch,
                 adapter_version=adapter_version,
                 timeout=timeout,

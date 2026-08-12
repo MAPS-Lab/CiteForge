@@ -23,9 +23,10 @@ from ..text_utils import has_placeholder
 from .census import AuthorCensus
 from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
-_SCHEMA_VERSION = "4"
+_SCHEMA_VERSION = "5"
+_SCHEMA_V4_FINGERPRINT = "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
 _MAX_PLAN_ROUNDS = 64
-_EXPECTED_SCHEMA_FINGERPRINT = "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
+_EXPECTED_SCHEMA_FINGERPRINT = "be14f7bc658bf347c5f519d0483311ff23118e0c9569f5328939b546b1fe2f46"
 _SATISFIED = frozenset(
     {
         TaskDisposition.SUCCEEDED,
@@ -99,6 +100,10 @@ _LEGAL_GENERATION_TRANSITIONS = {
 
 class FaultInjectedError(RuntimeError):
     """Test-only interruption raised after a named durable boundary."""
+
+
+class StaleClaimError(ValueError):
+    """A task or request fencing token no longer owns durable work."""
 
 
 def _plain_json(value: object) -> object:
@@ -750,12 +755,33 @@ class Ledger:
                 ).fetchone()
                 if existing_version is None:
                     raise ValueError("refusing to initialize nonempty database without schema version")
+            if existing_version is not None and existing_version[0] == "4":
+                stored = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
+                if (
+                    stored is None
+                    or stored[0] != _SCHEMA_V4_FINGERPRINT
+                    or self._schema_fingerprint(connection) != _SCHEMA_V4_FINGERPRINT
+                ):
+                    raise ValueError("refusing to migrate structurally inconsistent schema version 4")
+                connection.execute(
+                    "CREATE TABLE physical_send_markers (generation_id TEXT NOT NULL, request_key TEXT NOT NULL, "
+                    "owner TEXT NOT NULL, started_at TEXT NOT NULL, idempotent INTEGER NOT NULL "
+                    "CHECK(idempotent IN (0, 1)), resolved_at TEXT, PRIMARY KEY (generation_id, request_key), "
+                    "FOREIGN KEY (generation_id, request_key) "
+                    "REFERENCES requests(generation_id, request_key))"
+                )
+                connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (_SCHEMA_VERSION,))
+                connection.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'",
+                    (_EXPECTED_SCHEMA_FINGERPRINT,),
+                )
+                existing_version = (_SCHEMA_VERSION,)
             if existing_version is not None and existing_version[0] != _SCHEMA_VERSION:
                 raise ValueError(
                     f"unsupported or structurally inconsistent ledger schema version: {existing_version[0]}"
                 )
             if existing_version is not None:
-                self._validate_schema_v4(connection)
+                self._validate_schema_v5(connection)
                 return
             schema = """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -863,6 +889,11 @@ class Ledger:
                     PRIMARY KEY (generation_id, request_key, attempt_number),
                     FOREIGN KEY (generation_id, request_key) REFERENCES requests(generation_id, request_key)
                 );
+                CREATE TABLE IF NOT EXISTS physical_send_markers (generation_id TEXT NOT NULL,
+                    request_key TEXT NOT NULL, owner TEXT NOT NULL, started_at TEXT NOT NULL,
+                    idempotent INTEGER NOT NULL CHECK(idempotent IN (0, 1)), resolved_at TEXT,
+                    PRIMARY KEY (generation_id, request_key), FOREIGN KEY (generation_id, request_key)
+                    REFERENCES requests(generation_id, request_key));
                 CREATE TABLE IF NOT EXISTS observations (
                     generation_id TEXT NOT NULL,
                     request_key TEXT NOT NULL,
@@ -1180,7 +1211,7 @@ class Ledger:
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_fingerprint', ?)",
                     (_EXPECTED_SCHEMA_FINGERPRINT,),
                 )
-            self._validate_schema_v4(connection)
+            self._validate_schema_v5(connection)
 
     @staticmethod
     def _schema_fingerprint(connection: sqlite3.Connection) -> str:
@@ -1198,7 +1229,7 @@ class Ledger:
         return _digest(objects)
 
     @staticmethod
-    def _validate_schema_v4(connection: sqlite3.Connection) -> None:
+    def _validate_schema_v5(connection: sqlite3.Connection) -> None:
         required_columns = {
             "generations": {
                 "plan_closed",
@@ -1250,11 +1281,12 @@ class Ledger:
                 "topology_digest",
             },
             "inventory_policy_authority": {"authority_json", "authority_digest"},
+            "physical_send_markers": {"request_key", "owner", "started_at", "idempotent", "resolved_at"},
         }
         for table, required in required_columns.items():
             columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             if not required <= columns:
-                raise ValueError(f"structurally inconsistent schema version 4 table: {table}")
+                raise ValueError(f"structurally inconsistent schema version 5 table: {table}")
         fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
         actual = Ledger._schema_fingerprint(connection)
         if (
@@ -1262,7 +1294,7 @@ class Ledger:
             or fingerprint[0] != _EXPECTED_SCHEMA_FINGERPRINT
             or actual != _EXPECTED_SCHEMA_FINGERPRINT
         ):
-            raise ValueError("structurally inconsistent schema version 4 fingerprint")
+            raise ValueError("structurally inconsistent schema version 5 fingerprint")
         Ledger._assert_task5a_authority_invariant(connection)
 
     @staticmethod
@@ -3137,7 +3169,7 @@ class Ledger:
                 (generation_id, claim.key),
             ).fetchone()
             if stored_lease is None or stored_lease[0] != _timestamp(claim.lease_expires):
-                raise ValueError("stale claim fencing token")
+                raise StaleClaimError("stale claim fencing token")
             row = connection.execute(
                 "SELECT task.request_key, obligation.round_sequence FROM tasks AS task "
                 "JOIN plan_obligations AS obligation ON obligation.generation_id = task.generation_id "
@@ -3491,6 +3523,258 @@ class Ledger:
         self._inject("after_attempt_commit")
         return number
 
+    def mark_physical_send(
+        self, task_claim: TaskClaim, request_claim: RequestClaim, started_at: datetime, *, idempotent: bool
+    ) -> None:
+        """Fence and persist intent immediately before a physical socket send."""
+        generation_id = self._generation_id()
+        with self._transaction(immediate=True) as connection:
+            self._assert_owner("tasks", "task_key", task_claim.key, task_claim.owner, started_at)
+            self._assert_owner("requests", "request_key", request_claim.key, request_claim.owner, started_at)
+            existing = connection.execute(
+                "SELECT idempotent, resolved_at FROM physical_send_markers WHERE generation_id = ? AND request_key = ?",
+                (generation_id, request_claim.key),
+            ).fetchone()
+            if existing is not None and existing[1] is None and not bool(existing[0]):
+                raise ValueError("unresolved non-idempotent physical send cannot be repeated")
+            connection.execute(
+                "INSERT INTO physical_send_markers(generation_id, request_key, owner, started_at, idempotent) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(generation_id, request_key) DO UPDATE SET owner = excluded.owner, "
+                "started_at = excluded.started_at, idempotent = excluded.idempotent, resolved_at = NULL",
+                (generation_id, request_claim.key, task_claim.owner, _timestamp(started_at), int(idempotent)),
+            )
+
+    def unresolved_physical_send(self, request_key: str) -> tuple[datetime, bool] | None:
+        row = self._connection.execute(
+            "SELECT started_at, idempotent FROM physical_send_markers WHERE generation_id = ? AND request_key = ? "
+            "AND resolved_at IS NULL",
+            (self._generation_id(), _digest_text(request_key, "request key")),
+        ).fetchone()
+        return (datetime.fromisoformat(str(row[0])), bool(row[1])) if row is not None else None
+
+    def record_intermediate_attempt(
+        self,
+        task_claim: TaskClaim,
+        request_claim: RequestClaim,
+        started_at: datetime,
+        finished_at: datetime,
+        outcome: str,
+        http_status: int | None,
+    ) -> None:
+        """Record one completed network hop while retaining both exact leases."""
+        generation_id = self._generation_id()
+        with self._transaction(immediate=True) as connection:
+            self._assert_owner("tasks", "task_key", task_claim.key, task_claim.owner, finished_at)
+            self._assert_owner("requests", "request_key", request_claim.key, request_claim.owner, finished_at)
+            number = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM attempts WHERE generation_id = ? "
+                    "AND request_key = ?",
+                    (generation_id, request_claim.key),
+                ).fetchone()[0]
+            )
+            connection.execute(
+                "INSERT INTO attempts(generation_id, request_key, attempt_number, started_at, finished_at, outcome, "
+                "http_status, safe_diagnostic) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    request_claim.key,
+                    number,
+                    _timestamp(started_at),
+                    _timestamp(finished_at),
+                    _identifier(outcome, "attempt outcome"),
+                    http_status,
+                    "validated DOI redirect hop",
+                ),
+            )
+            connection.execute(
+                "UPDATE tasks SET attempt_count = attempt_count + 1 WHERE generation_id = ? AND request_key = ?",
+                (generation_id, request_claim.key),
+            )
+            connection.execute(
+                "UPDATE physical_send_markers SET resolved_at = ? WHERE generation_id = ? AND request_key = ?",
+                (_timestamp(finished_at), generation_id, request_claim.key),
+            )
+
+    def complete_physical_attempt(
+        self,
+        task_claim: TaskClaim,
+        request_claim: RequestClaim,
+        started_at: datetime,
+        finished_at: datetime,
+        outcome: str,
+        disposition: TaskDisposition,
+        *,
+        http_status: int | None = None,
+        retry_at: datetime | None = None,
+        retry_delay: float | None = None,
+        response_digest: str | None = None,
+        observation: ProviderObservation | None = None,
+        safe_diagnostic: str = "",
+        task_reason: str = "",
+        persist_attempt: bool = True,
+    ) -> int:
+        """Atomically fence and persist one physical request completion."""
+        task_key = _digest_text(task_claim.key, "task key")
+        request_key = _digest_text(request_claim.key, "request key")
+        owner = _identifier(task_claim.owner, "lease owner")
+        if request_claim.owner != owner or task_claim.request_key != request_key:
+            raise ValueError("task and request claims do not identify the same leased work")
+        outcome = _identifier(outcome, "attempt outcome")
+        diagnostic = _free_text(safe_diagnostic, "attempt diagnostic")
+        task_reason = _free_text(task_reason, "task reason")
+        if disposition not in _TERMINAL | {TaskDisposition.RETRY_WAIT}:
+            raise ValueError("invalid physical completion disposition")
+        if disposition is TaskDisposition.RETRY_WAIT and retry_at is None:
+            raise ValueError("retry wait requires a durable retry deadline")
+        if http_status is not None and not 100 <= http_status <= 599:
+            raise ValueError("invalid HTTP status")
+        if retry_delay is not None and retry_delay < 0:
+            raise ValueError("invalid retry delay")
+        if disposition in {TaskDisposition.SUCCEEDED, TaskDisposition.CONFIRMED_EMPTY} and observation is None:
+            raise ValueError("successful physical completion requires provider evidence")
+        if disposition is TaskDisposition.CONFIRMED_EMPTY and (
+            observation is None or not observation.authoritative_empty or observation.response
+        ):
+            raise ValueError("confirmed empty requires authoritative empty evidence")
+        if disposition is TaskDisposition.SUCCEEDED and observation is not None and observation.authoritative_empty:
+            raise ValueError("successful request cannot use authoritative empty evidence")
+        response_json: str | None = None
+        if observation is not None:
+            response_json = _canonical(dict(observation.response))
+            if response_digest is not None and response_digest != observation.digest:
+                raise ValueError("response digest does not match normalized response")
+            response_digest = observation.digest
+        if response_digest is not None:
+            _digest_text(response_digest, "response digest")
+
+        generation_id = self._generation_id()
+        finished_text = _timestamp(finished_at)
+        with self._transaction(immediate=True) as connection:
+            task = connection.execute(
+                "SELECT state, lease_owner, lease_expires_at, request_key FROM tasks "
+                "WHERE generation_id = ? AND task_key = ?",
+                (generation_id, task_key),
+            ).fetchone()
+            request = connection.execute(
+                "SELECT state, lease_owner, lease_expires_at, identity_json FROM requests "
+                "WHERE generation_id = ? AND request_key = ?",
+                (generation_id, request_key),
+            ).fetchone()
+            if (
+                task is None
+                or request is None
+                or task[0] != TaskDisposition.LEASED.value
+                or request[0] != TaskDisposition.LEASED.value
+                or task[1] != owner
+                or request[1] != owner
+                or task[2] != _timestamp(task_claim.lease_expires)
+                or request[2] != _timestamp(request_claim.lease_expires)
+                or task[2] < finished_text
+                or request[2] < finished_text
+                or task[3] != request_key
+            ):
+                raise StaleClaimError("stale claim fencing token")
+            identity = json.loads(request[3])
+            if observation is not None and observation.provider != identity["provider"]:
+                raise ValueError("observation provider does not match request")
+            if disposition is TaskDisposition.SUCCEEDED and observation is not None:
+                missing = [
+                    field_name
+                    for field_name in identity["requested_fields"]
+                    if field_name not in observation.response
+                    or (
+                        not _has_observation_value(observation.response[field_name])
+                        and not (
+                            identity["provider"] == "web"
+                            and identity["operation"] == "doi_probe"
+                            and field_name == "doi"
+                            and observation.response[field_name] is None
+                        )
+                    )
+                ]
+                if missing:
+                    raise ValueError(f"successful observation lacks requested field evidence: {', '.join(missing)}")
+
+            number = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM attempts "
+                    "WHERE generation_id = ? AND request_key = ?",
+                    (generation_id, request_key),
+                ).fetchone()[0]
+            )
+            if persist_attempt:
+                connection.execute(
+                    "INSERT INTO attempts(generation_id, request_key, attempt_number, started_at, finished_at, "
+                    "outcome, http_status, retry_delay_seconds, response_digest, safe_diagnostic) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        request_key,
+                        number,
+                        _timestamp(started_at),
+                        finished_text,
+                        outcome,
+                        http_status,
+                        retry_delay,
+                        response_digest,
+                        diagnostic,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE tasks SET attempt_count = attempt_count + 1 WHERE generation_id = ? AND request_key = ?",
+                    (generation_id, request_key),
+                )
+            connection.execute(
+                "UPDATE requests SET state = ?, next_attempt_at = ?, lease_owner = NULL, lease_expires_at = NULL, "
+                "response_digest = ?, safe_diagnostic = ? WHERE generation_id = ? AND request_key = ?",
+                (
+                    disposition.value,
+                    _timestamp(retry_at) if retry_at else None,
+                    response_digest,
+                    diagnostic,
+                    generation_id,
+                    request_key,
+                ),
+            )
+            if disposition in _TERMINAL:
+                connection.execute(
+                    "INSERT INTO observations(generation_id, request_key, disposition, response_json, response_digest, "
+                    "provider, schema_version, authoritative_empty, observed_at, safe_diagnostic) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        request_key,
+                        disposition.value,
+                        response_json,
+                        response_digest,
+                        observation.provider if observation is not None else identity["provider"],
+                        observation.schema_version if observation is not None else identity["adapter_version"],
+                        int(observation.authoritative_empty) if observation is not None else 0,
+                        finished_text,
+                        diagnostic,
+                    ),
+                )
+            connection.execute(
+                "UPDATE tasks SET state = ?, reason = ?, next_attempt_at = ?, lease_owner = NULL, "
+                "lease_expires_at = NULL, last_error_class = ?, safe_diagnostic = ? "
+                "WHERE generation_id = ? AND task_key = ?",
+                (
+                    disposition.value,
+                    task_reason,
+                    _timestamp(retry_at) if retry_at else None,
+                    disposition.value if disposition not in _SATISFIED else None,
+                    task_reason,
+                    generation_id,
+                    task_key,
+                ),
+            )
+            connection.execute(
+                "UPDATE physical_send_markers SET resolved_at = ? WHERE generation_id = ? AND request_key = ?",
+                (finished_text, generation_id, request_key),
+            )
+        return number
+
     def finish_request(
         self,
         request_key: str,
@@ -3544,7 +3828,15 @@ class Ledger:
                     field_name
                     for field_name in identity["requested_fields"]
                     if field_name not in observation.response
-                    or not _has_observation_value(observation.response[field_name])
+                    or (
+                        not _has_observation_value(observation.response[field_name])
+                        and not (
+                            identity["provider"] == "web"
+                            and identity["operation"] == "doi_probe"
+                            and field_name == "doi"
+                            and observation.response[field_name] is None
+                        )
+                    )
                 ]
                 if missing:
                     raise ValueError(f"successful observation lacks requested field evidence: {', '.join(missing)}")
@@ -4058,6 +4350,14 @@ class Ledger:
                     (generation_id,),
                 )
             ],
+            "physical_send_markers": [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT request_key, owner, started_at, idempotent, resolved_at FROM physical_send_markers "
+                    "WHERE generation_id = ? ORDER BY request_key",
+                    (generation_id,),
+                )
+            ],
             "dominance_evidence": [
                 {
                     "task_key": row["task_key"],
@@ -4247,6 +4547,7 @@ __all__ = [
     "RequestClaim",
     "RequestResult",
     "RequestSpec",
+    "StaleClaimError",
     "TaskClaim",
     "TaskSpec",
     "ValidationSpec",

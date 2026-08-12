@@ -335,16 +335,47 @@ def _send_once(
     headers: dict[str, str],
     timeout: tuple[float, float],
     json_payload: dict[str, Any] | None,
+    *,
+    stream: bool = False,
+    allow_redirects: bool = True,
 ) -> requests.Response:
     """Send one physical attempt through rate, pool, and concurrency controls."""
     session = _get_session()
     _THREAD_LOCAL.session_request_count += 1
-    with _GLOBAL_SEMAPHORE:
+    _GLOBAL_SEMAPHORE.acquire()
+    try:
         if method == "POST":
-            return session.post(url, json=json_payload, headers=headers, timeout=timeout)
-        if method == "HEAD":
-            return session.head(url, headers=headers, timeout=timeout)
-        return session.get(url, headers=headers, timeout=timeout)
+            response = session.post(
+                url, json=json_payload, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+        elif method == "HEAD":
+            response = session.head(
+                url, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+        else:
+            response = session.get(
+                url, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+    except Exception:
+        _GLOBAL_SEMAPHORE.release()
+        raise
+    if not stream:
+        _GLOBAL_SEMAPHORE.release()
+        return response
+    original_close = getattr(response, "close", lambda: None)
+    released = False
+
+    def close_and_release() -> None:
+        nonlocal released
+        try:
+            original_close()
+        finally:
+            if not released:
+                released = True
+                _GLOBAL_SEMAPHORE.release()
+
+    response.close = close_and_release  # type: ignore[method-assign]
+    return response
 
 
 def send_http_once(
@@ -353,6 +384,9 @@ def send_http_once(
     headers: dict[str, str],
     timeout: float,
     json_payload: dict[str, Any] | None = None,
+    *,
+    stream: bool = False,
+    allow_redirects: bool = True,
 ) -> requests.Response:
     """Send exactly one physical HTTP attempt for the durable refresh transport."""
     method = method.upper()
@@ -363,7 +397,15 @@ def send_http_once(
     limiter = _get_rate_limiter(namespace)
     if limiter is not None:
         limiter.acquire()
-    return _send_once(method, url, _randomize_headers(headers), (min(timeout, 10.0), timeout), json_payload)
+    return _send_once(
+        method,
+        url,
+        _randomize_headers(headers),
+        (min(timeout, 10.0), timeout),
+        json_payload,
+        stream=stream,
+        allow_redirects=allow_redirects,
+    )
 
 
 def _http_request(

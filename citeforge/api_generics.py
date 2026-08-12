@@ -114,9 +114,9 @@ _TRANSPORT_ADAPTER = {
     "semantic_scholar": "semantic_scholar.search",
     "europepmc": "europepmc.search",
     "crossref": "crossref.search",
-    "crossref_venue": "crossref.search",
+    "crossref_venue": "crossref.venue",
     "openalex": "openalex.search",
-    "openalex_venue": "openalex.search",
+    "openalex_venue": "openalex.venue",
 }
 _SECRET_QUERY_NAMES = {item.casefold() for item in REDACT_QUERY_PARAM_NAMES}
 
@@ -126,7 +126,7 @@ def _semantic_url_identity(url: str) -> dict[str, object]:
     parsed = urlsplit(url)
     query: dict[str, list[str]] = {}
     for name, value in sorted(parse_qsl(parsed.query, keep_blank_values=True)):
-        if name.casefold() in _SECRET_QUERY_NAMES:
+        if name.casefold() in _SECRET_QUERY_NAMES or name.casefold() == "mailto":
             continue
         query.setdefault(name, []).append(value)
     return {"host": parsed.hostname or "", "path": parsed.path, "query": query}

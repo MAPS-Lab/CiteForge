@@ -351,6 +351,37 @@ def test_recomputed_stored_fingerprint_cannot_bless_alien_schema(tmp_path: Path)
     assert path.read_bytes() == before
 
 
+def test_exact_v4_ledger_migrates_atomically_to_v5(tmp_path: Path) -> None:
+    path = tmp_path / "v4.db"
+    with Ledger.open(path):
+        pass
+    connection = sqlite3.connect(path)
+    connection.execute("DROP TABLE physical_send_markers")
+    objects = [
+        {
+            "name": row[1],
+            "sql": " ".join(str(row[3]).split()) if row[3] is not None else None,
+            "table": row[2],
+            "type": row[0],
+        }
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    ]
+    assert _canonical_digest(objects) == "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
+    connection.execute("UPDATE schema_meta SET value = '4' WHERE key = 'schema_version'")
+    connection.execute(
+        "UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (_canonical_digest(objects),)
+    )
+    connection.commit()
+    connection.close()
+
+    with Ledger.open(path) as migrated:
+        assert migrated.pragma("integrity_check") == "ok"
+        version = migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        assert version[0] == "5"
+
+
 def _canonical_digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()

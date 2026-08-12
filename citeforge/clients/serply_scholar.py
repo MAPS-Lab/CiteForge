@@ -53,6 +53,7 @@ def _serply_get(
     start: int = 0,
     *,
     durable_router: DurableJsonRouter | None = None,
+    author_key: str | None = None,
     freshness_epoch: str = "legacy",
     adapter_version: str = "1",
 ) -> dict[str, Any]:
@@ -83,11 +84,13 @@ def _serply_get(
 
     try:
         if durable_router is not None:
+            if not author_key:
+                raise ValueError("durable Serply search requires stable census author key")
             normalized = route_json(
                 durable_router,
                 "serply.scholar",
                 url=url,
-                normalized_payload={"query": query, "start": start},
+                normalized_payload={"author_key": author_key, "query": query, "start": start},
                 freshness_epoch=freshness_epoch,
                 adapter_version=adapter_version,
                 timeout=HTTP_TIMEOUT_DEFAULT,

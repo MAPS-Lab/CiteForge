@@ -45,7 +45,7 @@ def test_scholar_json_callers_route_without_legacy_http(monkeypatch: pytest.Monk
             },
         }
     )
-    assert serply_scholar._serply_get("secret", "ocean", durable_router=router)["articles"]
+    assert serply_scholar._serply_get("secret", "ocean", durable_router=router, author_key="author-ada")["articles"]
     assert serpapi_scholar._serpapi_get("secret", "author", durable_router=router)["articles"]
     assert [name for name, _operation in router.calls] == ["serply.scholar", "serpapi.author"]
 

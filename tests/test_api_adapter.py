@@ -171,7 +171,7 @@ def test_every_generic_json_adapter_is_callable_through_provider_transport(
         task_claim=TaskClaim("a" * 64, "b" * 64, "worker", datetime.max.replace(tzinfo=timezone.utc)),
         author_key="author-ada",
         freshness_epoch="2026-08",
-        adapter_version="test-v1",
+        adapter_version="1",
     )
     assert transport.physical_calls == 1
     assert result
@@ -244,7 +244,12 @@ def test_pubmed_legacy_summary_executes_singleton_exact_requests(monkeypatch: py
         if "esearch" in url:
             return {"esearchresult": {"idlist": ["123", "456"]}}
         pmid = parse_qs(urlparse(url).query)["id"][0]
-        return {"result": {"uids": [pmid], pmid: {"uid": pmid, "title": f"Title {pmid}"}}}
+        return {
+            "result": {
+                "uids": [pmid],
+                pmid: {"uid": pmid, "title": f"Title {pmid}", "authors": [], "pubdate": "2026"},
+            }
+        }
 
     monkeypatch.setattr(search_apis, "http_get_json", fake_get)
     result = search_apis._pubmed_fetch_articles("ocean", 2, 5.0)
@@ -271,22 +276,24 @@ def test_search_api_json_callers_route_without_legacy_http(monkeypatch: pytest.M
     router = _RecordingRouter(
         {
             "doi.csl": {"metadata": {"title": "Ocean"}},
-            "openreview.notes": {"notes": [{"id": "note"}]},
+            "openreview.term": {"notes": [{"id": "note"}]},
             "dblp.author_search": {"hits": [{"info": {"pid": "1", "author": AUTHOR}}]},
             "pubmed.search": {"pmids": ["123"]},
             "pubmed.summary.singleton": {"records": {"123": {"uid": "123", "title": "Ocean"}}},
         }
     )
     assert search_apis.fetch_csl_via_doi("10.1/x", durable_router=router) == {"title": "Ocean"}
-    assert search_apis._or_fetch_candidates(TITLE, {}, durable_router=router) == [{"id": "note"}]
+    assert search_apis._or_fetch_candidates(TITLE, {}, durable_router=router, author_key="author-ada") == [
+        {"id": "note"}
+    ]
     assert search_apis.dblp_find_author_pid(AUTHOR, durable_router=router) == "1"
-    assert search_apis._pubmed_fetch_articles("ocean", 1, 5.0, durable_router=router) == (
+    assert search_apis._pubmed_fetch_articles("ocean", 1, 5.0, durable_router=router, author_key="author-ada") == (
         [{"uid": "123", "title": "Ocean"}],
         1,
     )
     assert [name for name, _operation in router.calls] == [
         "doi.csl",
-        "openreview.notes",
+        "openreview.term",
         "dblp.author_search",
         "pubmed.search",
         "pubmed.summary.singleton",

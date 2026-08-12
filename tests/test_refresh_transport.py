@@ -13,6 +13,7 @@ import requests
 from citeforge import api_generics
 from citeforge.api_configs import S2_SEARCH_CONFIG
 from citeforge.cache import ResponseCache
+from citeforge.refresh.capabilities import GEMINI_GENERATION_CONFIG, GEMINI_MODEL_ID, GEMINI_PROMPT_VERSION
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
 from citeforge.refresh.ledger import Ledger, ProviderObservation, RequestClaim, RequestSpec, TaskClaim, TaskSpec
 from citeforge.refresh.provider_adapters import JSON_ADAPTERS, JSON_DURABLE_CALLSITES, pubmed_summary_adapter
@@ -20,6 +21,7 @@ from citeforge.refresh.transport import (
     LedgerTransport,
     OutcomeClass,
     ProviderResponse,
+    RawProviderResponse,
     SchemaChangedError,
     ScriptedTransport,
     SendOperation,
@@ -146,6 +148,208 @@ def test_send_operation_rejects_unsupported_wire_methods_before_claim(method: st
 
 def test_head_is_a_supported_retryable_wire_method() -> None:
     assert _operation(_request(method="HEAD")).retryable
+
+
+def test_durable_response_is_streamed_bounded_and_closed_before_decode(tmp_path: Path) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    raw = _response(200)
+    raw.headers["Content-Type"] = "application/json"
+    chunks = iter((b'{"items":[', b'{"title":"A"}', b"]}"))
+    close_count = 0
+    decode_count = 0
+
+    def iter_content(chunk_size: int):
+        assert chunk_size <= 65_536
+        yield from chunks
+
+    def close() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    raw.iter_content = iter_content  # type: ignore[method-assign]
+    raw.close = close  # type: ignore[method-assign]
+
+    def decoder(response: RawProviderResponse) -> tuple[dict[str, object], bool]:
+        nonlocal decode_count
+        decode_count += 1
+        assert close_count == 1
+        return {"items": json.loads(response.body)["items"], "title": "A"}, False
+
+    operation = SendOperation(
+        request,
+        "https://api.crossref.org/works",
+        5,
+        lambda _body: {},
+        lambda _body: False,
+        response_decoder=decoder,
+        decoder_schema="test-v1",
+        max_body_bytes=64,
+    )
+    result = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), operation
+    )
+    assert result.disposition is TaskDisposition.SUCCEEDED
+    assert close_count == 1
+    assert decode_count == 1
+    ledger.close()
+
+
+def test_success_clock_is_reacquired_after_decoder(tmp_path: Path) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    raw = _response(200)
+    raw.headers["Content-Type"] = "application/json"
+    instants = iter((NOW, NOW + timedelta(seconds=1), NOW + timedelta(seconds=2), NOW + timedelta(seconds=3)))
+    decoded = False
+
+    def clock() -> datetime:
+        instant = next(instants)
+        if instant >= NOW + timedelta(seconds=2):
+            assert decoded
+        return instant
+
+    def decoder(_raw: RawProviderResponse) -> tuple[dict[str, object], bool]:
+        nonlocal decoded
+        decoded = True
+        return {"title": "A"}, False
+
+    operation = SendOperation(
+        request,
+        "https://provider.test/resource",
+        5,
+        lambda _body: {},
+        lambda _body: False,
+        response_decoder=decoder,
+        decoder_schema="test-v1",
+    )
+    result = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=clock).send_claim(
+        _claim(ledger, "worker"), operation
+    )
+    assert result.disposition is TaskDisposition.SUCCEEDED
+    ledger.close()
+
+
+@pytest.mark.parametrize("broken_attribute", ["headers", "url"])
+def test_typed_response_metadata_failure_closes_and_terminalizes_one_attempt(
+    tmp_path: Path, broken_attribute: str
+) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+
+    class BrokenMetadataResponse(requests.Response):
+        @property
+        def headers(self):  # type: ignore[override]
+            if broken_attribute == "headers":
+                raise ValueError("secret metadata")
+            return self.__dict__.setdefault("_safe_headers", requests.structures.CaseInsensitiveDict())
+
+        @headers.setter
+        def headers(self, value):  # type: ignore[override]
+            self.__dict__["_safe_headers"] = value
+
+        @property
+        def url(self):  # type: ignore[override]
+            if broken_attribute == "url":
+                raise ValueError("secret metadata")
+            return "https://provider.test/resource"
+
+        @url.setter
+        def url(self, value):  # type: ignore[override]
+            self.__dict__["_safe_url"] = value
+
+    raw = BrokenMetadataResponse()
+    raw.status_code = 200
+    raw._content = b"{}"
+    close_count = 0
+
+    def close() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    raw.close = close  # type: ignore[method-assign]
+    operation = SendOperation(
+        request,
+        "https://provider.test/resource",
+        5,
+        lambda _body: {},
+        lambda _body: False,
+        response_decoder=lambda _raw: ({"title": "never"}, False),
+        decoder_schema="test-v1",
+    )
+    result = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), operation
+    )
+    assert result.disposition is TaskDisposition.MALFORMED
+    assert close_count == 1
+    assert len(ledger.manifest().data["attempts"]) == 1
+    ledger.close()
+
+
+def test_invalid_status_access_closes_and_terminalizes_claim(tmp_path: Path) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+
+    class BrokenStatusResponse(requests.Response):
+        @property
+        def status_code(self):  # type: ignore[override]
+            raise ValueError("invalid status")
+
+        @status_code.setter
+        def status_code(self, value):  # type: ignore[override]
+            self.__dict__["_status"] = value
+
+    raw = BrokenStatusResponse()
+    close_count = 0
+
+    def close() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    raw.close = close  # type: ignore[method-assign]
+    result = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), _operation(request)
+    )
+    assert result.disposition is TaskDisposition.PERMANENT_FAILURE
+    assert close_count == 1
+    assert ledger.request_result(request.key) is not None
+    ledger.close()
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "application/xml", "application/x-bibtex", "text/html"])
+def test_oversized_typed_response_is_one_malformed_attempt_before_decoder(tmp_path: Path, content_type: str) -> None:
+    request = _request()
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
+    raw = _response(200)
+    raw.headers["Content-Type"] = content_type
+    raw._content = b"x" * 33
+    raw.iter_content = lambda chunk_size: iter((raw._content,))  # type: ignore[method-assign]
+    raw.close = lambda: None  # type: ignore[method-assign]
+    decoded = False
+
+    def decoder(_response: RawProviderResponse) -> tuple[dict[str, object], bool]:
+        nonlocal decoded
+        decoded = True
+        return {}, False
+
+    operation = SendOperation(
+        request,
+        "https://provider.test/resource",
+        5,
+        lambda _body: {},
+        lambda _body: False,
+        response_decoder=decoder,
+        decoder_schema="test-v1",
+        max_body_bytes=32,
+    )
+    result = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), operation
+    )
+    assert result.disposition is TaskDisposition.MALFORMED
+    assert result.outcome is OutcomeClass.MALFORMED
+    assert not decoded
+    assert len(ledger.manifest().data["attempts"]) == 1
+    ledger.close()
 
 
 def test_unexpected_send_callback_exception_terminalizes_claim_and_attempt(tmp_path: Path) -> None:
@@ -339,7 +543,12 @@ def test_generic_search_uses_stable_author_key_and_real_ledger_transport(
         nonlocal calls
         calls += 1
         return _response(
-            200, {"data": [{"paperId": "s2", "title": "Ocean Forecasting", "authors": [{"name": "Ada Lovelace"}]}]}
+            200,
+            {
+                "total": 1,
+                "data": [{"paperId": "s2", "title": "Ocean Forecasting", "authors": [{"name": "Ada Lovelace"}]}],
+            },
+            headers={"Content-Type": "application/json"},
         )
 
     transport = LedgerTransport(
@@ -368,7 +577,7 @@ def test_generic_search_uses_stable_author_key_and_real_ledger_transport(
     assert result[0]["paperId"] == "s2"
     assert calls == 1
     assert len(ledger.manifest().data["attempts"]) == 1
-    assert operation.request.canonical_content()["normalized_payload"]["author_scope"] == "author-ada"
+    assert operation.request.canonical_content()["normalized_payload"]["query"] == '"Ocean Forecasting" Ada Lovelace'
     ledger.close()
 
 
@@ -566,6 +775,213 @@ def test_every_requests_exception_is_durable_and_secret_safe(
     ledger.close()
 
 
+def test_doi_redirect_invalid_url_is_terminalized_as_one_attempt_per_hop(tmp_path: Path) -> None:
+    adapter = JSON_ADAPTERS["doi.csl"]
+    operation = adapter.build_operation(
+        url="https://doi.org/10.1/x",
+        normalized_payload={"doi": "10.1/x"},
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        timeout=5,
+        headers={"Accept": "application/vnd.citationstyles.csl+json"},
+    )
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", operation.request)
+    calls = 0
+
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _response(302, headers={"Location": "https://api.crossref.org/works/10.1/x"})
+        raise requests.exceptions.InvalidURL("invalid redirect target")
+
+    result = LedgerTransport(ledger, send_once=sender, clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), operation
+    )
+    assert result.outcome is OutcomeClass.INVALID_REQUEST
+    assert result.disposition is TaskDisposition.PERMANENT_FAILURE
+    assert calls == 2
+    assert len(ledger.manifest().data["attempts"]) == 2
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("second_result", "expected_outcome", "expected_disposition"),
+    [
+        (object(), OutcomeClass.MALFORMED, TaskDisposition.MALFORMED),
+        (RuntimeError("api_key=secret"), OutcomeClass.INVALID_REQUEST, TaskDisposition.PERMANENT_FAILURE),
+        (requests.Timeout("late timeout"), OutcomeClass.TIMEOUT, TaskDisposition.RETRY_WAIT),
+        (
+            requests.ConnectionError("late connection"),
+            OutcomeClass.CONNECTION_FAILURE,
+            TaskDisposition.RETRY_WAIT,
+        ),
+    ],
+)
+def test_every_later_doi_redirect_hop_uses_the_physical_send_classifier(
+    tmp_path: Path,
+    second_result: object,
+    expected_outcome: OutcomeClass,
+    expected_disposition: TaskDisposition,
+) -> None:
+    adapter = JSON_ADAPTERS["doi.csl"]
+    operation = adapter.build_operation(
+        url="https://doi.org/10.1/x",
+        normalized_payload={"doi": "10.1/x"},
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        timeout=5,
+        headers={"Accept": "application/vnd.citationstyles.csl+json"},
+    )
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", operation.request)
+    calls = 0
+
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _response(302, headers={"Location": "https://api.crossref.org/works/10.1/x"})
+        if isinstance(second_result, BaseException):
+            raise second_result
+        return second_result  # type: ignore[return-value]
+
+    result = LedgerTransport(ledger, send_once=sender, clock=lambda: NOW, jitter=lambda _delay: 0).send_claim(
+        _claim(ledger, "worker"), operation
+    )
+    assert result.outcome is expected_outcome
+    assert result.disposition is expected_disposition
+    manifest = ledger.manifest().data
+    assert calls == 2
+    assert len(manifest["attempts"]) == 2
+    assert manifest["physical_send_markers"][0]["resolved_at"] is not None
+    assert "secret" not in json.dumps(manifest).casefold()
+    ledger.close()
+
+
+@pytest.mark.parametrize("location", ["https://[", "https://api.crossref.org:bad/works/10.1/x"])
+def test_malformed_doi_redirect_location_terminalizes_current_hop(tmp_path: Path, location: str) -> None:
+    adapter = JSON_ADAPTERS["doi.csl"]
+    operation = adapter.build_operation(
+        url="https://doi.org/10.1/x",
+        normalized_payload={"doi": "10.1/x"},
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        timeout=5,
+        headers={"Accept": "application/vnd.citationstyles.csl+json"},
+    )
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", operation.request)
+    result = LedgerTransport(
+        ledger, send_once=lambda _operation: _response(302, headers={"Location": location}), clock=lambda: NOW
+    ).send_claim(_claim(ledger, "worker"), operation)
+    assert result.outcome is OutcomeClass.INVALID_REQUEST
+    assert result.disposition is TaskDisposition.PERMANENT_FAILURE
+    manifest = ledger.manifest().data
+    assert len(manifest["attempts"]) == 1
+    assert manifest["physical_send_markers"][0]["resolved_at"] is not None
+    ledger.close()
+
+
+def test_later_doi_redirect_system_exit_preserves_exact_crash_marker(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    adapter = JSON_ADAPTERS["doi.csl"]
+    operation = adapter.build_operation(
+        url="https://doi.org/10.1/x",
+        normalized_payload={"doi": "10.1/x"},
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        timeout=5,
+        headers={"Accept": "application/vnd.citationstyles.csl+json"},
+    )
+    ledger, _ = _ready_ledger(path, operation.request)
+    calls = 0
+
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _response(302, headers={"Location": "https://api.crossref.org/works/10.1/x"})
+        raise SystemExit("crash on later hop")
+
+    with pytest.raises(SystemExit):
+        LedgerTransport(ledger, send_once=sender, clock=lambda: NOW).send_claim(_claim(ledger, "worker"), operation)
+    manifest = ledger.manifest().data
+    assert calls == 2
+    assert len(manifest["attempts"]) == 1
+    assert manifest["physical_send_markers"][0]["resolved_at"] is None
+    ledger.close()
+
+
+@pytest.mark.parametrize(("fail_on_call", "expected_physical_calls"), [(2, 1), (3, 1), (4, 2)])
+def test_doi_redirect_clock_failure_resolves_every_started_hop(
+    tmp_path: Path, fail_on_call: int, expected_physical_calls: int
+) -> None:
+    adapter = JSON_ADAPTERS["doi.csl"]
+    operation = adapter.build_operation(
+        url="https://doi.org/10.1/x",
+        normalized_payload={"doi": "10.1/x"},
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        timeout=5,
+        headers={"Accept": "application/vnd.citationstyles.csl+json"},
+    )
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", operation.request)
+    clock_calls = 0
+    physical_calls = 0
+
+    def clock() -> datetime:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == fail_on_call:
+            raise RuntimeError("clock unavailable")
+        return NOW
+
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal physical_calls
+        physical_calls += 1
+        if physical_calls == 1:
+            return _response(302, headers={"Location": "https://api.crossref.org/works/10.1/x"})
+        return _response(
+            200,
+            {"title": "Safe", "DOI": "10.1/x"},
+            headers={"Content-Type": "application/vnd.citationstyles.csl+json"},
+        )
+
+    result = LedgerTransport(ledger, send_once=sender, clock=clock).send_claim(_claim(ledger, "worker"), operation)
+    assert result.disposition is TaskDisposition.PERMANENT_FAILURE
+    manifest = ledger.manifest().data
+    assert physical_calls == expected_physical_calls
+    assert len(manifest["attempts"]) == expected_physical_calls
+    assert manifest["physical_send_markers"][0]["resolved_at"] is not None
+    assert manifest["tasks"][0]["lease_owner"] is None
+    assert manifest["requests"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
+    ledger.close()
+
+
+def test_doi_wrong_or_missing_accept_fails_preflight_without_send(tmp_path: Path) -> None:
+    adapter = JSON_ADAPTERS["doi.csl"]
+    operation = adapter.build_operation(
+        url="https://doi.org/10.1/x",
+        normalized_payload={"doi": "10.1/x"},
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        timeout=5,
+        headers={"Accept": "application/x-bibtex"},
+    )
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", operation.request)
+    calls = 0
+
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal calls
+        calls += 1
+        return _response(200, {})
+
+    with pytest.raises(ValueError, match="headers"):
+        LedgerTransport(ledger, send_once=sender, clock=lambda: NOW).send_claim(_claim(ledger, "worker"), operation)
+    assert calls == 0
+    assert ledger.manifest().data["attempts"] == []
+    ledger.close()
+
+
 @pytest.mark.parametrize("retry_after", ["7", format_datetime(NOW + timedelta(seconds=9), usegmt=True)])
 def test_rate_limit_honors_numeric_and_http_date_retry_after(tmp_path: Path, retry_after: str) -> None:
     request = _request()
@@ -612,10 +1028,15 @@ def test_permanent_client_errors_fail_fast(tmp_path: Path, status: int, outcome:
 
 
 @pytest.mark.parametrize(
-    ("body", "outcome"),
-    [(b"not json", OutcomeClass.MALFORMED), (b"[]", OutcomeClass.WRONG_SHAPE)],
+    ("body", "disposition", "outcome"),
+    [
+        (b"not json", TaskDisposition.MALFORMED, OutcomeClass.MALFORMED),
+        (b"[]", TaskDisposition.SCHEMA_CHANGED, OutcomeClass.WRONG_SHAPE),
+    ],
 )
-def test_malformed_and_wrong_shape_json_block(tmp_path: Path, body: bytes, outcome: OutcomeClass) -> None:
+def test_malformed_and_wrong_shape_json_block(
+    tmp_path: Path, body: bytes, disposition: TaskDisposition, outcome: OutcomeClass
+) -> None:
     request = _request()
     ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
     raw = _response(200)
@@ -623,7 +1044,7 @@ def test_malformed_and_wrong_shape_json_block(tmp_path: Path, body: bytes, outco
     response = LedgerTransport(ledger, send_once=lambda _op: raw, clock=lambda: NOW).send_claim(
         _claim(ledger, "worker"), _operation(request)
     )
-    assert response.disposition is TaskDisposition.MALFORMED
+    assert response.disposition is disposition
     assert response.outcome is outcome
     ledger.close()
 
@@ -738,6 +1159,75 @@ def test_post_without_proven_idempotency_never_retries(tmp_path: Path, idempoten
     ledger.close()
 
 
+def test_nonidempotent_crash_marker_blocks_repeat_after_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    request = _request(method="POST")
+    ledger, _ = _ready_ledger(path, request)
+    calls = 0
+
+    def crash(_operation: SendOperation) -> requests.Response:
+        nonlocal calls
+        calls += 1
+        raise SystemExit("crash after physical send began")
+
+    with pytest.raises(SystemExit):
+        LedgerTransport(ledger, send_once=crash, clock=lambda: NOW).send_claim(
+            _claim(ledger, "old"), _operation(request, idempotent=False)
+        )
+    original_started = ledger.manifest().data["physical_send_markers"][0]["started_at"]
+    ledger.close()
+
+    reopened = Ledger.open(path)
+    resume_at = NOW + timedelta(minutes=11)
+    claim = _claim(reopened, "new", resume_at)
+    response = LedgerTransport(
+        reopened,
+        send_once=lambda _operation: pytest.fail("non-idempotent request was repeated"),
+        clock=lambda: resume_at,
+    ).send_claim(claim, _operation(request, idempotent=False))
+    assert response.disposition is TaskDisposition.AMBIGUOUS
+    manifest = reopened.manifest().data
+    assert calls == 1
+    assert manifest["attempts"][0]["started_at"] == original_started
+    assert manifest["physical_send_markers"][0]["resolved_at"] is not None
+    reopened.close()
+
+
+def test_idempotent_crashes_record_exactly_one_attempt_per_physical_send_until_max(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    request = _request()
+    ledger, _ = _ready_ledger(path, request)
+    physical_calls = 0
+    operation = _operation(request, idempotent=True, max_attempts=3)
+
+    def crash(_operation: SendOperation) -> requests.Response:
+        nonlocal physical_calls
+        physical_calls += 1
+        raise SystemExit("crash after physical send began")
+
+    for index in range(3):
+        at = NOW + timedelta(minutes=11 * index)
+        with pytest.raises(SystemExit):
+            LedgerTransport(ledger, send_once=crash, clock=lambda at=at: at).send_claim(
+                _claim(ledger, f"worker-{index}", at), operation
+            )
+        ledger.close()
+        ledger = Ledger.open(path)
+
+    resume_at = NOW + timedelta(minutes=33)
+    result = LedgerTransport(
+        ledger,
+        send_once=lambda _operation: pytest.fail("exhausted crash marker was resent"),
+        clock=lambda: resume_at,
+    ).send_claim(_claim(ledger, "terminal", resume_at), operation)
+    assert result.disposition is TaskDisposition.BLOCKED
+    manifest = ledger.manifest().data
+    assert physical_calls == 3
+    assert len(manifest["attempts"]) == 3
+    assert all(attempt["http_status"] is None for attempt in manifest["attempts"])
+    ledger.close()
+
+
 def test_idempotent_post_may_retry(tmp_path: Path) -> None:
     request = _request(method="POST")
     ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
@@ -834,8 +1324,8 @@ def test_pubmed_esummary_real_envelope_has_exact_member_correlation() -> None:
     envelope = {
         "result": {
             "uids": ["456", "123"],
-            "123": {"uid": "123", "title": "A"},
-            "456": {"uid": "456", "title": "B"},
+            "123": {"uid": "123", "title": "A", "authors": [], "pubdate": "2026"},
+            "456": {"uid": "456", "title": "B", "authors": [], "pubdate": "2026"},
         }
     }
     assert list(adapter.normalize(envelope)["records"]) == ["123", "456"]
@@ -880,16 +1370,32 @@ def test_pubmed_esummary_rejects_record_key_uid_mismatch() -> None:
 @pytest.mark.parametrize(
     ("adapter_name", "envelope", "field"),
     [
-        ("semantic_scholar.search", {"data": [{"paperId": "s2"}]}, "results"),
-        ("crossref.search", {"message": {"items": [{"DOI": "10.1/x"}]}}, "results"),
-        ("openalex.search", {"results": [{"id": "W1"}]}, "results"),
-        ("europepmc.search", {"resultList": {"result": [{"id": "1"}]}}, "results"),
-        ("serply.scholar", {"articles": [{"id": "1"}]}, "articles"),
-        ("serpapi.author", {"articles": [{"citation_id": "1"}]}, "articles"),
+        ("semantic_scholar.search", {"total": 1, "data": [{"paperId": "s2", "title": "A"}]}, "results"),
+        (
+            "crossref.search",
+            {"status": "ok", "message": {"total-results": 1, "items": [{"DOI": "10.1/x", "title": ["A"]}]}},
+            "results",
+        ),
+        ("openalex.search", {"meta": {"count": 1}, "results": [{"id": "W1", "title": "A"}]}, "results"),
+        ("europepmc.search", {"hitCount": 1, "resultList": {"result": [{"id": "1", "title": "A"}]}}, "results"),
+        ("serply.scholar", {"articles": [{"title": "A"}]}, "articles"),
+        (
+            "serpapi.author",
+            {
+                "search_metadata": {
+                    "status": "Success",
+                    "google_scholar_author_url": "https://scholar.google.com/citations?user=p",
+                },
+                "search_parameters": {"engine": "google_scholar_author", "author_id": "p", "start": 0},
+                "author": {"name": "Ada"},
+                "articles": [{"citation_id": "1", "title": "A", "authors": "Ada"}],
+            },
+            "articles",
+        ),
         ("dblp.author_search", {"result": {"hits": {"hit": [{"info": {"pid": "1"}}]}}}, "hits"),
-        ("pubmed.search", {"esearchresult": {"idlist": ["1"]}}, "pmids"),
-        ("openreview.notes", {"notes": [{"id": "1"}]}, "notes"),
-        ("gemini.short_title", {"candidates": [{"content": {}}]}, "candidates"),
+        ("pubmed.search", {"esearchresult": {"count": "1", "idlist": ["1"]}}, "pmids"),
+        ("openreview.notes", {"notes": [{"id": "1", "content": {"title": "A"}}]}, "notes"),
+        ("gemini.short_title", {"candidates": [{"content": {"parts": [{"text": "Ocean"}]}}]}, "candidates"),
         ("doi.csl", {"title": "A", "DOI": "10.1/x"}, "metadata"),
     ],
 )
@@ -899,12 +1405,22 @@ def test_every_json_provider_has_one_transport_adapter(
     adapter = JSON_ADAPTERS[adapter_name]
     normalized = adapter.normalize(envelope)
     transport = ScriptedTransport([ProviderResponse(TaskDisposition.SUCCEEDED, OutcomeClass.SUCCESS, normalized, 200)])
+    payload = (
+        {
+            "prompt_digest_input": "Safe title",
+            "max_words": 4,
+            "prompt_version": GEMINI_PROMPT_VERSION,
+            "model_id": GEMINI_MODEL_ID,
+            "generation_config": dict(GEMINI_GENERATION_CONFIG),
+        }
+        if adapter_name == "gemini.short_title"
+        else ({"doi": "10.1/x"} if adapter_name == "doi.csl" else {"author_scope": "author-ada", "query": "safe"})
+    )
     operation = adapter.build_operation(
         url="https://provider.invalid/resource",
-        normalized_payload={"author_scope": "author-ada", "query": "safe"},
+        normalized_payload=payload,
         freshness_epoch="2026-08",
         adapter_version="1",
-        quota_scope="public",
         timeout=5,
         headers={"Authorization": "secret-at-send-only"},
         idempotent=adapter.method != "POST",
@@ -937,12 +1453,15 @@ def test_adapter_provider_names_match_existing_merge_and_quota_namespaces() -> N
 def test_registry_covers_every_production_json_durable_callsite_once() -> None:
     assert JSON_DURABLE_CALLSITES == {
         "api_generics.crossref": "crossref.search",
+        "api_generics.crossref_venue": "crossref.venue",
         "api_generics.europepmc": "europepmc.search",
         "api_generics.openalex": "openalex.search",
+        "api_generics.openalex_venue": "openalex.venue",
         "api_generics.semantic_scholar": "semantic_scholar.search",
         "search_apis.dblp_find_author_pid": "dblp.author_search",
         "search_apis.fetch_csl_via_doi": "doi.csl",
-        "search_apis.openreview_notes": "openreview.notes",
+        "search_apis.openreview_term": "openreview.term",
+        "search_apis.openreview_fallback": "openreview.fallback",
         "search_apis.pubmed_search": "pubmed.search",
         "search_apis.pubmed_summary": "pubmed.summary.singleton",
         "serpapi_scholar._serpapi_get": "serpapi.author",

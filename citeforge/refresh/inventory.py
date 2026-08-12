@@ -8,7 +8,6 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from types import MappingProxyType
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -19,50 +18,12 @@ from ..config import DBLP_PERSON_BASE, HTTP_TIMEOUT_DEFAULT, PREPRINT_SERVERS, S
 from ..id_utils import find_doi_in_text, is_secondary_doi, normalize_doi
 from ..identity import IdentityContext, evaluate_identity
 from ..text_utils import normalize_title
+from .capabilities import AdapterCapability, CredentialKind, ResponseMediaType, capability_for
 from .census import AuthorCensusRow
+from .decoders import decode_response
 from .ledger import Ledger, PublicationMetadata, RequestSpec, TaskClaim, TaskSpec
 from .transport import SchemaChangedError, SendOperation
 from .types import TaskDisposition
-
-
-class ResponseMediaType(str, Enum):
-    JSON = "json"
-    XML = "xml"
-
-
-class CredentialKind(str, Enum):
-    NONE = "none"
-    SERPAPI_KEY = "serpapi_key"
-
-
-@dataclass(frozen=True)
-class AdapterCapability:
-    logical_source: str
-    operation: str
-    adapter_version: str
-    capability_id: str
-    wire_provider: str
-    quota_scope: str
-    media_type: ResponseMediaType
-    credential_kind: CredentialKind
-    decoder_schema: str
-    requested_fields: tuple[str, ...]
-
-    def canonical_content(self) -> Mapping[str, object]:
-        return MappingProxyType(
-            {
-                "adapter_version": self.adapter_version,
-                "capability_id": self.capability_id,
-                "credential_kind": self.credential_kind.value,
-                "decoder_schema": self.decoder_schema,
-                "logical_source": self.logical_source,
-                "media_type": self.media_type.value,
-                "operation": self.operation,
-                "quota_scope": self.quota_scope,
-                "requested_fields": self.requested_fields,
-                "wire_provider": self.wire_provider,
-            }
-        )
 
 
 @dataclass(frozen=True)
@@ -161,69 +122,6 @@ class PageWave:
     tasks: tuple[TaskSpec, ...]
     source_task_keys: tuple[str, ...]
     digest: str
-
-
-_CAPABILITIES = (
-    AdapterCapability(
-        "scholar",
-        "inventory",
-        "1",
-        "scholar.inventory.v1",
-        "serpapi",
-        "serpapi",
-        ResponseMediaType.JSON,
-        CredentialKind.SERPAPI_KEY,
-        "serpapi-scholar-author-v1",
-        ("articles",),
-    ),
-    AdapterCapability(
-        "dblp",
-        "inventory",
-        "1",
-        "dblp.inventory.v1",
-        "dblp",
-        "dblp",
-        ResponseMediaType.XML,
-        CredentialKind.NONE,
-        "dblpperson-v1",
-        ("articles",),
-    ),
-    AdapterCapability(
-        "doi_csl",
-        "csl_lookup",
-        "1",
-        "doi_csl.csl_lookup.v1",
-        "doi",
-        "doi",
-        ResponseMediaType.JSON,
-        CredentialKind.NONE,
-        "doi-csl-v1",
-        ("metadata",),
-    ),
-    AdapterCapability(
-        "s2",
-        "fuzzy_search",
-        "1",
-        "s2.fuzzy_search.v1",
-        "s2",
-        "s2",
-        ResponseMediaType.JSON,
-        CredentialKind.NONE,
-        "s2-search-v1",
-        ("results",),
-    ),
-)
-
-
-def capability_for(logical_source: str, operation: str, adapter_version: str) -> AdapterCapability:
-    matches = [
-        item
-        for item in _CAPABILITIES
-        if (item.logical_source, item.operation, item.adapter_version) == (logical_source, operation, adapter_version)
-    ]
-    if len(matches) != 1:
-        raise ValueError("exactly one adapter capability is required")
-    return matches[0]
 
 
 def build_inventory_task(
@@ -542,14 +440,12 @@ def build_claimed_inventory_operation(
         }
         url = f"{SERPAPI_BASE}?{urlencode(query)}"
 
-        def decoder(body: bytes) -> tuple[Mapping[str, object], bool]:
-            return decode_scholar_inventory(
-                body,
-                str(payload["profile_id"]),
-                _integer(payload["start"], "Scholar start"),
-                _integer(payload["num"], "Scholar page size"),
-                _integer(payload["min_year"], "Scholar minimum year"),
-            )
+        decoder_context = {
+            "profile_id": str(payload["profile_id"]),
+            "offset": _integer(payload["start"], "Scholar start"),
+            "page_size": _integer(payload["num"], "Scholar page size"),
+            "min_year": _integer(payload["min_year"], "Scholar minimum year"),
+        }
 
     elif capability.logical_source == "dblp":
         if (
@@ -561,8 +457,7 @@ def build_claimed_inventory_operation(
         pid = str(payload["pid"])
         url = f"{DBLP_PERSON_BASE}/{pid}.xml"
 
-        def decoder(body: bytes) -> tuple[Mapping[str, object], bool]:
-            return decode_dblp_inventory(body, pid)
+        decoder_context = {"pid": pid}
     else:
         raise ValueError("claim is not an inventory capability")
     return SendOperation(
@@ -571,8 +466,12 @@ def build_claimed_inventory_operation(
         HTTP_TIMEOUT_DEFAULT,
         lambda _value: {},
         lambda _value: False,
-        response_decoder=decoder,
+        response_decoder=lambda raw: decode_response(capability.decoder_id, raw, decoder_context),
         decoder_schema=capability.decoder_schema,
+        max_body_bytes=capability.body_limit,
+        max_attempts=capability.max_attempts,
+        idempotent=capability.idempotent,
+        capability_id=capability.capability_id,
     )
 
 

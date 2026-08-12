@@ -6,25 +6,28 @@ import hashlib
 import json
 import math
 import random
+import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
 from ..config import HTTP_BACKOFF_INITIAL, HTTP_BACKOFF_MAX, HTTP_MAX_RETRIES
 from ..http_utils import send_http_once
-from .ledger import Ledger, ProviderObservation, RequestClaim, RequestResult, RequestSpec, TaskClaim
+from .ledger import Ledger, ProviderObservation, RequestClaim, RequestResult, RequestSpec, StaleClaimError, TaskClaim
 from .types import TaskDisposition
 
 JsonMapping = Mapping[str, object]
 EnvelopeValidator = Callable[[dict[str, object]], Mapping[str, object]]
 EmptyValidator = Callable[[dict[str, object]], bool]
-ResponseDecoder = Callable[[bytes], tuple[Mapping[str, object], bool]]
+ResponseDecoder = Callable[["RawProviderResponse"], tuple[Mapping[str, object], bool]]
 Clock = Callable[[], datetime]
 Jitter = Callable[[float], float]
 
@@ -55,6 +58,69 @@ class OutcomeClass(str, Enum):
 
 class SchemaChangedError(ValueError):
     """A syntactically valid provider envelope no longer matches its contract."""
+
+
+_SAFE_RESPONSE_HEADERS = frozenset({"content-type", "etag", "last-modified", "retry-after", "x-request-id"})
+
+
+@dataclass(frozen=True)
+class RawProviderResponse:
+    """Bounded, secret-safe response material passed across decoder boundaries."""
+
+    body: bytes = field(repr=False)
+    content_type: str = field(repr=False)
+    final_url: str = field(repr=False)
+    headers: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.body, bytes):
+            raise TypeError("provider response body must be bytes")
+        parts = urlsplit(self.final_url)
+        if parts.scheme.casefold() not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+            raise ValueError("unsafe provider final URL")
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise ValueError("unsafe provider final URL port") from exc
+        default_port = 443 if parts.scheme.casefold() == "https" else 80
+        if port not in {None, default_port}:
+            raise ValueError("unsafe provider final URL port")
+        hostname = parts.hostname.casefold()
+        netloc = f"[{hostname}]" if ":" in hostname else hostname
+        path_digest = hashlib.sha256((parts.path or "/").encode()).hexdigest()
+        safe_path = f"/path-sha256/{path_digest}"
+        if hostname in {"doi.org", "dx.doi.org"}:
+            from ..id_utils import find_doi_in_text
+
+            redirect_doi = find_doi_in_text(parts.path)
+            if redirect_doi:
+                safe_path = f"/{redirect_doi.casefold()}"
+        safe_headers: dict[str, str] = {}
+        for raw_name, raw_value in self.headers.items():
+            name = raw_name.casefold().strip()
+            if "\r" in raw_value or "\n" in raw_value or len(raw_value) > 4096:
+                raise ValueError("unsafe provider response header")
+            if name in _SAFE_RESPONSE_HEADERS:
+                safe_headers[name] = (
+                    raw_value.split(";", 1)[0].strip().casefold()
+                    if name == "content-type"
+                    else hashlib.sha256(raw_value.encode()).hexdigest()
+                )
+        content_type = self.content_type.split(";", 1)[0].strip().casefold()
+        if (
+            not content_type
+            or len(content_type) > 200
+            or not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", content_type)
+            or any(marker in content_type for marker in ("secret", "token", "key="))
+        ):
+            raise ValueError("unsafe provider content type")
+        object.__setattr__(self, "content_type", content_type)
+        object.__setattr__(
+            self,
+            "final_url",
+            urlunsplit((parts.scheme.casefold(), netloc, safe_path, "", "")),
+        )
+        object.__setattr__(self, "headers", MappingProxyType(safe_headers))
 
 
 class ProviderTransportError(RuntimeError):
@@ -100,12 +166,16 @@ class SendOperation:
     max_attempts: int = HTTP_MAX_RETRIES + 1
     response_decoder: ResponseDecoder | None = None
     decoder_schema: str | None = None
+    max_body_bytes: int = 2_000_000
+    capability_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.timeout <= 0:
             raise ValueError("provider timeout must be positive")
         if self.max_attempts < 1:
             raise ValueError("provider max attempts must be positive")
+        if self.max_body_bytes < 1:
+            raise ValueError("provider body limit must be positive")
         if self.request.method not in {"GET", "HEAD", "POST"}:
             raise ValueError("unsupported wire method")
         if self.response_decoder is not None and not self.decoder_schema:
@@ -202,6 +272,27 @@ def _canonical_digest(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _read_bounded_body(response: requests.Response, limit: int) -> bytes:
+    """Read at most ``limit + 1`` bytes from a streamed response."""
+    if (
+        response.raw is None and "iter_content" not in response.__dict__ and isinstance(response._content, bytes)
+    ):  # deterministic requests.Response test seam
+        if len(response._content) > limit:
+            raise ValueError("provider response exceeds body limit")
+        return response._content
+    body = bytearray()
+    for chunk in response.iter_content(chunk_size=min(limit + 1, 65_536)):
+        body.extend(chunk)
+        if len(body) > limit:
+            raise ValueError("provider response exceeds body limit")
+    return bytes(body)
+
+
+def _close_response(response: requests.Response) -> None:
+    with suppress(Exception):
+        response.close()
+
+
 def _retry_after(value: str | None, now: datetime) -> float | None:
     if not value:
         return None
@@ -262,6 +353,8 @@ class LedgerTransport:
             dict(operation.headers or {}),
             operation.timeout,
             dict(operation.json_payload) if operation.json_payload is not None else None,
+            stream=True,
+            allow_redirects=False,
         )
 
     def result(self, request_key: str) -> ProviderResponse | None:
@@ -306,6 +399,39 @@ class LedgerTransport:
 
     def send_claim(self, task_claim: TaskClaim, operation: SendOperation) -> ProviderResponse:
         """Execute one claimed task or observe its shared exact request."""
+        from .capabilities import capability_by_id, capability_for, validate_capability_wire
+
+        try:
+            registered = capability_for(
+                operation.request.provider, operation.request.operation, operation.request.adapter_version
+            )
+        except ValueError:
+            registered = None
+        if registered is not None and operation.capability_id is None:
+            raise ValueError("registered durable operation requires exact capability proof")
+        if operation.capability_id is not None:
+            capability = capability_by_id(operation.capability_id)
+            if (
+                operation.request.provider != capability.logical_source
+                or operation.request.operation != capability.operation
+                or operation.request.adapter_version != capability.adapter_version
+                or operation.request.method != capability.method
+                or operation.request.quota_scope != capability.quota_scope
+                or operation.request.requested_fields != capability.requested_fields
+                or operation.decoder_schema != capability.decoder_schema
+                or operation.response_decoder is None
+                or operation.max_body_bytes != capability.body_limit
+                or operation.max_attempts != capability.max_attempts
+                or operation.idempotent != capability.idempotent
+            ):
+                raise ValueError("send operation does not prove exact durable capability")
+            validate_capability_wire(
+                operation.capability_id,
+                operation.request.normalized_payload,
+                operation.url,
+                operation.headers,
+                operation.json_payload,
+            )
         if task_claim.request_key != operation.request.key:
             raise ValueError("claimed task does not match exact request")
         try:
@@ -351,72 +477,127 @@ class LedgerTransport:
             )
 
         started = now
-        try:
-            raw = self._send_once(operation)
-        except requests.Timeout:
-            return self._finish_retryable(
-                task_claim, request_claim, operation, started, OutcomeClass.TIMEOUT, "request timed out"
+        unresolved = self.ledger.unresolved_physical_send(operation.request.key)
+        if unresolved is not None and not unresolved[1]:
+            return self._finish_terminal(
+                task_claim,
+                request_claim,
+                operation,
+                unresolved[0],
+                now,
+                TaskDisposition.AMBIGUOUS,
+                OutcomeClass.AMBIGUOUS_PARTIAL,
+                None,
+                "unresolved non-idempotent physical send was not repeated",
             )
-        except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
-            return self._finish_retryable(
+        if unresolved is not None:
+            self.ledger.record_intermediate_attempt(
+                task_claim, request_claim, unresolved[0], now, "ambiguous_partial", None
+            )
+            if self.ledger.request_attempt_count(operation.request.key) >= operation.max_attempts:
+                return self._finish_terminal(
+                    task_claim,
+                    request_claim,
+                    operation,
+                    unresolved[0],
+                    now,
+                    TaskDisposition.BLOCKED,
+                    OutcomeClass.RETRY_EXHAUSTED,
+                    None,
+                    "idempotent crash attempts exhausted",
+                    persist_attempt=False,
+                )
+        try:
+            self.ledger.mark_physical_send(task_claim, request_claim, started, idempotent=operation.retryable)
+        except ValueError:
+            return self._finish_terminal(
                 task_claim,
                 request_claim,
                 operation,
                 started,
-                OutcomeClass.CONNECTION_FAILURE,
-                "provider connection failed",
+                started,
+                TaskDisposition.AMBIGUOUS,
+                OutcomeClass.AMBIGUOUS_PARTIAL,
+                None,
+                "unresolved non-idempotent physical send was not repeated",
             )
-        except requests.RequestException:
+        sent = self._send_marked_physical(task_claim, request_claim, operation, started)
+        if isinstance(sent, ProviderResponse):
+            return sent
+        raw, status, finished = sent
+        redirect_hops = 0
+        while status in {301, 302, 303, 307, 308} and operation.capability_id in {
+            "doi_csl.csl_lookup.v1",
+            "doi_bibtex.bibtex_lookup.v1",
+        }:
+            redirect_hops += 1
+            if redirect_hops > 3:
+                _close_response(raw)
+                return self._finish_terminal(
+                    task_claim,
+                    request_claim,
+                    operation,
+                    started,
+                    self._claim_safe_time(task_claim, request_claim),
+                    TaskDisposition.PERMANENT_FAILURE,
+                    OutcomeClass.INVALID_REQUEST,
+                    status,
+                    "DOI redirect limit exceeded",
+                )
             try:
-                finished = self.clock()
+                location = raw.headers.get("Location", "")
+                target = urlsplit(location)
+                safe_target = (
+                    target.scheme == "https"
+                    and target.hostname
+                    in {
+                        "doi.org",
+                        "api.crossref.org",
+                        "data.crossref.org",
+                        "api.datacite.org",
+                        "data.crosscite.org",
+                    }
+                    and not target.username
+                    and not target.password
+                    and target.port in {None, 443}
+                )
+            except Exception:
+                safe_target = False
+            if not safe_target:
+                _close_response(raw)
+                return self._finish_terminal(
+                    task_claim,
+                    request_claim,
+                    operation,
+                    started,
+                    self._claim_safe_time(task_claim, request_claim),
+                    TaskDisposition.PERMANENT_FAILURE,
+                    OutcomeClass.INVALID_REQUEST,
+                    status,
+                    "unsafe DOI redirect was rejected",
+                )
+            _close_response(raw)
+            try:
+                hop_finished = self.clock()
             except Exception:
                 return self._finish_classification_failure(task_claim, request_claim, operation, started)
-            return self._finish_terminal(
-                task_claim,
-                operation,
-                started,
-                finished,
-                TaskDisposition.PERMANENT_FAILURE,
-                OutcomeClass.INVALID_REQUEST,
-                None,
-                "provider request was invalid",
+            self.ledger.record_intermediate_attempt(
+                task_claim, request_claim, started, hop_finished, "redirect", status
             )
-        except Exception:
-            try:
-                finished = self.clock()
-            except Exception:
-                return self._finish_classification_failure(task_claim, request_claim, operation, started)
-            return self._finish_terminal(
-                task_claim,
-                operation,
-                started,
-                finished,
-                TaskDisposition.PERMANENT_FAILURE,
-                OutcomeClass.INVALID_REQUEST,
-                None,
-                "provider send callback failed",
+            started = hop_finished
+            self.ledger.mark_physical_send(task_claim, request_claim, started, idempotent=True)
+            operation = replace(
+                operation, url=location, headers={"Accept": (operation.headers or {}).get("Accept", "")}
             )
-        try:
-            finished = self.clock()
-        except Exception:
-            return self._finish_classification_failure(task_claim, request_claim, operation, started)
-        if not isinstance(raw, requests.Response):
-            return self._finish_terminal(
-                task_claim,
-                operation,
-                started,
-                finished,
-                TaskDisposition.MALFORMED,
-                OutcomeClass.MALFORMED,
-                None,
-                "provider send callback returned invalid response",
-            )
-        status = raw.status_code
-        if not isinstance(status, int):
-            return self._finish_classification_failure(task_claim, request_claim, operation, started)
+            sent = self._send_marked_physical(task_claim, request_claim, operation, started)
+            if isinstance(sent, ProviderResponse):
+                return sent
+            raw, status, finished = sent
         if status in {401, 403}:
+            _close_response(raw)
             return self._finish_terminal(
                 task_claim,
+                request_claim,
                 operation,
                 started,
                 finished,
@@ -427,13 +608,18 @@ class LedgerTransport:
             )
         if status in _RETRYABLE_STATUS:
             outcome = OutcomeClass.RATE_LIMITED if status == 429 else OutcomeClass.TRANSIENT_SERVER_ERROR
-            return self._finish_retryable(
-                task_claim, request_claim, operation, started, outcome, "retryable provider response", raw
-            )
+            try:
+                return self._finish_retryable(
+                    task_claim, request_claim, operation, started, outcome, "retryable provider response", raw
+                )
+            finally:
+                _close_response(raw)
         if 400 <= status < 500:
             outcome = OutcomeClass.NOT_FOUND if status == 404 else OutcomeClass.INVALID_REQUEST
+            _close_response(raw)
             return self._finish_terminal(
                 task_claim,
+                request_claim,
                 operation,
                 started,
                 finished,
@@ -443,8 +629,10 @@ class LedgerTransport:
                 "permanent provider client response",
             )
         if status < 200 or status >= 300:
+            _close_response(raw)
             return self._finish_terminal(
                 task_claim,
+                request_claim,
                 operation,
                 started,
                 finished,
@@ -453,15 +641,90 @@ class LedgerTransport:
                 status,
                 "unsupported provider status",
             )
+        try:
+            body = _read_bounded_body(raw, operation.max_body_bytes)
+        except requests.Timeout:
+            _close_response(raw)
+            try:
+                started = min(started, self.clock())
+            except Exception:
+                return self._finish_classification_failure(task_claim, request_claim, operation, started)
+            return self._finish_retryable(
+                task_claim, request_claim, operation, started, OutcomeClass.TIMEOUT, "response stream timed out"
+            )
+        except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
+            _close_response(raw)
+            try:
+                started = min(started, self.clock())
+            except Exception:
+                return self._finish_classification_failure(task_claim, request_claim, operation, started)
+            return self._finish_retryable(
+                task_claim,
+                request_claim,
+                operation,
+                started,
+                OutcomeClass.CONNECTION_FAILURE,
+                "provider response stream failed",
+            )
+        except Exception:
+            _close_response(raw)
+            try:
+                finished = self.clock()
+            except Exception:
+                return self._finish_classification_failure(task_claim, request_claim, operation, started)
+            return self._finish_terminal(
+                task_claim,
+                request_claim,
+                operation,
+                started,
+                finished,
+                TaskDisposition.MALFORMED,
+                OutcomeClass.MALFORMED,
+                status,
+                "provider response exceeded body limit or failed while streaming",
+            )
         if operation.response_decoder is not None:
             try:
-                normalized, is_empty = operation.response_decoder(raw.content)
+                content_type = raw.headers.get("Content-Type", "")
+                final_url = raw.url or operation.url
+                response_headers = dict(raw.headers)
+            except Exception:
+                _close_response(raw)
+                try:
+                    finished = self.clock()
+                except Exception:
+                    return self._finish_classification_failure(task_claim, request_claim, operation, started)
+                return self._finish_terminal(
+                    task_claim,
+                    request_claim,
+                    operation,
+                    started,
+                    finished,
+                    TaskDisposition.MALFORMED,
+                    OutcomeClass.MALFORMED,
+                    status,
+                    "provider response metadata was invalid",
+                )
+            _close_response(raw)
+            try:
+                response = RawProviderResponse(
+                    body,
+                    content_type,
+                    final_url,
+                    response_headers,
+                )
+                normalized, is_empty = operation.response_decoder(response)
                 if not isinstance(is_empty, bool):
                     raise SchemaChangedError("provider decoder did not return boolean empty evidence")
                 _canonical_digest(normalized)
             except SchemaChangedError:
+                try:
+                    finished = self.clock()
+                except Exception:
+                    return self._finish_classification_failure(task_claim, request_claim, operation, started)
                 return self._finish_terminal(
                     task_claim,
+                    request_claim,
                     operation,
                     started,
                     finished,
@@ -471,8 +734,13 @@ class LedgerTransport:
                     "provider envelope failed schema validation",
                 )
             except Exception:
+                try:
+                    finished = self.clock()
+                except Exception:
+                    return self._finish_classification_failure(task_claim, request_claim, operation, started)
                 return self._finish_terminal(
                     task_claim,
+                    request_claim,
                     operation,
                     started,
                     finished,
@@ -481,20 +749,26 @@ class LedgerTransport:
                     status,
                     "provider returned malformed encoded response",
                 )
+            try:
+                finished = self.clock()
+            except Exception:
+                return self._finish_classification_failure(task_claim, request_claim, operation, started)
             if is_empty:
                 return self._finish_observation(
-                    task_claim, operation, started, finished, {}, status, authoritative_empty=True
+                    task_claim, request_claim, operation, started, finished, {}, status, authoritative_empty=True
                 )
-            return self._finish_observation(task_claim, operation, started, finished, normalized, status)
+            return self._finish_observation(task_claim, request_claim, operation, started, finished, normalized, status)
+        _close_response(raw)
         try:
             decoded = json.loads(
-                raw.content.decode("utf-8"),
+                body.decode("utf-8"),
                 parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid constant {value}")),
                 object_pairs_hook=_reject_duplicate_pairs,
             )
         except Exception:
             return self._finish_terminal(
                 task_claim,
+                request_claim,
                 operation,
                 started,
                 finished,
@@ -506,10 +780,11 @@ class LedgerTransport:
         if not isinstance(decoded, dict):
             return self._finish_terminal(
                 task_claim,
+                request_claim,
                 operation,
                 started,
                 finished,
-                TaskDisposition.MALFORMED,
+                TaskDisposition.SCHEMA_CHANGED,
                 OutcomeClass.WRONG_SHAPE,
                 status,
                 "provider returned non-object JSON",
@@ -523,6 +798,7 @@ class LedgerTransport:
         except Exception:  # provider adapters are untrusted schema boundaries
             return self._finish_terminal(
                 task_claim,
+                request_claim,
                 operation,
                 started,
                 finished,
@@ -531,15 +807,20 @@ class LedgerTransport:
                 status,
                 "provider envelope failed schema validation",
             )
+        try:
+            finished = self.clock()
+        except Exception:
+            return self._finish_classification_failure(task_claim, request_claim, operation, started)
         if is_empty:
             return self._finish_observation(
-                task_claim, operation, started, finished, {}, status, authoritative_empty=True
+                task_claim, request_claim, operation, started, finished, {}, status, authoritative_empty=True
             )
-        return self._finish_observation(task_claim, operation, started, finished, normalized, status)
+        return self._finish_observation(task_claim, request_claim, operation, started, finished, normalized, status)
 
     def _finish_observation(
         self,
         task_claim: TaskClaim,
+        request_claim: RequestClaim,
         operation: SendOperation,
         started: datetime,
         finished: datetime,
@@ -548,6 +829,10 @@ class LedgerTransport:
         *,
         authoritative_empty: bool = False,
     ) -> ProviderResponse:
+        try:
+            finished = self.clock()
+        except Exception:
+            return self._finish_classification_failure(task_claim, request_claim, operation, started)
         disposition = TaskDisposition.CONFIRMED_EMPTY if authoritative_empty else TaskDisposition.SUCCEEDED
         outcome = OutcomeClass.AUTHORITATIVE_EMPTY if authoritative_empty else OutcomeClass.SUCCESS
         diagnostic = "validated authoritative empty" if authoritative_empty else "validated response"
@@ -562,6 +847,7 @@ class LedgerTransport:
         except Exception:
             return self._finish_terminal(
                 task_claim,
+                request_claim,
                 operation,
                 started,
                 finished,
@@ -570,26 +856,38 @@ class LedgerTransport:
                 status,
                 "normalized provider evidence was invalid",
             )
-        self.ledger.record_attempt(
-            operation.request.key,
-            task_claim.owner,
-            started,
-            finished,
-            outcome.value,
-            http_status=status,
-            response_digest=digest,
-            safe_diagnostic=diagnostic,
-        )
-        self.ledger.finish_request(
-            operation.request.key,
-            task_claim.owner,
-            disposition,
-            finished,
-            response_digest=digest,
-            observation=observation,
-            safe_diagnostic=diagnostic,
-        )
-        self.ledger.finish_task(task_claim.key, task_claim.owner, disposition, finished)
+        try:
+            self.ledger.complete_physical_attempt(
+                task_claim,
+                request_claim,
+                started,
+                finished,
+                outcome.value,
+                disposition,
+                http_status=status,
+                response_digest=digest,
+                observation=observation,
+                safe_diagnostic=diagnostic,
+            )
+        except StaleClaimError:
+            return ProviderResponse(
+                TaskDisposition.LEASED,
+                OutcomeClass.IN_FLIGHT,
+                safe_diagnostic="stale claim lost before provider completion",
+                from_ledger=True,
+            )
+        except ValueError:
+            return self._finish_terminal(
+                task_claim,
+                request_claim,
+                operation,
+                started,
+                finished,
+                TaskDisposition.SCHEMA_CHANGED,
+                OutcomeClass.SCHEMA_CHANGED,
+                status,
+                "normalized provider evidence did not satisfy the request",
+            )
         return ProviderResponse(disposition, outcome, normalized, status, digest, safe_diagnostic=diagnostic)
 
     def _finish_retryable(
@@ -618,6 +916,7 @@ class LedgerTransport:
         if not operation.retryable:
             return self._finish_terminal(
                 task_claim,
+                request_claim,
                 operation,
                 started,
                 finished,
@@ -627,34 +926,29 @@ class LedgerTransport:
                 "non-idempotent operation has ambiguous provider outcome",
             )
         durable_outcome = OutcomeClass.RETRY_EXHAUSTED if exhausted else outcome
-        self.ledger.record_attempt(
-            operation.request.key,
-            task_claim.owner,
-            started,
-            finished,
-            durable_outcome.value,
-            http_status=status,
-            retry_delay=None if exhausted else delay,
-            safe_diagnostic=diagnostic,
-        )
         disposition = TaskDisposition.BLOCKED if exhausted else TaskDisposition.RETRY_WAIT
         retry_at = None if exhausted else finished + timedelta(seconds=delay)
-        self.ledger.finish_request(
-            operation.request.key,
-            task_claim.owner,
-            disposition,
-            finished,
-            retry_at=retry_at,
-            safe_diagnostic=diagnostic,
-        )
-        self.ledger.finish_task(
-            task_claim.key,
-            task_claim.owner,
-            disposition,
-            finished,
-            retry_at=retry_at,
-            reason=diagnostic,
-        )
+        try:
+            self.ledger.complete_physical_attempt(
+                task_claim,
+                request_claim,
+                started,
+                finished,
+                durable_outcome.value,
+                disposition,
+                http_status=status,
+                retry_at=retry_at,
+                retry_delay=None if exhausted else delay,
+                safe_diagnostic=diagnostic,
+                task_reason=diagnostic,
+            )
+        except StaleClaimError:
+            return ProviderResponse(
+                TaskDisposition.LEASED,
+                OutcomeClass.IN_FLIGHT,
+                safe_diagnostic="stale claim lost before provider completion",
+                from_ledger=True,
+            )
         return ProviderResponse(
             disposition,
             durable_outcome,
@@ -675,6 +969,7 @@ class LedgerTransport:
         fallback_started = min(started or fallback_finished, fallback_finished)
         return self._finish_terminal(
             task_claim,
+            request_claim,
             operation,
             fallback_started,
             fallback_finished,
@@ -683,6 +978,80 @@ class LedgerTransport:
             None,
             "provider response classification failed",
         )
+
+    def _send_marked_physical(
+        self,
+        task_claim: TaskClaim,
+        request_claim: RequestClaim,
+        operation: SendOperation,
+        started: datetime,
+    ) -> tuple[requests.Response, int, datetime] | ProviderResponse:
+        """Send one already-marked socket attempt through one classified boundary."""
+        try:
+            raw = self._send_once(operation)
+        except requests.Timeout:
+            return self._finish_retryable(
+                task_claim, request_claim, operation, started, OutcomeClass.TIMEOUT, "request timed out"
+            )
+        except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
+            return self._finish_retryable(
+                task_claim,
+                request_claim,
+                operation,
+                started,
+                OutcomeClass.CONNECTION_FAILURE,
+                "provider connection failed",
+            )
+        except requests.RequestException:
+            return self._finish_terminal(
+                task_claim,
+                request_claim,
+                operation,
+                started,
+                self._claim_safe_time(task_claim, request_claim),
+                TaskDisposition.PERMANENT_FAILURE,
+                OutcomeClass.INVALID_REQUEST,
+                None,
+                "provider request was invalid",
+            )
+        except Exception:
+            return self._finish_terminal(
+                task_claim,
+                request_claim,
+                operation,
+                started,
+                self._claim_safe_time(task_claim, request_claim),
+                TaskDisposition.PERMANENT_FAILURE,
+                OutcomeClass.INVALID_REQUEST,
+                None,
+                "provider send callback failed",
+            )
+        try:
+            finished = self.clock()
+        except Exception:
+            _close_response(raw)
+            return self._finish_classification_failure(task_claim, request_claim, operation, started)
+        if not isinstance(raw, requests.Response):
+            return self._finish_terminal(
+                task_claim,
+                request_claim,
+                operation,
+                started,
+                finished,
+                TaskDisposition.MALFORMED,
+                OutcomeClass.MALFORMED,
+                None,
+                "provider send callback returned invalid response",
+            )
+        try:
+            status = raw.status_code
+        except Exception:
+            _close_response(raw)
+            return self._finish_classification_failure(task_claim, request_claim, operation, started)
+        if not isinstance(status, int):
+            _close_response(raw)
+            return self._finish_classification_failure(task_claim, request_claim, operation, started)
+        return raw, status, finished
 
     @staticmethod
     def _claim_safe_time(task_claim: TaskClaim, request_claim: RequestClaim | None = None) -> datetime:
@@ -721,6 +1090,7 @@ class LedgerTransport:
     def _finish_terminal(
         self,
         task_claim: TaskClaim,
+        request_claim: RequestClaim,
         operation: SendOperation,
         started: datetime,
         finished: datetime,
@@ -728,24 +1098,31 @@ class LedgerTransport:
         outcome: OutcomeClass,
         status: int | None,
         diagnostic: str,
+        *,
+        persist_attempt: bool = True,
     ) -> ProviderResponse:
-        self.ledger.record_attempt(
-            operation.request.key,
-            task_claim.owner,
-            started,
-            finished,
-            outcome.value,
-            http_status=status,
-            safe_diagnostic=diagnostic,
-        )
-        self.ledger.finish_request(
-            operation.request.key,
-            task_claim.owner,
-            disposition,
-            finished,
-            safe_diagnostic=diagnostic,
-        )
-        self.ledger.finish_task(task_claim.key, task_claim.owner, disposition, finished, reason=diagnostic)
+        with suppress(Exception):
+            finished = self.clock()
+        try:
+            self.ledger.complete_physical_attempt(
+                task_claim,
+                request_claim,
+                started,
+                finished,
+                outcome.value,
+                disposition,
+                http_status=status,
+                safe_diagnostic=diagnostic,
+                task_reason=diagnostic,
+                persist_attempt=persist_attempt,
+            )
+        except StaleClaimError:
+            return ProviderResponse(
+                TaskDisposition.LEASED,
+                OutcomeClass.IN_FLIGHT,
+                safe_diagnostic="stale claim lost before provider completion",
+                from_ledger=True,
+            )
         return ProviderResponse(disposition, outcome, status=status, safe_diagnostic=diagnostic)
 
 

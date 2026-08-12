@@ -355,6 +355,22 @@ class TestBackoffCapAndPostRetry:
 
 
 class TestLogicalAndTransportAccounting:
+    def test_single_send_preserves_buffered_default_and_allows_durable_streaming(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        streams: list[object] = []
+
+        class Session:
+            def get(self, _url: str, **kwargs: object) -> FakeResponse:
+                streams.append(kwargs.get("stream", "absent"))
+                return FakeResponse(200)
+
+        monkeypatch.setattr(http_utils, "_get_session", lambda: Session())
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        http_utils.send_http_once("GET", "https://example.com/x", {}, 1.0)
+        http_utils.send_http_once("GET", "https://example.com/x", {}, 1.0, stream=True)
+        assert streams == [False, True]
+
     @pytest.mark.parametrize(("timeout", "expected"), [(5.0, (5.0, 5.0)), (20.0, (10.0, 20.0))])
     def test_timeout_tuple_preserves_connect_cap(
         self, monkeypatch: pytest.MonkeyPatch, timeout: float, expected: tuple[float, float]

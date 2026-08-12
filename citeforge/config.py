@@ -21,6 +21,7 @@ PUBMED_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 EUROPEPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 SERPLY_BASE = "https://api.serply.io/v1/scholar"
 SERPAPI_BASE = "https://serpapi.com/search"
+DOI_BASE = "https://doi.org"
 
 DEFAULT_INPUT = "data/input.csv"
 DEFAULT_SERPLY_KEY_FILE = "keys/Serply.key"
