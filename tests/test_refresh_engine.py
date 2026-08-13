@@ -1314,7 +1314,7 @@ def test_every_blocked_return_seals_a_checkpoint_first() -> None:
 
     unsealed = []
     for index in blocked:
-        window = "\n".join(lines[max(0, index - 6) : index])
+        window = "\n".join(lines[max(0, index - 30) : index])
         # Two exemptions, both because no work was done that a seal could carry.
         # The entry guard returns before the execution loop, and _block_discovery
         # seals itself for every discovery caller.

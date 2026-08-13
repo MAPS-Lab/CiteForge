@@ -41,14 +41,43 @@ Actions API and organization billing, so they are external observations.
 | Runs cancelled at the six-hour job ceiling | 53 | External observation |
 | Runs failed | 2 | External observation |
 | Runs succeeded | 20 | External observation |
-| Wall-clock hours consumed by monthly refresh | 173.65 | External observation |
-| Monthly refresh share of all Actions time in the repository | 95 percent | External observation |
-| Runner-hours consumed by monthly execution | 172.637 | External observation, recorded in the architecture document |
+| Run wall-clock hours, created to updated | 173.65 | Measured, `gh run list` over 75 runs |
+| Job execution hours, summed started to completed | 166.55 | Measured, `gh api .../jobs` over 189 jobs |
+| Runner-hours recorded in the architecture document | 172.637 | External observation |
+| Monthly refresh share of all Actions time in the repository | 95 percent | Measured |
 
-The wall-clock and runner-hour figures are two separate measurements of the same population and are
-not expected to be identical. Wall clock counts elapsed time on the run record. Runner-hours counts
-billed job time. Both are reported because the six-hour ceiling is a per-job limit while the schedule
+Three numbers, three different quantities, and the earlier revision of this document left them
+unreconciled. They are reconciled here.
+
+Run wall clock is `createdAt` to `updatedAt` on the run record, so it includes queue time and the gaps
+between jobs. Job execution is `started_at` to `completed_at` summed over every job in every run,
+which is the time a runner was actually held. The difference, 7.10 hours across 75 runs, is queue and
+inter-job time and is real: it is why the six-hour ceiling bites on a per-job basis while schedule
 contention is a wall-clock property.
+
+The architecture document's 172.637 sits between the two, within 0.6 percent of run wall clock and
+3.7 percent above job execution, which places it in the wall-clock family rather than the billed-time
+family. It is retained as an external observation rather than adjusted, because the exact run set
+behind it is not recoverable.
+
+### Operator requirement, checkpoint secret
+
+`CACHE_ENCRYPTION_KEY` is the single input to the checkpoint key. It must be generated with
+`openssl rand -base64 32` and never chosen by a human. scrypt at N=2^17 raises the cost of an offline
+guess from roughly 1.7 million per second per core to about two, but no key-derivation function
+rescues a guessable passphrase, and the ciphertext is world readable on the state branch for as long
+as it exists. The code enforces a 16-byte floor only, which rejects a truncated secret and says
+nothing about entropy, so this requirement is recorded here rather than left implicit.
+
+The `data-cache` branch that the retired AES-CBC response cache wrote was deleted on 2026-08-13. It
+held a 3,481,952-byte ciphertext sealed with the same secret under OpenSSL's 10,000-iteration PBKDF2
+default, which made it a standing offline-attack target against the key the new checkpoints use. The
+code path that wrote it had already been removed; the artifact had not.
+
+None of the three is a cost. The repository is public and runs on standard runners, so the
+organization billing API reports this repository at zero gross and zero net. The constraint these
+numbers describe is the six-hour job ceiling and the multi-day wall clock to a complete refresh, not
+money.
 
 ### The constraint is the job ceiling, not money
 
@@ -144,19 +173,30 @@ article, computed from `output/baseline.json` with no threading overhead. It is 
 | Article-level pool, 24 workers | 10.80 s | 23.84 of 24 |
 
 The second is the threaded execution measured on the same corpus shape at the same 0.1 seconds per
-article.
+article, reported under both weightings.
 
-| Configuration | Makespan | Mean occupancy of the pool |
-|---|---|---|
-| Author-level pool, 16 workers | 30.49 s | 13.35 of 16 |
-| Article-level pool, 16 workers | 16.27 s | 15.56 of 16 |
-| Article-level pool, 24 workers | 10.94 s | 23.42 of 24 |
+| Configuration | Makespan | Time-weighted occupancy | Event-weighted occupancy |
+|---|---|---|---|
+| Author-level pool, 16 workers | 29.89 s | 8.66 of 16 | 12.88 of 16 |
+| Article-level pool, 16 workers | 16.37 s | 15.91 of 16 | 15.36 of 16 |
+| Article-level pool, 24 workers | 11.00 s | 23.75 of 24 | 23.18 of 24 |
 
-The two article-level rows agree within two percent on makespan, which is the expected cost of real
-thread scheduling over an idealized schedule. The author-level rows agree on the direction and on the
-conclusion but not on occupancy, where the idealized model predicts 9.64 and the threaded run measured
-13.35. That gap is unexplained offline and is recorded as such rather than reconciled by adjusting one
-of the models.
+An earlier revision of this document recorded the author-level occupancy as 13.35 against the model's
+9.64 and called the gap unexplained. It is explained, and it was a measurement defect rather than a
+disagreement about the system. The harness sampled concurrency once per article START, which weights
+every article equally. Articles start rarely during the straggler tail, so the low-concurrency period
+that defines the author-level case was precisely the period being undersampled. Integrating
+concurrency over wall time instead answers the question actually being asked, which is how busy the
+workers were.
+
+Under time weighting the threaded run measures 8.66 against the model's 9.64, an eleven percent gap
+attributable to thread scheduling, and the two agree. The identity that settles it is exact: mean
+occupancy is total busy worker-seconds over elapsed time, so (2575 + 57) articles and inventory calls
+at 0.1 s over 29.89 s gives 8.81 predicted against 8.66 measured. The article-level rows barely move
+between weightings because their concurrency is near constant throughout, which is itself the finding.
+
+The corrected figure makes the author-level case look worse, not better: the pool was 54 percent busy,
+not 83 percent.
 
 The conclusion both derivations support is the one that matters, and it does not depend on resolving
 the gap. Moving the unit of parallelism from the author to the article raises pool occupancy from

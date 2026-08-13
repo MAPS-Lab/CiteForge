@@ -324,7 +324,7 @@ def test_the_salt_is_fresh_per_checkpoint_and_reveals_nothing(tmp_path: Path) ->
     first = _save(store, _state(tmp_path, "one"), 1)
     second = _save(store, _state(tmp_path, "two"), 2)
 
-    assert first.kdf == second.kdf == "scrypt-n16384-r8-p1"
+    assert first.kdf == second.kdf == "scrypt-n131072-r8-p1"
     assert len(bytes.fromhex(first.kdf_salt)) == 16
     assert first.kdf_salt != second.kdf_salt, "a repeated salt shares a derived key across checkpoints"
     # Derived from os.urandom, never from the secret, so two stores holding the
@@ -344,3 +344,23 @@ def test_an_unsupported_kdf_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(CheckpointError, match="no retained checkpoint verified"):
         _load(store, tmp_path / "restored")
+
+
+def test_a_crafted_manifest_cannot_forge_a_log_line(tmp_path: Path) -> None:
+    """Manifest strings come off a public branch and end up in two logs.
+
+    A newline in one lets a crafted manifest write a second line of its own,
+    including an Actions workflow command. The error text must stay one line.
+    """
+    store = _store(tmp_path)
+    _save(store, _state(tmp_path), 1)
+    path = next(store.root.glob("*.manifest.json"))
+    content = json.loads(path.read_text(encoding="utf-8"))
+    content["schema_version"] = "9\n::error::Refresh complete: generation=FAKE"
+    path.write_text(json.dumps(content), encoding="utf-8")
+
+    with pytest.raises(CheckpointError) as caught:
+        _load(store, tmp_path / "restored")
+
+    assert "\n" not in str(caught.value), "a newline survived into the error text"
+    assert "::error::" not in str(caught.value).replace(" ", "") or "\n" not in str(caught.value)

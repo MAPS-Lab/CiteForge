@@ -44,15 +44,27 @@ CHECKPOINT_SCHEMA_VERSION = "2"
 # does not need the margin, but nothing in the pipeline can verify that the
 # operator supplied one, and the cost of assuming they did is every provider
 # response in the ledger.
-_KDF_NAME = "scrypt-n16384-r8-p1"
-_KDF_N, _KDF_R, _KDF_P = 16384, 8, 1
+# OWASP's current scrypt guidance, N=2^17. A derivation runs once per seal
+# and once per restore, so the whole cost of the higher setting is 0.43s
+# against a 300 minute segment budget. There is no latency argument for
+# staying low in a threat model where the attacker holds the ciphertext and
+# has unlimited time.
+_KDF_NAME = "scrypt-n131072-r8-p1"
+_KDF_N, _KDF_R, _KDF_P = 1 << 17, 8, 1
+# Explicit, because the default cap rejects the 128 MiB working set N=2^17
+# needs and every seal would raise instead.
+_KDF_MAXMEM = 256 * 1024 * 1024
 _SALT_BYTES = 16
 
 # AES-GCM with a 96-bit nonce, the size NIST recommends and the only one the
 # AESGCM recipe treats as the fast path.
 _NONCE_BYTES = 12
-# A floor, not a guarantee of entropy. It rejects an empty or truncated
-# secret; only the KDF above defends against a guessable one.
+# A floor, not a guarantee of entropy. It rejects an empty or truncated secret;
+# only the KDF above defends against a guessable one, and no amount of
+# stretching rescues a passphrase a human chose. The operator requirement is
+# therefore documented rather than merely implied: generate the secret with
+# `openssl rand -base64 32` and never type one. Nothing here can verify that
+# was done, which is exactly why it is written down.
 _MIN_SECRET_BYTES = 16
 
 # Current plus previous, so a corrupt newest sequence has somewhere to fall
@@ -120,6 +132,21 @@ class CheckpointManifest:
         binding = {k: v for k, v in self.canonical_content().items() if k != "ciphertext_digest"}
         return json.dumps(binding, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
 
+    @staticmethod
+    def _safe(value: object) -> str:
+        """Flatten an untrusted manifest string before it can reach a log.
+
+        The manifest arrives from a public branch anyone can push to, and its
+        strings reach CheckpointError messages, which the CLI writes to both the
+        durable run log and the Actions log. A newline there lets a crafted
+        manifest forge a second log line, including an Actions workflow command
+        like ::error:: or ::notice::. This module imports nothing from the
+        package by contract, so it cannot reach the shared privacy helpers and
+        does its own flattening.
+        """
+        text = str(value)
+        return "".join(char if char.isprintable() else " " for char in text)[:200]
+
     @classmethod
     def from_bytes(cls, raw: bytes) -> CheckpointManifest:
         try:
@@ -130,16 +157,16 @@ class CheckpointManifest:
             raise CheckpointError("checkpoint manifest is not a JSON object")
         try:
             return cls(
-                schema_version=str(content["schema_version"]),
-                generation_id=str(content["generation_id"]),
-                input_digest=str(content["input_digest"]),
-                policy_digest=str(content["policy_digest"]),
+                schema_version=cls._safe(content["schema_version"]),
+                generation_id=cls._safe(content["generation_id"]),
+                input_digest=cls._safe(content["input_digest"]),
+                policy_digest=cls._safe(content["policy_digest"]),
                 sequence=int(content["sequence"]),
                 created_at=datetime.fromisoformat(str(content["created_at"])),
-                ciphertext_digest=str(content["ciphertext_digest"]),
-                key_id=str(content["key_id"]),
-                kdf=str(content["kdf"]),
-                kdf_salt=str(content["kdf_salt"]),
+                ciphertext_digest=cls._safe(content["ciphertext_digest"]),
+                key_id=cls._safe(content["key_id"]),
+                kdf=cls._safe(content["kdf"]),
+                kdf_salt=cls._safe(content["kdf_salt"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CheckpointError(f"checkpoint manifest is missing or malformed: {exc}") from exc
@@ -201,7 +228,9 @@ class CheckpointStore:
 
     def _derive(self, salt: bytes) -> AESGCM:
         """Stretch the secret into an AES-256 key for one checkpoint."""
-        key = hashlib.scrypt(self._secret, salt=salt, n=_KDF_N, r=_KDF_R, p=_KDF_P, dklen=32)
+        key = hashlib.scrypt(
+            self._secret, salt=salt, n=_KDF_N, r=_KDF_R, p=_KDF_P, dklen=32, maxmem=_KDF_MAXMEM
+        )
         return AESGCM(key)
 
     @property

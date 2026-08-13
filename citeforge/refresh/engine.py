@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import secrets
@@ -11,6 +10,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from citeforge.clients.search_apis import OpenReviewRuntimeSession, OpenReviewSessionBroker
+from citeforge.log_utils import LogCategory, logger
 
 from .checkpoint import CheckpointStore
 from .discovery import (
@@ -475,11 +475,25 @@ class RefreshEngine:
         # Seal first. Discovery does real provider work, and a segment that
         # blocks after doing it would otherwise discard the evidence and make
         # the next segment re-fetch, which is the restart the ledger exists to
-        # prevent. The seal is best effort: a generation that cannot even read
-        # its own manifest must still report why it blocked.
+        # prevent.
+        #
+        # The seal cannot raise past the block, because a generation too broken
+        # to read its own manifest must still report WHY it blocked rather than
+        # dying with a second, less informative error. But it is reported, not
+        # swallowed: a failed seal means the next segment silently redoes this
+        # work, and an operator reading only the block reason would never learn
+        # that. The detail carries it too, so the reason survives into the
+        # RunResult the workflow parses, not just into a log nobody reads.
         if spec is not None:
-            with contextlib.suppress(ValueError, OSError):
+            try:
                 self._save_checkpoint(spec)
+            except (ValueError, OSError) as seal_error:
+                logger.error(
+                    f"CHECKPOINT_SEAL_FAILED | generation={generation_id} | completed={completed} "
+                    f"| error={seal_error}",
+                    category=LogCategory.ERROR,
+                )
+                detail = f"{detail} (checkpoint seal also failed: {seal_error}; the next segment will repeat this work)"
         state = self._ledger.generation_state()
         if state in {GenerationState.RUNNING, GenerationState.WAITING}:
             self._ledger.transition_generation(
