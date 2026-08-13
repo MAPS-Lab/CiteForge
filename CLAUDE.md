@@ -35,7 +35,7 @@ Phase 1 (DOI validation) → Phase 2 (multi-API enrichment) → Phase 2.5
 (SerpAPI publication string fallback) → Phase 3 (late DOI inference) → Phase
 4 (trust-based merge + save). Post-run steps run in order: flush CSV →
 reconcile phantoms → remove orphans → year-window cleanup → post-run fixup
-→ build a2i2 → rebuild baseline.json.
+→ remove superseded preprints → build a2i2 → rebuild baseline.json.
 
 Trust hierarchy in `citeforge/merge_utils.py:merge_with_policy()` merges fields from active configured sources with special override rules for DOI (published > preprint), journal (never downgrade to preprint), title (prefer longer), pages (reject invalid), and booktitle (upgrade generic series to conference name).
 
