@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -334,7 +335,7 @@ def test_generation_states_cover_exact_lifecycle() -> None:
         {"dblp_id": "98/7654"},
     ],
 )
-def test_generation_id_changes_for_each_material_census_field(tmp_path: Path, changed_row: dict[str, object]) -> None:
+def test_generation_id_changes_for_each_material_census_field(tmp_path: Path, changed_row: dict[str, Any]) -> None:
     census = load_census(
         _write_census(
             tmp_path / "authors.csv",

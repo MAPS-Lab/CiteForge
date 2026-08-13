@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -141,7 +142,7 @@ def test_registry_has_exact_planner_capabilities_and_complete_callbacks() -> Non
 def test_registry_digest_is_order_stable_and_materially_sensitive() -> None:
     assert registry_digest(tuple(reversed(tuple(CAPABILITIES.values())))) == REGISTRY_DIGEST
     original = next(iter(CAPABILITIES.values()))
-    fields = {
+    fields: dict[str, Any] = {
         "method": "HEAD" if original.method == "GET" else "GET",
         "builder_version": "changed",
         "decoder_version": "changed",

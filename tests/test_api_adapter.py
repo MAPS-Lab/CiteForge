@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -201,7 +202,7 @@ def test_durable_generic_search_rejects_missing_claim_or_stable_author_key(missi
     transport = ScriptedTransport(
         [ProviderResponse(TaskDisposition.CONFIRMED_EMPTY, OutcomeClass.AUTHORITATIVE_EMPTY, {}, 200)]
     )
-    kwargs: dict[str, object] = {
+    kwargs: dict[str, Any] = {
         "transport": transport,
         "task_claim": TaskClaim("a" * 64, "b" * 64, "worker", datetime.max.replace(tzinfo=timezone.utc)),
         "author_key": "author-ada",

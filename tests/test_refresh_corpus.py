@@ -11,6 +11,7 @@ import zlib
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 import requests
@@ -848,7 +849,7 @@ def test_production_planner_requires_corpus_and_revalidates_trusted_scan(
     calls = 0
     original = corpus_module._scan_existing_corpus_authority
 
-    def counted(*args: object, **kwargs: object) -> object:
+    def counted(*args: Any, **kwargs: Any) -> object:
         nonlocal calls
         calls += 1
         return original(*args, **kwargs)
@@ -887,7 +888,7 @@ def test_scan_commit_rejects_inventory_policy_drift_during_git_scan(
     with Ledger.open(tmp_path / "drift.db") as ledger:
         _complete_empty_inventory(ledger, spec)
 
-        def mutate_then_scan(*args: object, **kwargs: object) -> object:
+        def mutate_then_scan(*args: Any, **kwargs: Any) -> object:
             ledger._connection.execute(
                 "UPDATE generations SET inventory_freshness_epoch = '2025-01' WHERE generation_id = ?",
                 (spec.id,),
@@ -914,7 +915,7 @@ def test_git_scan_does_not_hold_sqlite_writer_lock_and_fences_external_drift(
     with Ledger.open(path) as ledger:
         _complete_empty_inventory(ledger, spec)
 
-        def delayed(*args: object, **kwargs: object) -> object:
+        def delayed(*args: Any, **kwargs: Any) -> object:
             entered.set()
             assert release.wait(5)
             return original(*args, **kwargs)
@@ -1301,7 +1302,7 @@ def test_ledger_independently_rejects_substituted_publication_derivation(
     spec = GenerationSpec(census, "policy-v1", {"doi_csl": "1", "s2": "1", "scholar": "1"}, commit)
     original = corpus_module._publication
 
-    def forged_publication(*args: object, **kwargs: object) -> PublicationMetadata:
+    def forged_publication(*args: Any, **kwargs: Any) -> PublicationMetadata:
         publication = original(*args, **kwargs)
         return replace(publication, normalized_title="forged title")
 
