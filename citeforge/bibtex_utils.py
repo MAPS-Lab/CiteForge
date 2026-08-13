@@ -133,7 +133,12 @@ class _StrictCorpusParser(BibTexParser):
 def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entry") -> str:
     """Build a compact citation key from the first author's surname, the year,
     and the first title word, falling back to a generic label."""
-    last = _NON_ALNUM_RE.sub("", authors[0].split()[-1]) if authors and authors[0] else ""
+    # .strip(), not plain truthiness: a whitespace-only name is truthy but
+    # " ".split() is empty, so [-1] raised IndexError. Blank co-author names do
+    # reach here (clients/helpers.py filters falsy/"..."/"et al", not " "), and
+    # IndexError is absent from FULL_OPERATION_ERRORS, so it escaped
+    # process_article and killed the author's whole remaining article list.
+    last = _NON_ALNUM_RE.sub("", authors[0].split()[-1]) if authors and authors[0].strip() else ""
     title_words = title.split()
     word = _NON_ALNUM_RE.sub("", title_words[0]) if title_words else ""
     y = str(year) if year else ""

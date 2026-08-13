@@ -143,6 +143,31 @@ def test_csv_append_multiple_entries(tmp_path: Path) -> None:
         assert int(rows[i]["trust_hits"]) == expected_hits, f"Row {i}: trust hits mismatch"
 
 
+def test_flush_sorts_rows_regardless_of_completion_order(tmp_path: Path) -> None:
+    """The committed CSV records content order, not the order workers finished in."""
+    csv_path = tmp_path / "summary.csv"
+    csv_path_str = str(csv_path)
+    paths = [
+        "output/Zeta (Z1)/Zeta2024-Last.bib",
+        "output/Alpha (A1)/Alpha2023-First.bib",
+        "output/Mu (M1)/Mu2025-Middle.bib",
+    ]
+
+    io_utils.init_summary_csv(csv_path_str)
+    for file_path in paths:
+        io_utils.append_summary_to_csv(csv_path_str, file_path, 1, _make_flags(s2=True))
+
+    with open(csv_path, encoding="utf-8") as f:
+        assert [r["file_path"] for r in csv.DictReader(f)] == paths, "appends should stay in arrival order"
+
+    io_utils.flush_summary_csv(csv_path_str)
+
+    with open(csv_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert [r["file_path"] for r in rows] == sorted(paths)
+    assert all(int(r["s2"]) == 1 for r in rows), "flush must not drop row content"
+
+
 def test_csv_edge_cases(tmp_path: Path) -> None:
     """Edge cases: very long file paths and special characters."""
     csv_path = tmp_path / "summary.csv"

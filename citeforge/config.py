@@ -916,6 +916,15 @@ TRUST_DIFF_OVERRIDE_THRESHOLD = 3
 # Override with CITEFORGE_MAX_WORKERS env var
 MAX_WORKERS = int(os.environ.get("CITEFORGE_MAX_WORKERS", "12"))
 
+# Maximum parallel workers for article enrichment, in a pool separate from the
+# author pool. Authors are a poor unit of parallelism on their own: the pool
+# drains to one worker while the largest author finishes its articles serially.
+# These threads spend nearly all their time blocked on the per-namespace token
+# buckets and the global concurrency semaphore, which are what actually pace
+# providers, so this can exceed the core count.
+# Override with CITEFORGE_ARTICLE_WORKERS env var
+ARTICLE_WORKERS = int(os.environ.get("CITEFORGE_ARTICLE_WORKERS", str(MAX_WORKERS * 2)))
+
 # Per-API rate limits: (tokens_per_second, burst_size)
 RATE_LIMITS: dict[str, tuple[float, int]] = {
     "arxiv": (0.33, 1),  # arXiv asks for <=3 req/s; we use ~1 per 3s

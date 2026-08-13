@@ -6,7 +6,7 @@ import re
 from typing import Any, cast
 
 from ..config import GEMINI_BASE
-from ..exceptions import ALL_API_ERRORS
+from ..exceptions import ALL_API_ERRORS, FIELD_ACCESS_ERRORS
 from ..http_utils import http_post_json
 from ..log_utils import LogCategory, LogSource, logger
 from ..refresh.capabilities import (
@@ -88,9 +88,19 @@ def gemini_generate_short_title(
         logger.debug("GEMINI_FAIL | reason=no_response", category=LogCategory.CITEKEY)
         return None
 
-    candidates = data.get("candidates") or []
-    parts = (candidates[0].get("content", {}).get("parts") or []) if candidates else []
-    raw_text = parts[0].get("text", "").strip() if parts else ""
+    # The decoded body is untrusted: json.loads can hand back a non-dict, a
+    # candidate or part can be a non-dict, and "text" can be present-but-null
+    # (where a default of "" does not apply). Unguarded, that AttributeError
+    # escapes process_article past its except PARSE_ERRORS, which does not
+    # include AttributeError, and aborts the whole author. FIELD_ACCESS_ERRORS
+    # is the guard the other post-decode extraction sites already use.
+    try:
+        candidates = data.get("candidates") or []
+        parts = (candidates[0].get("content", {}).get("parts") or []) if candidates else []
+        raw_text = (parts[0].get("text") or "").strip() if parts else ""
+    except FIELD_ACCESS_ERRORS:
+        logger.debug("GEMINI_FAIL | reason=malformed_response", category=LogCategory.CITEKEY)
+        return None
     short_title = re.sub(r"\s+", "", raw_text.strip("\"'"))
 
     if not short_title or len(short_title) > 100:

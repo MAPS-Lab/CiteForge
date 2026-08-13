@@ -85,6 +85,9 @@ from citeforge.text_utils import (
 from citeforge.textnorm import _is_corrupted_title, _is_garbage_title
 
 _ARXIV_ABS_RE = re.compile(r"arxiv\.org/abs/(\d{4}\.\d{4,5})", re.IGNORECASE)
+# An ampersand that is not already LaTeX-escaped. Testing for the absence of
+# r"\&" instead would miss a value carrying both an escaped and a bare one.
+_BARE_AMP_RE = re.compile(r"(?<!\\)&")
 _S2_BUILDER = partial(build_bibtex_from_response, mapping=S2_FIELD_MAPPING)
 _CROSSREF_BUILDER = partial(build_bibtex_from_response, mapping=CROSSREF_FIELD_MAPPING)
 _ARXIV_BUILDER = partial(build_bibtex_from_response, mapping=ARXIV_FIELD_MAPPING)
@@ -497,7 +500,7 @@ def process_article(
         # Escape bare & in field values (bibtex_from_dict handles this on write,
         # but we need to trigger a rewrite for files that were never re-serialized)
         for _fk, _fv in _bl_fields.items():
-            if _fk not in ("url", "doi") and isinstance(_fv, str) and "&" in _fv and r"\&" not in _fv:
+            if _fk not in ("url", "doi") and isinstance(_fv, str) and _BARE_AMP_RE.search(_fv):
                 _fixup_written = True
                 break
 
@@ -1046,7 +1049,11 @@ def process_article(
                         doi_candidates.append(d)
                         break
 
-            doi_candidates = [d for d in {idu.normalize_doi(d) for d in doi_candidates if d} if d]
+            # dict.fromkeys dedups while preserving discovery order. A set here
+            # made the order depend on per-process string hashing, so candidates
+            # tying on the stable sort below were validated in a different order
+            # each run and could save a different DOI from identical inputs.
+            doi_candidates = list(dict.fromkeys(d for d in (idu.normalize_doi(c) for c in doi_candidates if c) if d))
             # Feed Phase 3 DOIs into the candidate set for deterministic dedup
             all_candidate_dois.update(doi_candidates)
             # Published DOIs first, preprint/data DOIs last
