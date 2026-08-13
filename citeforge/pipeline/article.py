@@ -423,8 +423,8 @@ def process_article(
     author_dirname = format_author_dirname(rec.name, effective_id)
     author_dir = os.path.join(out_dir, author_dirname)
     existing_file_loaded = False
-    baseline_entry = None
-    existing_file_path = None
+    baseline_entry: dict[str, Any] | None = None
+    existing_file_path: str | None = None
 
     # Look for an existing BibTeX file to use as the enrichment seed; when
     # found it becomes the baseline and enrichment updates its fields

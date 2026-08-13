@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from ..config import PREPRINT_ONLY_PUBLISHERS, PREPRINT_SERVERS, SIM_IDENTIFIER_TITLE_MIN
@@ -876,7 +876,7 @@ class RequestResult:
 
 @dataclass(frozen=True)
 class LedgerManifest:
-    data: Mapping[str, object]
+    data: Mapping[str, Any]
     canonical_json: str
     digest: str
 
@@ -10665,8 +10665,10 @@ class Ledger:
             elif table == "aggregate_inputs":
                 if not isinstance(item.get("input"), Mapping):
                     raise ValueError("missing aggregate input evidence")
-                content = dict(cast(Mapping[str, object], item["input"]))
+                content = dict(cast("Mapping[str, Any]", item["input"]))
                 content["kind"] = EvidenceKind(content["kind"])
+                # Validated immediately below by require_matching_columns, which
+                # is what makes the keyword expansion safe.
                 aggregate_value = AggregateInput(**content)
                 require_matching_columns(aggregate_value)
                 if aggregate_value.key != item.get("input_digest"):
@@ -10733,7 +10735,8 @@ class Ledger:
     def pragma(self, name: str) -> object:
         if name not in {"journal_mode", "synchronous", "foreign_keys", "integrity_check"}:
             raise ValueError("unsupported pragma")
-        return self._connection.execute(f"PRAGMA {name}").fetchone()[0]
+        value: object = self._connection.execute(f"PRAGMA {name}").fetchone()[0]
+        return value
 
 
 __all__ = [

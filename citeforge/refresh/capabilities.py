@@ -314,23 +314,27 @@ def _builder_callback(capability_id: str, method: str, endpoint: str) -> Callabl
             )
             credential = "header:x-api-key"
         elif capability_id.startswith("crossref."):
-            bibliographic_key = (
+            bibliographic_key: str = (
                 "query.title"
                 if capability_id == "crossref.fuzzy_search.v1" and frozen.get("author")
                 else "query.bibliographic"
             )
-            query = MappingProxyType(
-                {
-                    bibliographic_key: frozen["query"],
-                    "rows": frozen["rows"],
-                    "select": (
-                        "title,author,issued,container-title,type,URL,DOI,published-print,published-online,"
-                        "publisher,volume,issue,page"
-                    ),
-                }
-                | ({"query.author": frozen["author"]} if frozen.get("author") else {})
-                | ({"query.container-title": frozen["venue"]} if "venue" in frozen else {})
-            )
+            # Built as one annotated dict rather than a chain of `|` unions.
+            # Merging dict literals whose keys are inferred separately widens
+            # the key type, and the result stops satisfying Mapping[str, object].
+            crossref_query: dict[str, object] = {
+                bibliographic_key: frozen["query"],
+                "rows": frozen["rows"],
+                "select": (
+                    "title,author,issued,container-title,type,URL,DOI,published-print,published-online,"
+                    "publisher,volume,issue,page"
+                ),
+            }
+            if frozen.get("author"):
+                crossref_query["query.author"] = frozen["author"]
+            if "venue" in frozen:
+                crossref_query["query.container-title"] = frozen["venue"]
+            query = MappingProxyType(crossref_query)
             credential = "query:mailto_if_configured"
         elif capability_id.startswith("openreview."):
             query = MappingProxyType(

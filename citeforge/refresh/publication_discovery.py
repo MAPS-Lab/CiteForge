@@ -1181,7 +1181,8 @@ def _accepted_venue_candidates(
 
         def authors_getter(candidate: Mapping[str, object]) -> object:
             if config.authors_getter is not None:
-                return config.authors_getter(dict(candidate))
+                configured: object = config.authors_getter(dict(candidate))
+                return configured
             return candidate.get(config.author_field) or []
 
         def year_getter(candidate: Mapping[str, object]) -> int | None:

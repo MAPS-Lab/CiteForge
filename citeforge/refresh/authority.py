@@ -86,7 +86,8 @@ def _plain(value: object) -> object:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_plain(item) for item in value]
     if isinstance(value, Enum):
-        return value.value
+        plain: object = value.value
+        return plain
     return value
 
 
