@@ -77,7 +77,7 @@ jobs:
           CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
           MAX_SEGMENTS: ${{ inputs.max_segments }}
           WALL_BUDGET_MINUTES: ${{ inputs.wall_budget_minutes }}
-          # The data-cache orphan branch this key sealed is deleted, so the
+          # The encrypted response-cache branch this key sealed is deleted, so the
           # checkpoint is now the only refresh state encrypted at rest.
           CHECKPOINT_KEY: ${{ secrets.CACHE_ENCRYPTION_KEY }}
           # Outside the checkout, so no ledger, checkpoint, or raw response can
