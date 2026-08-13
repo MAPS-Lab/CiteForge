@@ -1220,9 +1220,13 @@ class Ledger:
                 ):
                     raise ValueError("refusing to migrate structurally inconsistent schema version 4")
                 connection.execute(
+                    # resume_url and resume_url_digest belong to v9 and are added by
+                    # _install_schema_v9. A historical migration reproduces its own
+                    # historical schema, or the v5 fingerprint it is checked against
+                    # can never match.
                     "CREATE TABLE physical_send_markers (generation_id TEXT NOT NULL, request_key TEXT NOT NULL, "
                     "owner TEXT NOT NULL, started_at TEXT NOT NULL, idempotent INTEGER NOT NULL "
-                    "CHECK(idempotent IN (0, 1)), resolved_at TEXT, resume_url TEXT, resume_url_digest TEXT, "
+                    "CHECK(idempotent IN (0, 1)), resolved_at TEXT, "
                     "PRIMARY KEY (generation_id, request_key), "
                     "FOREIGN KEY (generation_id, request_key) "
                     "REFERENCES requests(generation_id, request_key))"
@@ -1797,8 +1801,6 @@ class Ledger:
                 "started_at",
                 "idempotent",
                 "resolved_at",
-                "resume_url",
-                "resume_url_digest",
             },
         }
         for table, required in required_columns.items():
@@ -5703,7 +5705,7 @@ class Ledger:
             states = [TaskDisposition(str(row[0])) for row in rows]
             if any(state in _TERMINAL - _SATISFIED for state in states):
                 return "blocking"
-            if pass_id == "late_identifiers":
+            if pass_id == "late_identifiers":  # noqa: S105 - planner pass identifier
                 return "complete"
             if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
                 if (

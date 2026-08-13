@@ -1163,6 +1163,18 @@ def _drop_v9_html_authority(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE html_probe_terminal_receipts")
     connection.execute("DROP TABLE html_probe_wave_items")
     connection.execute("DROP TABLE html_probe_waves")
+    # resume_url and resume_url_digest are v9 columns too, so undoing v9 has to
+    # remove them or the downgraded schema cannot match a pre-v9 fingerprint.
+    # The table is rebuilt rather than ALTER ... DROP COLUMN, which needs SQLite
+    # 3.35 and the supported 3.10 environments do not all carry it.
+    connection.execute("DROP TABLE physical_send_markers")
+    connection.execute(
+        "CREATE TABLE physical_send_markers (generation_id TEXT NOT NULL, request_key TEXT NOT NULL, "
+        "owner TEXT NOT NULL, started_at TEXT NOT NULL, idempotent INTEGER NOT NULL "
+        "CHECK(idempotent IN (0, 1)), resolved_at TEXT, "
+        "PRIMARY KEY (generation_id, request_key), FOREIGN KEY (generation_id, request_key) "
+        "REFERENCES requests(generation_id, request_key))"
+    )
 
 
 def test_exact_v4_ledger_migrates_atomically_to_v9(tmp_path: Path) -> None:
