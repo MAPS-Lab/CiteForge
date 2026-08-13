@@ -82,6 +82,8 @@ class TestRoundTrip:
             "created_at",
             "generation_id",
             "input_digest",
+            "kdf",
+            "kdf_salt",
             "key_id",
             "policy_digest",
             "schema_version",
@@ -201,10 +203,16 @@ class TestRejection:
         with pytest.raises(CheckpointError, match="no checkpoint found"):
             _load(_store(tmp_path), tmp_path / "restored")
 
-    @pytest.mark.parametrize("size", [0, 8, 15, 31, 33, 64])
-    def test_an_unusable_key_length_is_refused_at_construction(self, tmp_path: Path, size: int) -> None:
-        with pytest.raises(CheckpointError, match="must be 16, 24, or 32 bytes"):
+    @pytest.mark.parametrize("size", [0, 8, 15])
+    def test_a_truncated_secret_is_refused_at_construction(self, tmp_path: Path, size: int) -> None:
+        """A floor on length only. Guessability is the KDF's problem, not this check's."""
+        with pytest.raises(CheckpointError, match="at least 16 bytes"):
             CheckpointStore(tmp_path / "checkpoints", bytes(size), _KEY_ID)
+
+    @pytest.mark.parametrize("size", [16, 31, 33, 64])
+    def test_any_secret_at_or_above_the_floor_is_accepted(self, tmp_path: Path, size: int) -> None:
+        """The secret is stretched, so its length no longer has to be a key length."""
+        assert CheckpointStore(tmp_path / "checkpoints", bytes(range(size)), _KEY_ID)
 
     @pytest.mark.parametrize("key_id", ["", "   "])
     def test_an_empty_key_identifier_is_refused(self, tmp_path: Path, key_id: str) -> None:
@@ -303,3 +311,36 @@ class TestManifestParsing:
             )
 
         assert _with("").binding_bytes() == _with("f" * 64).binding_bytes()
+
+
+def test_the_salt_is_fresh_per_checkpoint_and_reveals_nothing(tmp_path: Path) -> None:
+    """A salt must be public and must not repeat.
+
+    Publishing it is what lets the restore side derive the same key. Repeating
+    it would let one cracking run cover every checkpoint at once, which is most
+    of what the KDF is buying.
+    """
+    store = _store(tmp_path)
+    first = _save(store, _state(tmp_path, "one"), 1)
+    second = _save(store, _state(tmp_path, "two"), 2)
+
+    assert first.kdf == second.kdf == "scrypt-n16384-r8-p1"
+    assert len(bytes.fromhex(first.kdf_salt)) == 16
+    assert first.kdf_salt != second.kdf_salt, "a repeated salt shares a derived key across checkpoints"
+    # Derived from os.urandom, never from the secret, so two stores holding the
+    # same secret still produce unrelated salts.
+    other = CheckpointStore(tmp_path / "other", _KEY, _KEY_ID)
+    assert _save(other, _state(tmp_path, "three"), 1).kdf_salt != first.kdf_salt
+
+
+def test_an_unsupported_kdf_is_refused(tmp_path: Path) -> None:
+    """A manifest naming a different KDF must fail closed, not fall back."""
+    store = _store(tmp_path)
+    _save(store, _state(tmp_path), 1)
+    path = next(store.root.glob("*.manifest.json"))
+    content = json.loads(path.read_text(encoding="utf-8"))
+    content["kdf"] = "sha256"
+    path.write_text(json.dumps(content), encoding="utf-8")
+
+    with pytest.raises(CheckpointError, match="no retained checkpoint verified"):
+        _load(store, tmp_path / "restored")

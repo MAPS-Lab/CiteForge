@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import shutil
 import subprocess
@@ -276,9 +275,18 @@ def run_refresh(
             logger.error("--checkpoint-dir requires CHECKPOINT_KEY in the environment", category=LogCategory.ERROR)
             logger.close()
             return 2
-        key = hashlib.sha256(secret.encode()).digest()
-        key_id = hashlib.sha256(b"citeforge-checkpoint:" + key).hexdigest()[:16]
-        store = CheckpointStore(checkpoint_dir, key, key_id)
+        # The secret goes in raw. CheckpointStore stretches it with scrypt and a
+        # per-checkpoint salt, because the ciphertext lands on a public branch
+        # and a bare hash would let an attacker guess offline at 1.7M tries per
+        # second per core rather than 17.
+        #
+        # The identifier is a label, never derived from the secret. Publishing
+        # any function of the secret in a cleartext manifest on a public branch
+        # hands an attacker a cheap oracle to test guesses against, which is
+        # exactly what the KDF above exists to deny them. A wrong key is caught
+        # by the AEAD tag; the label only makes the error legible.
+        key_id = os.environ.get("CHECKPOINT_KEY_ID", "default")
+        store = CheckpointStore(checkpoint_dir, secret.encode(), key_id)
         # Restore before the ledger is opened, because the sealed payload holds
         # the ledger file itself. A checkpoint that will not verify is an error
         # to escalate, never a reason to start the generation from zero, which
