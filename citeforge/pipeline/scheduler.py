@@ -13,6 +13,7 @@ import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from tenacity import Retrying, retry_if_result, stop_after_attempt, wait_exponential
@@ -315,58 +316,72 @@ def run_all(
     # (author_timeout * len(records)) on as_completed, not per future
     author_timeout = 1800  # seconds
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Submit all tasks and track them
-        future_to_author = {}
-        for idx, rec in enumerate(records_sorted, 1):
-            effective_id = rec.scholar_id or rec.dblp or "N/A"
-            logger.info(f"[{idx}/{len(records)}] Queued: {rec.name} (ID: {effective_id})", category=LogCategory.PLAN)
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Submit all tasks and track them
+            future_to_author = {}
+            for idx, rec in enumerate(records_sorted, 1):
+                effective_id = rec.scholar_id or rec.dblp or "N/A"
+                logger.info(
+                    f"[{idx}/{len(records)}] Queued: {rec.name} (ID: {effective_id})",
+                    category=LogCategory.PLAN,
+                )
 
-            future = executor.submit(
-                process_record,
-                serpapi_key,
-                serply_key,
-                rec,
-                out_dir,
-                max_pubs=None,
-                s2_api_key=s2_api_key,
-                or_creds=or_creds,
-                delay=REQUEST_DELAY_MIN,
-                gemini_api_key=gemini_api_key,
-                summary_csv_path=summary_csv_path,
-                force_enrich=force_enrich,
-            )
-            future_to_author[future] = rec
+                future = executor.submit(
+                    process_record,
+                    serpapi_key,
+                    serply_key,
+                    rec,
+                    out_dir,
+                    max_pubs=None,
+                    s2_api_key=s2_api_key,
+                    or_creds=or_creds,
+                    delay=REQUEST_DELAY_MIN,
+                    gemini_api_key=gemini_api_key,
+                    summary_csv_path=summary_csv_path,
+                    force_enrich=force_enrich,
+                )
+                future_to_author[future] = rec
 
-        logger.step(f"All {len(records)} authors queued for processing", category=LogCategory.PLAN)
+            logger.step(f"All {len(records)} authors queued for processing", category=LogCategory.PLAN)
 
-        try:
-            for future in as_completed(future_to_author, timeout=author_timeout * len(records)):
-                rec = future_to_author[future]
-                try:
-                    saved = future.result(timeout=30)
-                    total_saved += saved
-                    processed += 1
-                    logger.success(
-                        f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
-                        category=LogCategory.AUTHOR,
-                    )
-                except TimeoutError:
-                    processed += 1
-                    logger.error(
-                        f"[{processed}/{len(records)}] Timeout retrieving result for {rec.name}",
-                        category=LogCategory.ERROR,
-                    )
-                except Exception as e:
-                    processed += 1
-                    logger.error(
-                        f"[{processed}/{len(records)}] Error processing {rec.name} ({rec.scholar_id or rec.dblp}): {e}",
-                        category=LogCategory.ERROR,
-                    )
-        except TimeoutError:
-            remaining = [r.name for f, r in future_to_author.items() if not f.done()]
-            logger.error(
-                f"Pipeline timed out with {len(remaining)} author(s) still pending: " + ", ".join(remaining[:5]),
-                category=LogCategory.ERROR,
-            )
+            try:
+                for future in as_completed(future_to_author, timeout=author_timeout * len(records)):
+                    rec = future_to_author[future]
+                    try:
+                        saved = future.result(timeout=30)
+                        total_saved += saved
+                        processed += 1
+                        logger.success(
+                            f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
+                            category=LogCategory.AUTHOR,
+                        )
+                    except (TimeoutError, FuturesTimeoutError):
+                        processed += 1
+                        logger.error(
+                            f"[{processed}/{len(records)}] Timeout retrieving result for {rec.name}",
+                            category=LogCategory.ERROR,
+                        )
+                    except Exception as e:
+                        processed += 1
+                        logger.error(
+                            f"[{processed}/{len(records)}] Error processing {rec.name} "
+                            f"({rec.scholar_id or rec.dblp}): {e}",
+                            category=LogCategory.ERROR,
+                        )
+            except (TimeoutError, FuturesTimeoutError):
+                remaining = [r.name for f, r in future_to_author.items() if not f.done()]
+                logger.error(
+                    f"Pipeline timed out with {len(remaining)} author(s) still pending: " + ", ".join(remaining[:5]),
+                    category=LogCategory.ERROR,
+                )
+                # Cancel authors that have not started yet. Without this the
+                # `with` exit (shutdown(wait=True)) drains the whole remaining
+                # queue, so the deadline bounded nothing. A thread cannot be
+                # killed in Python, so the overrun is still bounded by the
+                # MAX_WORKERS authors already in flight, not by zero.
+                executor.shutdown(wait=False, cancel_futures=True)
+    finally:
+        threading.excepthook = _orig_excepthook
+
     return total_saved, processed
