@@ -389,7 +389,14 @@ def format_author_dirname(author_name: str | None, author_id: str) -> str:
     """Format an author directory name as "LastName (author_id)". Falls back
     to the id alone when name extraction fails, or to LastName when the id is
     empty."""
-    last_name = extract_last_name(author_name)
+    # The name is sanitized like the id, not trusted like a literal. It comes
+    # from the input CSV and becomes a real filesystem path (the per-author .bib
+    # directory and the author log file), so an embedded separator escapes
+    # out_dir. A name that is only dots and spaces would still yield ".." when
+    # the id is empty, so it is dropped rather than sanitized.
+    last_name = _DIRNAME_SANITIZE_RE.sub("-", extract_last_name(author_name))
+    if not last_name.strip(". "):
+        last_name = ""
 
     sanitized_id = _DIRNAME_SANITIZE_RE.sub("-", author_id)
 
