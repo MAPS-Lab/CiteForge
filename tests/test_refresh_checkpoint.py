@@ -289,16 +289,17 @@ class TestManifestParsing:
 
     def test_the_digest_field_does_not_affect_the_binding(self) -> None:
         """Otherwise the manifest could not authenticate itself."""
-        base: dict[str, object] = {
-            "schema_version": CHECKPOINT_SCHEMA_VERSION,
-            "generation_id": _GENERATION,
-            "input_digest": _INPUT_DIGEST,
-            "policy_digest": _POLICY_DIGEST,
-            "sequence": 7,
-            "created_at": _WHEN,
-            "key_id": _KEY_ID,
-        }
-        assert (
-            CheckpointManifest(**base, ciphertext_digest="").binding_bytes()
-            == CheckpointManifest(**base, ciphertext_digest="f" * 64).binding_bytes()
-        )
+
+        def _with(digest: str) -> CheckpointManifest:
+            return CheckpointManifest(
+                schema_version=CHECKPOINT_SCHEMA_VERSION,
+                generation_id=_GENERATION,
+                input_digest=_INPUT_DIGEST,
+                policy_digest=_POLICY_DIGEST,
+                sequence=7,
+                created_at=_WHEN,
+                ciphertext_digest=digest,
+                key_id=_KEY_ID,
+            )
+
+        assert _with("").binding_bytes() == _with("f" * 64).binding_bytes()
