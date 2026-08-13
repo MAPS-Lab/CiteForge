@@ -217,19 +217,47 @@ jobs:
           app-id: ${{ secrets.CI_BOT_APP_ID }}
           private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
 
-      - name: Commit output to main
+      # Publication goes through a pull request, never a direct push. Repo
+      # ruleset 10020080 "Protect default branch" carries both a pull_request
+      # rule (1 approving review, code-owner review required) and a strict
+      # required_status_checks rule on the "Required CI" context, and its only
+      # bypass actor is OrganizationAdmin, which a GitHub App cannot be. The
+      # direct push this replaced was rejected by that ruleset, which is why
+      # nothing has published since 2026-07-05.
+      - name: Open or update the refresh pull request
+        env:
+          GH_TOKEN: ${{ steps.push_token.outputs.token }}
         run: |
+          set -euo pipefail
+          MONTH="$(date +%Y-%m)"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add output/
-          if ! git diff --cached --quiet; then
-            git commit -m "data: monthly pipeline refresh $(date +%Y-%m)"
-            # Push as the app (ruleset bypass actor); GITHUB_TOKEN cannot bypass the required-PR rule.
-            git push "https://x-access-token:${{ steps.push_token.outputs.token }}@github.com/${{ github.repository }}.git" HEAD:main
-          else
-            echo "No output changes to commit"
+          if git diff --cached --quiet; then
+            echo "::notice::No output changes to publish"
+            exit 0
           fi
+
+          branch="data/refresh-${MONTH}"
+          git commit -m "data: monthly pipeline refresh ${MONTH}"
+          git push --force-with-lease \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+            "HEAD:refs/heads/${branch}"
+
+          if [ -z "$(gh pr list --head "${branch}" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "${branch}" \
+              --title "data: monthly pipeline refresh ${MONTH}" \
+              --body "Automated corpus refresh for ${MONTH}. Merges once Required CI is green and a code owner approves; the ruleset does not permit the bot to satisfy either on its own."
+          else
+            echo "::notice::Pull request for ${branch} already open, updated in place"
+          fi
+
+          # Arm auto-merge so the approval is the only remaining manual step.
+          # This is best-effort: it fails while the required review is missing,
+          # which is not a reason to fail the refresh.
+          gh pr merge "${branch}" --squash --auto || \
+            echo "::notice::Auto-merge not armed yet; the pull request is open and waiting on review"
 
   verify:
     needs: refresh
@@ -280,19 +308,8 @@ jobs:
           echo "Cache persistence was not guaranteed — manual re-trigger will resume from any cache that was successfully saved."
           exit 1
 
-  sync-website:
-    needs: [refresh, verify]
-    if: needs.refresh.result == 'success' && needs.refresh.outputs.converged == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Trigger mapslab-website publication sync
-        env:
-          GH_TOKEN: ${{ secrets.WEBSITE_SYNC_TOKEN }}
-        run: |
-          echo "Triggering mapslab-website import-publications workflow..."
-          gh api repos/MAPS-Lab/mapslab-website/dispatches \
-            --method POST \
-            -f event_type=citeforge-refresh
-          echo "::notice::Dispatched citeforge-refresh event to mapslab-website"
+  # The website sync moved to citeforge-refresh-merged.yml. Dispatching from
+  # here fired on a converged generation, which is upstream of the data
+  # actually reaching main: the refresh can converge and its pull request can
+  # then sit unreviewed or be closed. The website now syncs from the merge
+  # event, which is the only point at which main really carries the new corpus.

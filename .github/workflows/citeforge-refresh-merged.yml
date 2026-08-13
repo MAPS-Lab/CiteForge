@@ -1,0 +1,40 @@
+name: CiteForge Refresh Merged
+
+# Fires only when a refresh pull request actually lands on main. The previous
+# arrangement dispatched the website from the refresh job as soon as the
+# pipeline reported convergence, which is upstream of publication: the
+# generation can converge and its pull request can still sit unreviewed, be
+# closed, or fail Required CI. main carrying the corpus is the real event.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: citeforge-website-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-website:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'data/refresh-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger mapslab-website publication sync
+        env:
+          GH_TOKEN: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          echo "::notice::Refresh ${HEAD_REF} merged as ${MERGE_SHA}; dispatching website sync"
+          gh api repos/MAPS-Lab/mapslab-website/dispatches \
+            --method POST \
+            -f event_type=citeforge-refresh \
+            -f "client_payload[merge_sha]=${MERGE_SHA}" \
+            -f "client_payload[head_ref]=${HEAD_REF}"
