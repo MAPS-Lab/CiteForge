@@ -235,13 +235,18 @@ jobs:
           app-id: ${{ secrets.CI_BOT_APP_ID }}
           private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
 
-      # Publication goes through a pull request, never a direct push. Repo
-      # ruleset 10020080 "Protect default branch" carries both a pull_request
-      # rule (1 approving review, code-owner review required) and a strict
-      # required_status_checks rule on the "Required CI" context, and its only
-      # bypass actor is OrganizationAdmin, which a GitHub App cannot be. The
-      # direct push this replaced was rejected by that ruleset, which is why
-      # nothing has published since 2026-07-05.
+      # Publication goes through a pull request, never a direct push. The
+      # direct push this replaced was rejected by repo ruleset 10020080, which
+      # is why nothing has published since 2026-07-05.
+      #
+      # The rules were split so this can run unattended without weakening CI.
+      # Ruleset 20801390 "Required CI on default branch" carries the strict
+      # required_status_checks rule and has no bypass actors at all, so nothing
+      # merges without a green "Required CI". Ruleset 10020080 keeps deletion,
+      # non_fast_forward and pull_request, and grants maps-lab-ci-bot
+      # (Integration 4222409) a pull_request-mode bypass, so the App may merge
+      # its own refresh pull request without the code-owner review and still
+      # cannot force-push or delete the branch.
       - name: Open or update the refresh pull request
         env:
           GH_TOKEN: ${{ steps.push_token.outputs.token }}
@@ -266,16 +271,16 @@ jobs:
           if [ -z "$(gh pr list --head "${branch}" --state open --json number --jq '.[].number')" ]; then
             gh pr create --base main --head "${branch}" \
               --title "data: monthly pipeline refresh ${MONTH}" \
-              --body "Automated corpus refresh for ${MONTH}. Merges once Required CI is green and a code owner approves; the ruleset does not permit the bot to satisfy either on its own."
+              --body "Automated corpus refresh for ${MONTH}. Auto-merges once Required CI is green. Required CI lives in its own ruleset with no bypass actors, so this cannot merge red."
           else
             echo "::notice::Pull request for ${branch} already open, updated in place"
           fi
 
-          # Arm auto-merge so the approval is the only remaining manual step.
-          # This is best-effort: it fails while the required review is missing,
-          # which is not a reason to fail the refresh.
+          # Auto-merge is armed rather than merged here, so the merge waits on
+          # Required CI. Arming is best effort: a transient API failure is not
+          # a reason to fail a refresh whose pull request is already open.
           gh pr merge "${branch}" --squash --auto || \
-            echo "::notice::Auto-merge not armed yet; the pull request is open and waiting on review"
+            echo "::warning::Auto-merge not armed; the pull request is open and needs a manual merge"
 
   verify:
     needs: refresh
