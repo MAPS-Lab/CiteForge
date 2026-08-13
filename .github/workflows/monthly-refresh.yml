@@ -354,6 +354,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GENERATION: ${{ needs.refresh.outputs.generation }}
+          # Declared here too. The refresh job's job-level env does not reach
+          # this job, and the recovery below runs under set -u.
+          STATE_BRANCH: refresh-state
         run: |
           set -euo pipefail
           # Skip the dispatch only if a DIFFERENT run is already in progress
@@ -375,8 +378,26 @@ jobs:
             echo "::warning::Reached ${MAX_MONTHLY_RUNS} runs this month (${month_count}), not dispatching; investigate why the generation is not completing."
             exit 0
           fi
-          # A cancelled job reports no generation, so that dispatch derives the
-          # identity again rather than pinning one it never read.
+          # A cancelled job publishes no outputs, so GENERATION arrives empty
+          # even though the identity is durable. Read it back off the state
+          # branch rather than dispatching unpinned: an unpinned segment that
+          # meets a moved main derives a different identity and silently opens
+          # a second generation, re-burning the provider quota the first one
+          # already spent.
+          if [ -z "$GENERATION" ]; then
+            remote_url="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+            if git ls-remote --exit-code --heads "$remote_url" "$STATE_BRANCH" >/dev/null 2>&1; then
+              recovery_dir="$(mktemp -d)"
+              if git clone --quiet --depth 1 --single-branch --branch "$STATE_BRANCH" \
+                   "$remote_url" "$recovery_dir" 2>/dev/null; then
+                GENERATION=$(find "$recovery_dir" -maxdepth 1 -type f -name '*.manifest.json' \
+                  -exec jq -s -r 'max_by(.sequence).generation_id' {} + 2>/dev/null || true)
+                [ "$GENERATION" = null ] && GENERATION=""
+                [ -n "$GENERATION" ] && echo "::notice::Recovered generation ${GENERATION} from ${STATE_BRANCH}"
+              fi
+              rm -rf "$recovery_dir"
+            fi
+          fi
           if [ -n "$GENERATION" ]; then
             gh workflow run "Monthly Pipeline Refresh" --repo "${{ github.repository }}" -f "generation=${GENERATION}"
             echo "::notice::Dispatched the next segment of generation ${GENERATION}."
