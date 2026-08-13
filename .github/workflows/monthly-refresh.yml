@@ -140,11 +140,17 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          max_runs=50
-          consecutive_stable=0
+          # A digest-based convergence test needs at most one confirming sweep
+          # after the corpus stops moving, so the 50-pass ceiling that the
+          # API-delta test needed is gone. Ten is a runaway guard, not a target.
+          max_runs=10
           converged=false
-          prev_total=-1
+          prev_digest=""
           last_total=-1
+          # 300 of the job's 360 minutes, leaving the commit, the branch push
+          # and the pull request outside the loop's budget.
+          LOOP_BUDGET_SECONDS=18000
+          loop_started=$(date +%s)
 
           for i in $(seq 1 $max_runs); do
             echo "::group::Pipeline run $i/$max_runs"
@@ -166,10 +172,29 @@ jobs:
               exit 1
             fi
 
-            # Parse total API calls from the run log
+            # Reported for observability only. This counter is logical, not
+            # physical: it counts operations, not sends, so a retry storm is
+            # invisible to it. It must not gate anything.
             total=$(grep -aoP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
             last_total=$total
-            echo "Run $i — API calls: $total (prev: $prev_total)"
+
+            # Convergence is "this iteration changed nothing that gets
+            # published", read off the corpus itself. The previous test
+            # compared the API-call count between iterations and declared
+            # convergence when the delta fell to 50 or less. It never fired:
+            # the August 2026 chain went 3121, 2686, 2447, 2233, deltas of
+            # 435, 239 and 214, so the loop ran to the six-hour ceiling and
+            # the runner was cancelled. It also needed three to four full
+            # corpus sweeps to decide, and four warm sweeps at the measured
+            # 82.35 min do not fit in the 360 min budget.
+            # NUL-delimited throughout: author directories are named
+            # "Surname (ScholarID)" and the space splits under plain xargs,
+            # which leaves sha256sum reading a subset and reporting a digest
+            # that is stable from the first iteration. That reads as instant
+            # convergence and would publish an unfinished corpus.
+            digest=$(find output -type f \( -name '*.bib' -o -name 'summary.csv' -o -name 'baseline.json' \) -print0 \
+              | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1)
+            echo "Run $i — corpus digest ${digest:0:12} — API calls: $total"
 
             # Save cache after every iteration
             if ! save_cache "$i"; then
@@ -177,27 +202,20 @@ jobs:
               exit 1
             fi
 
-            # Delta-based convergence: stable when API call count changes
-            # by at most CONVERGENCE_THRESHOLD across 2 consecutive runs.
-            # Unconfirmed negatives (< 3 confirmations) are retried automatically
-            # by the cache layer — no need to clear files between iterations.
-            CONVERGENCE_THRESHOLD=50
-            if [ "$prev_total" -ge 0 ]; then
-              delta=$((total - prev_total))
-              if [ "$delta" -lt 0 ]; then delta=$((-delta)); fi
-              if [ "$delta" -le "$CONVERGENCE_THRESHOLD" ]; then
-                consecutive_stable=$((consecutive_stable + 1))
-                if [ "$consecutive_stable" -ge 2 ]; then
-                  echo "API calls stable (delta=$delta, threshold=$CONVERGENCE_THRESHOLD) over 3 runs — converged"
-                  converged=true
-                  break
-                fi
-                echo "API calls within threshold (delta=$delta) — confirming with one more run"
-              else
-                consecutive_stable=0
-              fi
+            if [ "$digest" = "$prev_digest" ]; then
+              echo "Corpus unchanged across two consecutive runs — converged"
+              converged=true
+              break
             fi
-            prev_total=$total
+            prev_digest=$digest
+
+            # Stop leasing new work with room left for the commit and the pull
+            # request, rather than being cancelled mid-iteration at the ceiling.
+            elapsed=$(( $(date +%s) - loop_started ))
+            if [ "$elapsed" -ge "$LOOP_BUDGET_SECONDS" ]; then
+              echo "::notice::Wall budget reached after $i run(s); exiting to publish what is complete"
+              break
+            fi
 
             if [ "$i" -eq "$max_runs" ]; then
               echo "Reached $max_runs runs without full convergence"
