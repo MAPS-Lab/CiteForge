@@ -5,11 +5,13 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import requests
 
 from citeforge.refresh.authority import (
     EvidenceKind,
@@ -386,7 +388,11 @@ def test_broad_identity_binds_every_wire_affecting_value() -> None:
             continue
         claim = TaskClaim(task.key, task.request.key, "worker", NOW + timedelta(minutes=1))
         operation = build_claimed_discovery_operation(  # type: ignore[arg-type]
-            ClaimLedger(task), claim, credentials, authority, now=NOW
+            ClaimLedger(task),  # type: ignore[arg-type]  # duck-typed ledger stub, proves builder needs no real Ledger
+            claim,
+            credentials,
+            authority,
+            now=NOW,
         )
         built[task.provider] = operation
         assert operation.request == task.request
@@ -437,7 +443,11 @@ def test_claimed_html_probe_uses_only_ledger_resolved_raw_url() -> None:
             return raw_url
 
     operation = build_claimed_discovery_operation(  # type: ignore[arg-type]
-        ClaimLedger(), claim, DiscoveryCredentials(s2_key="wire-only"), authority, now=NOW
+        ClaimLedger(),  # type: ignore[arg-type]  # duck-typed ledger stub
+        claim,
+        DiscoveryCredentials(s2_key="wire-only"),
+        authority,
+        now=NOW,
     )
     assert operation.request == request
     assert raw_url not in repr(operation)
@@ -448,7 +458,11 @@ def test_claimed_html_probe_uses_only_ledger_resolved_raw_url() -> None:
 
     with pytest.raises(ValueError, match="builder identity"):
         build_claimed_discovery_operation(  # type: ignore[arg-type]
-            SubstitutingLedger(), claim, DiscoveryCredentials(s2_key="wire-only"), authority, now=NOW
+            SubstitutingLedger(),  # type: ignore[arg-type]  # duck-typed ledger stub that substitutes the probe URL
+            claim,
+            DiscoveryCredentials(s2_key="wire-only"),
+            authority,
+            now=NOW,
         )
 
 
@@ -487,13 +501,21 @@ def test_claimed_gemini_operation_injects_only_runtime_key() -> None:
             return authority
 
     operation = build_claimed_discovery_operation(  # type: ignore[arg-type]
-        ClaimLedger(), claim, DiscoveryCredentials(s2_key="wire", gemini_key="secret"), authority, now=NOW
+        ClaimLedger(),  # type: ignore[arg-type]  # duck-typed ledger stub
+        claim,
+        DiscoveryCredentials(s2_key="wire", gemini_key="secret"),
+        authority,
+        now=NOW,
     )
     assert operation.headers == {"x-goog-api-key": "secret"}
     assert "secret" not in repr(operation) and "secret" not in repr(request)
     with pytest.raises(ValueError, match="credential"):
         build_claimed_discovery_operation(  # type: ignore[arg-type]
-            ClaimLedger(), claim, DiscoveryCredentials(s2_key="wire"), authority, now=NOW
+            ClaimLedger(),  # type: ignore[arg-type]  # duck-typed ledger stub
+            claim,
+            DiscoveryCredentials(s2_key="wire"),
+            authority,
+            now=NOW,
         )
 
 
@@ -712,8 +734,10 @@ def test_dynamic_openreview_cap_and_conditional_applicability_are_exact() -> Non
     assert all(item.task.request is not None for item in incomplete.decisions if item.task.provider != "serply")
 
     complete_entry = dict(seed.baseline_entry)
+    baseline_fields = seed.baseline_entry["fields"]
+    assert isinstance(baseline_fields, Mapping)
     complete_entry["fields"] = {
-        **dict(seed.baseline_entry["fields"]),
+        **baseline_fields,
         "author": "Lovelace, Ada",
         "journal": "Proceedings",
     }
@@ -832,9 +856,7 @@ def test_bound_disabled_s2_shapes_inventory_union_as_typed_applicability(tmp_pat
     policy = replace(_policy(), provider_modes={"gemini": "disabled", "s2": "disabled", "serply": "disabled"})
     spec = GenerationSpec(census, "policy-v1", {**dict(policy.adapter_versions), "scholar": "1"}, commit)
 
-    def send_once(_operation: SendOperation) -> object:
-        import requests
-
+    def send_once(_operation: SendOperation) -> requests.Response:
         response = requests.Response()
         response.status_code = 200
         response.headers["Content-Type"] = "application/json"
@@ -908,9 +930,7 @@ def test_atomic_known_doi_wave_commits_complete_round_and_replays(tmp_path: Path
     policy = _policy()
     spec = GenerationSpec(census, "policy-v1", {**dict(policy.adapter_versions), "scholar": "1"}, commit)
 
-    def send_once(_operation: SendOperation) -> object:
-        import requests
-
+    def send_once(_operation: SendOperation) -> requests.Response:
         response = requests.Response()
         response.status_code = 200
         response.headers["Content-Type"] = "application/json"
@@ -1117,9 +1137,7 @@ def test_zero_seed_generation_commits_and_replays_complete_c4_chain(tmp_path: Pa
     policy = replace(_policy(), provider_modes={"gemini": "disabled", "s2": "disabled", "serply": "disabled"})
     spec = GenerationSpec(census, "policy-v1", {**dict(policy.adapter_versions), "scholar": "1"}, commit)
 
-    def send_empty(_operation: SendOperation) -> object:
-        import requests
-
+    def send_empty(_operation: SendOperation) -> requests.Response:
         response = requests.Response()
         response.status_code = 200
         response.headers["Content-Type"] = "application/json"
@@ -1258,9 +1276,7 @@ def test_atomic_venue_fallback_consumes_crossref_and_expands_openalex(tmp_path: 
     policy = _policy()
     spec = GenerationSpec(census, "policy-v1", {**dict(policy.adapter_versions), "scholar": "1"}, commit)
 
-    def send_empty(_operation: SendOperation) -> object:
-        import requests
-
+    def send_empty(_operation: SendOperation) -> requests.Response:
         response = requests.Response()
         response.status_code = 200
         response.headers["Content-Type"] = "application/json"

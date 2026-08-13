@@ -5,7 +5,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from textwrap import dedent
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -201,7 +201,7 @@ def test_file_output(tmp_path: Path) -> None:
         "key": "Vaswani2017:Attention",
         "fields": {
             "title": paper["title"],
-            "author": " and ".join(paper["authors"]),
+            "author": " and ".join(cast(list[str], paper["authors"])),
             "year": str(paper["year"]),
             "booktitle": "NeurIPS",
             "doi": paper["doi"],
@@ -294,7 +294,7 @@ def test_complex_paper_enrichment() -> None:
         "key": "Jumper2021",
         "fields": {
             "title": paper["title"],
-            "author": " and ".join(paper["authors"]),
+            "author": " and ".join(cast(list[str], paper["authors"])),
             "year": str(paper["year"]),
             "journal": paper["venue"],
         },
@@ -307,7 +307,7 @@ def test_complex_paper_enrichment() -> None:
                 "type": "article",
                 "fields": {
                     "title": paper["title"],
-                    "author": " and ".join(paper["authors"]),
+                    "author": " and ".join(cast(list[str], paper["authors"])),
                     "year": str(paper["year"]),
                     "doi": paper["doi"],
                     "journal": "Nature",

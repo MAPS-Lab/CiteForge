@@ -40,7 +40,7 @@ def test_api_keys_fixture_allows_missing_gemini_config(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(io_utils, "read_gemini_api_key", fake_gemini)
 
-    keys = api_keys_fixture.__wrapped__()
+    keys = api_keys_fixture.__wrapped__()  # type: ignore[missing-attribute]  # pytest wraps the fixture fn
 
     assert keys["gemini"] == "gemini-key"
     assert gemini_paths == ["keys/Gemini.key"]

@@ -209,8 +209,12 @@ class ScriptedTransport:
         self._responses = list(responses)
         self.physical_calls = 0
 
-    def send(self, _operation: SendOperation, *, task_claim: TaskClaim | None = None) -> ProviderResponse:
-        del task_claim
+    def send(self, operation: SendOperation, *, task_claim: TaskClaim | None = None) -> ProviderResponse:
+        # Named to match the ProviderTransport protocol above. A leading
+        # underscore renames the positional parameter, so this class stopped
+        # structurally satisfying the protocol and every caller that passed it
+        # where a ProviderTransport was expected became a type error.
+        del operation, task_claim
         if not self._responses:
             raise AssertionError("scripted transport exhausted")
         self.physical_calls += 1
@@ -558,6 +562,7 @@ class LedgerTransport:
                     status,
                     "DOI redirect limit exceeded",
                 )
+            location = ""
             try:
                 location = raw.headers.get("Location", "")
                 location = urljoin(operation.url, location)

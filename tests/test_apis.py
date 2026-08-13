@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -193,8 +193,8 @@ def test_crossref_multiple_candidates() -> None:
     """Crossref multiple-candidate search returns results for a well-known paper."""
     paper = KNOWN_PAPERS[0]
     candidates = search_apis.crossref_search_multiple(
-        paper["title"],
-        paper["first_author"],
+        cast(str, paper["title"]),
+        cast(str, paper["first_author"]),
         max_results=5,
     )
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -14,6 +16,7 @@ from citeforge.api_configs import (
 )
 from citeforge.api_generics import build_bibtex_from_response, project_entry_from_response
 from citeforge.bibtex_utils import bibtex_from_dict
+from citeforge.canonicalize import CanonicalStage
 from citeforge.refresh.authority import EvidenceKind, IntentKind, PublicationSeedEvidence, evidence_digest
 from citeforge.refresh.capabilities import build_request, capability_for
 from citeforge.refresh.discovery import (
@@ -175,6 +178,13 @@ def _policy() -> DiscoveryPolicy:
         max_scholar_pages=10,
         max_html_probe_waves=8,
     )
+
+
+def _fields(entry: Mapping[str, object]) -> Mapping[str, Any]:
+    """Narrow the `fields` sub-mapping of an evidence entry, whose values are heterogeneous."""
+    fields = entry["fields"]
+    assert isinstance(fields, Mapping)
+    return fields
 
 
 def _seed(publication: str = "Journal of Engines 12(3), 44-51, 2024") -> PublicationSeedEvidence:
@@ -362,7 +372,7 @@ def test_venue_fallback_rejects_missing_or_extra_terminal_membership() -> None:
 
 def test_venue_fallback_consumes_doi_completeness_and_mapped_inventory_venue_fields() -> None:
     seed = _seed("ignored")
-    entry = {**seed.baseline_entry, "fields": {**seed.baseline_entry["fields"], "journal": "", "school": "MIT"}}
+    entry = {**seed.baseline_entry, "fields": {**_fields(seed.baseline_entry), "journal": "", "school": "MIT"}}
     seed = replace(seed, baseline_entry=entry, baseline_digest=evidence_digest(entry))
     seed = replace(seed, seed_digest=seed.derived_seed_digest)
     authority, _unused = _broad(seed)
@@ -1186,9 +1196,7 @@ def test_gemini_naming_is_pure_and_required_failure_never_falls_back(monkeypatch
         ("the and of to", "TheAndOfTo"),
     ),
 )
-def test_deterministic_citation_fragment_preserves_exact_legacy_case_and_splitting(
-    title: str, expected: str
-) -> None:
+def test_deterministic_citation_fragment_preserves_exact_legacy_case_and_splitting(title: str, expected: str) -> None:
     assert _deterministic_citation_fragment(title) == expected
 
 
@@ -1262,8 +1270,8 @@ def test_pubmed_record_map_expands_in_merge_and_late_identifier_evidence() -> No
     )
     projected = [item for item in project_merge_sources((seed,), (broad,), observations) if item.provider == "pubmed"]
     assert len(projected) == 1
-    assert projected[0].entry["fields"]["doi"] == "10.1234/pubmed"
-    assert projected[0].entry["fields"]["pmid"] == "123"
+    assert _fields(projected[0].entry)["doi"] == "10.1234/pubmed"
+    assert _fields(projected[0].entry)["pmid"] == "123"
     late = derive_late_identifier_evidence((seed,), (broad,), observations)
     assert {(item.kind, item.value) for item in late[0].candidates} >= {
         ("doi", "10.1234/pubmed"),
@@ -1451,7 +1459,7 @@ def test_pure_merge_uses_load_repair_then_trust_merge_then_post_merge_without_mu
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = _seed()
-    original = dict(seed.baseline_entry["fields"])
+    original = dict(_fields(seed.baseline_entry))
     source = MergeSourceEvidence(
         seed.author_key,
         seed.publication_key,
@@ -1478,8 +1486,8 @@ def test_pure_merge_uses_load_repair_then_trust_merge_then_post_merge_without_mu
 
     real = module.canonicalize
 
-    def record(entry: dict[str, object], *, stage: object) -> bool:
-        stages.append(str(getattr(stage, "value", stage)))
+    def record(entry: dict[str, object], *, stage: CanonicalStage) -> bool:
+        stages.append(stage.value)
         return real(entry, stage=stage)
 
     monkeypatch.setattr(module, "canonicalize", record)
@@ -1490,10 +1498,10 @@ def test_pure_merge_uses_load_repair_then_trust_merge_then_post_merge_without_mu
     monkeypatch.setattr("citeforge.merge_utils.logger.debug", reject_log)
     result = merge_publication_evidence((seed,), (source,))
     assert stages == ["load_repair", "post_merge"]
-    assert dict(seed.baseline_entry["fields"]) == original
+    assert dict(_fields(seed.baseline_entry)) == original
     assert result[0].publication_key == "pub-one"
     assert result[0].final_entry["key"] == "pub-one"
-    assert result[0].final_entry["fields"]["doi"] == "10.1234/engine"
+    assert _fields(result[0].final_entry)["doi"] == "10.1234/engine"
     assert result[0].selected_source_digests["journal"] == source.digest
 
 
@@ -1525,7 +1533,7 @@ def test_merge_rejects_cross_publication_or_duplicate_source_evidence() -> None:
 
 
 def test_merge_evidence_is_recursively_immutable_and_digest_stable() -> None:
-    nested = {"keywords": ["engine", {"areas": ["analysis"]}]}
+    nested: dict[str, list[Any]] = {"keywords": ["engine", {"areas": ["analysis"]}]}
     entry = {"type": "article", "key": "candidate", "fields": {"title": "Analytical Engine", "note": nested}}
     source = MergeSourceEvidence(
         "author-ada", "pub-one", "crossref", "crossref-search-v1", "1" * 64, "2" * 64, 0, True, entry
@@ -1533,9 +1541,9 @@ def test_merge_evidence_is_recursively_immutable_and_digest_stable() -> None:
     source_digest = source.digest
     nested["keywords"][1]["areas"].append("drift")
     assert source.digest == source_digest
-    assert source.entry["fields"]["note"]["keywords"][1]["areas"] == ("analysis",)
+    assert _fields(source.entry)["note"]["keywords"][1]["areas"] == ("analysis",)
     with pytest.raises(TypeError):
-        source.entry["fields"]["note"]["keywords"][1]["areas"] += ("drift",)
+        _fields(source.entry)["note"]["keywords"][1]["areas"] += ("drift",)
 
     final = {"type": "article", "key": "pub-one", "fields": {"title": "Analytical Engine", "note": nested}}
     selected = {"title": "3" * 64, "note": "4" * 64}
@@ -1544,10 +1552,10 @@ def test_merge_evidence_is_recursively_immutable_and_digest_stable() -> None:
     nested["keywords"].append("later")
     selected["title"] = "6" * 64
     assert merged.digest == merged_digest
-    assert merged.final_entry["fields"]["note"]["keywords"][-1] != "later"
+    assert _fields(merged.final_entry)["note"]["keywords"][-1] != "later"
     assert merged.selected_source_digests["title"] == "3" * 64
     with pytest.raises(TypeError):
-        merged.final_entry["fields"]["note"]["new"] = "drift"
+        _fields(merged.final_entry)["note"]["new"] = "drift"
 
 
 @pytest.mark.parametrize(
@@ -1598,7 +1606,7 @@ def test_merge_evidence_rejects_nested_secret_keys_but_allows_benign_token_prose
     value = MergeSourceEvidence(
         "author-ada", "pub-one", "crossref", "crossref-search-v1", "1" * 64, "2" * 64, 0, True, safe
     )
-    assert value.entry["fields"]["title"] == "Token classification improves language models"
+    assert _fields(value.entry)["title"] == "Token classification improves language models"
 
 
 def test_identity_rejected_projection_is_retained_but_never_merged() -> None:
@@ -1615,7 +1623,7 @@ def test_identity_rejected_projection_is_retained_but_never_merged() -> None:
         {"type": "article", "key": "candidate", "fields": {"title": "Unrelated", "doi": "10.9999/wrong"}},
     )
     merged = merge_publication_evidence((seed,), (rejected,))[0]
-    assert "doi" not in merged.final_entry["fields"]
+    assert "doi" not in _fields(merged.final_entry)
     provenance = derive_provenance_evidence("generation", "pass", (seed,), (rejected,), (merged,))
     assert all(
         any(
@@ -1657,7 +1665,7 @@ def test_author_global_intents_choose_one_doi_path_survivor_remove_existing_and_
     )
     decision_keys = {
         (value.author_key, value.publication_key): tuple(
-            evidence_digest((value.publication_key, field)) for field in value.final_entry["fields"]
+            evidence_digest((value.publication_key, field)) for field in _fields(value.final_entry)
         )
         for value in values
     }
@@ -1681,7 +1689,7 @@ def test_author_global_intents_choose_one_doi_path_survivor_remove_existing_and_
                 "Lovelace2024Engine",
                 "output/Ada/a.bib",
                 "3" * 64,
-                tuple(values[1].final_entry["fields"]),
+                tuple(_fields(values[1].final_entry)),
                 "deterministic",
                 "4" * 64,
             ),
@@ -1761,7 +1769,7 @@ def test_provenance_derivation_covers_every_final_field_and_every_considered_sou
     )
     merged = merge_publication_evidence((seed,), (source,))[0]
     bundle = derive_provenance_evidence("generation", "pass", (seed,), (source,), (merged,))
-    assert {item.field_name for item in bundle.decisions} == set(merged.final_entry["fields"])
+    assert {item.field_name for item in bundle.decisions} == set(_fields(merged.final_entry))
     for decision in bundle.decisions:
         members = [item for item in bundle.contributions if item.decision_key == decision.key]
         assert len([item for item in members if item.selected]) == 1

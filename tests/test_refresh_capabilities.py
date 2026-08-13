@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -49,7 +49,7 @@ PLANNER_CAPABILITY_IDS = {
 
 
 def _builder_payload(capability_id: str) -> dict[str, object]:
-    schemas = {
+    schemas: dict[str, dict[str, object]] = {
         "scholar.inventory.v1": {
             "author_key": "author",
             "profile_id": "p",
@@ -239,7 +239,7 @@ def test_public_decoder_metadata_has_no_reachable_authoritative_callback() -> No
             ),
             {"doi": "10.1/x"},
         )
-        assert normalized["metadata"]["title"] == "authoritative"
+        assert cast(dict[str, Any], normalized)["metadata"]["title"] == "authoritative"
         assert not empty
     finally:
         object.__setattr__(public_decoder, "callback", None)

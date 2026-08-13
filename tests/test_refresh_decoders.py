@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -111,7 +112,7 @@ def test_arxiv_paginated_feed_accepts_total_larger_than_current_page() -> None:
       <link rel="alternate" href="https://arxiv.org/abs/2601.12345"/></entry></feed>"""
     normalized, empty = decode_response("arxiv.fuzzy_search.v1.decoder", _raw(body, "application/atom+xml"))
     assert not empty
-    assert normalized["entries"][0]["arxiv_id"] == "2601.12345"
+    assert cast(dict[str, Any], normalized)["entries"][0]["arxiv_id"] == "2601.12345"
 
 
 @pytest.mark.parametrize(
@@ -162,7 +163,7 @@ def test_doi_bibtex_requires_expected_media_and_exactly_one_entry() -> None:
     body = b"@article{Ada2024, title={Analytical Engine}, author={Lovelace, Ada}, year={2024}, doi={10.1/x}}"
     normalized, empty = decode_response("doi_bibtex.bibtex_lookup.v1.decoder", _raw(body, "application/x-bibtex"))
     assert not empty
-    assert normalized["metadata"]["fields"]["doi"] == "10.1/x"
+    assert cast(dict[str, Any], normalized)["metadata"]["fields"]["doi"] == "10.1/x"
     for invalid in (b"", b"not bibtex", body + b"\n" + body.replace(b"Ada2024", b"Ada2025")):
         with pytest.raises((ValueError, SchemaChangedError)):
             decode_response("doi_bibtex.bibtex_lookup.v1.decoder", _raw(invalid, "application/x-bibtex"))
@@ -290,7 +291,7 @@ def test_openreview_decoders_reject_malformed_note_members(note: dict[str, objec
 def test_doi_bibtex_complete_scanner_respects_outer_delimiter_and_brace_shielding(body: bytes) -> None:
     normalized, empty = decode_response("doi_bibtex.bibtex_lookup.v1.decoder", _raw(body, "application/x-bibtex"))
     assert not empty
-    assert normalized["metadata"]["fields"]["title"]
+    assert cast(dict[str, Any], normalized)["metadata"]["fields"]["title"]
 
 
 def test_html_doi_probe_uses_structured_evidence_and_never_confirms_empty() -> None:

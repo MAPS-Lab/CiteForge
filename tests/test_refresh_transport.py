@@ -10,13 +10,22 @@ from typing import Any
 
 import pytest
 import requests
+from requests.structures import CaseInsensitiveDict
 
 from citeforge import api_generics
 from citeforge.api_configs import S2_SEARCH_CONFIG
 from citeforge.cache import ResponseCache
 from citeforge.refresh.capabilities import GEMINI_GENERATION_CONFIG, GEMINI_MODEL_ID, GEMINI_PROMPT_VERSION
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
-from citeforge.refresh.ledger import Ledger, ProviderObservation, RequestClaim, RequestSpec, TaskClaim, TaskSpec
+from citeforge.refresh.ledger import (
+    Ledger,
+    ProviderObservation,
+    RequestClaim,
+    RequestResult,
+    RequestSpec,
+    TaskClaim,
+    TaskSpec,
+)
 from citeforge.refresh.provider_adapters import JSON_ADAPTERS, JSON_DURABLE_CALLSITES, pubmed_summary_adapter
 from citeforge.refresh.transport import (
     LedgerTransport,
@@ -56,6 +65,12 @@ def _request(**changes: object) -> RequestSpec:
     }
     values.update(changes)
     return RequestSpec(**values)  # type: ignore[arg-type]
+
+
+def _request_result(ledger: Ledger, request_key: str) -> RequestResult:
+    result = ledger.request_result(request_key)
+    assert result is not None
+    return result
 
 
 def _ready_ledger(path: Path, request: RequestSpec, *, consumers: int = 1) -> tuple[Ledger, list[TaskSpec]]:
@@ -366,16 +381,18 @@ def test_unexpected_send_callback_exception_terminalizes_claim_and_attempt(tmp_p
     manifest = ledger.manifest().data
     assert len(manifest["attempts"]) == 1
     assert "credential" not in json.dumps(manifest).casefold()
-    assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    assert _request_result(ledger, request.key).disposition is TaskDisposition.PERMANENT_FAILURE
     ledger.close()
 
 
 def test_invalid_send_callback_response_terminalizes_claim_and_attempt(tmp_path: Path) -> None:
     request = _request()
     ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
-    response = LedgerTransport(ledger, send_once=lambda _operation: object(), clock=lambda: NOW).send_claim(
-        _claim(ledger, "worker"), _operation(request)
-    )
+    response = LedgerTransport(
+        ledger,
+        send_once=lambda _operation: object(),  # type: ignore[bad-argument-type]  # deliberate non-Response, proves the guard
+        clock=lambda: NOW,
+    ).send_claim(_claim(ledger, "worker"), _operation(request))
     assert response.disposition is TaskDisposition.MALFORMED
     assert response.outcome is OutcomeClass.MALFORMED
     assert len(ledger.manifest().data["attempts"]) == 1
@@ -386,8 +403,8 @@ def test_unexpected_response_decode_exception_terminalizes_attempt(tmp_path: Pat
     request = _request()
     ledger, _ = _ready_ledger(tmp_path / "ledger.db", request)
     raw = _response(200)
-    raw._content = False
-    raw._content_consumed = True
+    raw._content = False  # type: ignore[bad-assignment]  # deliberate wrong type, makes .json() raise
+    raw._content_consumed = True  # type: ignore[missing-attribute]  # private requests attr absent from stubs
     response = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW).send_claim(
         _claim(ledger, "worker"), _operation(request)
     )
@@ -578,7 +595,8 @@ def test_generic_search_uses_stable_author_key_and_real_ledger_transport(
     assert result[0]["paperId"] == "s2"
     assert calls == 1
     assert len(ledger.manifest().data["attempts"]) == 1
-    assert operation.request.canonical_content()["normalized_payload"]["query"] == '"Ocean Forecasting" Ada Lovelace'
+    normalized_payload: Any = operation.request.canonical_content()["normalized_payload"]
+    assert normalized_payload["query"] == '"Ocean Forecasting" Ada Lovelace'
     ledger.close()
 
 
@@ -616,8 +634,8 @@ def test_transient_outcomes_persist_retry_without_secret(
     ledger.close()
 
 
-class _RaisingHeaders(dict[str, str]):
-    def get(self, _key: str, _default: object = None) -> str | None:
+class _RaisingHeaders(CaseInsensitiveDict[str]):
+    def get(self, _key: str, _default: object = None) -> str | None:  # type: ignore[bad-override]  # deliberately raises instead of returning
         raise RuntimeError("token=secret")
 
 
@@ -639,7 +657,7 @@ def test_post_claim_retry_helper_failure_terminalizes_exactly_once(tmp_path: Pat
         raw.status_code = 429
         raw.headers = _RaisingHeaders()
     elif failure == "status_none":
-        raw.status_code = None
+        raw.status_code = None  # type: ignore[bad-assignment]  # deliberate wrong type, proves the guard
     response = LedgerTransport(ledger, send_once=lambda _operation: raw, clock=lambda: NOW, jitter=jitter).send_claim(
         _claim(ledger, "worker"), _operation(request)
     )
@@ -647,7 +665,7 @@ def test_post_claim_retry_helper_failure_terminalizes_exactly_once(tmp_path: Pat
     assert response.safe_diagnostic == "provider response classification failed"
     assert len(ledger.manifest().data["attempts"]) == 1
     assert "secret" not in json.dumps(ledger.manifest().data).casefold()
-    assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    assert _request_result(ledger, request.key).disposition is TaskDisposition.PERMANENT_FAILURE
     assert jitter_called is (failure == "jitter")
     ledger.close()
 
@@ -672,7 +690,7 @@ def test_initial_clock_failure_terminalizes_claim_with_claim_safe_time(tmp_path:
     assert response.safe_diagnostic == "provider response classification failed"
     assert len(ledger.manifest().data["attempts"]) == 0
     assert "secret" not in json.dumps(ledger.manifest().data).casefold()
-    assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    assert _request_result(ledger, request.key).disposition is TaskDisposition.PERMANENT_FAILURE
     manifest = ledger.manifest().data
     assert manifest["tasks"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
     assert manifest["requests"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
@@ -743,7 +761,7 @@ def test_post_claim_clock_failure_terminalizes_exactly_once(tmp_path: Path, fail
     assert response.safe_diagnostic == "provider response classification failed"
     assert len(ledger.manifest().data["attempts"]) == 1
     assert "secret" not in json.dumps(ledger.manifest().data).casefold()
-    assert ledger.request_result(request.key).disposition is TaskDisposition.PERMANENT_FAILURE
+    assert _request_result(ledger, request.key).disposition is TaskDisposition.PERMANENT_FAILURE
     manifest = ledger.manifest().data
     assert manifest["tasks"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
     assert manifest["requests"][0]["state"] == TaskDisposition.PERMANENT_FAILURE.value
@@ -1398,20 +1416,21 @@ def test_batch_correlation_accepts_reordered_exact_members() -> None:
 
 def test_pubmed_esummary_real_envelope_has_exact_member_correlation() -> None:
     adapter = pubmed_summary_adapter(("123", "456"))
-    envelope = {
+    envelope: dict[str, object] = {
         "result": {
             "uids": ["456", "123"],
             "123": {"uid": "123", "title": "A", "authors": [], "pubdate": "2026"},
             "456": {"uid": "456", "title": "B", "authors": [], "pubdate": "2026"},
         }
     }
-    assert list(adapter.normalize(envelope)["records"]) == ["123", "456"]
+    records: Any = adapter.normalize(envelope)["records"]
+    assert list(records) == ["123", "456"]
 
 
 @pytest.mark.parametrize("uids", [["123"], ["123", "123"], ["123", "456", "789"]])
 def test_pubmed_esummary_missing_duplicate_or_unexpected_members_fail_closed(uids: list[str]) -> None:
     adapter = pubmed_summary_adapter(("123", "456"))
-    envelope = {
+    envelope: dict[str, object] = {
         "result": {
             "uids": uids,
             "123": {"uid": "123"},
@@ -1425,21 +1444,21 @@ def test_pubmed_esummary_missing_duplicate_or_unexpected_members_fail_closed(uid
 
 def test_pubmed_esummary_rejects_uid_shaped_record_not_listed_in_uids() -> None:
     adapter = pubmed_summary_adapter(("123",))
-    envelope = {"result": {"uids": ["123"], "123": {"uid": "123"}, "999": {"uid": "999"}}}
+    envelope: dict[str, object] = {"result": {"uids": ["123"], "123": {"uid": "123"}, "999": {"uid": "999"}}}
     with pytest.raises(SchemaChangedError, match="PubMed"):
         adapter.normalize(envelope)
 
 
 def test_pubmed_esummary_rejects_uid_shaped_nonrecord_not_listed_in_uids() -> None:
     adapter = pubmed_summary_adapter(("123",))
-    envelope = {"result": {"uids": ["123"], "123": {"uid": "123"}, "999": None}}
+    envelope: dict[str, object] = {"result": {"uids": ["123"], "123": {"uid": "123"}, "999": None}}
     with pytest.raises(SchemaChangedError, match="PubMed"):
         adapter.normalize(envelope)
 
 
 def test_pubmed_esummary_rejects_record_key_uid_mismatch() -> None:
     adapter = pubmed_summary_adapter(("123",))
-    envelope = {"result": {"uids": ["123"], "123": {"uid": "999"}}}
+    envelope: dict[str, object] = {"result": {"uids": ["123"], "123": {"uid": "999"}}}
     with pytest.raises(SchemaChangedError, match="PubMed"):
         adapter.normalize(envelope)
 

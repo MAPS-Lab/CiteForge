@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -50,6 +50,11 @@ from citeforge.refresh.ledger import (
 from citeforge.refresh.types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+
+
+def _snapshot_items(snapshot: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """Narrow the heterogeneous ``Mapping[str, object]`` snapshot to its evidence item list."""
+    return cast(list[Mapping[str, object]], snapshot["items"])
 
 
 def _census(*, enabled: bool = True, name: str = "Ada Lovelace") -> AuthorCensus:
@@ -296,7 +301,7 @@ def test_registered_pass_snapshots_exact_membership_and_commits_inputs_without_c
             pass_snapshot["items"][0]["payload"]["author_key"] = "forged"  # type: ignore[index]
         receipt = ledger.execute_registered_pass("bind_corpus_seed")
         assert receipt == ledger.execute_registered_pass("bind_corpus_seed")
-        items = pass_snapshot["items"]
+        items = _snapshot_items(pass_snapshot)
         inputs = tuple(
             AggregateInput(
                 spec.id,
@@ -354,7 +359,7 @@ def test_provenance_and_intent_commit_is_atomic_exact_and_non_materializing(tmp_
                 ordinal,
                 item,
             )
-            for ordinal, item in enumerate(snapshot["items"])
+            for ordinal, item in enumerate(_snapshot_items(snapshot))
         )
         publication_digest = next(item.source_digest for item in inputs if item.kind is EvidenceKind.PUBLICATION)
         decisions = []
@@ -502,7 +507,7 @@ def test_provenance_preserves_distinct_requests_with_identical_observation_diges
                 ordinal,
                 item,
             )
-            for ordinal, item in enumerate(snapshot["items"])
+            for ordinal, item in enumerate(_snapshot_items(snapshot))
         )
         publication_input = next(item for item in inputs if item.kind is EvidenceKind.PUBLICATION)
         observation_inputs = [item for item in inputs if item.kind is EvidenceKind.OBSERVATION]
@@ -655,7 +660,7 @@ def test_remove_intent_requires_exact_path_digest_and_no_emitted_provenance(tmp_
                 ordinal,
                 item,
             )
-            for ordinal, item in enumerate(snapshot_for_pass["items"])
+            for ordinal, item in enumerate(_snapshot_items(snapshot_for_pass))
         )
         intent = MaterializationIntent(
             spec.id,
@@ -932,7 +937,7 @@ def _finish_request_and_task(ledger: Ledger, disposition: TaskDisposition) -> No
             ApplicabilityReason.NO_APPLICABLE_IDENTIFIER
             if disposition is TaskDisposition.NOT_APPLICABLE
             else DominanceEvidence(
-                (request_claim.key,), "stronger-current-observation", ("title", "year"), request_claim.key
+                (request_claim.key,), DominanceRule.AUTHORITATIVE_METADATA, ("title", "year"), request_claim.key
             )
             if disposition is TaskDisposition.DOMINATED
             else None
@@ -953,6 +958,7 @@ def _record_dominance_observations(
     dominated: TaskSpec,
     dominated_response: dict[str, object],
 ) -> tuple[str, str, str, str]:
+    assert stronger.request is not None
     claims = {}
     for index in range(2):
         owner = f"worker-{index}"
@@ -1742,7 +1748,7 @@ def test_reduction_replay_rejects_changed_phase_version_publication_task_or_expa
             },
         )
         for changed in conflicts:
-            arguments = {
+            arguments: dict[str, Any] = {
                 "source_evidence_digest": observation.digest,
                 "publications": (),
                 "tasks": base_tasks,
@@ -2320,7 +2326,7 @@ def test_task_identity_is_canonical_and_caller_cannot_alias() -> None:
     assert first.key != not_applicable.key
     with pytest.raises(TypeError, match="key"):
         TaskSpec(  # type: ignore[call-arg]
-            key="caller-alias",
+            key="caller-alias",  # type: ignore[unexpected-keyword]  # deliberate alias, proves the guard
             author_key="author-ada",
             publication_key="pub-same",
             provider="crossref",
@@ -2529,7 +2535,7 @@ def test_inventory_obligations_derive_exactly_from_enabled_census_sources(tmp_pa
         for task in derived[:-1]:
             ledger.plan_task(task)
         with pytest.raises(ValueError, match="inventory obligation"):
-            ledger.seal_plan(derived[:-1], required_validations=(), inventory_freshness_epoch="2026-08")
+            ledger.seal_plan(list(derived[:-1]), required_validations=(), inventory_freshness_epoch="2026-08")
 
 
 def test_typed_terminal_evidence_is_required(tmp_path: Path) -> None:
@@ -2649,7 +2655,12 @@ def test_planned_not_applicable_task_has_no_request_and_closes_with_typed_reason
                 "worker",
                 TaskDisposition.DOMINATED,
                 NOW,
-                evidence=DominanceEvidence(("0" * 64,), "rule", (), "1" * 64),
+                evidence=DominanceEvidence(
+                    ("0" * 64,),
+                    "rule",  # type: ignore[bad-argument-type]  # deliberate wrong rule, proves the guard
+                    (),
+                    "1" * 64,
+                ),
             )
 
 
@@ -3113,6 +3124,7 @@ def test_field_provenance_requires_succeeded_matching_observation(tmp_path: Path
         )
         ledger.record_publication_metadata(publication)
         task = _task("provenance")
+        assert task.request is not None
         ledger.plan_task(task)
         with pytest.raises(ValueError, match="succeeded observation"):
             ledger.record_field_provenance(

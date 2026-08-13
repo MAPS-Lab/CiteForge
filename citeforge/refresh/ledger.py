@@ -5867,6 +5867,13 @@ class Ledger:
                 content = json.loads(str(row[0]))
                 content["origin_kind"] = EvidenceKind(str(content["origin_kind"]))
                 seeds.append(PublicationSeedEvidence(**content))
+            authors = {
+                str(row[0]): str(row[1])
+                for row in connection.execute(
+                    "SELECT row_key, name FROM authors WHERE generation_id = ? AND enabled = 1",
+                    (generation_id,),
+                )
+            }
             known = plan_known_doi(seeds, authority)
             source_items: list[Mapping[str, object]] = []
             if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
@@ -5938,13 +5945,6 @@ class Ledger:
                     bibtex_observations,
                     authority,
                 )
-                authors = {
-                    str(row[0]): str(row[1])
-                    for row in connection.execute(
-                        "SELECT row_key, name FROM authors WHERE generation_id = ? AND enabled = 1",
-                        (generation_id,),
-                    )
-                }
                 for author_key, name in sorted(authors.items()):
                     payload = {"author_key": author_key, "name": name}
                     source_items.append(
@@ -7259,10 +7259,10 @@ class Ledger:
         decision_set_digest = evidence_digest(decision_payloads)
         terminal = not applicable
         round_key: str | None = None
+        sequence = int(generation[0]) + 1
         if int(generation[0]) >= _MAX_PLAN_ROUNDS and applicable:
             raise ValueError("HTML child exceeds the fixed plan round budget")
         if applicable:
-            sequence = int(generation[0]) + 1
             content = self._round_content(
                 sequence,
                 PlanPhase.LATE_IDENTIFIERS,

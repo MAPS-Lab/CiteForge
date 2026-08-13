@@ -314,7 +314,7 @@ def test_gemini_json_caller_routes_without_legacy_http(monkeypatch: pytest.Monke
 
 def _install_adapter_stub(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> dict[str, object]:
     """Install one observable stub for both generic and Semantic Scholar HTTP paths."""
-    observed: dict[str, object] = {"calls": 0}
+    observed: dict[str, Any] = {"calls": 0}
 
     def fake_get(url: str, timeout: float) -> dict[str, object]:
         observed["calls"] = int(observed["calls"]) + 1

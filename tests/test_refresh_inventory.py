@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,22 @@ from citeforge.refresh.inventory import (
 )
 from citeforge.refresh.transport import SchemaChangedError
 from citeforge.refresh.types import TaskDisposition
+
+
+def _article(normalized: Mapping[str, object], index: int = 0) -> Mapping[str, object]:
+    """Narrow one decoded article out of a decoder's heterogeneous payload."""
+    articles = normalized["articles"]
+    assert isinstance(articles, list)
+    article = articles[index]
+    assert isinstance(article, dict)
+    return article
+
+
+def _fields(entry: Mapping[str, object]) -> Mapping[str, object]:
+    """Narrow the canonical field map out of a baseline entry."""
+    fields = entry["fields"]
+    assert isinstance(fields, dict)
+    return fields
 
 
 def _row() -> AuthorCensusRow:
@@ -88,7 +105,7 @@ def test_scholar_decoder_is_strict_and_derives_trusted_next_offset() -> None:
     normalized, empty = decode_scholar_inventory(body, "Scholar123", 0, 100, 2020)
     assert not empty
     assert normalized["next_offset"] == 100
-    assert normalized["articles"][0]["year"] == 2024
+    assert _article(normalized)["year"] == 2024
     duplicate = b'{"articles":[],"articles":[]}'
     with pytest.raises(ValueError, match="duplicate"):
         decode_scholar_inventory(duplicate, "Scholar123", 0, 100, 2020)
@@ -224,7 +241,7 @@ def test_scholar_decoder_accepts_public_https_publication_link() -> None:
         "articles": [{"title": "Analytical Engine", "year": 2024, "citation_id": "Scholar123:paper1", "link": link}],
     }
     normalized, _empty = decode_scholar_inventory(json.dumps(body).encode(), "Scholar123", 0, 100, 2020)
-    assert normalized["articles"][0]["url"] == link
+    assert _article(normalized)["url"] == link
 
 
 @pytest.mark.parametrize(("field", "value"), [("title", "ada@example.com"), ("authors", "http://10.0.0.1/x")])
@@ -261,9 +278,9 @@ def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> No
     <ee>https://doi.org/10.1000/example</ee></article></r><coauthors/></dblpperson>"""
     normalized, empty = decode_dblp_inventory(xml, "12/345")
     assert not empty
-    assert normalized["articles"][0]["doi"] == "10.1000/example"
-    assert normalized["articles"][0]["authors"] == ["Ada Lovelace"]
-    assert normalized["articles"][0]["record_key"] == "journals/x/1"
+    assert _article(normalized)["doi"] == "10.1000/example"
+    assert _article(normalized)["authors"] == ["Ada Lovelace"]
+    assert _article(normalized)["record_key"] == "journals/x/1"
     with pytest.raises(ValueError, match="PID"):
         decode_dblp_inventory(xml, "99/wrong")
     with pytest.raises(ValueError, match="PID"):
@@ -281,14 +298,14 @@ def test_dblp_decoder_rejects_unsafe_or_wrong_pid_and_normalizes_records() -> No
     relative = b"""<dblpperson key="homepages/12/345"><r><article key="conf/x/one">
     <title>Relative URL</title><year>2024</year><url>db/conf/x/one.html</url></article></r></dblpperson>"""
     relative_normalized, _ = decode_dblp_inventory(relative, "12/345")
-    assert relative_normalized["articles"][0]["url"] == "https://dblp.org/rec/conf/x/one"
+    assert _article(relative_normalized)["url"] == "https://dblp.org/rec/conf/x/one"
     data_xml = b"""<dblpperson key="homepages/35/5521"><r><data key="data/11/AdjeiZHSN25">
     <author>Malcolm Heywood</author><title>Benchmark Dataset</title><year>2025</year>
     <publisher>IEEE DataPort</publisher><url>db/data/11/AdjeiZHSN25.html</url></data></r></dblpperson>"""
     data_normalized, _ = decode_dblp_inventory(data_xml, "35/5521")
-    assert data_normalized["articles"][0]["record_type"] == "data"
-    assert data_normalized["articles"][0]["publication"] == "IEEE DataPort"
-    assert data_normalized["articles"][0]["url"] == "https://dblp.org/rec/data/11/AdjeiZHSN25"
+    assert _article(data_normalized)["record_type"] == "data"
+    assert _article(data_normalized)["publication"] == "IEEE DataPort"
+    assert _article(data_normalized)["url"] == "https://dblp.org/rec/data/11/AdjeiZHSN25"
 
 
 def test_pure_union_is_order_independent_and_seeds_every_publication() -> None:
@@ -439,5 +456,5 @@ def test_inventory_baseline_preserves_dblp_record_semantics(
     )
     baseline = next(iter(inventory_baseline_entries(_row(), snapshot, InventoryPolicy(2020, 1000, 10)).values()))
     assert baseline["type"] == expected_type
-    assert baseline["fields"][container_field] == "Exact Container"
-    assert baseline["fields"]["editor"] == "Charles Babbage"
+    assert _fields(baseline)[container_field] == "Exact Container"
+    assert _fields(baseline)["editor"] == "Charles Babbage"

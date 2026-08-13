@@ -128,7 +128,10 @@ def test_discovery_engine_advances_earliest_incomplete_wave_and_scopes_claims(
     engine = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), Transport())  # type: ignore[arg-type]
     policy = SimpleNamespace(openreview_mode="anonymous")
     result = engine.run_discovery(  # type: ignore[arg-type]
-        SimpleNamespace(id="generation", census=object()), policy, DiscoveryCredentials(), lambda: False
+        SimpleNamespace(id="generation", census=object()),  # type: ignore[arg-type]  # stand-in spec
+        policy,  # type: ignore[arg-type]  # stand-in policy
+        DiscoveryCredentials(),
+        lambda: False,
     )
     assert result.status is RunStatus.CONTINUATION
     assert ledger.committed == [
@@ -178,8 +181,8 @@ def test_discovery_engine_does_not_spin_on_html_backoff_without_due_work() -> No
     ledger = FakeLedger()
     engine = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), None)  # type: ignore[arg-type]
     result = engine.run_discovery(  # type: ignore[arg-type]
-        SimpleNamespace(id="generation", census=object()),
-        SimpleNamespace(openreview_mode="anonymous"),
+        SimpleNamespace(id="generation", census=object()),  # type: ignore[arg-type]  # stand-in spec
+        SimpleNamespace(openreview_mode="anonymous"),  # type: ignore[arg-type]  # stand-in policy
         DiscoveryCredentials(),
         lambda: False,
     )
@@ -240,8 +243,8 @@ def test_discovery_engine_stops_cached_wave_after_first_blocking_response(
     transport = Transport()
     monkeypatch.setattr("citeforge.refresh.engine.build_claimed_discovery_operation", lambda *_a, **_k: object())
     result = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), transport).run_discovery(  # type: ignore[arg-type]
-        SimpleNamespace(id="generation", census=object()),
-        SimpleNamespace(openreview_mode="anonymous"),
+        SimpleNamespace(id="generation", census=object()),  # type: ignore[arg-type]  # stand-in spec
+        SimpleNamespace(openreview_mode="anonymous"),  # type: ignore[arg-type]  # stand-in policy
         DiscoveryCredentials(),
         lambda: False,
     )
@@ -304,8 +307,8 @@ def test_discovery_engine_rechecks_durable_phase_after_lost_lease(
     transport = Transport()
     monkeypatch.setattr("citeforge.refresh.engine.build_claimed_discovery_operation", lambda *_a, **_k: object())
     result = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), transport).run_discovery(  # type: ignore[arg-type]
-        SimpleNamespace(id="generation", census=object()),
-        SimpleNamespace(openreview_mode="anonymous"),
+        SimpleNamespace(id="generation", census=object()),  # type: ignore[arg-type]  # stand-in spec
+        SimpleNamespace(openreview_mode="anonymous"),  # type: ignore[arg-type]  # stand-in policy
         DiscoveryCredentials(),
         lambda: False,
     )
@@ -341,11 +344,14 @@ def test_discovery_engine_does_not_login_without_pending_openreview(monkeypatch:
             return "complete"
 
     engine = RefreshEngine(  # type: ignore[arg-type]
-        FakeLedger(), InventoryPolicy(2020, 1000, 10), transport=object(), openreview_broker=Broker()
+        FakeLedger(),  # type: ignore[arg-type]  # stand-in ledger
+        InventoryPolicy(2020, 1000, 10),
+        transport=object(),  # type: ignore[arg-type]  # unusable transport, proves no send happens
+        openreview_broker=Broker(),  # type: ignore[arg-type]  # stand-in broker
     )
     result = engine.run_discovery(  # type: ignore[arg-type]
-        SimpleNamespace(id="generation", census=object()),
-        SimpleNamespace(openreview_mode="authenticated"),
+        SimpleNamespace(id="generation", census=object()),  # type: ignore[arg-type]  # stand-in spec
+        SimpleNamespace(openreview_mode="authenticated"),  # type: ignore[arg-type]  # stand-in policy
         DiscoveryCredentials(openreview_username="user", openreview_password="password"),
         lambda: False,
     )
@@ -362,8 +368,8 @@ def test_discovery_engine_rejects_generation_mismatch_before_policy_or_send() ->
 
     engine = RefreshEngine(FakeLedger(), InventoryPolicy(2020, 1000, 10), transport=object())  # type: ignore[arg-type]
     result = engine.run_discovery(  # type: ignore[arg-type]
-        SimpleNamespace(id="supplied", census=object()),
-        SimpleNamespace(openreview_mode="anonymous"),
+        SimpleNamespace(id="supplied", census=object()),  # type: ignore[arg-type]  # stand-in spec
+        SimpleNamespace(openreview_mode="anonymous"),  # type: ignore[arg-type]  # stand-in policy
         DiscoveryCredentials(),
         lambda: False,
     )
@@ -390,8 +396,8 @@ def test_discovery_engine_requires_committed_c3_before_policy_binding() -> None:
 
     engine = RefreshEngine(FakeLedger(), InventoryPolicy(2020, 1000, 10), transport=object())  # type: ignore[arg-type]
     result = engine.run_discovery(  # type: ignore[arg-type]
-        SimpleNamespace(id="generation", census=object()),
-        SimpleNamespace(openreview_mode="anonymous"),
+        SimpleNamespace(id="generation", census=object()),  # type: ignore[arg-type]  # stand-in spec
+        SimpleNamespace(openreview_mode="anonymous"),  # type: ignore[arg-type]  # stand-in policy
         DiscoveryCredentials(),
         lambda: False,
     )
@@ -662,7 +668,7 @@ def test_unused_inventory_adapter_version_does_not_change_bound_capabilities(tmp
 
 def test_engine_paginates_in_durable_waves_without_repeating_success(tmp_path: Path) -> None:
     spec = _spec()
-    calls: list[int] = []
+    calls: list[object] = []
 
     def send_once(operation: SendOperation) -> requests.Response:
         request = operation.request
