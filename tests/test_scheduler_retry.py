@@ -199,7 +199,11 @@ def test_completion_after_warning_threshold_is_counted_once(monkeypatch: pytest.
     successes: list[str] = []
 
     def delayed_result(*_args: object, **_kwargs: object) -> int:
-        assert threshold_logged.wait(timeout=1.0)
+        # A deadlock guard, not a deadline. The event is always set by the
+        # main thread, so the only thing this bounds is a hang; 1.0s was short
+        # enough that a contended CI runner missed it and the author was
+        # counted as an error with zero saved files, on all five legs.
+        assert threshold_logged.wait(timeout=30.0)
         return 5
 
     def hit_warning_threshold(*_args: object, **_kwargs: object) -> None:

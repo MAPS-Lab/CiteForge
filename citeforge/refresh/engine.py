@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import secrets
@@ -202,6 +203,7 @@ class RefreshEngine:
                             datetime.now(timezone.utc),
                             blocking_reason="claimed inventory failed durable authority validation",
                         )
+                    self._save_checkpoint(spec)
                     return RunResult(RunStatus.BLOCKED, spec.id, completed_tasks=completed, detail=str(exc))
                 self._transport.send(operation, task_claim=claim)
                 completed += 1
@@ -216,6 +218,7 @@ class RefreshEngine:
                     datetime.now(timezone.utc),
                     blocking_reason="inventory planning or reduction rejected durable evidence",
                 )
+                self._save_checkpoint(spec)
                 return RunResult(RunStatus.BLOCKED, spec.id, completed_tasks=completed, detail=str(exc))
 
         self._save_checkpoint(spec)
@@ -322,7 +325,7 @@ class RefreshEngine:
                         else:
                             self._ledger.execute_and_commit_discovery_wave(pass_id, policy, now=now)
                     except ValueError as exc:
-                        return self._block_discovery(spec.id, completed, str(exc), now)
+                        return self._block_discovery(spec.id, completed, str(exc), now, spec)
                     continue
                 if status == "blocking":
                     return self._block_discovery(
@@ -330,6 +333,7 @@ class RefreshEngine:
                         completed,
                         f"{pass_id} has durable blocking evidence",
                         now,
+                        spec,
                     )
                 if status == "complete":
                     break
@@ -345,7 +349,7 @@ class RefreshEngine:
                         else:
                             self._ledger.execute_and_commit_discovery_wave(pass_id, policy, now=now)
                     except ValueError as exc:
-                        return self._block_discovery(spec.id, completed, str(exc), now)
+                        return self._block_discovery(spec.id, completed, str(exc), now, spec)
                     refreshed = datetime.now(timezone.utc)
                     if self._ledger.discovery_phase_status(pass_id, now=refreshed) != "pending":
                         continue
@@ -364,7 +368,7 @@ class RefreshEngine:
                     try:
                         self._ledger.execute_and_commit_html_probe(policy, now=now)
                     except ValueError as exc:
-                        return self._block_discovery(spec.id, completed, str(exc), now)
+                        return self._block_discovery(spec.id, completed, str(exc), now, spec)
                     refreshed = datetime.now(timezone.utc)
                     if (
                         self._ledger.discovery_phase_status(pass_id, now=refreshed) == "pending"
@@ -401,17 +405,19 @@ class RefreshEngine:
                             completed,
                             "authenticated OpenReview credentials are unavailable",
                             now,
+                            spec,
                         )
                     try:
                         openreview_session = self._openreview_broker.acquire((str(identity[0]), str(identity[1])))
                     except ValueError as exc:
-                        return self._block_discovery(spec.id, completed, str(exc), now)
+                        return self._block_discovery(spec.id, completed, str(exc), now, spec)
                     if openreview_session is None:
                         return self._block_discovery(
                             spec.id,
                             completed,
                             "authenticated OpenReview login failed",
                             now,
+                            spec,
                         )
 
                 claim = self._ledger.claim_due_for_operations(
@@ -432,7 +438,7 @@ class RefreshEngine:
                         openreview_session=openreview_session,
                     )
                 except ValueError as exc:
-                    return self._block_discovery(spec.id, completed, str(exc), datetime.now(timezone.utc))
+                    return self._block_discovery(spec.id, completed, str(exc), datetime.now(timezone.utc), spec)
                 response = self._transport.send(operation, task_claim=claim)
                 completed += 1
                 if getattr(response, "disposition", None) in _DISCOVERY_BLOCKING:
@@ -441,6 +447,7 @@ class RefreshEngine:
                         completed,
                         f"{pass_id} has durable blocking evidence",
                         datetime.now(timezone.utc),
+                        spec,
                     )
                 if getattr(response, "disposition", None) is TaskDisposition.LEASED:
                     eligible_status = self._ledger.discovery_phase_status(
@@ -452,6 +459,7 @@ class RefreshEngine:
                             completed,
                             f"{pass_id} has durable blocking evidence",
                             datetime.now(timezone.utc),
+                            spec,
                         )
 
         return RunResult(
@@ -461,7 +469,17 @@ class RefreshEngine:
             detail="bounded publication discovery waves are complete",
         )
 
-    def _block_discovery(self, generation_id: str, completed: int, detail: str, now: datetime) -> RunResult:
+    def _block_discovery(
+        self, generation_id: str, completed: int, detail: str, now: datetime, spec: GenerationSpec | None = None
+    ) -> RunResult:
+        # Seal first. Discovery does real provider work, and a segment that
+        # blocks after doing it would otherwise discard the evidence and make
+        # the next segment re-fetch, which is the restart the ledger exists to
+        # prevent. The seal is best effort: a generation that cannot even read
+        # its own manifest must still report why it blocked.
+        if spec is not None:
+            with contextlib.suppress(ValueError, OSError):
+                self._save_checkpoint(spec)
         state = self._ledger.generation_state()
         if state in {GenerationState.RUNNING, GenerationState.WAITING}:
             self._ledger.transition_generation(

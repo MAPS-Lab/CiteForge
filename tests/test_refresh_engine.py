@@ -1293,3 +1293,33 @@ def test_bounded_lease_stop_takes_no_new_claim_after_the_first_send(tmp_path: Pa
     assert len(unclaimed) == 1
     assert unclaimed[0]["attempt_count"] == 0
     assert unclaimed[0]["lease_owner"] in {None, ""}
+
+
+def test_every_blocked_return_seals_a_checkpoint_first() -> None:
+    """A segment that does work and then blocks must not discard the work.
+
+    _save_checkpoint sat after the execution loop, so both blocked returns
+    exited above it. The next segment restored the previous checkpoint and
+    redid everything this one had completed, which is the restart-from-zero the
+    durable ledger exists to prevent.
+
+    Asserted structurally because the blocked paths need a ledger in a specific
+    durable state to reach, and a test that cannot reach them proves nothing.
+    This fails the moment someone adds a blocked return without a seal above it.
+    """
+    source = (Path(__file__).parents[1] / "citeforge" / "refresh" / "engine.py").read_text()
+    lines = source.splitlines()
+    blocked = [i for i, line in enumerate(lines) if "RunResult(RunStatus.BLOCKED" in line]
+    assert blocked, "no blocked returns found, the invariant would pass vacuously"
+
+    unsealed = []
+    for index in blocked:
+        window = "\n".join(lines[max(0, index - 6) : index])
+        # Two exemptions, both because no work was done that a seal could carry.
+        # The entry guard returns before the execution loop, and _block_discovery
+        # seals itself for every discovery caller.
+        entry_guard = "remains durably blocked" in lines[index]
+        inside_blocker = "def _block_discovery" in "\n".join(lines[max(0, index - 20) : index])
+        if "_save_checkpoint" not in window and not entry_guard and not inside_blocker:
+            unsealed.append(lines[index].strip())
+    assert not unsealed, f"blocked returns with no checkpoint seal above them: {unsealed}"

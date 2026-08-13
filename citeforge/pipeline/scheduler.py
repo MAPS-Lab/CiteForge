@@ -391,16 +391,18 @@ def run_all(
                     _account_result(future, future_to_author[future])
             except (TimeoutError, FuturesTimeoutError):
                 remaining = [r.name for f, r in future_to_author.items() if not f.done()]
-                logger.error(
-                    f"Pipeline timed out with {len(remaining)} author(s) still pending: " + ", ".join(remaining[:5]),
-                    category=LogCategory.ERROR,
+                # A warning, not a kill. Cancelling here bounded the overrun but
+                # discarded finished work: an author that completes just after
+                # the threshold returned zero saved files despite having done
+                # them. The threshold surfaces a slow run; the drain below still
+                # counts every result once, and article-level parallelism is
+                # what actually bounds the tail.
+                logger.warn(
+                    f"Pipeline completion warning threshold reached with {len(remaining)} author(s) still running: "
+                    + ", ".join(remaining[:5])
+                    + ". Waiting for worker threads before final accounting.",
+                    category=LogCategory.PLAN,
                 )
-                # Cancel authors that have not started yet. Without this the
-                # `with` exit (shutdown(wait=True)) drains the whole remaining
-                # queue, so the deadline bounded nothing. A thread cannot be
-                # killed in Python, so the overrun is still bounded by the
-                # MAX_WORKERS authors already in flight, not by zero.
-                executor.shutdown(wait=False, cancel_futures=True)
     finally:
         threading.excepthook = _orig_excepthook
 
