@@ -1136,7 +1136,7 @@ def test_corpus_commit_rejects_cross_source_doi_and_no_doi_split(tmp_path: Path)
 
 def test_accepted_committed_corpus_golden_membership() -> None:
     census = load_census(Path("data/input.csv"))
-    base_commit = _git(Path("."), "rev-parse", "3b4c83c^{commit}")
+    base_commit = _git(Path("."), "rev-parse", "HEAD")
     evidence = scan_existing_corpus(Path("."), census, generation_id="golden", base_commit=base_commit)
     parsed = [item for item in evidence.items if item.disposition == "parsed"]
     absent = [item for item in evidence.items if item.disposition == "absent"]
@@ -1151,7 +1151,7 @@ def test_accepted_committed_corpus_golden_membership() -> None:
 
 def test_real_census_generation_identity_creates_and_resumes(tmp_path: Path) -> None:
     census = load_census(Path("data/input.csv"))
-    base_commit = _git(Path("."), "rev-parse", "3b4c83c^{commit}")
+    base_commit = _git(Path("."), "rev-parse", "HEAD")
     spec = GenerationSpec(
         census,
         "policy-v1",
