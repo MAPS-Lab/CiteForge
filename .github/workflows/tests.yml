@@ -40,8 +40,11 @@ jobs:
         # Keying on pyproject.toml alone leaves the cache stale whenever the
         # lock is regenerated without a pyproject change.
         key: ${{ runner.os }}-pip-lint-${{ hashFiles('pyproject.toml', 'requirements-build.lock', 'requirements-dev.lock') }}
+        # Scoped to this job's own prefix. A bare `-pip-` fallback restores the
+        # first matching cache, including one a different Python leg wrote,
+        # which seeds this environment with wheels built for another version.
         restore-keys: |
-          ${{ runner.os }}-pip-
+          ${{ runner.os }}-pip-lint-
 
     - name: Install dependencies
       run: |
@@ -59,6 +62,10 @@ jobs:
     - name: Build wheel with locked backend
       run: python -m pip wheel --no-build-isolation --no-deps --wheel-dir /tmp/citeforge-wheel .
 
+    # The wheel was built and discarded, so a packaging break (a module left
+    # out of the distribution, a bad entry point) passed CI and only surfaced
+    # on install. Import it from a clean venv outside the checkout, where the
+    # source tree cannot satisfy the import instead.
     - name: Smoke-test installed wheel
       run: |
         smoke_dir="$(mktemp -d)"
@@ -80,8 +87,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
-      max-parallel: 1
-      fail-fast: true
+      # Independent legs run concurrently. They were pinned to max-parallel 1
+      # with fail-fast, so a run took the sum of its legs (measured on run
+      # 31532991251: legs started at +0s, +50s, +96s, +144s for 194s of wall
+      # against 201 billed job-seconds) and a 3.10 failure meant 3.11 through
+      # 3.14 never reported at all. Concurrency costs the same billed seconds
+      # and returns every version's verdict on the first run.
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
@@ -110,11 +122,18 @@ jobs:
         pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
         pip install --no-build-isolation --no-deps -e .
 
+    # Coverage is a property of the test suite, not of the interpreter, so one
+    # canonical version owns it. The other legs prove the suite passes there.
     - name: Run tests with coverage
+      if: matrix.python-version == '3.12'
       run: pytest -m 'not live' --cov=citeforge --cov=main --cov-report=term-missing --cov-report=xml --cov-fail-under=68
 
+    - name: Run tests
+      if: matrix.python-version != '3.12'
+      run: pytest -m 'not live'
+
     - name: Upload coverage report
-      if: always()
+      if: always() && matrix.python-version == '3.12'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: coverage-${{ matrix.python-version }}

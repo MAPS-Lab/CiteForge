@@ -81,7 +81,25 @@ CiteForge retrieves each author's publication list from Google Scholar through S
 
 Equivalent cache-hit inputs produce byte-identical materialized output. That idempotence result is distinct from entry completeness, response-cache freshness, and workflow completion. Author queries run in parallel under per-API rate limits, and configurable parameters (source trust order, similarity thresholds, rate limits, venue mappings) are centralized in [`citeforge/config.py`](citeforge/config.py).
 
-The legacy monthly workflow is currently a non-publishing diagnostic path. It cannot establish a complete refresh or publish generated output. The durable refresh engine described in the architecture documents has not been implemented yet.
+The monthly workflow runs one generation segment per Actions run rather than sweeping the whole corpus
+repeatedly. A run restores the previous sealed checkpoint, drives `citeforge refresh` once, and seals
+its progress again before exiting, so a segment that hits the job ceiling resumes where it stopped
+instead of restarting the month. Whether the generation is finished is read from the durable ledger,
+not inferred from a request count or a corpus digest that stopped moving. Only a generation the ledger
+reports as complete is published, and publication is a bot pull request gated on Required CI, never a
+direct push. The website sync fires from the merge, so nothing is dispatched before the corpus is
+actually on `main`. No encrypted response-cache branch is maintained; the only state carried between
+runs is the sealed checkpoint.
+
+The durable refresh engine behind it lives in `citeforge/refresh/`. Its census, ledger, transport,
+discovery, checkpoint, staging, and publication layers are implemented and covered by tests, and
+`citeforge refresh --state-dir <dir>` runs one bounded generation. What is not yet proven is a full
+generation against live providers. That run is wired as a manually dispatched, publication-disabled
+shadow workflow and has not been executed, so every claim about live provider authentication, schemas,
+and quotas remains unverified. [`docs/ci-refresh-architecture.md`](docs/ci-refresh-architecture.md) is
+the contract it is built against, [`docs/ci-refresh-implementation-plan.md`](docs/ci-refresh-implementation-plan.md)
+is the task breakdown, and [`docs/ci-refresh-evidence.md`](docs/ci-refresh-evidence.md) records which
+requirements have evidence, which do not, and which can only be settled by that run.
 
 ## Data sources
 

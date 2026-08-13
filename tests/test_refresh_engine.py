@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ import requests
 
 from citeforge.refresh.authority import evidence_digest
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
+from citeforge.refresh.checkpoint import CheckpointStore
 from citeforge.refresh.discovery import DiscoveryCredentials, DiscoveryPolicy
 from citeforge.refresh.engine import RefreshEngine
 from citeforge.refresh.inventory import (
@@ -1120,3 +1122,174 @@ def test_sixty_four_author_unions_commit_in_one_phase_wave(tmp_path: Path) -> No
         assert replay.status is RunStatus.CONTINUATION
         assert len(calls) == 64
         assert len(ledger.manifest().data["plan_rounds"]) == 2
+
+
+def _two_author_spec() -> GenerationSpec:
+    census = AuthorCensus(
+        (
+            AuthorCensusRow(
+                2,
+                "author-ada",
+                "Ada Lovelace",
+                "ada lovelace",
+                "Scholar123",
+                "",
+                True,
+                "",
+                TaskDisposition.PENDING,
+            ),
+            AuthorCensusRow(
+                3,
+                "author-grace",
+                "Grace Hopper",
+                "grace hopper",
+                "Scholar456",
+                "",
+                True,
+                "",
+                TaskDisposition.PENDING,
+            ),
+        )
+    )
+    return GenerationSpec(census, "policy-v1", {"doi_csl": "1", "s2": "1", "scholar": "1"}, "abc123")
+
+
+def _scholar_page(operation: SendOperation) -> requests.Response:
+    """One valid single-page Scholar envelope for whichever profile was claimed."""
+    profile_id = str(dict(operation.request.normalized_payload)["profile_id"])
+    body = {
+        "search_metadata": {
+            "status": "Success",
+            "google_scholar_author_url": f"https://scholar.google.com/citations?user={profile_id}",
+        },
+        "search_parameters": {
+            "engine": "google_scholar_author",
+            "author_id": profile_id,
+            "cstart": 0,
+        },
+        "author": {"name": f"Author {profile_id}"},
+        "articles": [
+            {
+                "title": f"Paper {profile_id}",
+                "authors": "Ada Lovelace",
+                "year": 2024,
+                "citation_id": f"{profile_id}:one",
+                "link": f"https://scholar.google.com/{profile_id}",
+            }
+        ],
+    }
+    response = requests.Response()
+    response.status_code = 200
+    response.headers["Content-Type"] = "application/json"
+    response._content = json.dumps(body).encode()
+    return response
+
+
+def test_engine_seals_and_records_a_checkpoint_for_the_segment(tmp_path: Path) -> None:
+    spec = _spec()
+    store = CheckpointStore(tmp_path / "checkpoints", b"k" * 32, "segment-key")
+    with Ledger.open(tmp_path / "state" / "ledger.db") as ledger:
+        result = RefreshEngine(
+            ledger,
+            InventoryPolicy(2020, 1000, 10),
+            LedgerTransport(ledger, send_once=_scholar_page),
+            checkpoint_store=store,
+        ).run(spec, RefreshCredentials(serpapi_key="secret"), lambda: False)
+        assert result.status is RunStatus.CONTINUATION
+        rows = ledger.manifest().data["checkpoints"]
+
+    assert store.available_sequences() == [1]
+    assert [row["sequence"] for row in rows] == [1]
+    assert rows[0]["key_id"] == "segment-key"
+    sealed = (tmp_path / "checkpoints" / f"{1:012d}.bin").read_bytes()
+    assert rows[0]["ciphertext_digest"] == hashlib.sha256(sealed).hexdigest()
+
+
+def test_engine_rejects_a_checkpoint_store_nested_in_the_sealed_state(tmp_path: Path) -> None:
+    with Ledger.open(tmp_path / "state" / "ledger.db") as ledger:
+        store = CheckpointStore(tmp_path / "state" / "checkpoints", b"k" * 32, "segment-key")
+        with pytest.raises(ValueError, match="outside the sealed state directory"):
+            RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), checkpoint_store=store)
+
+
+def test_restored_checkpoint_resumes_without_repeating_durable_success(tmp_path: Path) -> None:
+    spec = _spec()
+    store = CheckpointStore(tmp_path / "checkpoints", b"k" * 32, "segment-key")
+    sends: list[str] = []
+
+    def send_once(operation: SendOperation) -> requests.Response:
+        sends.append(str(dict(operation.request.normalized_payload)["profile_id"]))
+        return _scholar_page(operation)
+
+    with Ledger.open(tmp_path / "segment-one" / "ledger.db") as ledger:
+        first = RefreshEngine(
+            ledger,
+            InventoryPolicy(2020, 1000, 10),
+            LedgerTransport(ledger, send_once=send_once),
+            checkpoint_store=store,
+        ).run(spec, RefreshCredentials(serpapi_key="secret"), lambda: False)
+        assert first.status is RunStatus.CONTINUATION
+        generation = ledger.manifest().data["generation"]
+        assert isinstance(generation, dict)
+        input_digest = str(generation["input_digest"])
+        policy_digest = str(generation["policy_digest"])
+    assert sends == ["Scholar123"]
+
+    # The runner is gone with its workspace. Only the sealed blob crosses into
+    # the next segment, so the restore happens before any ledger is opened.
+    second_dir = tmp_path / "segment-two"
+    restored = store.load_latest_valid(
+        generation_id=spec.id,
+        input_digest=input_digest,
+        policy_digest=policy_digest,
+        destination=second_dir,
+    )
+    assert restored.sequence == 1
+
+    with Ledger.open(second_dir / "ledger.db") as resumed:
+        second = RefreshEngine(
+            resumed,
+            InventoryPolicy(2020, 1000, 10),
+            LedgerTransport(resumed, send_once=send_once),
+            checkpoint_store=store,
+        ).run(spec, RefreshCredentials(serpapi_key="secret"), lambda: False)
+        assert second.status is RunStatus.CONTINUATION
+        tasks = resumed.manifest().data["tasks"]
+
+    assert sends == ["Scholar123"]
+    assert isinstance(tasks, list)
+    inventory = [item for item in tasks if item["operation"] == "inventory"]
+    assert inventory and all(item["state"] == "succeeded" for item in inventory)
+    assert store.available_sequences() == [2, 1]
+
+
+def test_bounded_lease_stop_takes_no_new_claim_after_the_first_send(tmp_path: Path) -> None:
+    spec = _two_author_spec()
+    sends: list[str] = []
+
+    def send_once(operation: SendOperation) -> requests.Response:
+        sends.append(str(dict(operation.request.normalized_payload)["profile_id"]))
+        return _scholar_page(operation)
+
+    checks = 0
+
+    def stop_requested() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    with Ledger.open(tmp_path / "ledger.db") as ledger:
+        result = RefreshEngine(
+            ledger, InventoryPolicy(2020, 1000, 10), LedgerTransport(ledger, send_once=send_once)
+        ).run(spec, RefreshCredentials(serpapi_key="secret"), stop_requested)
+        assert result.status is RunStatus.CONTINUATION
+        tasks = ledger.manifest().data["tasks"]
+
+    assert len(sends) == 1
+    assert isinstance(tasks, list)
+    inventory = [item for item in tasks if item["operation"] == "inventory"]
+    unclaimed = [item for item in inventory if item["state"] == "pending"]
+    assert sum(item["state"] == "succeeded" for item in inventory) == 1
+    assert len(unclaimed) == 1
+    assert unclaimed[0]["attempt_count"] == 0
+    assert unclaimed[0]["lease_owner"] in {None, ""}

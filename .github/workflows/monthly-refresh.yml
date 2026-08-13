@@ -1,29 +1,52 @@
-name: Monthly Refresh Shadow Diagnostics
+name: Monthly Pipeline Refresh
 
 on:
   schedule:
-    - cron: '0 4 1 * *'
+    - cron: '0 4 1 * *'  # 4 AM UTC on the 1st of each month (midnight AST)
   workflow_dispatch:
+    inputs:
+      generation:
+        description: 'Generation identifier this segment must resume. Empty derives it from the inputs.'
+        required: false
+        default: ''
 
+# Read by default. Each job escalates only what it needs: the refresh job
+# pushes sealed checkpoints to its own state branch, and the verify job
+# dispatches the continuation segment.
 permissions:
   contents: read
 
+# One generation segment at a time. Two overlapping runs would race the state
+# branch and the same monthly pull-request branch.
 concurrency:
   group: citeforge-refresh
   cancel-in-progress: false
 
 jobs:
   refresh:
-    name: Legacy refresh diagnostics
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    permissions:
+      contents: write
+    env:
+      # The two directory paths cannot join this block. GitHub's context
+      # availability table grants `jobs.<job_id>.env` only github, needs,
+      # strategy, matrix, vars, secrets and inputs, so `runner` there resolves
+      # to nothing and every path would collapse to the filesystem root. They
+      # are declared per step, where the runner context is available.
+      STATE_BRANCH: refresh-state
+    outputs:
+      status: ${{ steps.segment.outputs.status }}
+      generation: ${{ steps.segment.outputs.generation }}
 
     steps:
       - name: Checkout main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
-          fetch-depth: 1
+          fetch-depth: 0
+          # The job runs third-party provider code for hours. Nothing is left
+          # in .git/config; every push and fetch below carries its own token.
           persist-credentials: false
 
       - name: Set up Python
@@ -45,17 +68,332 @@ jobs:
           OPENREVIEW_KEY: ${{ secrets.OPENREVIEW }}
         run: |
           mkdir -p keys
-          echo "$S2_KEY" > keys/Semantic.key
-          echo "$SERPAPI_KEY" > keys/SerpAPI.key
-          echo "$SERPLY_KEY" > keys/Serply.key
-          echo "$GEMINI_KEY" > keys/Gemini.key
+          echo "$S2_KEY"        > keys/Semantic.key
+          echo "$SERPAPI_KEY"   > keys/SerpAPI.key
+          echo "$SERPLY_KEY"    > keys/Serply.key
+          echo "$GEMINI_KEY"    > keys/Gemini.key
           echo "$OPENREVIEW_KEY" > keys/OpenReview.key
 
-      - name: Run one legacy refresh for diagnostics
+      # CACHE_ENCRYPTION_KEY keeps its name but no longer its meaning. It was
+      # the unauthenticated AES-CBC passphrase for the retired response-cache
+      # tarball; it is now the AES-GCM checkpoint key material, read as
+      # CHECKPOINT_KEY inside citeforge.cli, which derives the key and the key
+      # identifier. Nothing derives a key in this workflow.
+      - name: Restore the sealed checkpoint from the state branch
+        id: restore
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECKPOINT_KEY: ${{ secrets.CACHE_ENCRYPTION_KEY }}
+          CHECKPOINT_DIR: ${{ runner.temp }}/refresh-checkpoints
+        run: |
+          set -euo pipefail
+          if [ -z "$CHECKPOINT_KEY" ]; then
+            echo "::error::CACHE_ENCRYPTION_KEY is unset; a segment that cannot seal its state must not run"
+            exit 1
+          fi
+          mkdir -p "$CHECKPOINT_DIR"
+          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+
+          # An absent branch is the first generation, which is the only honest
+          # reason to hold no checkpoint. A branch that exists and yields
+          # nothing is a restore failure: continuing there would silently
+          # re-lease the whole corpus as a brand new generation.
+          if ! git ls-remote --exit-code --heads "$remote_url" "$STATE_BRANCH" >/dev/null 2>&1; then
+            echo "::notice::No $STATE_BRANCH branch; this segment opens the first generation"
+            exit 0
+          fi
+
+          restore_dir="$(mktemp -d)"
+          git clone --quiet --depth 1 --single-branch --branch "$STATE_BRANCH" "$remote_url" "$restore_dir"
+          # Root files only, so the clone's own .git never reaches the store.
+          if [ -z "$(find "$restore_dir" -maxdepth 1 -type f -print -quit)" ]; then
+            echo "::error::$STATE_BRANCH exists but carries no sealed checkpoint"
+            exit 1
+          fi
+          find "$restore_dir" -maxdepth 1 -type f -exec cp -t "$CHECKPOINT_DIR" {} +
+          echo "Restored $(find "$CHECKPOINT_DIR" -maxdepth 1 -type f | wc -l) checkpoint file(s)"
+
+          # Every manifest is cleartext by design, so the generation the branch
+          # holds can be read without the key and pinned on the segment below.
+          # Best effort on purpose: a manifest that will not parse yields no
+          # pin, which leaves load_latest_valid its retained-sequence fallback
+          # rather than failing the segment over the newest file alone.
+          pinned=$(find "$CHECKPOINT_DIR" -maxdepth 1 -type f -name '*.manifest.json' \
+            -exec jq -s -r 'max_by(.sequence).generation_id' {} + 2>/dev/null || true)
+          if [ -n "$pinned" ] && [ "$pinned" != null ]; then
+            echo "generation=$pinned" >> "$GITHUB_OUTPUT"
+            echo "Branch holds generation $pinned"
+          fi
+
+      # One Actions run is one generation segment. The engine leases, drains and
+      # checkpoints against the durable ledger, so the segment stops at its own
+      # natural bound and the next run resumes from the seal. The whole-corpus
+      # pass loop this replaced restarted from zero every month.
+      - name: Run one generation segment
+        id: segment
+        # Below the job's own 360, so a segment that overruns still leaves the
+        # checkpoint push and the pull request their budget rather than being
+        # cancelled with the seal unpublished.
+        timeout-minutes: 300
         env:
           CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
           CITEFORGE_MAX_WORKERS: "16"
           CITEFORGE_CONCURRENCY: "20"
+          CHECKPOINT_KEY: ${{ secrets.CACHE_ENCRYPTION_KEY }}
+          # Both live outside the workspace on purpose. The state directory
+          # holds raw provider payloads, and inside the checkout it sits one
+          # `git add` away from the publication branch. The checkpoint
+          # directory is a sibling rather than a child because RefreshEngine
+          # refuses a store inside the directory it seals, where each blob
+          # would grow by the size of the last.
+          STATE_DIR: ${{ runner.temp }}/refresh-state
+          CHECKPOINT_DIR: ${{ runner.temp }}/refresh-checkpoints
+          # The dispatched value wins; a scheduled run falls back to whatever
+          # generation the restored branch carries.
+          GENERATION: ${{ inputs.generation || steps.restore.outputs.generation }}
         run: |
-          python3 main.py
-          echo "Legacy refresh completed for diagnostics only. This workflow cannot publish output."
+          set -uo pipefail
+          rc=0
+          echo "::group::Refresh segment"
+          # A continuation pins the generation it resumes, so a census, policy
+          # or base-commit change between segments is rejected by name rather
+          # than surfacing as a checkpoint that belongs to another generation.
+          # An empty value is the unpinned form the CLI already understands, so
+          # the flag stays unconditional and this run is one command, not two.
+          citeforge refresh --state-dir "$STATE_DIR" --checkpoint-dir "$CHECKPOINT_DIR" --generation "$GENERATION" || rc=$?
+          echo "::endgroup::"
+
+          log="$STATE_DIR/refresh.log"
+          if [ ! -f "$log" ]; then
+            echo "::error::Segment produced no refresh log at $log"
+            exit 1
+          fi
+          # The command exits 0 for both terminal statuses, so the run status is
+          # read off the log line the CLI writes. Last match only, because a
+          # multi-line value corrupts the step-output file.
+          status=$(sed -nE 's/.*Refresh (complete|continuation|blocked|invalid_configuration):.*/\1/p' "$log" | tail -n 1)
+          generation=$(sed -nE 's/.*Refresh (complete|continuation|blocked|invalid_configuration): generation=([^ ]+).*/\2/p' "$log" | tail -n 1)
+          echo "Segment status: ${status:-unreported}, generation: ${generation:-unknown}"
+
+          # Written before any exit, so the verify job can report a failed
+          # segment rather than reading an empty status.
+          {
+            echo "status=$status"
+            echo "generation=$generation"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Refresh segment exited $rc (status ${status:-unreported})"
+            exit 1
+          fi
+          # Fail closed. An exit 0 that reports neither terminal status means
+          # the log contract moved, and publishing on that would publish an
+          # unfinished corpus.
+          case "$status" in
+            complete|continuation) ;;
+            *)
+              echo "::error::Segment exited 0 without reporting complete or continuation"
+              exit 1
+              ;;
+          esac
+
+      # Always, because a segment that fails or is cancelled after the engine
+      # sealed its progress must still leave that seal on the branch. Losing it
+      # would restart the generation from zero.
+      - name: Save the sealed checkpoint to the state branch
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECKPOINT_DIR: ${{ runner.temp }}/refresh-checkpoints
+        run: |
+          set -euo pipefail
+          if [ ! -d "$CHECKPOINT_DIR" ] || [ -z "$(find "$CHECKPOINT_DIR" -maxdepth 1 -type f -print -quit)" ]; then
+            echo "::warning::No sealed checkpoint to publish"
+            exit 0
+          fi
+
+          save_dir="$(mktemp -d)"
+          find "$CHECKPOINT_DIR" -maxdepth 1 -type f -exec cp -t "$save_dir" {} +
+          cd "$save_dir"
+          # The store retains a bounded window of sequences, so the branch is a
+          # rolling snapshot rather than a history. A fresh orphan commit each
+          # segment keeps the branch that size instead of accumulating every
+          # sealed blob the generation ever wrote.
+          git init -q -b "$STATE_BRANCH"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -q -m "state: refresh checkpoint $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # The lease needs an expected value. Pushing to a URL creates no
+          # remote-tracking ref, so the bare --force-with-lease form has
+          # nothing to compare against and rejects every push as stale info.
+          # An empty expected value is the documented "must not exist yet"
+          # form, which is exactly the first-push case.
+          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          expected="$(git ls-remote "$remote_url" "refs/heads/${STATE_BRANCH}" | cut -f1)"
+          pushed=false
+          for attempt in 1 2 3; do
+            # The lease is re-read by nobody between attempts on purpose: a
+            # retry exists for a flaky network, not for a concurrent writer.
+            if git push --quiet --force-with-lease="refs/heads/${STATE_BRANCH}:${expected}" \
+                 "$remote_url" "HEAD:refs/heads/${STATE_BRANCH}"; then
+              pushed=true
+              break
+            fi
+            echo "Checkpoint push attempt $attempt failed, retrying in ${attempt}0s..."
+            sleep "${attempt}0"
+          done
+          if [ "$pushed" != true ]; then
+            echo "::error::Checkpoint push failed after 3 attempts; the segment's progress is not durable"
+            exit 1
+          fi
+          echo "Pushed $(find . -maxdepth 1 -type f | wc -l) checkpoint file(s) to $STATE_BRANCH"
+
+      # summary.csv only. The run log records provider URLs, and those carry
+      # key material for the query-string providers, so it is not an artifact.
+      - name: Upload corpus summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: refresh-summary
+          path: output/summary.csv
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Fresh token minted here (not at checkout): the segment can run for hours
+      # and an app token lives only 1h, so mint it immediately before the push.
+      - name: Generate push token
+        if: steps.segment.outputs.status == 'complete'
+        id: push_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+
+      # Publication goes through a pull request, never a direct push. The
+      # direct push this replaced was rejected by repo ruleset 10020080, which
+      # is why nothing has published since 2026-07-05.
+      #
+      # The rules were split so this can run unattended without weakening CI.
+      # Ruleset 20801390 "Required CI on default branch" carries the strict
+      # required_status_checks rule and has no bypass actors at all, so nothing
+      # merges without a green "Required CI". Ruleset 10020080 keeps deletion,
+      # non_fast_forward and pull_request, and grants maps-lab-ci-bot
+      # (Integration 4222409) a pull_request-mode bypass, so the App may merge
+      # its own refresh pull request without the code-owner review and still
+      # cannot force-push or delete the branch.
+      #
+      # Only a complete generation publishes. A continuation has a partial
+      # corpus by construction.
+      - name: Open or update the refresh pull request
+        if: steps.segment.outputs.status == 'complete'
+        env:
+          GH_TOKEN: ${{ steps.push_token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          MONTH="$(date +%Y-%m)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add output/
+          if git diff --cached --quiet; then
+            echo "::notice::No output changes to publish"
+            exit 0
+          fi
+
+          branch="data/refresh-${MONTH}"
+          git commit -m "data: monthly pipeline refresh ${MONTH}"
+
+          # The lease needs an expected value. Pushing to a URL creates no
+          # remote-tracking ref, so the bare --force-with-lease form has
+          # nothing to compare against and rejects every push as stale info.
+          # An empty expected value is the documented "must not exist yet"
+          # form, which is exactly the first-push case.
+          remote_url="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          expected="$(git ls-remote "$remote_url" "refs/heads/${branch}" | cut -f1)"
+          git push --force-with-lease="refs/heads/${branch}:${expected}" \
+            "$remote_url" "HEAD:refs/heads/${branch}"
+
+          if [ -z "$(gh pr list --head "${branch}" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "${branch}" \
+              --title "data: monthly pipeline refresh ${MONTH}" \
+              --body "Automated corpus refresh for ${MONTH}. Auto-merges once Required CI is green. Required CI lives in its own ruleset with no bypass actors, so this cannot merge red."
+          else
+            echo "::notice::Pull request for ${branch} already open, updated in place"
+          fi
+
+          # Auto-merge is armed rather than merged here, so the merge waits on
+          # Required CI. Arming is best effort: a transient API failure is not
+          # a reason to fail a refresh whose pull request is already open.
+          gh pr merge "${branch}" --squash --auto || \
+            echo "::warning::Auto-merge not armed; the pull request is open and needs a manual merge"
+
+  verify:
+    needs: refresh
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Report status
+        run: |
+          echo "## Refresh segment"
+          echo "Status: ${{ needs.refresh.outputs.status }}"
+          echo "Generation: ${{ needs.refresh.outputs.generation }}"
+          echo "Job result: ${{ needs.refresh.result }}"
+
+      - name: Dispatch the continuation segment
+        if: |
+          (needs.refresh.result == 'success' && needs.refresh.outputs.status == 'continuation')
+          || needs.refresh.result == 'cancelled'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GENERATION: ${{ needs.refresh.outputs.generation }}
+        run: |
+          set -euo pipefail
+          # Skip the dispatch only if a DIFFERENT run is already in progress
+          # (prevents cascade). Exclude the current run: while this verify job
+          # executes, its own run is still 'in_progress', so counting it would
+          # make a timed-out run always self-skip and stall the chain.
+          running=$(gh run list --workflow="Monthly Pipeline Refresh" --status=in_progress --json databaseId --jq "[.[] | select(.databaseId != ${{ github.run_id }})] | length" --repo "${{ github.repository }}")
+          if [ "$running" -gt 0 ]; then
+            echo "::notice::Another run is already in progress, skipping the dispatch"
+            exit 0
+          fi
+          # Runaway guard: cap total runs per calendar month so a generation
+          # that never completes cannot cascade into unbounded Actions minutes
+          # or API quota.
+          MAX_MONTHLY_RUNS=12
+          month_start=$(date +%Y-%m-01)
+          month_count=$(gh run list --workflow="Monthly Pipeline Refresh" --created ">=${month_start}" --json databaseId --jq 'length' --repo "${{ github.repository }}")
+          if [ "$month_count" -ge "$MAX_MONTHLY_RUNS" ]; then
+            echo "::warning::Reached ${MAX_MONTHLY_RUNS} runs this month (${month_count}), not dispatching; investigate why the generation is not completing."
+            exit 0
+          fi
+          # A cancelled job reports no generation, so that dispatch derives the
+          # identity again rather than pinning one it never read.
+          if [ -n "$GENERATION" ]; then
+            gh workflow run "Monthly Pipeline Refresh" --repo "${{ github.repository }}" -f "generation=${GENERATION}"
+            echo "::notice::Dispatched the next segment of generation ${GENERATION}."
+          else
+            gh workflow run "Monthly Pipeline Refresh" --repo "${{ github.repository }}"
+            echo "::notice::Dispatched a segment; it derives its generation from the current inputs."
+          fi
+
+      - name: Fail if the segment failed
+        if: needs.refresh.result == 'failure'
+        run: |
+          echo "::error::Refresh segment failed. Check the refresh job logs."
+          echo "The sealed checkpoint is pushed on failure too, so a re-run resumes from it rather than restarting the generation."
+          exit 1
+
+  # The website sync moved to citeforge-refresh-merged.yml. Dispatching from
+  # here fired on a converged generation, which is upstream of the data
+  # actually reaching main: the refresh can complete and its pull request can
+  # then sit unreviewed or be closed. The website now syncs from the merge
+  # event, which is the only point at which main really carries the new corpus.

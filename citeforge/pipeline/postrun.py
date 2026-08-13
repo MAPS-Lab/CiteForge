@@ -2,8 +2,12 @@
 
 Runs the deterministic sequence that closes out a run, flushing the summary CSV,
 reconciling phantom rows, removing duplicate orphan files, applying the
-year-window cleanup, running the post-run fixup pass, building the a2i2 folder,
-and rewriting `baseline.json`. The order is load-bearing.
+year-window cleanup, running the post-run fixup pass, dropping superseded
+preprints, building the a2i2 folder, and rewriting `baseline.json`. The order is
+load-bearing.
+
+Only the first three steps read the summary CSV. The rest operate on `out_dir`
+alone and therefore run whether or not a CSV was produced.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import csv
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from citeforge import bibtex_utils as bt
@@ -45,19 +50,52 @@ from citeforge.text_utils import (
 _FILENAME_YEAR_RE = re.compile(r"/[A-Za-z]+(\d{4})-")
 
 
+class FinalizationError(RuntimeError):
+    """A finalization step could not read or write a file it owns.
+
+    Raised instead of continuing, because a partially applied cleanup leaves the
+    output tree in a state no later step can distinguish from a clean one.
+    """
+
+
+@dataclass(frozen=True)
+class FinalizationReport:
+    """What the post-run tail actually did, as counts rather than log text.
+
+    Every field records an irreversible or observable effect, so a caller can
+    validate finalization directly instead of re-deriving it from the tree.
+    """
+
+    summary_csv_path: str | None
+    summary_csv_present: bool
+    phantom_rows_removed: int
+    orphans_removed: int
+    orphans_kept: int
+    out_of_window_removed: int
+    files_fixed: int
+    superseded_preprints_removed: int
+    a2i2_files: int
+    baseline_total: int
+    baseline_authors: dict[str, int]
+
+
 def finalize_run(
     out_dir: str,
     records: list[Record],
     total_saved: int,
     processed: int,
     summary_csv_path: str | None,
-) -> None:
-    """Run the strict-ordered post-run finalization tail.
+) -> FinalizationReport:
+    """Run the strict-ordered post-run finalization tail and report what it did.
 
-    Logs run stats, then (when the summary CSV exists) flushes it, reconciles
-    phantom rows, removes duplicate orphans, deletes out-of-window files, applies
-    the post-run fixup, builds the a2i2 folder, and rewrites baseline.json.
-    Order is load-bearing.
+    Logs run stats, then, when the summary CSV exists, flushes it, reconciles
+    phantom rows and removes duplicate orphans. The remaining steps read only
+    *out_dir* and *records*, so they run regardless of the CSV: year-window
+    cleanup, post-run fixup, superseded-preprint removal, the a2i2 build and the
+    baseline.json rewrite. Order is load-bearing.
+
+    Raises :class:`FinalizationError` when a step cannot read or write a file it
+    is responsible for.
     """
     counts = get_api_call_counts()
     logger.step("Run complete", category=LogCategory.PLAN)
@@ -73,26 +111,30 @@ def finalize_run(
     )
     logger.info(f"Log file: {logger.log_file_path or 'n/a'}", category=LogCategory.PLAN)
 
-    if summary_csv_path and os.path.exists(summary_csv_path):
-        flush_summary_csv(summary_csv_path)
+    csv_path = summary_csv_path if summary_csv_path and os.path.exists(summary_csv_path) else None
+    phantoms = 0
+    removed = 0
+    kept = 0
+
+    if csv_path is not None:
+        flush_summary_csv(csv_path)
 
         # Remove phantom CSV entries
-        phantoms = reconcile_summary_csv(summary_csv_path)
+        phantoms = reconcile_summary_csv(csv_path)
         if phantoms:
             logger.info(f"Reconciled summary CSV: removed {phantoms} phantom entries", category=LogCategory.CLEANUP)
 
         # Safe orphan removal (duplicates only)
-        orphans = collect_orphan_files(summary_csv_path, out_dir)
+        orphans = collect_orphan_files(csv_path, out_dir)
         if orphans:
-            csv_titles = _load_csv_titles(summary_csv_path)
-            removed = 0
+            csv_titles = _load_csv_titles(csv_path)
             for orphan in orphans:
                 try:
                     with open(orphan, encoding="utf-8") as of:
                         orphan_entry = bt.parse_bibtex_to_dict(of.read())
-                    orphan_title = (orphan_entry or {}).get("fields", {}).get("title", "")
-                except (OSError, ValueError):
-                    orphan_title = ""
+                except (OSError, ValueError) as exc:
+                    raise FinalizationError(f"cannot read orphan candidate {orphan}") from exc
+                orphan_title = (orphan_entry or {}).get("fields", {}).get("title", "")
 
                 author_dir_path = os.path.dirname(orphan)
                 tracked_titles = csv_titles.get(author_dir_path, [])
@@ -110,6 +152,7 @@ def finalize_run(
                         category=LogCategory.CLEANUP,
                     )
                 else:
+                    kept += 1
                     logger.warn(
                         f"Orphan kept (no duplicate found): {os.path.basename(orphan)}",
                         category=LogCategory.CLEANUP,
@@ -120,100 +163,115 @@ def finalize_run(
                     category=LogCategory.CLEANUP,
                 )
 
-        # Remove .bib files outside the contribution window
-        window_min = get_min_year()
-        window_removed = 0
-        for entry in iter_output_dirs(out_dir):
-            if entry == "a2i2":
+    # Remove .bib files outside the contribution window
+    window_min = get_min_year()
+    window_removed = 0
+    for entry in iter_output_dirs(out_dir):
+        if entry == "a2i2":
+            continue
+        d = os.path.join(out_dir, entry)
+        for fname in iter_author_bibs(d):
+            fpath = os.path.join(d, fname)
+            # Try filename year first
+            m = _FILENAME_YEAR_RE.search(f"/{fname}")
+            if m:
+                if int(m.group(1)) < window_min:
+                    logger.debug(
+                        f"YEAR_WINDOW | removing {fname} (year={m.group(1)} < {window_min})",
+                        category=LogCategory.CLEANUP,
+                    )
+                    os.remove(fpath)
+                    window_removed += 1
                 continue
-            d = os.path.join(out_dir, entry)
-            for fname in iter_author_bibs(d):
-                fpath = os.path.join(d, fname)
-                # Try filename year first
-                m = _FILENAME_YEAR_RE.search(f"/{fname}")
-                if m:
-                    if int(m.group(1)) < window_min:
-                        logger.debug(
-                            f"YEAR_WINDOW | removing {fname} (year={m.group(1)} < {window_min})",
-                            category=LogCategory.CLEANUP,
-                        )
-                        os.remove(fpath)
-                        window_removed += 1
-                    continue
-                # Fall back to the BibTeX year field for non-standard filenames
-                try:
-                    with open(fpath, encoding="utf-8") as bf:
-                        parsed = bt.parse_bibtex_to_dict(bf.read())
-                    bib_year = extract_year_from_any((parsed or {}).get("fields", {}).get("year"), fallback=0) or 0
-                    if 0 < bib_year < window_min:
-                        logger.debug(
-                            f"YEAR_WINDOW | removing {fname} (bib_year={bib_year} < {window_min})",
-                            category=LogCategory.CLEANUP,
-                        )
-                        os.remove(fpath)
-                        window_removed += 1
-                except (OSError, ValueError):
-                    pass
-        if window_removed:
-            logger.info(
-                f"Removed {window_removed} out-of-window files (year < {window_min})",
-                category=LogCategory.CLEANUP,
-            )
-
-        # Post-run fixup applies entry type and field corrections to ALL .bib
-        # files. This catches orphans (files not processed during enrichment) and
-        # entries where Phase 4 corrections were undone by Tier 2 filling.
-        postrun_fixed = 0
-        for pr_entry_name in iter_output_dirs(out_dir):
-            if pr_entry_name == "a2i2":
-                continue
-            pr_dir = os.path.join(out_dir, pr_entry_name)
-            for pr_fname in iter_author_bibs(pr_dir):
-                pr_fpath = os.path.join(pr_dir, pr_fname)
-                try:
-                    with open(pr_fpath, encoding="utf-8") as prf:
-                        pr_content = prf.read()
-                    pr_parsed = bt.parse_bibtex_to_dict(pr_content)
-                    if pr_parsed and _fixup_bib_entry(pr_parsed):
-                        bib_str = bt.bibtex_from_dict(pr_parsed)
-                        if bib_str != pr_content:
-                            safe_write_file(pr_fpath, bib_str)
-                            postrun_fixed += 1
-                except (OSError, ValueError):
-                    pass
-        if postrun_fixed:
-            logger.info(
-                f"Post-run fixup: corrected {postrun_fixed} .bib files",
-                category=LogCategory.CLEANUP,
-            )
-
-        # Drop preprints superseded by a published record of the same work.
-        superseded = _remove_superseded_preprints(out_dir)
-        if superseded:
-            logger.info(
-                f"Removed {superseded} superseded preprint .bib files (published twin exists)",
-                category=LogCategory.CLEANUP,
-            )
-
-        # Build a2i2 joint output folder
-        a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
-        if a2i2_count:
-            logger.info(
-                f"Built a2i2 folder: {a2i2_count} deduplicated files",
-                category=LogCategory.CLEANUP,
-            )
-
-        # Write per-author baseline counts (a2i2 included by design; the
-        # baseline total must equal the on-disk .bib count)
-        baseline: dict[str, int] = {}
-        for entry in iter_output_dirs(out_dir):
-            baseline[entry] = len(iter_author_bibs(os.path.join(out_dir, entry)))
-        safe_write_json(
-            os.path.join(out_dir, "baseline.json"),
-            {"total": sum(baseline.values()), "authors": baseline},
+            # Fall back to the BibTeX year field for non-standard filenames
+            try:
+                with open(fpath, encoding="utf-8") as bf:
+                    parsed = bt.parse_bibtex_to_dict(bf.read())
+            except (OSError, ValueError) as exc:
+                raise FinalizationError(f"cannot read {fpath} for the year-window check") from exc
+            bib_year = extract_year_from_any((parsed or {}).get("fields", {}).get("year"), fallback=0) or 0
+            if 0 < bib_year < window_min:
+                logger.debug(
+                    f"YEAR_WINDOW | removing {fname} (bib_year={bib_year} < {window_min})",
+                    category=LogCategory.CLEANUP,
+                )
+                os.remove(fpath)
+                window_removed += 1
+    if window_removed:
+        logger.info(
+            f"Removed {window_removed} out-of-window files (year < {window_min})",
+            category=LogCategory.CLEANUP,
         )
 
-        logger.info(f"Summary CSV: {summary_csv_path}", category=LogCategory.PLAN)
+    # Post-run fixup applies entry type and field corrections to ALL .bib
+    # files. This catches orphans (files not processed during enrichment) and
+    # entries where Phase 4 corrections were undone by Tier 2 filling.
+    postrun_fixed = 0
+    for pr_entry_name in iter_output_dirs(out_dir):
+        if pr_entry_name == "a2i2":
+            continue
+        pr_dir = os.path.join(out_dir, pr_entry_name)
+        for pr_fname in iter_author_bibs(pr_dir):
+            pr_fpath = os.path.join(pr_dir, pr_fname)
+            try:
+                with open(pr_fpath, encoding="utf-8") as prf:
+                    pr_content = prf.read()
+                pr_parsed = bt.parse_bibtex_to_dict(pr_content)
+            except (OSError, ValueError) as exc:
+                raise FinalizationError(f"cannot read {pr_fpath} for the post-run fixup") from exc
+            if pr_parsed and _fixup_bib_entry(pr_parsed):
+                bib_str = bt.bibtex_from_dict(pr_parsed)
+                if bib_str != pr_content:
+                    if not safe_write_file(pr_fpath, bib_str):
+                        raise FinalizationError(f"post-run fixup could not write {pr_fpath}")
+                    postrun_fixed += 1
+    if postrun_fixed:
+        logger.info(
+            f"Post-run fixup: corrected {postrun_fixed} .bib files",
+            category=LogCategory.CLEANUP,
+        )
+
+    # Drop preprints superseded by a published record of the same work.
+    superseded = _remove_superseded_preprints(out_dir)
+    if superseded:
+        logger.info(
+            f"Removed {superseded} superseded preprint .bib files (published twin exists)",
+            category=LogCategory.CLEANUP,
+        )
+
+    # Build a2i2 joint output folder
+    a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
+    if a2i2_count:
+        logger.info(
+            f"Built a2i2 folder: {a2i2_count} deduplicated files",
+            category=LogCategory.CLEANUP,
+        )
+
+    # Write per-author baseline counts (a2i2 included by design; the
+    # baseline total must equal the on-disk .bib count)
+    baseline: dict[str, int] = {}
+    for entry in iter_output_dirs(out_dir):
+        baseline[entry] = len(iter_author_bibs(os.path.join(out_dir, entry)))
+    baseline_path = os.path.join(out_dir, "baseline.json")
+    if not safe_write_json(baseline_path, {"total": sum(baseline.values()), "authors": baseline}):
+        raise FinalizationError(f"could not write {baseline_path}")
+
+    if csv_path is not None:
+        logger.info(f"Summary CSV: {csv_path}", category=LogCategory.PLAN)
+
+    return FinalizationReport(
+        summary_csv_path=summary_csv_path,
+        summary_csv_present=csv_path is not None,
+        phantom_rows_removed=phantoms,
+        orphans_removed=removed,
+        orphans_kept=kept,
+        out_of_window_removed=window_removed,
+        files_fixed=postrun_fixed,
+        superseded_preprints_removed=superseded,
+        a2i2_files=a2i2_count,
+        baseline_total=sum(baseline.values()),
+        baseline_authors=baseline,
+    )
 
 
 def _looks_published(entry: dict[str, Any]) -> bool:

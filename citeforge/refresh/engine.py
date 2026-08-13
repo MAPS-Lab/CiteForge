@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from citeforge.clients.search_apis import OpenReviewRuntimeSession, OpenReviewSessionBroker
 
+from .checkpoint import CheckpointStore
 from .discovery import (
     DiscoveryCredentials,
     DiscoveryPolicy,
@@ -60,10 +61,18 @@ class RefreshEngine:
         policy: InventoryPolicy,
         transport: ProviderTransport | None = None,
         openreview_broker: OpenReviewSessionBroker | None = None,
+        checkpoint_store: CheckpointStore | None = None,
     ) -> None:
+        if checkpoint_store is not None and checkpoint_store.root.resolve().is_relative_to(
+            ledger.path.parent.resolve()
+        ):
+            # The store would otherwise seal its own previous sequences into
+            # every new one, growing each checkpoint by the size of the last.
+            raise ValueError("checkpoint store root must live outside the sealed state directory")
         self._ledger = ledger
         self._policy = policy
         self._transport = transport
+        self._checkpoint_store = checkpoint_store
         self._owner = f"inventory-{secrets.token_hex(12)}"
         self._discovery_owner = f"discovery-{secrets.token_hex(12)}"
         self._openreview_broker = openreview_broker or OpenReviewSessionBroker()
@@ -165,6 +174,12 @@ class RefreshEngine:
                 ]
                 if not inventory_open:
                     break
+                # Bounded lease stop, not a drain. The check sits after the
+                # emptiness test and before claim_due so a stop takes no new
+                # lease, and there is nothing left to await once it fires:
+                # transport.send below is synchronous and the engine keeps no
+                # in-flight set. Moving this past claim_due would lease work the
+                # segment has no time to send, parking it until the lease expires.
                 if stop_requested():
                     break
                 claim = self._ledger.claim_due(self._owner, datetime.now(timezone.utc), timedelta(minutes=5))
@@ -203,6 +218,7 @@ class RefreshEngine:
                 )
                 return RunResult(RunStatus.BLOCKED, spec.id, completed_tasks=completed, detail=str(exc))
 
+        self._save_checkpoint(spec)
         manifest = self._ledger.manifest().data
         task_rows = manifest["tasks"]
         blocking_states = {
@@ -455,6 +471,46 @@ class RefreshEngine:
                 blocking_reason="discovery execution rejected durable evidence",
             )
         return RunResult(RunStatus.BLOCKED, generation_id, completed_tasks=completed, detail=detail)
+
+    def _save_checkpoint(self, spec: GenerationSpec) -> None:
+        """Seal the durable state directory, then record the seal in the ledger.
+
+        Order is load-bearing in both directions. The seal is taken first
+        because no archive can contain the row that describes itself, so the
+        restored ledger is always one checkpoint row behind the blob that
+        carries it, and the sequence below is chosen to survive that gap. The
+        ledger write is made from here rather than from
+        :mod:`citeforge.refresh.checkpoint` because ``record_checkpoint`` opens
+        ``BEGIN IMMEDIATE`` on the single connection the seal has just copied.
+
+        Retention is asymmetric by design. ``CheckpointStore`` keeps the current
+        and previous sequences on disk; the ``checkpoints`` table is append-only
+        and keeps every one.
+        """
+        if self._checkpoint_store is None:
+            return
+        generation = self._ledger.manifest().data.get("generation")
+        if not isinstance(generation, dict):
+            raise ValueError("manifest generation is malformed")
+        # Both sources are needed. The ledger sequence alone regresses after a
+        # restore, because the restored ledger predates the row describing its
+        # own seal, and a regressed sequence overwrites the very blob the
+        # segment resumed from. The store sequence alone cannot be trusted
+        # either, since retention prunes it. Counting saves in memory is worse
+        # than both: the primary key on (generation_id, sequence) turns a
+        # replayed number into a sqlite3.IntegrityError, not a ValueError.
+        retained = self._checkpoint_store.available_sequences()
+        sequence = max([int(generation["checkpoint_sequence"]), *retained]) + 1
+        created_at = datetime.now(timezone.utc)
+        checkpoint = self._checkpoint_store.save(
+            generation_id=spec.id,
+            input_digest=str(generation["input_digest"]),
+            policy_digest=str(generation["policy_digest"]),
+            sequence=sequence,
+            created_at=created_at,
+            state_dir=self._ledger.path.parent,
+        )
+        self._ledger.record_checkpoint(sequence, checkpoint.ciphertext_digest, checkpoint.key_id, created_at)
 
     def _commit_pending_page_wave(self, spec: GenerationSpec) -> None:
         raw = self._ledger.load_pending_scholar_wave()

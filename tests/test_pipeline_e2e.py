@@ -6,9 +6,10 @@ DIRECTIVE and the on-disk data-safety guarantees, yet neither had a direct
 test. These run the real functions with every network client stubbed to an
 empty result, so only the deterministic baseline -> merge -> canonicalize ->
 serialize -> save path executes, and assert byte-identical .bib output across a
-cold re-run and a cache-hit re-run. The post-run finalization safety guarantees
-(orphan-only deletion, contamination guard, year-window, phantom-write) are
-covered in test_finalize_run.py.
+cold re-run and a cache-hit re-run. One test joins the two halves, finalizing a
+real pipeline output tree and asserting the tail leaves those bytes alone. The
+post-run finalization safety guarantees (orphan-only deletion, contamination
+guard, year-window, phantom-write) are covered in test_finalize_run.py.
 
 The suite-wide socket guard rejects any leaked real call, keeping the oracle
 offline and deterministic.
@@ -17,6 +18,7 @@ offline and deterministic.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ import pytest
 
 from citeforge.models import Record
 from citeforge.pipeline import article as article_mod
+from citeforge.pipeline import postrun
 
 # Every article-module name that would otherwise reach the network. Each is
 # replaced with a stub returning the empty result its caller expects, so the
@@ -105,3 +108,24 @@ def test_cache_hit_rerun_is_byte_identical(tmp_path: Path, monkeypatch: pytest.M
     _run_once(out, monkeypatch)
     second = _digest(_bib_files(out))
     assert first == second, f"cache-hit drift: {first} vs {second}"
+
+
+def test_finalize_run_on_real_pipeline_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The post-run tail runs over a real ``process_article`` output tree even
+    though this run produced no summary CSV, leaves the .bib bytes untouched, and
+    reports the same counts on a repeat call.
+    """
+    monkeypatch.setattr(postrun, "DEFAULT_A2I2_INPUT", str(tmp_path / "no_such_a2i2.csv"))
+    out = tmp_path / "out"
+    assert _run_once(out, monkeypatch) == 1
+    before = _digest(_bib_files(out))
+
+    rec = Record(name="Ada Lovelace", scholar_id="ABC1234567")
+    first = postrun.finalize_run(str(out), [rec], total_saved=1, processed=1, summary_csv_path=None)
+    second = postrun.finalize_run(str(out), [rec], total_saved=1, processed=1, summary_csv_path=None)
+
+    assert _digest(_bib_files(out)) == before, "finalization rewrote pipeline output"
+    assert first == second, "finalization is not idempotent"
+    assert first.summary_csv_present is False
+    assert first.baseline_total == len(before) == 1
+    assert json.loads((out / "baseline.json").read_text(encoding="utf-8"))["total"] == 1
