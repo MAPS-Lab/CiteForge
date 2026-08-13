@@ -17,6 +17,9 @@ dependencies = [
     "unidecode>=1.3.0",
     "tenacity>=9.0.0",
     "defusedxml>=0.7.1",
+    # Refresh checkpoints are AES-GCM sealed. The floor is 46.0.0 because that
+    # is the first release shipping a cp314 wheel, and 3.14 is in the matrix.
+    "cryptography>=46.0.0",
 ]
 
 [project.optional-dependencies]
