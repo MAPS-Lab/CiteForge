@@ -339,14 +339,14 @@ def append_summary_to_csv(csv_path: str, file_path: str, trust_hits: int, flags:
 
 
 def flush_summary_csv(csv_path: str) -> None:
-    """Rewrite the summary CSV only when existing entries were updated during the run.
+    """Rewrite the summary CSV sorted by file_path, applying any in-memory updates.
 
-    Called once from the post-run tail.
+    Called once from the post-run tail. The rewrite is unconditional because
+    append_summary_to_csv writes a new row the moment its worker finishes, so
+    without a final sorted pass the row order of the committed file records
+    thread scheduling rather than content.
     """
     with _CSV_LOCK:
-        if not _SUMMARY_UPDATES:
-            return
-
         existing: dict[str, dict[str, Any]] = {}
         try:
             with open(csv_path, newline="", encoding="utf-8") as csvfile:
@@ -364,7 +364,11 @@ def flush_summary_csv(csv_path: str) -> None:
         with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
             writer.writeheader()
-            for row in existing.values():
+            # Sorted, not insertion-ordered. A row absent from the CSV enters
+            # existing through the update above, so its position was the order
+            # its worker thread happened to finish in, which is not reproducible
+            # across runs. file_path is unique per row and is the natural key.
+            for _, row in sorted(existing.items()):
                 writer.writerow(row)
 
 
@@ -435,6 +439,7 @@ def reconcile_summary_csv(csv_path: str) -> int:
             return 0
 
         if removed:
+            rows.sort(key=lambda r: r.get("file_path", ""))
             with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
                 writer.writeheader()
