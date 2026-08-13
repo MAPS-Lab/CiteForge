@@ -7,13 +7,16 @@ This is the single boundary between the pipeline and the local filesystem.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
 import logging
 import os
 import re
+import tempfile
 import threading
-from typing import Any
+from collections.abc import Callable
+from typing import IO, Any
 
 from . import bibtex_utils as bt
 from .clients.helpers import get_current_year
@@ -218,14 +221,45 @@ def _ensure_parent_dirs(path: str) -> bool:
     return True
 
 
+def _atomic_write(path: str, write: Callable[[IO[str]], object], encoding: str) -> None:
+    """Write via a temp file in the same directory, then rename over *path*.
+
+    A crash or a full disk leaves the previous file intact instead of a truncated
+    one. mkstemp creates the temp file 0600, so the mode is widened to match what
+    a plain ``open(path, "w")`` would have produced under the process umask.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            write(f)
+        os.chmod(tmp_path, 0o666 & ~_process_umask())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
+        raise
+
+
+def _process_umask() -> int:
+    """Return the process umask, reading it once because os.umask() is not thread-safe."""
+    global _UMASK
+    if _UMASK is None:
+        _UMASK = os.umask(0)
+        os.umask(_UMASK)
+    return _UMASK
+
+
+_UMASK: int | None = None
+
+
 def safe_write_file(path: str, content: str, encoding: str = "utf-8", makedirs: bool = True) -> bool:
     """Write *content* to a file, optionally creating parent directories. Returns False on error."""
     if makedirs and not _ensure_parent_dirs(path):
         return False
 
     try:
-        with open(path, "w", encoding=encoding) as f:
-            f.write(content)
+        _atomic_write(path, lambda f: f.write(content), encoding)
         return True
     except OSError:
         return False
@@ -237,8 +271,7 @@ def safe_write_json(path: str, data: Any, makedirs: bool = True, indent: int | N
         return False
 
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=indent)
+        _atomic_write(path, lambda f: json.dump(data, f, indent=indent), "utf-8")
         return True
     except (OSError, TypeError):
         return False
@@ -306,14 +339,14 @@ def append_summary_to_csv(csv_path: str, file_path: str, trust_hits: int, flags:
 
 
 def flush_summary_csv(csv_path: str) -> None:
-    """Rewrite the summary CSV only when existing entries were updated during the run.
+    """Rewrite the summary CSV sorted by file_path, applying any in-memory updates.
 
-    Called once from the post-run tail.
+    Called once from the post-run tail. The rewrite is unconditional because
+    append_summary_to_csv writes a new row the moment its worker finishes, so
+    without a final sorted pass the row order of the committed file records
+    thread scheduling rather than content.
     """
     with _CSV_LOCK:
-        if not _SUMMARY_UPDATES:
-            return
-
         existing: dict[str, dict[str, Any]] = {}
         try:
             with open(csv_path, newline="", encoding="utf-8") as csvfile:
@@ -331,7 +364,11 @@ def flush_summary_csv(csv_path: str) -> None:
         with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
             writer.writeheader()
-            for row in existing.values():
+            # Sorted, not insertion-ordered. A row absent from the CSV enters
+            # existing through the update above, so its position was the order
+            # its worker thread happened to finish in, which is not reproducible
+            # across runs. file_path is unique per row and is the natural key.
+            for _, row in sorted(existing.items()):
                 writer.writerow(row)
 
 
@@ -402,6 +439,7 @@ def reconcile_summary_csv(csv_path: str) -> int:
             return 0
 
         if removed:
+            rows.sort(key=lambda r: r.get("file_path", ""))
             with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=_SUMMARY_CSV_FIELDNAMES)
                 writer.writeheader()

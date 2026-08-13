@@ -547,6 +547,24 @@ def test_safe_file_operations(tmp_path: Path) -> None:
     assert not io_utils.safe_write_file(str(no_dir_path), content, makedirs=False), "Should fail without makedirs"
 
 
+def test_safe_write_file_is_atomic_and_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed write leaves the previous file intact, and a successful one stays world-readable."""
+    test_path = tmp_path / "entry.bib"
+    assert io_utils.safe_write_file(str(test_path), "original")
+
+    # Mode matches what a plain open(path, "w") would produce, not mkstemp's 0600.
+    umask = io_utils._process_umask()
+    assert test_path.stat().st_mode & 0o777 == 0o666 & ~umask
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(io_utils.os, "replace", boom)
+    assert not io_utils.safe_write_file(str(test_path), "replacement")
+    assert test_path.read_text() == "original", "Failed write must not truncate the existing file"
+    assert not list(tmp_path.glob("*.tmp")), "Failed write must not leave a temp file behind"
+
+
 def test_safe_json_operations(tmp_path: Path) -> None:
     """Test safe JSON reading and writing."""
     test_path = tmp_path / "test.json"

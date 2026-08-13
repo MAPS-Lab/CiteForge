@@ -532,15 +532,6 @@ def _rule_strip_bracket_j_title(entry: dict[str, Any], fields: dict[str, Any]) -
     return False
 
 
-def _rule_strip_trailing_dash_title(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """Strip a trailing " -"/en-dash truncation artifact from the title only."""
-    title = (fields.get("title") or "").strip()
-    if title and _TRAILING_DASH_RE.search(title):
-        fields["title"] = _TRAILING_DASH_RE.sub("", title)
-        return True
-    return False
-
-
 def _rule_trim_caps_title(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
     """Normalize ALL-CAPS / truncated titles via the default title trimmer."""
     title = fields.get("title", "")
@@ -795,6 +786,7 @@ def _rule_strip_preprint_only_publisher(entry: dict[str, Any], fields: dict[str,
 # ---------------------------------------------------------------------------
 # Site A applies the orphan and terminal sweep for _fixup_bib_entry, in order.
 _POSTRUN_ORPHAN_REPAIR_RULES = (
+    _rule_strip_ellipsis_venues,
     _rule_procedia_to_inproceedings,
     _rule_pacm_booktitle_to_article,
     _rule_named_proceedings_to_article,
@@ -852,6 +844,7 @@ _POST_MERGE_RULES = (
     _rule_article_preprint_doi,
     _rule_backfill_howpublished,
     _rule_normalize_title_chain,
+    _rule_strip_trailing_dash_venue_title,
     _rule_booktitle_fixups,
     _rule_expand_abbreviated_venue,
     _rule_venue_case_corrections,
@@ -883,7 +876,7 @@ _LOAD_REPAIR_RULES = (
     _rule_expand_abbreviated_venue,
     _rule_venue_case_corrections,
     _rule_strip_publisher_duplicate,
-    _rule_strip_trailing_dash_title,
+    _rule_strip_trailing_dash_venue_title,
     _rule_strip_subtitle_wrapper_title,
     _rule_strip_spire_suffix,
     _rule_strip_osf_doi_version,

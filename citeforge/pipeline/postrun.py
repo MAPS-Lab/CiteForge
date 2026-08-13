@@ -2,8 +2,9 @@
 
 Runs the deterministic sequence that closes out a run, flushing the summary CSV,
 reconciling phantom rows, removing duplicate orphan files, applying the
-year-window cleanup, running the post-run fixup pass, building the a2i2 folder,
-and rewriting `baseline.json`. The order is load-bearing.
+year-window cleanup, running the post-run fixup pass, dropping preprints that a
+published twin supersedes, building the a2i2 folder, and rewriting
+`baseline.json`. The order is load-bearing.
 """
 
 from __future__ import annotations
@@ -56,8 +57,8 @@ def finalize_run(
 
     Logs run stats, then (when the summary CSV exists) flushes it, reconciles
     phantom rows, removes duplicate orphans, deletes out-of-window files, applies
-    the post-run fixup, builds the a2i2 folder, and rewrites baseline.json.
-    Order is load-bearing.
+    the post-run fixup, removes superseded preprints, builds the a2i2 folder, and
+    rewrites baseline.json. Order is load-bearing.
     """
     counts = get_api_call_counts()
     logger.step("Run complete", category=LogCategory.PLAN)

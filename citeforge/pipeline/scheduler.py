@@ -9,10 +9,10 @@ time budget.
 from __future__ import annotations
 
 import os
-import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from tenacity import Retrying, retry_if_result, stop_after_attempt, wait_exponential
@@ -27,10 +27,9 @@ from citeforge.clients.search_apis import (
     dblp_fetch_for_author,
 )
 from citeforge.config import (
+    ARTICLE_WORKERS,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
-    REQUEST_DELAY_MAX,
-    REQUEST_DELAY_MIN,
     SCHOLAR_FETCH_BACKOFF_INITIAL,
     SCHOLAR_FETCH_BACKOFF_MAX,
     SCHOLAR_FETCH_MAX_ATTEMPTS,
@@ -49,6 +48,12 @@ from citeforge.text_utils import (
     trim_title_default,
 )
 
+# One process-wide article pool, kept separate from the author pool so an
+# author thread blocked on its own articles can never starve the workers it is
+# waiting on. ThreadPoolExecutor spawns threads on first submit, so an import
+# that never runs the pipeline costs nothing.
+_ARTICLE_POOL = ThreadPoolExecutor(max_workers=ARTICLE_WORKERS, thread_name_prefix="article")
+
 
 def _author_dirname(rec: Record) -> str:
     """Return the output directory name for *rec*, keyed by its Scholar or DBLP id."""
@@ -63,7 +68,6 @@ def process_record(
     max_pubs: int | None = 1,
     s2_api_key: str | None = None,
     or_creds: tuple[str, str] | None = None,
-    delay: float = 0.0,
     gemini_api_key: str | None = None,
     summary_csv_path: str | None = None,
     force_enrich: bool = False,
@@ -204,12 +208,15 @@ def process_record(
             category=LogCategory.PLAN,
         )
 
-        saved = 0
-        for idx, art in enumerate(articles_sorted):
-            if max_pubs is not None and idx >= max_pubs:
-                break
+        planned = articles_sorted if max_pubs is None else articles_sorted[:max_pubs]
+
+        def _one_article(numbered: tuple[int, dict[str, Any]]) -> int:
+            idx, art = numbered
+            # Each article runs on an article-pool thread, so it binds the
+            # author's log itself. The handler is shared and reference counted.
+            logger.set_log_file(author_log_path)
             try:
-                saved += process_article(
+                return process_article(
                     rec,
                     art,
                     serply_key,
@@ -225,9 +232,20 @@ def process_record(
                 )
             except FULL_OPERATION_ERRORS as e:
                 logger.error(f"Article error: {e}", category=LogCategory.ERROR)
-            if delay > 0:
-                jittered = random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX)
-                time.sleep(jittered)
+                return 0
+            finally:
+                logger.close()
+
+        # Articles are the unit of parallelism, not authors. An author-level
+        # pool idles once fewer authors remain than workers, and the largest
+        # author then sets the wall clock on its own: in the August 2026 logs
+        # the last three authors took 43 of an 82 minute iteration on at most
+        # two of sixteen workers. The article pool is separate from the author
+        # pool, so an author thread waiting here cannot starve the workers it
+        # is waiting on. Provider pacing is unchanged, still the per-namespace
+        # token buckets and the global concurrency semaphore.
+        saved = sum(_ARTICLE_POOL.map(_one_article, enumerate(planned)))
+
         logger.info(f"Author done: saved {saved} file(s)", category=LogCategory.PLAN)
         return saved
     finally:
@@ -315,58 +333,71 @@ def run_all(
     # (author_timeout * len(records)) on as_completed, not per future
     author_timeout = 1800  # seconds
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Submit all tasks and track them
-        future_to_author = {}
-        for idx, rec in enumerate(records_sorted, 1):
-            effective_id = rec.scholar_id or rec.dblp or "N/A"
-            logger.info(f"[{idx}/{len(records)}] Queued: {rec.name} (ID: {effective_id})", category=LogCategory.PLAN)
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Submit all tasks and track them
+            future_to_author = {}
+            for idx, rec in enumerate(records_sorted, 1):
+                effective_id = rec.scholar_id or rec.dblp or "N/A"
+                logger.info(
+                    f"[{idx}/{len(records)}] Queued: {rec.name} (ID: {effective_id})",
+                    category=LogCategory.PLAN,
+                )
 
-            future = executor.submit(
-                process_record,
-                serpapi_key,
-                serply_key,
-                rec,
-                out_dir,
-                max_pubs=None,
-                s2_api_key=s2_api_key,
-                or_creds=or_creds,
-                delay=REQUEST_DELAY_MIN,
-                gemini_api_key=gemini_api_key,
-                summary_csv_path=summary_csv_path,
-                force_enrich=force_enrich,
-            )
-            future_to_author[future] = rec
+                future = executor.submit(
+                    process_record,
+                    serpapi_key,
+                    serply_key,
+                    rec,
+                    out_dir,
+                    max_pubs=None,
+                    s2_api_key=s2_api_key,
+                    or_creds=or_creds,
+                    gemini_api_key=gemini_api_key,
+                    summary_csv_path=summary_csv_path,
+                    force_enrich=force_enrich,
+                )
+                future_to_author[future] = rec
 
-        logger.step(f"All {len(records)} authors queued for processing", category=LogCategory.PLAN)
+            logger.step(f"All {len(records)} authors queued for processing", category=LogCategory.PLAN)
 
-        try:
-            for future in as_completed(future_to_author, timeout=author_timeout * len(records)):
-                rec = future_to_author[future]
-                try:
-                    saved = future.result(timeout=30)
-                    total_saved += saved
-                    processed += 1
-                    logger.success(
-                        f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
-                        category=LogCategory.AUTHOR,
-                    )
-                except TimeoutError:
-                    processed += 1
-                    logger.error(
-                        f"[{processed}/{len(records)}] Timeout retrieving result for {rec.name}",
-                        category=LogCategory.ERROR,
-                    )
-                except Exception as e:
-                    processed += 1
-                    logger.error(
-                        f"[{processed}/{len(records)}] Error processing {rec.name} ({rec.scholar_id or rec.dblp}): {e}",
-                        category=LogCategory.ERROR,
-                    )
-        except TimeoutError:
-            remaining = [r.name for f, r in future_to_author.items() if not f.done()]
-            logger.error(
-                f"Pipeline timed out with {len(remaining)} author(s) still pending: " + ", ".join(remaining[:5]),
-                category=LogCategory.ERROR,
-            )
+            try:
+                for future in as_completed(future_to_author, timeout=author_timeout * len(records)):
+                    rec = future_to_author[future]
+                    try:
+                        saved = future.result(timeout=30)
+                        total_saved += saved
+                        processed += 1
+                        logger.success(
+                            f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
+                            category=LogCategory.AUTHOR,
+                        )
+                    except (TimeoutError, FuturesTimeoutError):
+                        processed += 1
+                        logger.error(
+                            f"[{processed}/{len(records)}] Timeout retrieving result for {rec.name}",
+                            category=LogCategory.ERROR,
+                        )
+                    except Exception as e:
+                        processed += 1
+                        logger.error(
+                            f"[{processed}/{len(records)}] Error processing {rec.name} "
+                            f"({rec.scholar_id or rec.dblp}): {e}",
+                            category=LogCategory.ERROR,
+                        )
+            except (TimeoutError, FuturesTimeoutError):
+                remaining = [r.name for f, r in future_to_author.items() if not f.done()]
+                logger.error(
+                    f"Pipeline timed out with {len(remaining)} author(s) still pending: " + ", ".join(remaining[:5]),
+                    category=LogCategory.ERROR,
+                )
+                # Cancel authors that have not started yet. Without this the
+                # `with` exit (shutdown(wait=True)) drains the whole remaining
+                # queue, so the deadline bounded nothing. A thread cannot be
+                # killed in Python, so the overrun is still bounded by the
+                # MAX_WORKERS authors already in flight, not by zero.
+                executor.shutdown(wait=False, cancel_futures=True)
+    finally:
+        threading.excepthook = _orig_excepthook
+
     return total_saved, processed
