@@ -1,5 +1,6 @@
 import runpy
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -8,7 +9,7 @@ KEY_NAMES = ("serpapi_key", "serply_key", "s2_key", "or_key", "gemini_key")
 KEY_FILENAMES = ("SerpAPI.key", "Serply.key", "Semantic.key", "OpenReview.key", "Gemini.key")
 
 
-def _silence_logger(monkeypatch: pytest.MonkeyPatch, cli: object) -> None:
+def _silence_logger(monkeypatch: pytest.MonkeyPatch, cli: ModuleType) -> None:
     for method in ("set_log_file", "step", "success", "warn", "error", "close"):
         monkeypatch.setattr(cli.logger, method, lambda *_args, **_kwargs: None)
 

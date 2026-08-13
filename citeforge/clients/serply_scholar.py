@@ -139,7 +139,7 @@ def _extract_authors(item: dict[str, Any]) -> str:
             return " and ".join(names)
 
     # Fallback: parse from author.names (comma-separated before the " - ")
-    names_str = author_data.get("names") or ""
+    names_str = str(author_data.get("names") or "")
     if names_str and " - " in names_str:
         author_part = names_str.split(" - ")[0]
         # Remove non-breaking spaces

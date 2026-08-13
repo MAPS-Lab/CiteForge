@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
 # Well-known papers for testing, including complex edge cases
-KNOWN_PAPERS = [
+KNOWN_PAPERS: list[dict[str, Any]] = [
     {
         "name": "attention_is_all_you_need",
         "title": "Attention Is All You Need",
@@ -232,7 +234,7 @@ KNOWN_PAPERS = [
 ]
 
 # Papers optimized for specific APIs (to ensure each API is actually tested)
-API_SPECIFIC_PAPERS = {
+API_SPECIFIC_PAPERS: dict[str, Any] = {
     "semantic_scholar": {
         "title": "Attention Is All You Need",
         "first_author": "Vaswani",
@@ -269,7 +271,7 @@ API_SPECIFIC_PAPERS = {
 }
 
 # Test author with known publications (for integration tests)
-TEST_AUTHOR = {
+TEST_AUTHOR: dict[str, Any] = {
     "name": "Geoffrey Hinton",
     "email": "test@example.com",
     "scholar_id": "JicYPdAAAAAJ",
@@ -281,7 +283,7 @@ REQUIRED_FIELDS = ["title", "author", "year"]
 OPTIONAL_FIELDS = ["journal", "booktitle", "doi", "url", "pages", "volume", "note"]
 
 # API-specific configuration
-API_CONFIGS = {
+API_CONFIGS: dict[str, Any] = {
     "serpapi": {
         "required": True,
         "key_file": "keys/SerpAPI.key",
@@ -341,7 +343,7 @@ API_CONFIGS = {
 
 # Canned OpenAlex work record for offline fallback in test_openalex_search.
 # Mirrors the essential fields of W2964148859 ("Attention Is All You Need").
-OPENALEX_CANNED_WORK = {
+OPENALEX_CANNED_WORK: dict[str, Any] = {
     "id": "https://openalex.org/W2964148859",
     "doi": "https://doi.org/10.48550/arXiv.1706.03762",
     "title": "Attention Is All You Need",

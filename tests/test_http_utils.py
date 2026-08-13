@@ -6,6 +6,7 @@ from email.utils import format_datetime
 
 import pytest
 import requests
+from requests.adapters import HTTPAdapter
 
 from citeforge import http_utils
 from citeforge.config import HTTP_BACKOFF_MAX, SESSION_ROTATION_THRESHOLD
@@ -87,8 +88,10 @@ class TestRetryBounding:
 
     def test_requests_adapters_disable_transport_retries(self) -> None:
         session = http_utils._new_session()
-        assert session.get_adapter("https://").max_retries.total == 0
-        assert session.get_adapter("http://").max_retries.total == 0
+        for prefix in ("https://", "http://"):
+            adapter = session.get_adapter(prefix)
+            assert isinstance(adapter, HTTPAdapter)
+            assert adapter.max_retries.total == 0
 
     @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
     def test_get_retries_selected_status_to_success(self, monkeypatch: pytest.MonkeyPatch, status: int) -> None:

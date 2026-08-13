@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -126,7 +127,7 @@ def _adapter_payload(case: _AdapterCase, records: list[dict[str, object]]) -> di
 
 def _install_adapter_stub(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> dict[str, object]:
     """Install one observable stub for both generic and Semantic Scholar HTTP paths."""
-    observed: dict[str, object] = {"calls": 0}
+    observed: dict[str, Any] = {"calls": 0}
 
     def fake_get(url: str, timeout: float) -> dict[str, object]:
         observed["calls"] = int(observed["calls"]) + 1
