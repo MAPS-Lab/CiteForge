@@ -7,13 +7,16 @@ This is the single boundary between the pipeline and the local filesystem.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
 import logging
 import os
 import re
+import tempfile
 import threading
-from typing import Any
+from collections.abc import Callable
+from typing import IO, Any
 
 from . import bibtex_utils as bt
 from .clients.helpers import get_current_year
@@ -218,14 +221,45 @@ def _ensure_parent_dirs(path: str) -> bool:
     return True
 
 
+def _atomic_write(path: str, write: Callable[[IO[str]], object], encoding: str) -> None:
+    """Write via a temp file in the same directory, then rename over *path*.
+
+    A crash or a full disk leaves the previous file intact instead of a truncated
+    one. mkstemp creates the temp file 0600, so the mode is widened to match what
+    a plain ``open(path, "w")`` would have produced under the process umask.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            write(f)
+        os.chmod(tmp_path, 0o666 & ~_process_umask())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
+        raise
+
+
+def _process_umask() -> int:
+    """Return the process umask, reading it once because os.umask() is not thread-safe."""
+    global _UMASK
+    if _UMASK is None:
+        _UMASK = os.umask(0)
+        os.umask(_UMASK)
+    return _UMASK
+
+
+_UMASK: int | None = None
+
+
 def safe_write_file(path: str, content: str, encoding: str = "utf-8", makedirs: bool = True) -> bool:
     """Write *content* to a file, optionally creating parent directories. Returns False on error."""
     if makedirs and not _ensure_parent_dirs(path):
         return False
 
     try:
-        with open(path, "w", encoding=encoding) as f:
-            f.write(content)
+        _atomic_write(path, lambda f: f.write(content), encoding)
         return True
     except OSError:
         return False
@@ -237,8 +271,7 @@ def safe_write_json(path: str, data: Any, makedirs: bool = True, indent: int | N
         return False
 
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=indent)
+        _atomic_write(path, lambda f: json.dump(data, f, indent=indent), "utf-8")
         return True
     except (OSError, TypeError):
         return False
