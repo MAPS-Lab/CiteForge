@@ -13,7 +13,7 @@ import os
 import sys
 import threading
 from collections.abc import MutableMapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 STEP_LEVEL = 25  # Between INFO (20) and WARNING (30)
 SUCCESS_LEVEL = 22  # Between INFO (20) and STEP (25)
@@ -209,6 +209,44 @@ class ThreadLocalFileHandler(logging.Handler):
             handler.emit(record)
 
 
+# One open file handler per log path, shared by every thread bound to it and
+# reference counted. A per-thread handler cannot work once more than one thread
+# writes an author's log, because FileHandler opens mode="w" and the second
+# thread would truncate the first thread's output. logging.Handler.emit locks
+# per record, so lines from concurrent threads interleave but never tear. Logs
+# are untracked, so interleaving does not affect output determinism.
+_SHARED_HANDLERS: dict[str, list[Any]] = {}
+_SHARED_HANDLERS_LOCK = threading.Lock()
+
+
+def _acquire_shared_handler(path: str, fmt: str, datefmt: str) -> logging.FileHandler:
+    """Return the handler for *path*, opening it on first use. Raises OSError."""
+    with _SHARED_HANDLERS_LOCK:
+        entry = _SHARED_HANDLERS.get(path)
+        if entry is None:
+            handler = logging.FileHandler(path, mode="w", encoding="utf-8")
+            handler.setLevel(logging.DEBUG)
+            handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+            _SHARED_HANDLERS[path] = [handler, 1]
+            return handler
+        entry[1] += 1
+        return cast("logging.FileHandler", entry[0])
+
+
+def _release_shared_handler(path: str | None) -> None:
+    """Drop one reference to *path*'s handler, closing it when the last one goes."""
+    if path is None:
+        return
+    with _SHARED_HANDLERS_LOCK:
+        entry = _SHARED_HANDLERS.get(path)
+        if entry is None:
+            return
+        entry[1] -= 1
+        if entry[1] <= 0:
+            _SHARED_HANDLERS.pop(path, None)
+            cast("logging.FileHandler", entry[0]).close()
+
+
 class Logger:
     """Logger with colors, custom levels (STEP/SUCCESS), thread-local files, and categories."""
 
@@ -239,16 +277,13 @@ class Logger:
         self._adapter = CategoryAdapter(self._logger, {})
 
     def set_log_file(self, path: str) -> None:
-        """Start mirroring all log messages to the specified file for the current thread."""
+        """Bind this thread to *path*'s shared log handler, opening it if needed."""
         with contextlib.suppress(OSError):
             os.makedirs(os.path.dirname(path), exist_ok=True)
 
         self._close_thread_handler()
         try:
-            handler = logging.FileHandler(path, mode="w", encoding="utf-8")
-            handler.setLevel(logging.DEBUG)
-            handler.setFormatter(logging.Formatter(self.LOG_FORMAT, datefmt=self.DATE_FORMAT))
-            self._thread_local.handler = handler
+            self._thread_local.handler = _acquire_shared_handler(path, self.LOG_FORMAT, self.DATE_FORMAT)
             self._thread_local.log_file_path = path
         except OSError as e:
             self._thread_local.handler = None
@@ -256,10 +291,9 @@ class Logger:
             self._logger.error(f"Failed to open log file {path}: {e}")
 
     def _close_thread_handler(self) -> None:
-        """Close the current thread's file handler if one exists."""
-        handler = getattr(self._thread_local, "handler", None)
-        if handler:
-            handler.close()
+        """Release this thread's reference to its log handler, if it holds one."""
+        if getattr(self._thread_local, "handler", None):
+            _release_shared_handler(getattr(self._thread_local, "log_file_path", None))
             self._thread_local.handler = None
             self._thread_local.log_file_path = None
 
