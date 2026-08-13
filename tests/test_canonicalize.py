@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import glob
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -630,3 +631,118 @@ def test_three_fix_sites_container_settles_venueless_to_misc() -> None:
     assert "booktitle" not in settled["fields"]
     assert after_repeat["type"] == "misc"
     assert after_repeat["fields"] == settled["fields"]
+
+
+def test_load_repair_strips_trailing_dash_from_booktitle() -> None:
+    """A truncated booktitle must lose its " -" artifact before Phase 4 merge.
+
+    With the artifact intact, merge_utils._guard_booktitle compares the lowered
+    booktitle against GENERIC_SERIES_NAMES by exact membership, so a truncated
+    generic series misses the set and the documented generic-to-specific
+    conference-name upgrade never fires.
+    """
+    from citeforge.config import GENERIC_SERIES_NAMES
+
+    entry = {
+        "type": "inproceedings",
+        "key": "K",
+        "fields": {"title": "Some Paper", "booktitle": "Lecture Notes in Computer Science -"},
+    }
+    repaired = _load_repair(entry)
+    assert repaired["fields"]["booktitle"] == "Lecture Notes in Computer Science"
+    assert repaired["fields"]["booktitle"].lower() in GENERIC_SERIES_NAMES
+
+
+def test_post_merge_strips_trailing_dash_from_booktitle() -> None:
+    """POST_MERGE emits booktitle, so it carries the same truncation repair."""
+    entry = {
+        "type": "inproceedings",
+        "key": "K",
+        "fields": {"title": "Some Paper", "booktitle": "Lecture Notes in Computer Science -"},
+    }
+    canonicalize(entry, stage=CanonicalStage.POST_MERGE)
+    assert entry["fields"]["booktitle"] == "Lecture Notes in Computer Science"
+
+
+def test_postrun_orphan_repair_strips_ellipsis_venue() -> None:
+    """An orphan .bib never reaches LOAD_REPAIR or POST_MERGE, so the postrun
+    sweep is its only chance to lose a truncated-venue ellipsis."""
+    entry = {
+        "type": "article",
+        "key": "K",
+        "fields": {"title": "Some Paper", "journal": "IEEE Transactions on Intelligent Transportation Sys..."},
+    }
+    canonicalize(entry, stage=CanonicalStage.POSTRUN_ORPHAN_REPAIR)
+    assert not entry["fields"]["journal"].endswith("...")
+
+
+def test_bare_amp_trigger_fires_on_mixed_escaped_and_bare() -> None:
+    """The existing-file rewrite trigger must fire on a value carrying BOTH an
+    escaped and a bare ampersand.
+
+    Testing for the absence of a literal escaped ampersand instead meant such a
+    field never triggered a rewrite, so the invalid bare "&" survived every run
+    even though the serializer would have escaped it on write.
+    """
+    from citeforge.bibtex_utils import bibtex_from_dict
+    from citeforge.pipeline.article import _BARE_AMP_RE
+
+    mixed = r"Ships \& Ports and R&D Forum"
+    assert _BARE_AMP_RE.search(mixed) is not None
+    assert _BARE_AMP_RE.search(r"Ships \& Ports") is None
+    assert _BARE_AMP_RE.search("R&D Forum") is not None
+
+    # The rewrite the trigger gates does produce valid BibTeX for that value.
+    written = bibtex_from_dict({"type": "misc", "key": "K", "fields": {"booktitle": mixed}})
+    assert r"R\&D" in written
+
+
+def test_gemini_malformed_response_returns_none_not_attributeerror() -> None:
+    """A non-dict body or a null "text" must degrade to the algorithmic path.
+
+    Unguarded, the AttributeError escapes process_article past its
+    `except PARSE_ERRORS` (which excludes AttributeError) and aborts the whole
+    author via the per-future handler in run_all.
+    """
+    import citeforge.clients.utility_apis as ua
+
+    for body in (
+        ["not", "a", "dict"],
+        {"candidates": ["not-a-dict"]},
+        {"candidates": [{"content": {"parts": [{"text": None}]}}]},
+    ):
+        with patch.object(ua, "http_post_json", return_value=body):
+            assert ua.gemini_generate_short_title("Some Title", "key", 4) is None
+
+
+def test_author_dirname_cannot_escape_output_dir() -> None:
+    """The CSV author name lands in a real filesystem path, so it is sanitized.
+
+    Unsanitized, scheduler.py's author log path and the per-author .bib
+    directory both resolve outside out_dir.
+    """
+    import os
+
+    from citeforge.text_utils import format_author_dirname
+
+    for name in ("John ../../../../tmp/pwned", "A /etc/cron.d/x", r"B ..\..\windows"):
+        dirname = format_author_dirname(name, "bfdGsGUAAAAJ")
+        assert "/" not in dirname and "\\" not in dirname, dirname
+        assert os.path.abspath(os.path.join("/out", dirname)).startswith("/out/"), dirname
+
+    # A dots-only name with no id must not collapse to a parent reference.
+    assert format_author_dirname("John ..", "") not in ("..", ".")
+    # Normal names are untouched.
+    assert format_author_dirname("Gabriel Spadon", "bfdGsGUAAAAJ") == "Spadon (bfdGsGUAAAAJ)"
+
+
+def test_make_bibkey_survives_whitespace_only_author() -> None:
+    """A blank co-author name is truthy but splits to [], so [-1] raised
+    IndexError, which FULL_OPERATION_ERRORS does not catch."""
+    from citeforge.bibtex_utils import build_minimal_bibtex, make_bibkey
+
+    for blank in (" ", "\t", "  "):
+        assert make_bibkey("Some Title", [blank], 2024) == "2024Some"
+    assert build_minimal_bibtex("Some Title", [" "], 2024, keyhint="x")
+    # A real author is still used.
+    assert make_bibkey("Some Title", ["Gabriel Spadon"], 2024) == "Spadon2024Some"
