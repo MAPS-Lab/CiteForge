@@ -659,6 +659,7 @@ def process_article(
     # if the baseline already has a DOI, use it to get better metadata early on
     doi_validated = False  # Track if we successfully validated the DOI
     unvalidated_doi: str | None = None  # Stash failed DOI for Phase 3 retry
+    doi_early: str | None = None  # Bound before the try so Phase 4 can read it after a parse failure
     p1_doi = bf.get("doi")
     logger.debug(
         f"PHASE1_START | doi={p1_doi} | has_doi={bool(p1_doi)}",

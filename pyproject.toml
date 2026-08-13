@@ -78,6 +78,17 @@ ignore = [
     "S105",   # hardcoded password strings in test data
 ]
 
+[tool.pyrefly]
+# mypy stays the merge gate. Pyrefly runs alongside it and needs to honour the
+# `# type: ignore[...]` comments already in the tree, which are reviewed and
+# mypy-checked; without this it re-reports every one of them. Project root and
+# Python version are inherited from [tool.mypy].
+permissive-ignores = true
+# Pin the project venv. Left unset, pyrefly picks whichever interpreter it
+# infers from the environment, which on a machine with other virtualenvs
+# resolves none of this project's dependencies and reports every third-party
+# import as missing.
+python-interpreter = ".venv/bin/python"
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true

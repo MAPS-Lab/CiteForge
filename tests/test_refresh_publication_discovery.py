@@ -18,6 +18,7 @@ from citeforge.refresh.authority import EvidenceKind, IntentKind, PublicationSee
 from citeforge.refresh.capabilities import build_request, capability_for
 from citeforge.refresh.discovery import (
     ApplicabilityReason,
+    DiscoveryAuthority,
     DiscoveryCredentials,
     DiscoveryDecision,
     DiscoveryObservation,
@@ -227,7 +228,7 @@ def _seed_member(publication_key: str, *, doi: str | None = None) -> Publication
     return replace(seed, seed_digest=seed.derived_seed_digest)
 
 
-def _broad(seed: PublicationSeedEvidence) -> tuple[object, DiscoveryWave]:
+def _broad(seed: PublicationSeedEvidence) -> tuple[DiscoveryAuthority, DiscoveryWave]:
     authority = resolve_discovery_authority(_policy(), DiscoveryCredentials(s2_key="wire-only"))
     broad = plan_broad_discovery(
         (seed,),
@@ -784,7 +785,7 @@ def _late_doi(
 def _html_doi_wave(
     seeds: tuple[PublicationSeedEvidence, ...],
     selected: PublicationSeedEvidence,
-    authority: object,
+    authority: DiscoveryAuthority,
 ) -> tuple[DiscoveryWave, DiscoveryObservation]:
     capability = capability_for("web", "doi_probe", "1")
     request = RequestSpec(

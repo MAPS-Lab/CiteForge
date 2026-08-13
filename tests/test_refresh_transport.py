@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import requests
@@ -1161,7 +1162,7 @@ def test_unexpected_envelope_callback_failure_is_durable_schema_change(tmp_path:
     def broken(_body: dict[str, object]) -> dict[str, object]:
         raise RuntimeError("api_key=secret")
 
-    kwargs = {"validator": broken} if phase == "validator" else {"empty_validator": broken}
+    kwargs: dict[str, Any] = {"validator": broken} if phase == "validator" else {"empty_validator": broken}
     result = LedgerTransport(
         ledger, send_once=lambda _op: _response(200, {"title": "A"}), clock=lambda: NOW
     ).send_claim(_claim(ledger, "worker"), _operation(request, **kwargs))
@@ -1326,7 +1327,7 @@ def test_idempotent_post_may_retry(tmp_path: Path) -> None:
         },
     ],
 )
-def test_post_retry_requires_matching_transmitted_idempotency_header(kwargs: dict[str, object]) -> None:
+def test_post_retry_requires_matching_transmitted_idempotency_header(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match="idempotency"):
         _operation(_request(method="POST"), **kwargs)
 

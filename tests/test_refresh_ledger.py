@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
+from typing import Any
 
 import pytest
 
@@ -1728,7 +1729,7 @@ def test_reduction_replay_rejects_changed_phase_version_publication_task_or_expa
             tasks=base_tasks,
             now=NOW,
         )
-        conflicts = (
+        conflicts: tuple[dict[str, Any], ...] = (
             {"phase": PlanPhase.AUTHORITATIVE},
             {"reducer_version": "2"},
             {"reducer_id": "alternate_reducer"},
