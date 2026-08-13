@@ -9,7 +9,6 @@ time budget.
 from __future__ import annotations
 
 import os
-import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,10 +27,9 @@ from citeforge.clients.search_apis import (
     dblp_fetch_for_author,
 )
 from citeforge.config import (
+    ARTICLE_WORKERS,
     MAX_PUBLICATIONS_PER_AUTHOR,
     MAX_WORKERS,
-    REQUEST_DELAY_MAX,
-    REQUEST_DELAY_MIN,
     SCHOLAR_FETCH_BACKOFF_INITIAL,
     SCHOLAR_FETCH_BACKOFF_MAX,
     SCHOLAR_FETCH_MAX_ATTEMPTS,
@@ -50,6 +48,12 @@ from citeforge.text_utils import (
     trim_title_default,
 )
 
+# One process-wide article pool, kept separate from the author pool so an
+# author thread blocked on its own articles can never starve the workers it is
+# waiting on. ThreadPoolExecutor spawns threads on first submit, so an import
+# that never runs the pipeline costs nothing.
+_ARTICLE_POOL = ThreadPoolExecutor(max_workers=ARTICLE_WORKERS, thread_name_prefix="article")
+
 
 def _author_dirname(rec: Record) -> str:
     """Return the output directory name for *rec*, keyed by its Scholar or DBLP id."""
@@ -64,7 +68,6 @@ def process_record(
     max_pubs: int | None = 1,
     s2_api_key: str | None = None,
     or_creds: tuple[str, str] | None = None,
-    delay: float = 0.0,
     gemini_api_key: str | None = None,
     summary_csv_path: str | None = None,
     force_enrich: bool = False,
@@ -205,12 +208,15 @@ def process_record(
             category=LogCategory.PLAN,
         )
 
-        saved = 0
-        for idx, art in enumerate(articles_sorted):
-            if max_pubs is not None and idx >= max_pubs:
-                break
+        planned = articles_sorted if max_pubs is None else articles_sorted[:max_pubs]
+
+        def _one_article(numbered: tuple[int, dict[str, Any]]) -> int:
+            idx, art = numbered
+            # Each article runs on an article-pool thread, so it binds the
+            # author's log itself. The handler is shared and reference counted.
+            logger.set_log_file(author_log_path)
             try:
-                saved += process_article(
+                return process_article(
                     rec,
                     art,
                     serply_key,
@@ -226,9 +232,20 @@ def process_record(
                 )
             except FULL_OPERATION_ERRORS as e:
                 logger.error(f"Article error: {e}", category=LogCategory.ERROR)
-            if delay > 0:
-                jittered = random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX)
-                time.sleep(jittered)
+                return 0
+            finally:
+                logger.close()
+
+        # Articles are the unit of parallelism, not authors. An author-level
+        # pool idles once fewer authors remain than workers, and the largest
+        # author then sets the wall clock on its own: in the August 2026 logs
+        # the last three authors took 43 of an 82 minute iteration on at most
+        # two of sixteen workers. The article pool is separate from the author
+        # pool, so an author thread waiting here cannot starve the workers it
+        # is waiting on. Provider pacing is unchanged, still the per-namespace
+        # token buckets and the global concurrency semaphore.
+        saved = sum(_ARTICLE_POOL.map(_one_article, enumerate(planned)))
+
         logger.info(f"Author done: saved {saved} file(s)", category=LogCategory.PLAN)
         return saved
     finally:
@@ -336,7 +353,6 @@ def run_all(
                     max_pubs=None,
                     s2_api_key=s2_api_key,
                     or_creds=or_creds,
-                    delay=REQUEST_DELAY_MIN,
                     gemini_api_key=gemini_api_key,
                     summary_csv_path=summary_csv_path,
                     force_enrich=force_enrich,
