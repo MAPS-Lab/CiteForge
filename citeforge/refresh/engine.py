@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from citeforge.clients.search_apis import OpenReviewRuntimeSession, OpenReviewSessionBroker
 from citeforge.log_utils import LogCategory, logger
 
-from .checkpoint import CheckpointStore
+from .checkpoint import CheckpointError, CheckpointStore
 from .discovery import (
     DiscoveryCredentials,
     DiscoveryPolicy,
@@ -487,7 +487,7 @@ class RefreshEngine:
         if spec is not None:
             try:
                 self._save_checkpoint(spec)
-            except (ValueError, OSError) as seal_error:
+            except (CheckpointError, ValueError, OSError) as seal_error:
                 logger.error(
                     f"CHECKPOINT_SEAL_FAILED | generation={generation_id} | completed={completed} "
                     f"| error={seal_error}",

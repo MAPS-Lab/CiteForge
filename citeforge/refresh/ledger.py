@@ -9401,11 +9401,42 @@ class Ledger:
 
     @staticmethod
     def _all_required_satisfied(connection: sqlite3.Connection, generation_id: str) -> bool:
+        """Is every required work item in a state that may publish?
+
+        This returned a hardcoded False while the planner was being built, which
+        made VALIDATING unreachable, so COMPLETE was unreachable, so the workflow
+        gate on status == complete could never fire. The engine ran, sealed, and
+        never published: the same shape as the fifty-pass loop it replaced.
+
+        Satisfying means one of the four terminal states the architecture allows
+        to publish. Every other state, including the pending and leased ones,
+        blocks. A generation with no required work at all does not qualify,
+        because an empty plan is an unplanned generation rather than a finished
+        one.
+        """
         Ledger._verify_plan_integrity(connection, generation_id)
-        # Task 5A deliberately owns structural planning only. Task 5B must add
-        # independently executable planner/capability authority before any
-        # generation can satisfy production discovery completeness.
-        return False
+
+        closed = connection.execute(
+            "SELECT plan_closed, discovery_closed FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        if closed is None or not closed[0]:
+            return False
+        # Both flags, not just the plan. Inventory-only terminal work satisfies
+        # a closed plan and must still never satisfy the generation, because
+        # discovery is what turns an author list into the publication set. A
+        # generation that published on the plan flag alone would ship a corpus
+        # missing every publication discovery would have found.
+        if not closed[1]:
+            return False
+
+        satisfied = tuple(sorted(state.value for state in _SATISFIED))
+        placeholders = ",".join("?" * len(satisfied))
+        required, unsatisfied = connection.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(state NOT IN ({placeholders})), 0) "  # noqa: S608
+            "FROM tasks WHERE generation_id = ? AND required = 1",
+            (*satisfied, generation_id),
+        ).fetchone()
+        return bool(required) and not unsatisfied
 
     def record_checkpoint(self, sequence: int, ciphertext_digest: str, key_id: str, created_at: datetime) -> None:
         if sequence < 1:
