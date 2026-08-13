@@ -46,7 +46,9 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run((_GIT, *args), cwd=repo, check=True, capture_output=True, text=True).stdout.strip()  # noqa: S603
 
 
-def _real_corpus_authority(tmp_path: Path, *, empty: bool = False) -> tuple[Path, str, AuthorCensus]:
+def _real_corpus_authority(
+    tmp_path: Path, *, empty: bool = False, venue_without_doi: bool = False
+) -> tuple[Path, str, AuthorCensus]:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -55,8 +57,14 @@ def _real_corpus_authority(tmp_path: Path, *, empty: bool = False) -> tuple[Path
     author_dir = repo / "output" / "Lovelace (Scholar123)"
     author_dir.mkdir(parents=True)
     if not empty:
+        entry = (
+            "@article{Key,title={A title},author={Lovelace, Ada},year={2026},"
+            "journal={Journal of Engines 12(3), 44-51, 2026}}\n"
+            if venue_without_doi
+            else "@article{Key,title={A title},author={Lovelace, Ada},year={2026},doi={10.1000/X}}\n"
+        )
         (author_dir / "paper.bib").write_text(
-            "@article{Key,title={A title},author={Lovelace, Ada},year={2026},doi={10.1000/X}}\n",
+            entry,
             encoding="utf-8",
         )
     (repo / "output" / "baseline.json").write_text(
@@ -305,6 +313,7 @@ def test_discovery_policy_rejects_output_irrelevant_lower_candidate_limit(provid
 
 
 def test_c4_round_budget_preflight_is_exact() -> None:
+    # 44 Scholar pages + 9 pass waves + 3 expansions + 8 HTML waves.
     assert _policy(max_scholar_pages=44, max_html_probe_waves=8).round_budget == 64
     with pytest.raises(ValueError, match="round budget"):
         _policy(max_scholar_pages=45, max_html_probe_waves=8)
@@ -416,9 +425,7 @@ def test_successful_identity_matching_bibtex_can_suppress_broad_search() -> None
     authority = resolve_discovery_authority(_policy(), DiscoveryCredentials(s2_key="wire-only"))
     known = plan_known_doi((seed,), authority)
     csl_task = known.decisions[0].task
-    csl = DiscoveryObservation(
-        csl_task, TaskDisposition.CONFIRMED_EMPTY, {}, True, "doi-csl-v1"
-    )
+    csl = DiscoveryObservation(csl_task, TaskDisposition.CONFIRMED_EMPTY, {}, True, "doi-csl-v1")
     bibtex = plan_doi_bibtex((seed,), known, (csl,), authority)
     bibtex_task = bibtex.decisions[0].task
     observation = DiscoveryObservation(
@@ -440,15 +447,11 @@ def test_successful_identity_matching_bibtex_can_suppress_broad_search() -> None
         False,
         "doi-bibtex-v1",
     )
-    reductions = reduce_current_doi_observations(
-        (seed,), known, (csl,), bibtex, (observation,), authority
-    )
+    reductions = reduce_current_doi_observations((seed,), known, (csl,), bibtex, (observation,), authority)
     assert reductions[0].status == "identity_matched"
     broad = plan_broad_discovery((seed,), {"author-ada": "Ada Lovelace"}, authority, reductions)
     assert len(broad.decisions) == 8
-    assert {decision.reason for decision in broad.decisions} == {
-        ApplicabilityReason.REDUNDANT_AUTHORITATIVE_EVIDENCE
-    }
+    assert {decision.reason for decision in broad.decisions} == {ApplicabilityReason.REDUNDANT_AUTHORITATIVE_EVIDENCE}
 
 
 def test_pubmed_expansion_is_singleton_complete_and_correlated() -> None:
@@ -940,13 +943,14 @@ def test_atomic_known_doi_wave_commits_complete_round_and_replays(tmp_path: Path
         with Ledger.open(expansion_fault_path, corpus_repo_root=repo) as faulted:
             faulted.set_fault("after_c4_expansion")
             with pytest.raises(FaultInjectedError, match="after_c4_expansion"):
-                faulted.execute_and_commit_discovery_wave(
-                    "known_doi", policy, now=wave_now + timedelta(seconds=1)
+                faulted.execute_and_commit_discovery_wave("known_doi", policy, now=wave_now + timedelta(seconds=1))
+            assert (
+                tuple(
+                    faulted._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+                    for table in expansion_tables
                 )
-            assert tuple(
-                faulted._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
-                for table in expansion_tables
-            ) == expansion_before
+                == expansion_before
+            )
         with Ledger.open(expansion_fault_path, corpus_repo_root=repo) as replayed:
             replayed.execute_and_commit_discovery_wave("known_doi", policy, now=wave_now + timedelta(seconds=1))
             replayed.manifest()
@@ -1056,14 +1060,283 @@ def test_zero_seed_generation_commits_and_replays_complete_c4_chain(tmp_path: Pa
         ledger.execute_and_commit_discovery_wave("known_doi", policy, now=now + timedelta(seconds=1))
         broad = ledger.execute_and_commit_discovery_wave("broad_discovery", policy, now=now + timedelta(seconds=2))
         dynamic = ledger.execute_and_commit_discovery_wave("dynamic_expansion", policy, now=now + timedelta(seconds=3))
+        historical_path = tmp_path / "populated-c4-registry.db"
+        with sqlite3.connect(historical_path) as historical_connection:
+            ledger._connection.backup(historical_connection)
+        historical_connection = sqlite3.connect(historical_path)
+        update_trigger = historical_connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'planner_passes_append_only_update'"
+        ).fetchone()[0]
+        historical_connection.execute("DROP TRIGGER planner_passes_append_only_update")
+        for pass_id in ("bind_corpus_seed", "known_doi", "broad_discovery", "dynamic_expansion"):
+            content = json.loads(
+                historical_connection.execute(
+                    "SELECT receipt_json FROM planner_passes WHERE pass_id = ?", (pass_id,)
+                ).fetchone()[0]
+            )
+            content["registry_digest"] = "4aca44ec61c5f081b1fa372705434adb4413b6e02b5f981166829cd5d41d5696"
+            historical_connection.execute(
+                "UPDATE planner_passes SET registry_digest = ?, receipt_json = ? WHERE pass_id = ?",
+                (
+                    content["registry_digest"],
+                    json.dumps(content, sort_keys=True, separators=(",", ":")),
+                    pass_id,
+                ),
+            )
+        historical_connection.execute(str(update_trigger))
+        historical_connection.commit()
+        historical_connection.close()
+        with Ledger.open(historical_path, corpus_repo_root=repo) as historical:
+            historical.manifest()
+            assert historical.execute_and_commit_discovery_wave("known_doi", policy, now=NOW) == replace(
+                known,
+                registry_digest="4aca44ec61c5f081b1fa372705434adb4413b6e02b5f981166829cd5d41d5696",
+            )
+            assert historical.execute_and_commit_discovery_wave("broad_discovery", policy, now=NOW) == replace(
+                broad,
+                registry_digest="4aca44ec61c5f081b1fa372705434adb4413b6e02b5f981166829cd5d41d5696",
+            )
+            assert historical.execute_and_commit_discovery_wave("dynamic_expansion", policy, now=NOW) == replace(
+                dynamic,
+                registry_digest="4aca44ec61c5f081b1fa372705434adb4413b6e02b5f981166829cd5d41d5696",
+            )
+        venue = ledger.execute_and_commit_venue_fallback(policy, now=now + timedelta(seconds=4))
+        assert ledger.discovery_phase_status("venue_fallback", now=now) == "pending"
+        ledger.execute_and_commit_venue_fallback(policy, now=now + timedelta(seconds=5))
+        late = ledger.execute_and_commit_late_identifiers(policy, now=now + timedelta(seconds=6))
         assert ledger.discovery_phase_status("known_doi", now=now) == "complete"
         assert ledger.discovery_phase_status("broad_discovery", now=now) == "complete"
         assert ledger.discovery_phase_status("dynamic_expansion", now=now) == "complete"
+        assert ledger.discovery_phase_status("venue_fallback", now=now) == "complete"
         ledger.manifest()
     with Ledger.open(path, corpus_repo_root=repo) as reopened:
         assert reopened.execute_and_commit_discovery_wave("known_doi", policy, now=NOW) == known
         assert reopened.execute_and_commit_discovery_wave("broad_discovery", policy, now=NOW) == broad
         assert reopened.execute_and_commit_discovery_wave("dynamic_expansion", policy, now=NOW) == dynamic
+        assert reopened.execute_and_commit_venue_fallback(policy, now=NOW) == venue
+        assert reopened.execute_and_commit_late_identifiers(policy, now=NOW) == late
+        reopened.manifest()
+
+
+def test_atomic_venue_fallback_consumes_crossref_and_expands_openalex(tmp_path: Path) -> None:
+    repo, commit, census = _real_corpus_authority(tmp_path, venue_without_doi=True)
+    policy = _policy()
+    spec = GenerationSpec(census, "policy-v1", {**dict(policy.adapter_versions), "scholar": "1"}, commit)
+
+    def send_empty(_operation: SendOperation) -> object:
+        import requests
+
+        response = requests.Response()
+        response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
+        response._content = json.dumps(
+            {
+                "search_metadata": {
+                    "status": "Success",
+                    "google_scholar_author_url": "https://scholar.google.com/citations?user=Scholar123",
+                },
+                "search_parameters": {
+                    "engine": "google_scholar_author",
+                    "author_id": "Scholar123",
+                    "cstart": 0,
+                },
+                "author": {"name": "Ada Lovelace"},
+                "articles": [],
+            }
+        ).encode()
+        return response
+
+    path = tmp_path / "venue.db"
+    with Ledger.open(path, corpus_repo_root=repo) as ledger:
+        ledger.create_or_resume(spec, census)
+        ledger.bind_discovery_policy(policy, DiscoveryCredentials(s2_key="wire-only"))
+        result = RefreshEngine(
+            ledger,
+            InventoryPolicy(2020, 1000, 10, s2_adapter_version="2", freshness_epoch="2026-08"),
+            LedgerTransport(ledger, send_once=send_empty),
+        ).run(spec, RefreshCredentials(serpapi_key="wire-only"), lambda: False)
+        assert result.status.value == "continuation"
+        ledger.scan_and_commit_corpus(repo)
+        ledger.execute_registered_pass("bind_corpus_seed")
+        now = datetime.now(timezone.utc)
+        ledger.execute_and_commit_discovery_wave("known_doi", policy, now=now)
+        ledger.execute_and_commit_discovery_wave("known_doi", policy, now=now + timedelta(seconds=1))
+        ledger.execute_and_commit_discovery_wave("broad_discovery", policy, now=now + timedelta(seconds=2))
+        broad_now = now + timedelta(seconds=2)
+        empty_response = {
+            "arxiv": ("arxiv-atom-v1", {"entries": ()}),
+            "crossref": ("crossref-search-v1", {"results": ()}),
+            "europepmc": ("europepmc-search-v1", {"results": ()}),
+            "openalex": ("openalex-search-v1", {"results": ()}),
+            "openreview": ("openreview-notes-v1", {"notes": ()}),
+            "pubmed": ("pubmed-esearch-v1", {"pmids": ()}),
+            "s2": ("s2-search-v2", {"results": ()}),
+        }
+        while eligible := ledger.discovery_wave_task_keys("broad_discovery", now=broad_now):
+            claim = ledger.claim_due_for_operations("worker", broad_now, timedelta(minutes=1), eligible)
+            assert claim is not None
+            task = ledger.reconstruct_claimed_task(claim, broad_now)
+            request_claim = ledger.claim_request(claim.key, "worker", broad_now, timedelta(minutes=1))
+            assert request_claim is not None
+            schema, _response = empty_response[task.provider]
+            ledger.finish_request(
+                request_claim.key,
+                "worker",
+                TaskDisposition.CONFIRMED_EMPTY,
+                broad_now,
+                observation=ProviderObservation(task.provider, schema, {}, authoritative_empty=True),
+            )
+            ledger.finish_task(claim.key, "worker", TaskDisposition.CONFIRMED_EMPTY, broad_now)
+        ledger.execute_and_commit_discovery_wave("dynamic_expansion", policy, now=now + timedelta(seconds=3))
+        dynamic_now = now + timedelta(seconds=3)
+        while eligible := ledger.discovery_wave_task_keys("dynamic_expansion", now=dynamic_now):
+            claim = ledger.claim_due_for_operations("worker", dynamic_now, timedelta(minutes=1), eligible)
+            assert claim is not None
+            request_claim = ledger.claim_request(claim.key, "worker", dynamic_now, timedelta(minutes=1))
+            assert request_claim is not None
+            ledger.finish_request(
+                request_claim.key,
+                "worker",
+                TaskDisposition.CONFIRMED_EMPTY,
+                dynamic_now,
+                observation=ProviderObservation("openreview", "openreview-notes-v1", {}, authoritative_empty=True),
+            )
+            ledger.finish_task(claim.key, "worker", TaskDisposition.CONFIRMED_EMPTY, dynamic_now)
+
+        before = tuple(
+            ledger._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+            for table in ("planner_passes", "planner_pass_expected_items", "tasks", "plan_rounds")
+        )
+        fault_path = tmp_path / "venue-fault.db"
+        with sqlite3.connect(fault_path) as destination:
+            ledger._connection.backup(destination)
+        with Ledger.open(fault_path, corpus_repo_root=repo) as faulted:
+            faulted.set_fault("after_c4_round")
+            with pytest.raises(FaultInjectedError, match="after_c4_round"):
+                faulted.execute_and_commit_venue_fallback(policy, now=now + timedelta(seconds=4))
+            assert (
+                tuple(
+                    faulted._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+                    for table in ("planner_passes", "planner_pass_expected_items", "tasks", "plan_rounds")
+                )
+                == before
+            )
+
+        receipt = ledger.execute_and_commit_venue_fallback(policy, now=now + timedelta(seconds=4))
+        crossref_keys = ledger.discovery_wave_task_keys("venue_fallback", now=now + timedelta(seconds=4))
+        assert len(crossref_keys) == 1
+        claim = ledger.claim_due_for_operations(
+            "worker", now + timedelta(seconds=4), timedelta(minutes=1), crossref_keys
+        )
+        assert claim is not None
+        request_claim = ledger.claim_request(claim.key, "worker", now + timedelta(seconds=4), timedelta(minutes=1))
+        assert request_claim is not None
+        ledger.finish_request(
+            request_claim.key,
+            "worker",
+            TaskDisposition.CONFIRMED_EMPTY,
+            now + timedelta(seconds=4),
+            observation=ProviderObservation("crossref", "crossref-venue-v1", {}, authoritative_empty=True),
+        )
+        ledger.finish_task(claim.key, "worker", TaskDisposition.CONFIRMED_EMPTY, now + timedelta(seconds=4))
+        expansion_tables = ("tasks", "requests", "request_consumers", "plan_obligations", "plan_rounds")
+        expansion_before = tuple(
+            ledger._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+            for table in expansion_tables
+        )
+        expansion_fault_path = tmp_path / "venue-expansion-fault.db"
+        with sqlite3.connect(expansion_fault_path) as destination:
+            ledger._connection.backup(destination)
+        with Ledger.open(expansion_fault_path, corpus_repo_root=repo) as faulted:
+            faulted.set_fault("after_c4_expansion")
+            with pytest.raises(FaultInjectedError, match="after_c4_expansion"):
+                faulted.execute_and_commit_venue_fallback(policy, now=now + timedelta(seconds=5))
+            assert (
+                tuple(
+                    faulted._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+                    for table in expansion_tables
+                )
+                == expansion_before
+            )
+        ledger.execute_and_commit_venue_fallback(policy, now=now + timedelta(seconds=5))
+        assert len(ledger.discovery_wave_task_keys("venue_fallback", now=now + timedelta(seconds=5))) == 1
+        assert (
+            ledger._connection.execute(
+                "SELECT COUNT(*) FROM reduction_sources WHERE source_task_key = ?", (claim.key,)
+            ).fetchone()[0]
+            == 1
+        )
+        openalex_keys = ledger.discovery_wave_task_keys("venue_fallback", now=now + timedelta(seconds=5))
+        openalex_claim = ledger.claim_due_for_operations(
+            "worker", now + timedelta(seconds=5), timedelta(minutes=1), openalex_keys
+        )
+        assert openalex_claim is not None
+        openalex_request = ledger.claim_request(
+            openalex_claim.key, "worker", now + timedelta(seconds=5), timedelta(minutes=1)
+        )
+        assert openalex_request is not None
+        ledger.finish_request(
+            openalex_request.key,
+            "worker",
+            TaskDisposition.CONFIRMED_EMPTY,
+            now + timedelta(seconds=5),
+            observation=ProviderObservation("openalex", "openalex-venue-v1", {}, authoritative_empty=True),
+        )
+        ledger.finish_task(
+            openalex_claim.key,
+            "worker",
+            TaskDisposition.CONFIRMED_EMPTY,
+            now + timedelta(seconds=5),
+        )
+        late_before = tuple(
+            ledger._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+            for table in ("planner_passes", "planner_pass_expected_items", "plan_rounds")
+        )
+        late_fault_path = tmp_path / "late-fault.db"
+        with sqlite3.connect(late_fault_path) as destination:
+            ledger._connection.backup(destination)
+        with Ledger.open(late_fault_path, corpus_repo_root=repo) as faulted:
+            faulted.set_fault("after_c4_expected_items")
+            with pytest.raises(FaultInjectedError, match="after_c4_expected_items"):
+                faulted.execute_and_commit_late_identifiers(policy, now=now + timedelta(seconds=6))
+            assert (
+                tuple(
+                    faulted._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+                    for table in ("planner_passes", "planner_pass_expected_items", "plan_rounds")
+                )
+                == late_before
+            )
+        late = ledger.execute_and_commit_late_identifiers(policy, now=now + timedelta(seconds=6))
+        late_row = ledger._connection.execute(
+            "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
+            "AND pass_key = ? AND item_key LIKE 'late-source:%' LIMIT 1",
+            (ledger._generation_id(), late.pass_key),
+        ).fetchone()
+        assert late_row is not None
+        omitted = json.loads(str(late_row[0]))
+        items = [
+            json.loads(str(row[0]))
+            for row in ledger._connection.execute(
+                "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? AND pass_key = ?",
+                (ledger._generation_id(), late.pass_key),
+            )
+            if json.loads(str(row[0]))["key"] != omitted["key"]
+        ]
+        with pytest.raises(ValueError, match="source membership is incomplete"):
+            ledger._verify_late_identifier_snapshot(
+                ledger._connection,
+                ledger._generation_id(),
+                {
+                    "generation_id": ledger._generation_id(),
+                    "pass_id": "late_identifiers",
+                    "pass_version": "2",
+                    "items": items,
+                },
+            )
+        ledger.manifest()
+    with Ledger.open(path, corpus_repo_root=repo) as reopened:
+        assert reopened.execute_and_commit_venue_fallback(policy, now=NOW) == receipt
+        assert reopened.execute_and_commit_late_identifiers(policy, now=NOW) == late
         reopened.manifest()
 
 

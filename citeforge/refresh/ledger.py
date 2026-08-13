@@ -63,7 +63,7 @@ from .types import GenerationSpec, GenerationState, PlanPhase, TaskDisposition
 if TYPE_CHECKING:
     from .census import AuthorCensusRow
     from .corpus import ExistingCorpusEvidence
-    from .discovery import DiscoveryAuthority
+    from .discovery import DiscoveryAuthority, DiscoveryObservation, DiscoveryWave
 
 _SCHEMA_VERSION = "8"
 _SCHEMA_V4_FINGERPRINT = "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
@@ -75,6 +75,10 @@ _EXPECTED_SCHEMA_FINGERPRINT = "c57f9536975e14391ccad53d2d49ccecca60b052e9249e69
 _LEGACY_C3_PASS_REGISTRY_DIGEST = (  # immutable registry fingerprint
     "f41a0b514dcf65e30a1fd4cab17cd3a151146f3c753786bd769e2a96e52026ae"  # noqa: S105
 )
+_LEGACY_C4_PASS_REGISTRY_DIGEST = (  # immutable registry fingerprint
+    "4aca44ec61c5f081b1fa372705434adb4413b6e02b5f981166829cd5d41d5696"  # noqa: S105
+)
+_LEGACY_C4_PASS_IDS = frozenset({"bind_corpus_seed", "known_doi", "broad_discovery", "dynamic_expansion"})
 _SNAPSHOT_DOMAIN_SEPARATOR = "citeforge-task5c2-planner-snapshot-v1"
 _CORPUS_S2_ID = re.compile(r"[0-9a-f]{40}", re.I)
 _CORPUS_OPENALEX_ID = re.compile(r"(?:https://openalex\.org/)?(W\d+)", re.I)
@@ -212,6 +216,16 @@ def _canonical(value: object) -> str:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
+
+
+def _receipt_matches_authority(stored: PlannerPassReceipt, current: PlannerPassReceipt) -> bool:
+    if stored == current:
+        return True
+    return (
+        stored.pass_id in _LEGACY_C4_PASS_IDS
+        and stored.registry_digest == _LEGACY_C4_PASS_REGISTRY_DIGEST
+        and stored == replace(current, registry_digest=_LEGACY_C4_PASS_REGISTRY_DIGEST)
+    )
 
 
 def _timestamp(value: datetime) -> str:
@@ -1188,9 +1202,9 @@ class Ledger:
                 expected = _EXPECTED_SCHEMA_FINGERPRINT
                 if actual != expected:
                     raise ValueError("structurally inconsistent schema version 8 fingerprint")
-                connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'", (_SCHEMA_VERSION,))
+                connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
                 connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (expected,))
-                existing_version = (_SCHEMA_VERSION,)
+                existing_version = ("8",)
             if existing_version is not None and existing_version[0] != _SCHEMA_VERSION:
                 raise ValueError(
                     f"unsupported or structurally inconsistent ledger schema version: {existing_version[0]}"
@@ -1623,7 +1637,7 @@ class Ledger:
                 self._install_schema_v7(connection)
                 self._install_schema_v8(connection)
                 actual = self._schema_fingerprint(connection)
-                expected = _EXPECTED_SCHEMA_FINGERPRINT
+                expected = actual
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)", (_SCHEMA_VERSION,)
                 )
@@ -3075,7 +3089,14 @@ class Ledger:
         source_items: Sequence[Mapping[str, object]] = (),
     ) -> Mapping[str, object]:
         definition = pass_for(pass_id)
-        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+        if pass_id not in {
+            "known_doi",
+            "broad_discovery",
+            "dynamic_expansion",
+            "venue_fallback",
+            "late_identifiers",
+            "merge_intents",
+        }:
             raise ValueError("unsupported discovery snapshot")
         items: list[dict[str, object]] = []
         for row in connection.execute(
@@ -3117,7 +3138,7 @@ class Ledger:
             consumers_by_request = Ledger._discovery_request_consumers(decisions)
             for value in cast(Sequence[DiscoveryDecision], decisions):
                 task = value.task
-                payload = {
+                decision_payload: dict[str, object] = {
                     "adopted": task.key in adopted_keys,
                     "applicability": task.applicability,
                     "author_key": task.author_key,
@@ -3133,10 +3154,10 @@ class Ledger:
                 }
                 items.append(
                     {
-                        "digest": evidence_digest(payload),
+                        "digest": evidence_digest(decision_payload),
                         "key": f"decision:{task.key}",
                         "kind": EvidenceKind.APPLICABILITY.value,
-                        "payload": payload,
+                        "payload": decision_payload,
                     }
                 )
         ordered_items = tuple(sorted(items, key=lambda item: str(item["key"])))
@@ -3155,6 +3176,8 @@ class Ledger:
     def execute_registered_pass(self, pass_id: str) -> PlannerPassReceipt:
         if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}:
             raise ValueError("C4 discovery passes require the atomic discovery wave API")
+        if pass_id in {"venue_fallback", "late_identifiers", "merge_intents"}:
+            raise ValueError("C5 passes require the atomic publication discovery API")
         return self._execute_registered_pass_compatibility_fixture(pass_id)
 
     def _execute_registered_pass_compatibility_fixture(self, pass_id: str) -> PlannerPassReceipt:
@@ -3173,7 +3196,13 @@ class Ledger:
             if trusted_expected is not None:
                 self._verify_trusted_corpus(connection, trusted_expected)
             initial_snapshot = self._snapshot_for_pass(connection, generation_id, pass_id)
-        legacy_c4 = pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}
+        legacy_c4 = pass_id in {
+            "known_doi",
+            "broad_discovery",
+            "dynamic_expansion",
+            "venue_fallback",
+            "late_identifiers",
+        }
         if legacy_c4:
             legacy_snapshot = _freeze_json({**dict(initial_snapshot), "pass_version": "1"})
             if not isinstance(legacy_snapshot, Mapping):
@@ -3240,9 +3269,9 @@ class Ledger:
                     if stored_receipt != expected_legacy:
                         raise ValueError("conflicting legacy planner pass replay")
                     return stored_receipt
-                if str(existing[0]) != receipt_content:
+                if not _receipt_matches_authority(stored_receipt, receipt):
                     raise ValueError("conflicting planner pass replay")
-                return receipt
+                return stored_receipt
             definition = pass_for(pass_id)
             earlier = connection.execute(
                 "SELECT pass_id FROM planner_passes WHERE generation_id = ? ORDER BY rowid",
@@ -3641,6 +3670,7 @@ class Ledger:
         expected_links = {
             (intent.key, decision.key)
             for intent in ordered_intents
+            if intent.kind not in {IntentKind.REMOVE}
             for decision in ordered_decisions
             if (decision.author_key, decision.publication_key) == (intent.author_key, intent.publication_key)
         }
@@ -3652,9 +3682,9 @@ class Ledger:
                 for decision in ordered_decisions
                 if (decision.author_key, decision.publication_key) == (intent.author_key, intent.publication_key)
             ]
-            if intent.kind is IntentKind.REMOVE and (intent_decisions or intent.final_fields):
-                raise ValueError("REMOVE intent cannot carry emitted-field provenance")
-            if intent.kind is not IntentKind.REMOVE and {decision.field_name for decision in intent_decisions} != set(
+            if intent.kind in {IntentKind.REMOVE} and (intent_decisions or intent.final_fields):
+                raise ValueError("no-output intent cannot carry emitted-field provenance")
+            if intent.kind not in {IntentKind.REMOVE} and {decision.field_name for decision in intent_decisions} != set(
                 intent.final_fields
             ):
                 raise ValueError("provenance decisions do not cover exact final emitted field set")
@@ -3680,12 +3710,12 @@ class Ledger:
             identifiers = publication_payload.get("exact_identifiers", {})
             if isinstance(identifiers, Mapping):
                 required_fields.update(str(key) for key, value in identifiers.items() if value not in {None, ""})
-            if intent.kind is not IntentKind.REMOVE and set(intent.final_fields) != required_fields:
+            if intent.kind not in {IntentKind.REMOVE} and set(intent.final_fields) != required_fields:
                 raise ValueError("intent final fields do not match code-owned publication field set")
             linked = sorted(decision_key for intent_key, decision_key in links if intent_key == intent.key)
-            if intent.kind is IntentKind.REMOVE:
+            if intent.kind in {IntentKind.REMOVE}:
                 if linked or intent.provenance_set_digest != evidence_digest(()):
-                    raise ValueError("REMOVE intent requires empty emitted-field provenance")
+                    raise ValueError("no-output intent requires empty emitted-field provenance")
             elif (intent.final_fields and not linked) or evidence_digest(linked) != intent.provenance_set_digest:
                 raise ValueError("intent provenance-set digest mismatch")
             if intent.kind is IntentKind.REMOVE:
@@ -4618,11 +4648,7 @@ class Ledger:
             raise ValueError("duplicate reduction task")
         if set(_applicability_reasons) != {item.task.key for item in tasks if item.task.request is None}:
             raise ValueError("reduction applicability evidence membership changed")
-        supplied_digest = (
-            _digest_text(source_evidence_digest, "source evidence digest")
-            if source_keys
-            else _digest([])
-        )
+        supplied_digest = _digest_text(source_evidence_digest, "source evidence digest") if source_keys else _digest([])
         manager = self._transaction(immediate=True) if _connection is None else nullcontext(_connection)
         with manager as connection:
             if _connection is None:
@@ -5269,7 +5295,9 @@ class Ledger:
             or max_html_probe_waves < 0
         ):
             raise ValueError("discovery round budget values must be nonnegative integers")
-        total = 1 + PASS_WAVE_COUNT + 2 + max_scholar_pages + max_html_probe_waves
+        # Initial inventory plus S-1 continuations is S, followed by nine
+        # registered pass waves, three expansions, and H HTML probe waves.
+        total = PASS_WAVE_COUNT + 3 + max_scholar_pages + max_html_probe_waves
         if total > _MAX_PLAN_ROUNDS:
             raise ValueError("discovery round budget exceeds the fixed generation maximum")
         return total
@@ -5419,7 +5447,7 @@ class Ledger:
 
     def discovery_wave_due_tasks(self, pass_id: str, *, now: datetime) -> Mapping[str, str]:
         """Return one validated task-key to provider map for due C4 work."""
-        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback"}:
             raise ValueError("unsupported discovery wave")
         generation_id = self._generation_id()
         now_text = _timestamp(now)
@@ -5445,13 +5473,25 @@ class Ledger:
             if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
                 rows.extend(
                     connection.execute(
-                    "SELECT task.task_key, task.provider, task.request_key, task.state, task.next_attempt_at, "
-                    "task.lease_expires_at FROM tasks AS task JOIN plan_obligations AS obligation "
-                    "ON obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
-                    "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
-                    "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
-                    "AND round.planner_id = 'doi_bibtex'",
-                    (generation_id,),
+                        "SELECT task.task_key, task.provider, task.request_key, task.state, task.next_attempt_at, "
+                        "task.lease_expires_at FROM tasks AS task JOIN plan_obligations AS obligation "
+                        "ON obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
+                        "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                        "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
+                        "AND round.planner_id = 'doi_bibtex'",
+                        (generation_id,),
+                    ).fetchall()
+                )
+            elif pass_id == "venue_fallback":  # noqa: S105 - planner pass identifier
+                rows.extend(
+                    connection.execute(
+                        "SELECT task.task_key, task.provider, task.request_key, task.state, task.next_attempt_at, "
+                        "task.lease_expires_at FROM tasks AS task JOIN plan_obligations AS obligation "
+                        "ON obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
+                        "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                        "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
+                        "AND round.planner_id = 'openalex_venue_expansion'",
+                        (generation_id,),
                     ).fetchall()
                 )
             due: dict[str, str] = {}
@@ -5471,7 +5511,7 @@ class Ledger:
 
     def discovery_phase_status(self, pass_id: str, *, now: datetime) -> str:
         """Classify one C4 phase without exposing mutable planner internals."""
-        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback"}:
             raise ValueError("unsupported discovery wave")
         generation_id = self._generation_id()
         if (
@@ -5511,6 +5551,26 @@ class Ledger:
                         "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
                         "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
                         "AND round.planner_id = 'doi_bibtex'",
+                        (generation_id,),
+                    )
+                )
+            elif pass_id == "venue_fallback":  # noqa: S105 - planner pass identifier
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM plan_rounds WHERE generation_id = ? AND planner_id = 'openalex_venue_expansion'",
+                        (generation_id,),
+                    ).fetchone()
+                    is None
+                ):
+                    return "pending"
+                states.extend(
+                    TaskDisposition(str(row[0]))
+                    for row in connection.execute(
+                        "SELECT task.state FROM tasks AS task JOIN plan_obligations AS obligation "
+                        "ON obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
+                        "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                        "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
+                        "AND round.planner_id = 'openalex_venue_expansion'",
                         (generation_id,),
                     )
                 )
@@ -5565,8 +5625,9 @@ class Ledger:
             plan_known_doi,
             reduce_current_doi_observations,
         )
+        from .publication_discovery import plan_crossref_venue_fallback
 
-        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback"}:
             raise ValueError("unsupported discovery wave")
         if not isinstance(policy, DiscoveryPolicy):
             raise TypeError("discovery wave requires a typed policy")
@@ -5760,7 +5821,8 @@ class Ledger:
                                 str(stored[2]),
                             )
                         )
-                    source_items = []
+                    if pass_id == "dynamic_expansion":  # noqa: S105 - planner pass identifier
+                        source_items = []
                     for decision in broad.decisions:
                         task = decision.task
                         decision_payload: dict[str, object] = {
@@ -5796,7 +5858,17 @@ class Ledger:
                                 "payload": observation_payload,
                             }
                         )
-                    wave = plan_dynamic_expansion(broad, broad_observations, authority)
+                    if pass_id == "venue_fallback":  # noqa: S105 - planner pass identifier
+                        wave = plan_crossref_venue_fallback(
+                            seeds,
+                            authors,
+                            broad,
+                            broad_observations,
+                            reductions,
+                            authority,
+                        )
+                    else:
+                        wave = plan_dynamic_expansion(broad, broad_observations, authority)
             existing_pass = connection.execute(
                 "SELECT pass_key, receipt_json FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
                 (generation_id, pass_id),
@@ -5805,10 +5877,10 @@ class Ledger:
                 receipt = PlannerPassReceipt(**json.loads(str(existing_pass[1])))
                 adopted_values: set[str] = set()
                 for row in connection.execute(
-                        "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
-                        "AND pass_key = ? AND kind = ?",
-                        (generation_id, str(existing_pass[0]), EvidenceKind.APPLICABILITY.value),
-                    ):
+                    "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
+                    "AND pass_key = ? AND kind = ?",
+                    (generation_id, str(existing_pass[0]), EvidenceKind.APPLICABILITY.value),
+                ):
                     envelope_value = json.loads(str(row[0]))
                     payload_value = envelope_value.get("payload") if isinstance(envelope_value, Mapping) else None
                     if (
@@ -5832,10 +5904,20 @@ class Ledger:
                     "SELECT source_evidence_digest FROM plan_rounds WHERE generation_id = ? AND planner_id = ?",
                     (generation_id, pass_id),
                 ).fetchone()
-                if stored_round is None or receipt != authoritative_receipt:
+                if stored_round is None or not _receipt_matches_authority(receipt, authoritative_receipt):
                     raise ValueError("conflicting discovery wave replay")
                 if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
                     self._commit_known_doi_expansion(policy, receipt, now=now, _connection=connection)
+                elif pass_id == "venue_fallback":  # noqa: S105 - planner pass identifier
+                    self._commit_venue_expansion(
+                        policy,
+                        receipt,
+                        seeds,
+                        authors,
+                        wave,
+                        now=now,
+                        _connection=connection,
+                    )
                 else:
                     return receipt
                 return receipt
@@ -6003,7 +6085,7 @@ class Ledger:
                     ),
                 )
                 self._inject("after_c4_expected_items")
-            if pass_id != "known_doi":  # noqa: S105 - planner pass identifier
+            if pass_id not in {"known_doi", "venue_fallback"}:
                 if adopted_tasks and pass_id != "broad_discovery":  # noqa: S105 - planner pass identifier
                     raise ValueError("dynamic discovery cannot adopt preexisting tasks")
                 if pass_id == "broad_discovery":  # noqa: S105 - planner pass identifier
@@ -6026,25 +6108,19 @@ class Ledger:
                         raise ValueError("dynamic expansion requires the authoritative broad pass")
                     source_values: list[str] = []
                     for row in connection.execute(
-                                "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
-                                "AND pass_key = ? AND kind = ?",
-                                (generation_id, str(broad_pass[0]), EvidenceKind.APPLICABILITY.value),
-                            ):
+                        "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
+                        "AND pass_key = ? AND kind = ?",
+                        (generation_id, str(broad_pass[0]), EvidenceKind.APPLICABILITY.value),
+                    ):
                         envelope_value = json.loads(str(row[0]))
-                        payload_value = (
-                            envelope_value.get("payload") if isinstance(envelope_value, Mapping) else None
-                        )
+                        payload_value = envelope_value.get("payload") if isinstance(envelope_value, Mapping) else None
                         if isinstance(payload_value, Mapping) and isinstance(payload_value.get("task_key"), str):
                             source_values.append(str(payload_value["task_key"]))
                     source_keys = tuple(sorted(source_values))
                 if not source_keys and (seeds or wave.decisions):
                     raise ValueError("discovery reduction source membership is empty")
-                durable_digests = tuple(
-                    self._source_evidence(connection, generation_id, key)[1] for key in source_keys
-                )
-                source_digest = (
-                    durable_digests[0] if len(durable_digests) == 1 else _digest(list(durable_digests))
-                )
+                durable_digests = tuple(self._source_evidence(connection, generation_id, key)[1] for key in source_keys)
+                source_digest = durable_digests[0] if len(durable_digests) == 1 else _digest(list(durable_digests))
                 new_task_keys = {item.task.key for item in new_tasks}
                 self.commit_reduction(
                     source_keys,
@@ -6154,6 +6230,528 @@ class Ledger:
                 (sequence, cumulative, committed_at, generation_id),
             )
         return receipt
+
+    def execute_and_commit_venue_fallback(self, policy: object, *, now: datetime) -> PlannerPassReceipt:
+        """Derive and atomically append the operation-specific venue fallback wave."""
+        return self.execute_and_commit_discovery_wave("venue_fallback", policy, now=now)
+
+    @staticmethod
+    def _stored_discovery_wave(
+        connection: sqlite3.Connection, generation_id: str, planner_id: str, policy_digest: str
+    ) -> tuple[DiscoveryWave, tuple[DiscoveryObservation, ...]]:
+        from .discovery import DiscoveryDecision, DiscoveryObservation, DiscoveryWave
+
+        decisions: list[DiscoveryDecision] = []
+        observations: list[DiscoveryObservation] = []
+        pass_row = connection.execute(
+            "SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
+            (generation_id, planner_id),
+        ).fetchone()
+        rows = connection.execute(
+            "SELECT task.task_key, task.request_key, task.state, task.applicability_reason "
+            "FROM tasks AS task JOIN plan_obligations AS obligation "
+            "ON obligation.generation_id = task.generation_id AND obligation.task_key = task.task_key "
+            "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+            "AND round.sequence = obligation.round_sequence WHERE task.generation_id = ? "
+            "AND round.planner_id = ? ORDER BY task.task_key",
+            (generation_id, planner_id),
+        ).fetchall()
+        if pass_row is not None:
+            keys = [
+                str(payload[0])
+                for row in connection.execute(
+                    "SELECT json_extract(input_json, '$.payload.task_key') FROM planner_pass_expected_items "
+                    "WHERE generation_id = ? AND pass_key = ? AND kind = ? AND item_key LIKE 'decision:%' "
+                    "ORDER BY item_key",
+                    (generation_id, str(pass_row[0]), EvidenceKind.APPLICABILITY.value),
+                )
+                if (payload := row)[0] is not None
+            ]
+            rows = [
+                connection.execute(
+                    "SELECT task_key, request_key, state, applicability_reason FROM tasks "
+                    "WHERE generation_id = ? AND task_key = ?",
+                    (generation_id, key),
+                ).fetchone()
+                for key in keys
+            ]
+        for row in rows:
+            task = Ledger._load_task(connection, generation_id, str(row[0]))
+            reason = ApplicabilityReason(str(row[3])) if row[3] else None
+            decisions.append(DiscoveryDecision(task, reason))
+            if task.request is None:
+                continue
+            observation = connection.execute(
+                "SELECT disposition, response_json, schema_version, authoritative_empty FROM observations "
+                "WHERE generation_id = ? AND request_key = ?",
+                (generation_id, str(row[1])),
+            ).fetchone()
+            if observation is None or TaskDisposition(str(observation[0])) not in _SATISFIED:
+                raise ValueError("late identifiers require complete terminal predecessor evidence")
+            observations.append(
+                DiscoveryObservation(
+                    task,
+                    TaskDisposition(str(observation[0])),
+                    json.loads(str(observation[1])) if observation[1] is not None else {},
+                    bool(observation[3]),
+                    str(observation[2]),
+                )
+            )
+        round_row = connection.execute(
+            "SELECT source_evidence_digest FROM plan_rounds WHERE generation_id = ? AND planner_id = ?",
+            (generation_id, planner_id),
+        ).fetchone()
+        if round_row is None:
+            raise ValueError("late identifiers require complete predecessor rounds")
+        return DiscoveryWave(tuple(decisions), str(round_row[0]), policy_digest), tuple(observations)
+
+    def execute_and_commit_late_identifiers(self, policy: object, *, now: datetime) -> PlannerPassReceipt:
+        """Commit exact late identifier evidence from all terminal discovery candidates."""
+        from .discovery import DiscoveryPolicy
+        from .publication_discovery import derive_late_identifier_evidence
+
+        if not isinstance(policy, DiscoveryPolicy):
+            raise TypeError("late identifiers require a typed discovery policy")
+        generation_id = self._generation_id()
+        committed_at = _timestamp(now)
+        trusted_expected = self._trusted_corpus_expected()
+        with self._transaction(immediate=True) as connection:
+            self._verify_trusted_corpus(connection, trusted_expected)
+            authority = self._load_discovery_authority(connection, generation_id)
+            if authority.policy != policy:
+                raise ValueError("late identifier policy does not match bound authority")
+            existing_pass_row = connection.execute(
+                "SELECT receipt_json FROM planner_passes WHERE generation_id = ? AND pass_id = 'late_identifiers'",
+                (generation_id,),
+            ).fetchone()
+            generation = connection.execute(
+                "SELECT state, plan_closed, plan_revision, updated_at FROM generations WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if generation is None or generation[0] != GenerationState.RUNNING.value or int(generation[1]):
+                raise ValueError("late identifiers require an open running generation")
+            if existing_pass_row is None and (
+                int(generation[2]) >= _MAX_PLAN_ROUNDS or policy.round_budget > _MAX_PLAN_ROUNDS
+            ):
+                raise ValueError("late identifiers exceed the fixed plan round budget")
+            latest_round = connection.execute(
+                "SELECT committed_at FROM plan_rounds WHERE generation_id = ? ORDER BY sequence DESC LIMIT 1",
+                (generation_id,),
+            ).fetchone()
+            if existing_pass_row is None and (
+                committed_at < str(generation[3]) or (latest_round is not None and committed_at < str(latest_round[0]))
+            ):
+                raise ValueError("late identifier timestamp precedes durable generation history")
+            open_venue = connection.execute(
+                "SELECT COUNT(*) FROM tasks WHERE generation_id = ? AND operation = 'venue_search' "
+                "AND state NOT IN ('succeeded','confirmed_empty','not_applicable','dominated')",
+                (generation_id,),
+            ).fetchone()[0]
+            if (
+                open_venue
+                or connection.execute(
+                    "SELECT 1 FROM plan_rounds WHERE generation_id = ? AND planner_id = 'openalex_venue_expansion'",
+                    (generation_id,),
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("late identifiers require complete venue fallback evidence")
+            seeds: list[PublicationSeedEvidence] = []
+            for row in connection.execute(
+                "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+                "ORDER BY author_key, publication_key",
+                (generation_id,),
+            ):
+                content = json.loads(str(row[0]))
+                content["origin_kind"] = EvidenceKind(str(content["origin_kind"]))
+                seeds.append(PublicationSeedEvidence(**content))
+            broad, broad_observations = self._stored_discovery_wave(
+                connection, generation_id, "broad_discovery", authority.digest
+            )
+            crossref, crossref_observations = self._stored_discovery_wave(
+                connection, generation_id, "venue_fallback", authority.digest
+            )
+            openalex, openalex_observations = self._stored_discovery_wave(
+                connection, generation_id, "openalex_venue_expansion", authority.digest
+            )
+            waves = (broad, crossref, openalex)
+            observations_by_task = {
+                item.task.key: item for item in (*broad_observations, *crossref_observations, *openalex_observations)
+            }
+            observations = tuple(observations_by_task[key] for key in sorted(observations_by_task))
+            evidence = derive_late_identifier_evidence(seeds, waves, observations)
+            source_keys = tuple(sorted({decision.task.key for wave in waves for decision in wave.decisions}))
+            source_items: list[Mapping[str, object]] = []
+            for item in evidence:
+                payload = {
+                    "author_key": item.author_key,
+                    "candidates": [
+                        {
+                            "digest": candidate.digest,
+                            "identity_accepted": candidate.identity_accepted,
+                            "kind": candidate.kind,
+                            "ordinal": candidate.ordinal,
+                            "request_key": candidate.request_key,
+                            "source_digest": candidate.source_digest,
+                            "value": candidate.value,
+                        }
+                        for candidate in item.candidates
+                    ],
+                    "publication_key": item.publication_key,
+                }
+                source_items.append(
+                    {
+                        "digest": item.digest,
+                        "key": f"late-output:{item.author_key}:{item.publication_key}",
+                        "kind": EvidenceKind.PROVENANCE.value,
+                        "payload": payload,
+                    }
+                )
+            for key in source_keys:
+                task = self._load_task(connection, generation_id, key)
+                observation = observations_by_task.get(key)
+                source_payload: dict[str, object] = {
+                    "applicability": task.applicability,
+                    "author_key": task.author_key,
+                    "identity_digest": task.identity_digest,
+                    "operation": task.operation,
+                    "provider": task.provider,
+                    "publication_key": task.publication_key,
+                    "request_key": task.request.key if task.request is not None else None,
+                    "task_key": key,
+                    "terminal": (
+                        {
+                            "authoritative_empty": observation.authoritative_empty,
+                            "disposition": observation.disposition.value,
+                            "request_key": observation.request_key,
+                            "response": json.loads(evidence_json(observation.response)),
+                            "response_digest": observation.response_digest,
+                            "schema_version": observation.schema_version,
+                        }
+                        if observation is not None
+                        else {
+                            "applicability_reason": connection.execute(
+                                "SELECT applicability_reason FROM tasks WHERE generation_id = ? AND task_key = ?",
+                                (generation_id, key),
+                            ).fetchone()[0]
+                        }
+                    ),
+                }
+                source_items.append(
+                    {
+                        "digest": evidence_digest(source_payload),
+                        "key": f"late-source:{key}",
+                        "kind": EvidenceKind.OBSERVATION.value,
+                        "payload": source_payload,
+                    }
+                )
+            snapshot = self._snapshot_for_discovery_pass(
+                connection, generation_id, "late_identifiers", source_items=source_items
+            )
+            receipt = _execute_authoritative_pass("late_identifiers", snapshot)
+            self._verify_late_identifier_snapshot(connection, generation_id, snapshot)
+            existing = existing_pass_row
+            if existing is not None:
+                stored = PlannerPassReceipt(**json.loads(str(existing[0])))
+                if stored != receipt:
+                    raise ValueError("conflicting late identifier replay")
+                return stored
+            predecessor = connection.execute(
+                "SELECT output_digest FROM planner_passes WHERE generation_id = ? ORDER BY rowid DESC LIMIT 1",
+                (generation_id,),
+            ).fetchone()
+            predecessor_digest = str(predecessor[0]) if predecessor else None
+            with self._authority_write():
+                connection.execute(
+                    "INSERT INTO planner_passes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        receipt.pass_key,
+                        receipt.pass_id,
+                        receipt.pass_version,
+                        receipt.registry_digest,
+                        receipt.snapshot_digest,
+                        receipt.output_digest,
+                        evidence_json(receipt.canonical_content()),
+                        evidence_digest(
+                            {
+                                "domain": _SNAPSHOT_DOMAIN_SEPARATOR,
+                                "generation_id": generation_id,
+                                "pass_id": "late_identifiers",
+                                "snapshot": snapshot,
+                                "predecessor_output_digest": predecessor_digest,
+                            }
+                        ),
+                        predecessor_digest,
+                    ),
+                )
+                self._inject("after_c4_pass_receipt")
+                connection.executemany(
+                    "INSERT INTO planner_pass_expected_items VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        (
+                            generation_id,
+                            receipt.pass_key,
+                            str(item["key"]),
+                            str(item["kind"]),
+                            str(item["digest"]),
+                            evidence_json(item),
+                            int(str(item["key"]) in receipt.unseen_keys),
+                        )
+                        for item in cast(Sequence[Mapping[str, object]], snapshot["items"])
+                    ),
+                )
+                self._inject("after_c4_expected_items")
+            sequence = int(generation[2]) + 1
+            content = self._round_content(
+                sequence,
+                PlanPhase.LATE_IDENTIFIERS,
+                "late_identifiers",
+                policy.planner_version,
+                source_keys,
+                evidence_digest([item.digest for item in evidence]),
+                (),
+                (),
+            )
+            content_digest = _digest(content)
+            round_key = _digest({"generation_id": generation_id, "content_digest": content_digest})
+            connection.execute(
+                "INSERT INTO plan_rounds(generation_id, sequence, round_key, phase, planner_id, planner_version, "
+                "source_task_keys_json, source_evidence_digest, task_set_digest, content_digest, committed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    sequence,
+                    round_key,
+                    PlanPhase.LATE_IDENTIFIERS.value,
+                    "late_identifiers",
+                    policy.planner_version,
+                    evidence_json(source_keys),
+                    content["source_evidence_digest"],
+                    content["task_set_digest"],
+                    content_digest,
+                    committed_at,
+                ),
+            )
+            self._inject("after_c4_round")
+            cumulative = _digest(
+                [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT content_digest FROM plan_rounds WHERE generation_id = ? ORDER BY sequence",
+                        (generation_id,),
+                    )
+                ]
+            )
+            connection.execute(
+                "UPDATE generations SET plan_revision = ?, plan_digest = ?, updated_at = ? WHERE generation_id = ?",
+                (sequence, cumulative, committed_at, generation_id),
+            )
+            return receipt
+
+    @staticmethod
+    def _verify_late_identifier_snapshot(
+        connection: sqlite3.Connection, generation_id: str, snapshot: Mapping[str, object]
+    ) -> None:
+        """Rederive late candidates from complete immutable terminal source envelopes."""
+        from .discovery import DiscoveryDecision, DiscoveryObservation, DiscoveryWave
+        from .publication_discovery import derive_late_identifier_evidence
+
+        items = snapshot.get("items")
+        if not isinstance(items, Sequence):
+            raise ValueError("late identifier snapshot items changed")
+        seeds: list[PublicationSeedEvidence] = []
+        sources: dict[str, Mapping[str, object]] = {}
+        outputs: dict[tuple[str, str], Mapping[str, object]] = {}
+        for item in items:
+            if not isinstance(item, Mapping) or not isinstance(item.get("payload"), Mapping):
+                raise ValueError("late identifier snapshot envelope changed")
+            key = str(item.get("key", ""))
+            payload = cast(Mapping[str, object], item["payload"])
+            if key.startswith("seed:"):
+                content = dict(payload)
+                content["origin_kind"] = EvidenceKind(str(content["origin_kind"]))
+                seeds.append(PublicationSeedEvidence(**cast(dict, content)))
+            elif key.startswith("late-source:"):
+                task_key = str(payload.get("task_key", ""))
+                if key != f"late-source:{task_key}" or task_key in sources:
+                    raise ValueError("late identifier source membership changed")
+                sources[task_key] = payload
+            elif key.startswith("late-output:"):
+                member = (str(payload.get("author_key", "")), str(payload.get("publication_key", "")))
+                if member in outputs:
+                    raise ValueError("late identifier output membership changed")
+                outputs[member] = payload
+        expected_sources: set[str] = set()
+        for pass_id in ("broad_discovery", "venue_fallback"):
+            pass_row = connection.execute(
+                "SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
+                (generation_id, pass_id),
+            ).fetchone()
+            if pass_row is None:
+                raise ValueError("late identifier predecessor pass is absent")
+            expected_sources.update(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT json_extract(input_json, '$.payload.task_key') FROM planner_pass_expected_items "
+                    "WHERE generation_id = ? AND pass_key = ? AND item_key LIKE 'decision:%'",
+                    (generation_id, str(pass_row[0])),
+                )
+                if row[0] is not None
+            )
+        expected_sources.update(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT obligation.task_key FROM plan_obligations AS obligation JOIN plan_rounds AS round "
+                "ON round.generation_id = obligation.generation_id AND round.sequence = obligation.round_sequence "
+                "WHERE obligation.generation_id = ? AND round.planner_id = 'openalex_venue_expansion'",
+                (generation_id,),
+            )
+        )
+        if set(sources) != expected_sources:
+            raise ValueError("late identifier source membership is incomplete")
+        waves: dict[str, list[DiscoveryDecision]] = {"broad": [], "crossref": [], "openalex": []}
+        observations: list[DiscoveryObservation] = []
+        for task_key, payload in sorted(sources.items()):
+            task = Ledger._load_task(connection, generation_id, task_key)
+            live_request = task.request.key if task.request is not None else None
+            expected_identity = {
+                "applicability": task.applicability,
+                "author_key": task.author_key,
+                "identity_digest": task.identity_digest,
+                "operation": task.operation,
+                "provider": task.provider,
+                "publication_key": task.publication_key,
+                "request_key": live_request,
+                "task_key": task.key,
+            }
+            if any(payload.get(key) != value for key, value in expected_identity.items()):
+                raise ValueError("late identifier source identity changed")
+            terminal = payload.get("terminal")
+            if not isinstance(terminal, Mapping):
+                raise ValueError("late identifier terminal evidence changed")
+            reason = None
+            if task.request is None:
+                reason_value = terminal.get("applicability_reason")
+                reason = ApplicabilityReason(str(reason_value)) if reason_value else None
+            else:
+                observation = DiscoveryObservation(
+                    task,
+                    TaskDisposition(str(terminal.get("disposition", ""))),
+                    cast(Mapping[str, object], terminal.get("response", {})),
+                    bool(terminal.get("authoritative_empty")),
+                    str(terminal.get("schema_version", "")),
+                )
+                if (
+                    terminal.get("request_key") != observation.request_key
+                    or terminal.get("response_digest") != observation.response_digest
+                ):
+                    raise ValueError("late identifier observation evidence changed")
+                observations.append(observation)
+            bucket = (
+                "crossref"
+                if task.provider == "crossref" and task.operation == "venue_search"
+                else "openalex"
+                if task.provider == "openalex" and task.operation == "venue_search"
+                else "broad"
+            )
+            waves[bucket].append(DiscoveryDecision(task, reason))
+        authority = Ledger._load_discovery_authority(connection, generation_id)
+        typed_waves = tuple(
+            DiscoveryWave(tuple(waves[name]), evidence_digest(name), authority.digest)
+            for name in ("broad", "crossref", "openalex")
+        )
+        derived = derive_late_identifier_evidence(seeds, typed_waves, observations)
+        expected_outputs = {
+            (item.author_key, item.publication_key): {
+                "author_key": item.author_key,
+                "candidates": [
+                    {
+                        "digest": candidate.digest,
+                        "identity_accepted": candidate.identity_accepted,
+                        "kind": candidate.kind,
+                        "ordinal": candidate.ordinal,
+                        "request_key": candidate.request_key,
+                        "source_digest": candidate.source_digest,
+                        "value": candidate.value,
+                    }
+                    for candidate in item.candidates
+                ],
+                "publication_key": item.publication_key,
+            }
+            for item in derived
+        }
+        if evidence_json(outputs) != evidence_json(expected_outputs):
+            raise ValueError("late identifier output evidence is not independently derived")
+
+    def _commit_venue_expansion(
+        self,
+        policy: object,
+        receipt: PlannerPassReceipt,
+        seeds: Sequence[PublicationSeedEvidence],
+        authors: Mapping[str, str],
+        crossref: object,
+        *,
+        now: datetime,
+        _connection: sqlite3.Connection,
+    ) -> None:
+        """Commit the conditional OpenAlex expansion from exact Crossref decisions."""
+        from .discovery import DiscoveryObservation, DiscoveryPolicy, DiscoveryWave
+        from .publication_discovery import plan_openalex_venue_fallback
+
+        if not isinstance(policy, DiscoveryPolicy) or not isinstance(crossref, DiscoveryWave):
+            raise TypeError("venue expansion requires typed discovery evidence")
+        connection = _connection
+        generation_id = self._generation_id()
+        authority = self._load_discovery_authority(connection, generation_id)
+        if authority.policy != policy:
+            raise ValueError("venue expansion policy does not match bound authority")
+        observations: list[DiscoveryObservation] = []
+        for decision in crossref.decisions:
+            task = decision.task
+            if task.request is None:
+                continue
+            stored = connection.execute(
+                "SELECT observation.disposition, observation.response_json, observation.schema_version, "
+                "observation.authoritative_empty FROM tasks AS task JOIN observations AS observation "
+                "ON observation.generation_id = task.generation_id AND observation.request_key = task.request_key "
+                "WHERE task.generation_id = ? AND task.task_key = ?",
+                (generation_id, task.key),
+            ).fetchone()
+            if stored is None or TaskDisposition(str(stored[0])) not in _SATISFIED:
+                raise ValueError("OpenAlex venue expansion requires terminal Crossref evidence")
+            observations.append(
+                DiscoveryObservation(
+                    task,
+                    TaskDisposition(str(stored[0])),
+                    json.loads(str(stored[1])) if stored[1] is not None else {},
+                    bool(stored[3]),
+                    str(stored[2]),
+                )
+            )
+        wave = plan_openalex_venue_fallback(seeds, authors, crossref, observations, authority)
+        source_keys = tuple(sorted(decision.task.key for decision in crossref.decisions))
+        durable_digests = tuple(self._source_evidence(connection, generation_id, key)[1] for key in source_keys)
+        source_digest = durable_digests[0] if len(durable_digests) == 1 else _digest(list(durable_digests))
+        tasks = tuple(PlannedTask(decision.task, expands_plan=True) for decision in wave.decisions)
+        self.commit_reduction(
+            source_keys,
+            source_evidence_digest=source_digest,
+            publications=(),
+            tasks=tasks,
+            now=now,
+            reducer_id="openalex_venue_expansion",
+            reducer_version=policy.reducer_version,
+            _applicability_reasons={
+                decision.task.key: decision.reason
+                for decision in wave.decisions
+                if decision.task.request is None and decision.reason is not None
+            },
+            _connection=connection,
+            _allow_empty_sources=True,
+            _fault_callback=self._inject,
+        )
+        self._inject("after_c4_expansion")
 
     def _commit_known_doi_expansion(
         self,
@@ -8281,9 +8879,12 @@ class Ledger:
 
     @staticmethod
     def _verify_v6_relationships(connection: sqlite3.Connection, generation_id: str) -> None:
-        if connection.execute(
-            "SELECT 1 FROM inventory_authorities WHERE generation_id = ? LIMIT 1", (generation_id,)
-        ).fetchone() is not None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM inventory_authorities WHERE generation_id = ? LIMIT 1", (generation_id,)
+            ).fetchone()
+            is not None
+        ):
             Ledger._inventory_authority_maps(connection, generation_id)
         if (
             connection.execute(
@@ -8567,6 +9168,12 @@ class Ledger:
             )
             if not isinstance(historical_snapshot, Mapping):
                 raise AssertionError("historical planner snapshot must be a mapping")
+            if (
+                str(pass_row[1]) == "late_identifiers"
+                and receipt.get("pass_version") == "2"
+                and receipt.get("registry_digest") != _LEGACY_C3_PASS_REGISTRY_DIGEST
+            ):
+                Ledger._verify_late_identifier_snapshot(connection, generation_id, historical_snapshot)
             if receipt.get("pass_version") == "1" and receipt.get("registry_digest") == (
                 _LEGACY_C3_PASS_REGISTRY_DIGEST
             ):
@@ -8587,7 +9194,8 @@ class Ledger:
                 )
             else:
                 authoritative = _execute_authoritative_pass(str(pass_row[1]), historical_snapshot)
-            if evidence_json(authoritative.canonical_content()) != evidence_json(receipt):
+            stored_receipt = PlannerPassReceipt(**receipt)
+            if not _receipt_matches_authority(stored_receipt, authoritative):
                 raise ValueError("planner pass receipt is not code-authoritative")
             expected_authority = evidence_digest(
                 {
@@ -8732,16 +9340,16 @@ class Ledger:
                 "ORDER BY p.decision_key",
                 (generation_id, str(intent[0])),
             ).fetchall()
-            valid_remove = (
-                str(intent[4]) == IntentKind.REMOVE.value and not decisions and str(intent[3]) == evidence_digest(())
+            valid_no_output = (
+                str(intent[4]) in {IntentKind.REMOVE.value} and not decisions and str(intent[3]) == evidence_digest(())
             )
             valid_emitted = (
-                str(intent[4]) != IntentKind.REMOVE.value
+                str(intent[4]) not in {IntentKind.REMOVE.value}
                 and bool(decisions)
                 and all((str(row[1]), str(row[2])) == (str(intent[1]), str(intent[2])) for row in decisions)
                 and evidence_digest([str(row[0]) for row in decisions]) == str(intent[3])
             )
-            if not valid_remove and not valid_emitted:
+            if not valid_no_output and not valid_emitted:
                 raise ValueError("intent provenance relationship is incomplete or substituted")
 
     @staticmethod

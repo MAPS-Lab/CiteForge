@@ -17,7 +17,9 @@ _URI = re.compile(r"(?i)(?:(?:https?|file|mailto|data|javascript|urn|tel):|//)[^
 
 
 def _normalized_secret_key(key: str) -> str:
-    return re.sub(r"[._-]+", "_", unicodedata.normalize("NFKC", key).casefold()).strip("_")
+    normalized = unicodedata.normalize("NFKC", key)
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized)
+    return re.sub(r"[._-]+", "_", normalized.casefold()).strip("_")
 
 
 _SECRET_QUERY_KEYS = frozenset(_normalized_secret_key(name) for name in REDACT_QUERY_PARAM_NAMES) | {
@@ -28,6 +30,9 @@ _SECRET_QUERY_KEYS = frozenset(_normalized_secret_key(name) for name in REDACT_Q
 }
 _SECRET_ASSIGNMENT = re.compile(r"(?i)(?<![A-Z0-9])[\"']?(?P<key>[A-Z][A-Z0-9_.-]*)[\"']?\s*[:=]")
 _SECRET_KEY_PARTS = frozenset({"authorization", "cookie", "credential", "credentials", "password", "secret", "token"})
+_SECRET_COMPOUND_KEYS = frozenset(
+    {"clientsecret", "accesstoken", "refreshtoken", "sessioncookie", "proxyauthorization"}
+)
 _SECRET_VALUE = re.compile(r"(?i)(?:\bbearer\s+[A-Z0-9._~+/-]+=*|-----BEGIN\s+(?:[A-Z]+\s+)*PRIVATE\s+KEY-----)")
 
 
@@ -53,7 +58,12 @@ def _contains_secret_assignment(text: str) -> bool:
 
 def _is_secret_query_key(key: str) -> bool:
     normalized = _normalized_secret_key(key)
-    return normalized in _SECRET_QUERY_KEYS or any(part in _SECRET_KEY_PARTS for part in normalized.split("_"))
+    compact = normalized.replace("_", "")
+    return (
+        normalized in _SECRET_QUERY_KEYS
+        or compact in _SECRET_COMPOUND_KEYS
+        or any(part in _SECRET_KEY_PARTS for part in normalized.split("_"))
+    )
 
 
 def ensure_public_https_url(url: str) -> str:
@@ -113,3 +123,11 @@ def ensure_safe_durable_text(text: str) -> None:
         raise ValueError("durable evidence contains control characters")
     for match in _URI.findall(detection_text):
         ensure_public_https_url(match.rstrip(".,;)"))
+
+
+def ensure_safe_durable_key(key: str) -> None:
+    """Reject secret-bearing mapping keys before they enter durable evidence."""
+    ensure_safe_durable_text(key)
+    detection_key = _detection_text(key)
+    if _normalized_secret_key(detection_key) != "key" and _is_secret_query_key(detection_key):
+        raise ValueError("durable evidence contains a secret-bearing key")

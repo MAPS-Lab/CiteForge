@@ -262,7 +262,7 @@ def external_ids_match(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> bo
     return False
 
 
-def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
+def normalize_arxiv_metadata(fields: dict[str, Any], *, log: Any = logger) -> dict[str, Any]:
     """
     Normalize arXiv metadata to standard BibTeX fields following best practices.
 
@@ -297,7 +297,7 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
             if not arxiv_id:
                 arxiv_id = _norm_arxiv_id(m.group(1))
             # remove arXiv ID from pages - it doesn't belong there
-            logger.debug(
+            log.debug(
                 f"PAGES_REMOVE | val={pages} | reason=contains_arxiv_id",
                 category=LogCategory.ARXIV,
                 source=LogSource.ARXIV,
@@ -318,7 +318,7 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
         if m:
             arxiv_id = _norm_arxiv_id(m.group(2))
 
-    logger.debug(
+    log.debug(
         f"ID_SOURCE | eprint={bool(fields.get('eprint'))}"
         f" | doi={bool(fields.get('doi'))}"
         f" | pages={bool(fields.get('pages'))}"
@@ -330,7 +330,7 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
     )
 
     if arxiv_id:
-        logger.debug(
+        log.debug(
             f"SET_EPRINT | id={arxiv_id} | archiveprefix=arXiv | primaryclass={primary_class or 'none'}",
             category=LogCategory.ARXIV,
             source=LogSource.ARXIV,
@@ -343,7 +343,7 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
 
         publisher_val = (fields.get("publisher") or "").strip()
         if publisher_val.lower() in _ARXIV_PUBLISHER_NAMES:
-            logger.debug(
+            log.debug(
                 f"PUBLISHER_REMOVE | val={publisher_val}",
                 category=LogCategory.ARXIV,
                 source=LogSource.ARXIV,
@@ -358,7 +358,7 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
             or bool(re.search(r"arxiv:\s*\d{4}\.\d{4,5}", journal_lower))
         )
         if is_arxiv_journal:
-            logger.debug(
+            log.debug(
                 f"JOURNAL_REMOVE | old={journal} | reason=arxiv_is_preprint",
                 category=LogCategory.ARXIV,
                 source=LogSource.ARXIV,
@@ -368,7 +368,7 @@ def normalize_arxiv_metadata(fields: dict[str, Any]) -> dict[str, Any]:
         url = fields.get("url", "")
         if not (url and "doi.org" in url.lower()):
             arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
-            logger.debug(
+            log.debug(
                 f"URL_SET | url={arxiv_url}",
                 category=LogCategory.ARXIV,
                 source=LogSource.ARXIV,

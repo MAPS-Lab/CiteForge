@@ -340,7 +340,7 @@ def test_provenance_and_intent_commit_is_atomic_exact_and_non_materializing(tmp_
         )
         for pass_id in tuple(PASSES)[:-1]:
             ledger._execute_registered_pass_compatibility_fixture(pass_id)
-        receipt = ledger.execute_registered_pass("merge_intents")
+        receipt = ledger._execute_registered_pass_compatibility_fixture("merge_intents")
         snapshot = ledger.snapshot_for_pass("merge_intents")
         inputs = tuple(
             AggregateInput(
@@ -714,6 +714,14 @@ def test_phase_scoped_claim_never_leases_ineligible_seed_task(tmp_path: Path) ->
             frozenset({task.key}),
         )
         assert claim is not None and claim.key == task.key
+
+
+@pytest.mark.parametrize("pass_id", ("venue_fallback", "late_identifiers", "merge_intents"))
+def test_c5_owned_passes_reject_generic_execution_without_partial_receipt(tmp_path: Path, pass_id: str) -> None:
+    with _open_ready(tmp_path / f"{pass_id}.db") as ledger:
+        with pytest.raises(ValueError, match="atomic publication discovery"):
+            ledger.execute_registered_pass(pass_id)
+        assert ledger._connection.execute("SELECT COUNT(*) FROM planner_passes").fetchone()[0] == 0
 
 
 def test_registered_pass_rejects_membership_drift_before_receipt_commit(
@@ -1344,6 +1352,46 @@ def test_populated_v7_legacy_bind_receipt_validates_before_v8_policy_install(tmp
             == "8"
         )
         assert migrated.execute_registered_pass("bind_corpus_seed") == legacy
+
+
+def test_populated_c4_registry_receipt_replays_under_v8(tmp_path: Path) -> None:
+    path = tmp_path / "populated-c4-registry.db"
+    with Ledger.open(path) as ledger:
+        census = _census(enabled=False)
+        spec = _generation(census)
+        ledger.create_or_resume(spec, census)
+        ledger.commit_initial_round([], source_evidence_digest="a" * 64, now=NOW)
+        ledger.transition_generation(GenerationState.PLANNING, GenerationState.RUNNING, NOW)
+        current = ledger.execute_registered_pass("bind_corpus_seed")
+
+    historical = replace(
+        current,
+        registry_digest="4aca44ec61c5f081b1fa372705434adb4413b6e02b5f981166829cd5d41d5696",
+    )
+    connection = sqlite3.connect(path)
+    update_trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'planner_passes_append_only_update'"
+    ).fetchone()[0]
+    connection.execute("DROP TRIGGER planner_passes_append_only_update")
+    connection.execute(
+        "UPDATE planner_passes SET registry_digest = ?, receipt_json = ? WHERE pass_id = ?",
+        (
+            historical.registry_digest,
+            json.dumps(dict(historical.canonical_content()), sort_keys=True, separators=(",", ":")),
+            "bind_corpus_seed",
+        ),
+    )
+    connection.execute(str(update_trigger))
+    connection.commit()
+    connection.close()
+
+    with Ledger.open(path) as migrated:
+        assert migrated.manifest().canonical_json
+        assert migrated.execute_registered_pass("bind_corpus_seed") == historical
+        assert (
+            migrated._connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
+            == "8"
+        )
 
 
 def test_v6_migration_rejects_orphaned_c2_evidence(tmp_path: Path) -> None:

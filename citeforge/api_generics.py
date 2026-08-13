@@ -605,3 +605,48 @@ def build_bibtex_from_response(response: dict[str, Any], keyhint: str, mapping: 
         arxiv_id=arxiv_id,
         extra_fields=extra_fields,
     )
+
+
+def project_entry_from_response(
+    response: dict[str, Any], keyhint: str, mapping: APIFieldMapping
+) -> dict[str, object] | None:
+    """Pure provider-mapped entry projection, matching the legacy builder fields."""
+    from .bibtex_build import build_entry_dict, determine_entry_type
+
+    title = _first_resolved_str(response, mapping.title_fields, check_placeholder=True)
+    if not title:
+        return None
+    authors = (
+        mapping.custom_author_extractor(response)
+        if mapping.custom_author_extractor
+        else extract_author_names(
+            next((v for f in mapping.author_fields if (v := _resolve_dotted(response, f))), None),
+            name_key=mapping.author_name_key or "name",
+            given_key=mapping.author_given_key,
+            family_key=mapping.author_family_key,
+        )
+    )
+    if not authors or has_placeholder(", ".join(authors)):
+        return None
+    year = (
+        mapping.custom_year_extractor(response)
+        if mapping.custom_year_extractor
+        else extract_year_from_any(response, field_names=mapping.year_fields, fallback=0) or 0
+    )
+    extra = {
+        target: value
+        for source, target in mapping.extra_field_mappings.items()
+        if (value := _resolve_dotted_str(response, source))
+    }
+    return build_entry_dict(
+        determine_entry_type(response, mapping.entry_type_field, mapping.entry_type_list_field, mapping.venue_hints),
+        title,
+        authors,
+        year,
+        keyhint,
+        _extract_venue(response, mapping),
+        _first_resolved_with_transform(response, mapping.doi_fields, find_doi_in_text),
+        _first_resolved_str(response, mapping.url_fields),
+        _first_resolved_with_transform(response, mapping.arxiv_fields, find_arxiv_in_text),
+        extra,
+    )

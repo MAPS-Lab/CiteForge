@@ -27,8 +27,7 @@ if TYPE_CHECKING:
     from .transport import SendOperation
 
 _MAX_PLAN_ROUNDS = 64
-_FIXED_EXPANSION_ROUNDS = 2
-_INVENTORY_UNION_ROUNDS = 1
+_FIXED_EXPANSION_ROUNDS = 3
 _ADAPTERS = frozenset(
     {
         "arxiv",
@@ -264,7 +263,8 @@ class DiscoveryPolicy:
             capability = capability_for(provider, operation, adapters[provider])
             if provider != "gemini" and not capability.planner_emittable:
                 raise ValueError(f"{provider} discovery capability is not planner-emittable")
-        fixed = _INVENTORY_UNION_ROUNDS + PASS_WAVE_COUNT + _FIXED_EXPANSION_ROUNDS
+        # One initial inventory page plus at most S-1 continuations is exactly S.
+        fixed = PASS_WAVE_COUNT + _FIXED_EXPANSION_ROUNDS
         round_budget = fixed + self.max_scholar_pages + self.max_html_probe_waves
         if round_budget > _MAX_PLAN_ROUNDS:
             raise ValueError("discovery round budget exceeds the fixed generation maximum")
@@ -340,7 +340,7 @@ class DoiReduction:
         )
 
 
-def _authoritatively_complete(reduction: DoiReduction, baseline_fields: Mapping[str, object]) -> bool:
+def doi_reduction_is_authoritatively_complete(reduction: DoiReduction, baseline_fields: Mapping[str, object]) -> bool:
     if reduction.status != "identity_matched":
         return False
     metadata = reduction.selected_metadata
@@ -555,7 +555,7 @@ def plan_broad_discovery(
         for provider, operation in capabilities:
             capability = capability_for(provider, operation, policy.adapter_versions[provider])
             reduction = reduction_map[(seed.author_key, seed.publication_key)]
-            complete = _authoritatively_complete(reduction, fields)
+            complete = doi_reduction_is_authoritatively_complete(reduction, fields)
             mode = "complete" if complete else resolved_modes.get(provider, "applicable")
             if mode == "complete":
                 task = TaskSpec(
@@ -847,9 +847,11 @@ def reduce_current_doi_observations(
             raise ValueError("terminal BibTeX response is malformed")
         candidate = _thaw_json(metadata)
         baseline = _thaw_json(seed_map[(reduction.author_key, reduction.publication_key)].baseline_entry)
-        if not isinstance(baseline, Mapping) or not isinstance(candidate, Mapping) or not evaluate_identity(
-            dict(baseline), dict(candidate), context=IdentityContext.ENRICHMENT
-        ).verdict:
+        if (
+            not isinstance(baseline, Mapping)
+            or not isinstance(candidate, Mapping)
+            or not evaluate_identity(dict(baseline), dict(candidate), context=IdentityContext.ENRICHMENT).verdict
+        ):
             merged.append(reduction)
             continue
         fields = metadata.get("fields")

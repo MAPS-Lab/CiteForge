@@ -16,6 +16,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from . import log_utils
 from .bibtex_build import determine_entry_type, get_container_field
 from .bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict, short_filename_for_entry
 from .config import (
@@ -157,12 +158,14 @@ def _is_preprint_doi(doi: str) -> bool:
     return is_secondary_doi(doi)
 
 
-def _pop_fields(target: dict[str, Any], field_names: set[str] | frozenset[str], log_tag: str) -> None:
+def _pop_fields(
+    target: dict[str, Any], field_names: set[str] | frozenset[str], log_tag: str, log: Any = logger
+) -> None:
     """Remove *field_names* from *target*, logging any that were actually present."""
     _sentinel = object()
     removed = [f for f in sorted(field_names) if target.pop(f, _sentinel) is not _sentinel]
     if removed:
-        logger.debug(f"{log_tag} | fields={removed}", category=LogCategory.CLEANUP)
+        log.debug(f"{log_tag} | fields={removed}", category=LogCategory.CLEANUP)
 
 
 def _invalid_pages_reason(pages_str: str) -> tuple[str, int] | None:
@@ -191,18 +194,18 @@ def _invalid_pages_reason(pages_str: str) -> tuple[str, int] | None:
 #   True  -> accept the candidate regardless of rank,
 #   False -> reject the candidate regardless of rank,
 #   None  -> fall through to the plain rank comparison.
-def _guard_doi(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+def _guard_doi(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int], log: Any = logger) -> bool | None:
     """Prefer published DOIs over preprint DOIs in both directions."""
     cur_is_preprint = _is_preprint_doi(str(cur))
     new_is_preprint = _is_preprint_doi(str(v))
     if cur_is_preprint and not new_is_preprint:
-        logger.debug(
+        log.debug(
             f"DOI_UPGRADE | preprint->published | old={cur} | new={v} | src={src}",
             category=LogCategory.MERGE,
         )
         return True
     if not cur_is_preprint and new_is_preprint:
-        logger.debug(
+        log.debug(
             f"DOI_KEEP | published beats preprint | cur={cur} | rejected={v} | src={src}",
             category=LogCategory.MERGE,
         )
@@ -210,18 +213,20 @@ def _guard_doi(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, in
     return None
 
 
-def _guard_pages(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+def _guard_pages(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int], log: Any = logger) -> bool | None:
     """Reject candidate pages that are not actual page numbers."""
     reason = _invalid_pages_reason(str(v).strip())
     if reason is not None:
         code, digits = reason
         msg = f"component_too_long({digits}digits)" if code == "overflow" else code
-        logger.debug(f"PAGES_REJECT | val={v} | reason={msg}", category=LogCategory.MERGE)
+        log.debug(f"PAGES_REJECT | val={v} | reason={msg}", category=LogCategory.MERGE)
         return False
     return None
 
 
-def _guard_journal(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+def _guard_journal(
+    cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int], log: Any = logger
+) -> bool | None:
     """Never downgrade a published journal to a preprint server."""
     # Deliberately narrower than the canonical fields-level predicate
     # text_utils._is_preprint_fields: this guard sees two bare venue strings,
@@ -231,7 +236,7 @@ def _guard_journal(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str
     cur_is_preprint = any(ps in str(cur).lower() for ps in PREPRINT_SERVERS)
     new_is_preprint = any(ps in str(v).lower() for ps in PREPRINT_SERVERS)
     if not cur_is_preprint and new_is_preprint:
-        logger.debug(
+        log.debug(
             f"JOURNAL_KEEP | published beats preprint | cur={cur} | rejected={v} | src={src}",
             category=LogCategory.MERGE,
         )
@@ -239,7 +244,9 @@ def _guard_journal(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str
     return None
 
 
-def _guard_author(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+def _guard_author(
+    cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int], log: Any = logger
+) -> bool | None:
     """Prefer more complete (less abbreviated) author lists.
 
     Never drop authors. A truncated (shorter) list must not overwrite a more
@@ -252,7 +259,7 @@ def _guard_author(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str,
     if cur_parts and new_parts and len(new_parts) < len(cur_parts):
         trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
         if trust_diff < TRUST_DIFF_OVERRIDE_THRESHOLD:
-            logger.debug(
+            log.debug(
                 f"AUTHOR_KEEP_SUPERSET | cur_n={len(cur_parts)} new_n={len(new_parts)} "
                 f"trust_diff={trust_diff} | src={src} | keeping more complete author list",
                 category=LogCategory.MERGE,
@@ -263,7 +270,7 @@ def _guard_author(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str,
         cur_inits = sum(1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
         new_inits = sum(1 for name in new_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
         if new_inits > cur_inits:
-            logger.debug(
+            log.debug(
                 f"AUTHOR_KEEP_COMPLETE | cur_initials={cur_inits} new_initials={new_inits} "
                 f"| src={src} | keeping more complete names",
                 category=LogCategory.MERGE,
@@ -275,7 +282,7 @@ def _guard_author(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str,
             cur_len = sum(len(n) for n in cur_parts)
             new_len = sum(len(n) for n in new_parts)
             if new_len < cur_len:
-                logger.debug(
+                log.debug(
                     f"AUTHOR_KEEP_LONGER | cur_len={cur_len} new_len={new_len} "
                     f"| src={src} | keeping longer author names",
                     category=LogCategory.MERGE,
@@ -284,7 +291,7 @@ def _guard_author(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str,
     return None
 
 
-def _guard_title(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+def _guard_title(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int], log: Any = logger) -> bool | None:
     """Prefer longer, more descriptive titles.
 
     Compares content length without whitespace so OCR artifacts (e.g. "Un met"
@@ -298,7 +305,7 @@ def _guard_title(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, 
     if cur_len > 0 and new_len < (cur_len * TITLE_LENGTH_KEEP_RATIO):
         trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
         if trust_diff < TRUST_DIFF_OVERRIDE_THRESHOLD:
-            logger.debug(
+            log.debug(
                 f"TITLE_KEEP_LONGER | cur_len={cur_len} new_len={new_len} "
                 f"ratio={new_len / cur_len:.2f} trust_diff={trust_diff}",
                 category=LogCategory.MERGE,
@@ -307,7 +314,9 @@ def _guard_title(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, 
     return None
 
 
-def _guard_booktitle(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int]) -> bool | None:
+def _guard_booktitle(
+    cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int], log: Any = logger
+) -> bool | None:
     """Prefer a specific conference name over a generic series name.
 
     A generic-to-specific upgrade is accepted only when the specific value is
@@ -321,14 +330,14 @@ def _guard_booktitle(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[s
     if cur_lower in GENERIC_SERIES_NAMES and new_lower not in GENERIC_SERIES_NAMES:
         trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
         if trust_diff > -TRUST_DIFF_OVERRIDE_THRESHOLD:
-            logger.debug(
+            log.debug(
                 f"BOOKTITLE_UPGRADE | generic->specific | old={str(cur)[:60]} "
                 f"| new={str(v)[:60]} | src={src} | trust_diff={trust_diff}",
                 category=LogCategory.MERGE,
             )
             return True
     if cur_lower not in GENERIC_SERIES_NAMES and new_lower in GENERIC_SERIES_NAMES:
-        logger.debug(
+        log.debug(
             f"BOOKTITLE_KEEP | specific beats generic | cur={str(cur)[:60]} | rejected={str(v)[:60]} | src={src}",
             category=LogCategory.MERGE,
         )
@@ -336,7 +345,7 @@ def _guard_booktitle(cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[s
     return None
 
 
-_FIELD_GUARDS: dict[str, Callable[[Any, Any, str, str, dict[str, int]], bool | None]] = {
+_FIELD_GUARDS: dict[str, Callable[[Any, Any, str, str, dict[str, int], Any], bool | None]] = {
     "author": _guard_author,
     "booktitle": _guard_booktitle,
     "doi": _guard_doi,
@@ -346,7 +355,20 @@ _FIELD_GUARDS: dict[str, Callable[[Any, Any, str, str, dict[str, int]], bool | N
 }
 
 
-def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+class _NullMergeLogger:
+    def debug(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+
+_NULL_MERGE_LOGGER = _NullMergeLogger()
+
+
+def merge_with_policy(
+    primary: dict[str, Any],
+    enrichers: list[tuple[str, dict[str, Any]]],
+    *,
+    emit_logs: bool = True,
+) -> dict[str, Any]:
     """
     Combine a baseline BibTeX entry with metadata from multiple sources by
     following a trust hierarchy. Replace weaker fields with stronger ones and
@@ -355,6 +377,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
     The result is a single cleaned entry that prefers reliable venues and removes
     arXiv eprint fields when a published DOI is present.
     """
+    logger = log_utils.logger if emit_logs else _NULL_MERGE_LOGGER
     fields = dict(primary.get("fields") or {})
     etype = (primary.get("type") or "misc").lower()
     type_rank = {src: i for i, src in enumerate(TRUST_ORDER)}
@@ -417,7 +440,7 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
             # booktitle) may accept or reject the candidate regardless of rank.
             guard = _FIELD_GUARDS.get(k)
             if guard is not None:
-                decision = guard(cur, v, cur_src, src, type_rank)
+                decision = guard(cur, v, cur_src, src, type_rank, logger)
                 if decision is True:
                     merged[k] = v
                     field_sources[k] = src
@@ -509,9 +532,9 @@ def merge_with_policy(primary: dict[str, Any], enrichers: list[tuple[str, dict[s
                 category=LogCategory.CLEANUP,
             )
 
-    _pop_fields(merged, DEDUP_INTERNAL_FIELDS, "dedup_fields_removed")
-    merged = normalize_arxiv_metadata(merged)
-    _pop_fields(merged, {"keywords", "copyright"}, "unwanted_removed")
+    _pop_fields(merged, DEDUP_INTERNAL_FIELDS, "dedup_fields_removed", logger)
+    merged = normalize_arxiv_metadata(merged, log=logger)
+    _pop_fields(merged, {"keywords", "copyright"}, "unwanted_removed", logger)
 
     # Strip trailing digit suffixes leaked from Scholar/DBLP author
     # disambiguation markers (e.g., "Das1" becomes "Das").

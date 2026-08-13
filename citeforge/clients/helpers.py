@@ -39,6 +39,8 @@ def _score_candidate_generic(
     cand_year: int | None,
     title_sim: Callable[[str, str], float],
     author_match: Callable[[str, Any], bool],
+    *,
+    emit_logs: bool = True,
 ) -> float:
     tsim = title_sim(target_title, cand_title)
     s = SIM_TITLE_WEIGHT * tsim
@@ -57,13 +59,14 @@ def _score_candidate_generic(
         year_bonus = SIM_YEAR_BONUS if year_in_window else 0.0
         s += year_bonus
 
-    logger.debug(
-        f"CANDIDATE | title_sim={tsim:.3f} | author_match={author_matched}"
-        f" | author_bonus={author_bonus:.2f} | year_diff={year_diff}"
-        f" | year_in_window={year_in_window} | year_bonus={year_bonus:.2f}"
-        f" | total={s:.3f}",
-        category=LogCategory.SCORE,
-    )
+    if emit_logs:
+        logger.debug(
+            f"CANDIDATE | title_sim={tsim:.3f} | author_match={author_matched}"
+            f" | author_bonus={author_bonus:.2f} | year_diff={year_diff}"
+            f" | year_in_window={year_in_window} | year_bonus={year_bonus:.2f}"
+            f" | total={s:.3f}",
+            category=LogCategory.SCORE,
+        )
     return s
 
 

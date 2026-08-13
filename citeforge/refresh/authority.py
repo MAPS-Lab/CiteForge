@@ -524,15 +524,17 @@ def _callback_for(
 ) -> Callable[[Mapping[str, object]], tuple[tuple[str, ...], tuple[str, ...]]]:
     def callback(snapshot: Mapping[str, object]) -> tuple[tuple[str, ...], tuple[str, ...]]:
         expected, _unseen = _expected_items(snapshot)
-        if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}:
+        if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback"}:
             items = snapshot.get("items", ())
             if not isinstance(items, Sequence) or isinstance(items, (str, bytes, bytearray)):
                 raise ValueError("known DOI snapshot items must be a sequence")
-            seed_keys = tuple(sorted(
-                _identifier(str(item.get("key", "")), "known DOI seed item")
-                for item in items
-                if isinstance(item, Mapping) and item.get("kind") == EvidenceKind.SEED.value
-            ))
+            seed_keys = tuple(
+                sorted(
+                    _identifier(str(item.get("key", "")), "known DOI seed item")
+                    for item in items
+                    if isinstance(item, Mapping) and item.get("kind") == EvidenceKind.SEED.value
+                )
+            )
             if len(seed_keys) != len(set(seed_keys)):
                 raise ValueError("known DOI pass requires the exact seed union")
             authority_items = [
@@ -557,6 +559,26 @@ def _callback_for(
                 if len(decisions) != len(seed_keys):
                     raise ValueError("known DOI pass output authority is incomplete")
                 return expected, seed_keys
+            if pass_id == "venue_fallback":  # noqa: S105 - planner pass identifier
+                venue_sources = tuple(
+                    sorted(
+                        _identifier(str(item.get("key", "")), "venue source item")
+                        for item in items
+                        if isinstance(item, Mapping)
+                        and str(item.get("key", "")).startswith(
+                            ("author:", "broad-decision:", "broad-observation:", "doi-reduction:")
+                        )
+                    )
+                )
+                broad_decisions = [key for key in venue_sources if key.startswith("broad-decision:")]
+                reductions = [key for key in venue_sources if key.startswith("doi-reduction:")]
+                if seed_keys and (
+                    len(decisions) != len(seed_keys)
+                    or len(reductions) != len(seed_keys)
+                    or len(broad_decisions) != 8 * len(seed_keys)
+                ):
+                    raise ValueError("venue fallback source or output authority is incomplete")
+                return expected, venue_sources
             source_prefix = (
                 "doi-reduction:"
                 if pass_id == "broad_discovery"  # noqa: S105 - planner pass identifier
@@ -572,6 +594,28 @@ def _callback_for(
             if (not source_keys or not decisions) and seed_keys:
                 raise ValueError("discovery pass source or output authority is incomplete")
             return expected, source_keys
+        if pass_id == "late_identifiers":  # noqa: S105 - planner pass identifier
+            items = snapshot.get("items", ())
+            if not isinstance(items, Sequence) or isinstance(items, (str, bytes, bytearray)):
+                raise ValueError("late identifier snapshot items must be a sequence")
+            seed_keys = tuple(
+                str(item.get("key"))
+                for item in items
+                if isinstance(item, Mapping) and item.get("kind") == EvidenceKind.SEED.value
+            )
+            sources = tuple(
+                str(item.get("key"))
+                for item in items
+                if isinstance(item, Mapping) and str(item.get("key", "")).startswith("late-source:")
+            )
+            outputs = tuple(
+                str(item.get("key"))
+                for item in items
+                if isinstance(item, Mapping) and str(item.get("key", "")).startswith("late-output:")
+            )
+            if len(outputs) != len(seed_keys) or (seed_keys and not sources):
+                raise ValueError("late identifier source or output authority is incomplete")
+            return expected, tuple(sorted(sources))
         return expected, expected
 
     return callback
@@ -582,20 +626,38 @@ _PRIVATE_PASSES = MappingProxyType(
     {
         pass_id: PassDefinition(
             pass_id,
-            "2" if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"} else "1",
+            "2"
+            if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback", "late_identifiers"}
+            else "1",
             f"{pass_id}.callback",
-            "2" if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"} else "1",
+            "2"
+            if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback", "late_identifiers"}
+            else "1",
             pass_id,
             ordinal,
             "task5c-fixed-waves-v1",
             (
                 "task5c4-discovery-policy-v2"
-                if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}
+                if pass_id
+                in {
+                    "known_doi",
+                    "broad_discovery",
+                    "dynamic_expansion",
+                    "venue_fallback",
+                    "late_identifiers",
+                }
                 else "task5c-evidence-policy-v1"
             ),
             (
                 "task5c4-discovery-snapshot-v2"
-                if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion"}
+                if pass_id
+                in {
+                    "known_doi",
+                    "broad_discovery",
+                    "dynamic_expansion",
+                    "venue_fallback",
+                    "late_identifiers",
+                }
                 else "task5c-snapshot-v1"
             ),
             "task5c-provenance-v1",
