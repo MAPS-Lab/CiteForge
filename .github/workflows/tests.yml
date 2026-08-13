@@ -68,11 +68,18 @@ jobs:
     # source tree cannot satisfy the import instead.
     - name: Smoke-test installed wheel
       run: |
+        # set -e and the guarded cd both matter. The whole point of this step is
+        # to import from somewhere the source tree cannot satisfy the import, so
+        # a cd that failed silently would leave the checkout as the working
+        # directory and the step would pass against exactly what it exists to
+        # rule out.
+        set -euo pipefail
         smoke_dir="$(mktemp -d)"
         python -m venv "$smoke_dir/venv"
         "$smoke_dir/venv/bin/pip" install --require-hashes -r requirements.lock
         "$smoke_dir/venv/bin/pip" install --no-deps /tmp/citeforge-wheel/*.whl
-        cd "$smoke_dir"
+        cd "$smoke_dir" || exit 1
+        [ "$PWD" != "$GITHUB_WORKSPACE" ] || { echo "::error::smoke test is running inside the checkout"; exit 1; }
         "$smoke_dir/venv/bin/python" -c "import citeforge, citeforge.cli"
         "$smoke_dir/venv/bin/citeforge" --help
 
