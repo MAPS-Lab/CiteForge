@@ -21,7 +21,7 @@ from ..api_configs import (
 from ..api_generics import project_entry_from_response
 from ..bibtex_build import create_scoring_function, format_author_field
 from ..canonicalize import CanonicalStage, canonicalize
-from ..config import PUB_PARSE_TIER1_MIN_CONFIDENCE, TRUST_ORDER
+from ..config import BIBTEX_KEY_MAX_WORDS, PUB_PARSE_TIER1_MIN_CONFIDENCE, TRUST_ORDER
 from ..id_utils import find_doi_in_text, normalize_doi
 from ..identity import IdentityContext, evaluate_identity
 from ..merge_utils import merge_with_policy
@@ -36,7 +36,13 @@ from .authority import (
     PublicationSeedEvidence,
     evidence_digest,
 )
-from .capabilities import capability_for
+from .capabilities import (
+    GEMINI_GENERATION_CONFIG,
+    GEMINI_MODEL_ID,
+    GEMINI_PROMPT_VERSION,
+    build_request,
+    capability_for,
+)
 from .discovery import (
     ApplicabilityReason,
     DiscoveryAuthority,
@@ -77,6 +83,28 @@ _VENUE_IDENTITY_POLICY_VERSION = "enrichment-v1"
 _MERGE_REDUCER_VERSION = "task5c5-merge-v1"
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _LATE_IDENTIFIER_KINDS = frozenset({"arxiv", "doi", "openalex_id", "pmid", "s2_corpus_id", "s2_paper_id", "url_sha256"})
+_NAMING_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "of",
+        "on",
+        "the",
+        "through",
+        "to",
+        "using",
+        "via",
+        "with",
+    }
+)
+_NAMING_REDUCER_VERSION = "citation-key-fragment-v1"
 
 
 def _validate_durable_strings(value: object) -> None:
@@ -268,21 +296,7 @@ def project_merge_sources(
         for ordinal, record in enumerate(values):
             if not isinstance(record, Mapping):
                 raise ValueError("merge projection record changed")
-            mapping = {
-                "arxiv": ARXIV_FIELD_MAPPING,
-                "crossref": CROSSREF_FIELD_MAPPING,
-                "openalex": OPENALEX_FIELD_MAPPING,
-                "openreview": OPENREVIEW_FIELD_MAPPING,
-                "s2": S2_FIELD_MAPPING,
-            }.get(task.provider)
-            try:
-                entry = (
-                    project_entry_from_response(dict(record), task.publication_key, mapping)
-                    if mapping is not None
-                    else _project_unmapped_record(task.provider, record, task.publication_key)
-                )
-            except (AttributeError, TypeError, ValueError):
-                entry = None
+            entry = _project_provider_record(task.provider, record, task.publication_key)
             rejected = entry is None
             if entry is None:
                 entry = {"type": "misc", "key": task.publication_key, "fields": {}}
@@ -320,6 +334,8 @@ def project_merge_sources(
 
 
 def _normalized_response_records(provider: str, response: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    if provider == "web" and set(response) == {"doi"}:
+        return (response,)
     records = response.get("records")
     if records is not None:
         if provider != "pubmed" or not isinstance(records, Mapping):
@@ -334,11 +350,29 @@ def _normalized_response_records(provider: str, response: Mapping[str, object]) 
         (
             value
             for key in ("metadata", "entry", "results", "entries", "articles", "notes")
-            if isinstance((value := response.get(key)), (Mapping, tuple))
+            if isinstance((value := response.get(key)), (Mapping, tuple, list))
         ),
         (),
     )
-    return (members,) if isinstance(members, Mapping) else members
+    return (members,) if isinstance(members, Mapping) else tuple(members)
+
+
+def _project_provider_record(provider: str, record: Mapping[str, object], keyhint: str) -> dict[str, object] | None:
+    mapping = {
+        "arxiv": ARXIV_FIELD_MAPPING,
+        "crossref": CROSSREF_FIELD_MAPPING,
+        "openalex": OPENALEX_FIELD_MAPPING,
+        "openreview": OPENREVIEW_FIELD_MAPPING,
+        "s2": S2_FIELD_MAPPING,
+    }.get(provider)
+    try:
+        return (
+            project_entry_from_response(dict(record), keyhint, mapping)
+            if mapping is not None
+            else _project_unmapped_record(provider, record, keyhint)
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _pubmed_article_doi(record: Mapping[str, object]) -> str | None:
@@ -361,29 +395,55 @@ def _project_unmapped_record(provider: str, record: Mapping[str, object], keyhin
         return dict(entry) if isinstance(entry, Mapping) and isinstance(entry.get("fields"), Mapping) else None
     if provider == "doi_csl":
         title = record.get("title")
+        if isinstance(title, (list, tuple)):
+            title = title[0] if title else None
         if not isinstance(title, str) or not title.strip():
             return None
-        entry = _candidate_entry(record)
-        fields = cast(dict[str, object], entry["fields"])
-        if isinstance(fields.get("author"), list):
-            fields["author"] = format_author_field(cast(list[str], fields["author"])) or ""
+        plain = _thaw(record)
+        if not isinstance(plain, Mapping):
+            return None
+        fields: dict[str, object] = {"title": title.strip()}
+        author_members = plain.get("author")
+        authors = []
+        if isinstance(author_members, list):
+            for author in author_members:
+                if not isinstance(author, Mapping):
+                    continue
+                literal = str(author.get("literal") or "").strip()
+                given = str(author.get("given") or "").strip()
+                family = str(author.get("family") or "").strip()
+                value = literal or " ".join(item for item in (given, family) if item)
+                if value:
+                    authors.append(value)
+        if authors:
+            fields["author"] = format_author_field(authors) or ""
+        year = extract_year_from_any(
+            plain,
+            field_names=["issued", "published-print", "published-online"],
+            fallback=None,
+        )
+        if year is not None:
+            fields["year"] = str(year)
+        doi = normalize_doi(str(record.get("DOI") or ""))
+        if doi is not None:
+            fields["doi"] = doi
         for source, target in (("publisher", "publisher"), ("container-title", "journal")):
-            value = record.get(source)
-            if isinstance(value, (list, tuple)):
-                value = value[0] if value else None
-            if isinstance(value, str) and value.strip():
-                fields[target] = value.strip()
-        return entry
+            field_value = record.get(source)
+            if isinstance(field_value, (list, tuple)):
+                field_value = field_value[0] if field_value else None
+            if isinstance(field_value, str) and field_value.strip():
+                fields[target] = field_value.strip()
+        return {"type": "misc", "key": keyhint, "fields": fields}
     if provider == "pubmed":
-        authors = record.get("authors")
+        pubmed_authors = record.get("authors")
         normalized = dict(record)
         normalized["authors"] = (
             [
                 item["name"]
-                for item in authors
+                for item in pubmed_authors
                 if isinstance(item, Mapping) and isinstance(item.get("name"), str) and item["name"].strip()
             ]
-            if isinstance(authors, (list, tuple))
+            if isinstance(pubmed_authors, (list, tuple))
             else []
         )
         normalized["year"] = record.get("pubdate")
@@ -401,9 +461,9 @@ def _project_unmapped_record(provider: str, record: Mapping[str, object], keyhin
             ("issue", "number"),
             ("pages", "pages"),
         ):
-            value = record.get(source)
-            if isinstance(value, str) and value.strip():
-                fields.setdefault(target, value.strip())
+            field_value = record.get(source)
+            if isinstance(field_value, str) and field_value.strip():
+                fields.setdefault(target, field_value.strip())
         doi = _pubmed_article_doi(record)
         if doi is not None:
             fields["doi"] = doi
@@ -417,9 +477,9 @@ def _project_unmapped_record(provider: str, record: Mapping[str, object], keyhin
         if isinstance(fields.get("author"), list):
             fields["author"] = format_author_field(cast(list[str], fields["author"])) or ""
         for source, target in (("pmid", "pmid"), ("journalTitle", "journal"), ("doi", "doi")):
-            value = record.get(source)
-            if isinstance(value, str) and value.strip():
-                fields[target] = value.strip()
+            field_value = record.get(source)
+            if isinstance(field_value, str) and field_value.strip():
+                fields[target] = field_value.strip()
         return entry
     if provider == "serply":
         entry = _candidate_entry(record)
@@ -427,9 +487,9 @@ def _project_unmapped_record(provider: str, record: Mapping[str, object], keyhin
         if isinstance(fields.get("author"), list):
             fields["author"] = format_author_field(cast(list[str], fields["author"])) or ""
         for source, target in (("publication", "journal"), ("link", "url")):
-            value = record.get(source)
-            if isinstance(value, str) and value.strip():
-                fields[target] = value.strip()
+            field_value = record.get(source)
+            if isinstance(field_value, str) and field_value.strip():
+                fields[target] = field_value.strip()
         return entry
     return None
 
@@ -519,6 +579,263 @@ class NamingEvidence:
         if not fields or len(fields) != len(set(fields)):
             raise ValueError("naming evidence fields changed")
         object.__setattr__(self, "final_fields", fields)
+
+
+@dataclass(frozen=True)
+class CitationKeyFragmentEvidence:
+    """Terminal C6 citation-key fragment authority, deliberately excluding filenames."""
+
+    author_key: str
+    publication_key: str
+    fragment: str
+    source: str
+    source_task_key: str
+    source_receipt_digest: str
+    reducer_version: str = _NAMING_REDUCER_VERSION
+    digest: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.source not in {"deterministic", "gemini", "gemini-fallback"}:
+            raise ValueError("citation fragment source changed")
+        if (
+            not _DIGEST_RE.fullmatch(self.source_task_key)
+            or not _DIGEST_RE.fullmatch(self.source_receipt_digest)
+            or self.reducer_version != _NAMING_REDUCER_VERSION
+        ):
+            raise ValueError("citation fragment authority changed")
+        _validate_citation_fragment(self.fragment, enforce_word_bound=self.source == "gemini")
+        for value in (self.author_key, self.publication_key, self.fragment, self.source):
+            ensure_safe_durable_text(value)
+        object.__setattr__(
+            self,
+            "digest",
+            evidence_digest(
+                {
+                    "author_key": self.author_key,
+                    "fragment": self.fragment,
+                    "publication_key": self.publication_key,
+                    "reducer_version": self.reducer_version,
+                    "source": self.source,
+                    "source_receipt_digest": self.source_receipt_digest,
+                    "source_task_key": self.source_task_key,
+                }
+            ),
+        )
+
+
+def _validate_citation_fragment(fragment: str, *, enforce_word_bound: bool = True) -> None:
+    if (
+        not isinstance(fragment, str)
+        or not fragment
+        or len(fragment) > 100
+        or not re.fullmatch(r"[A-Z][A-Za-z0-9]*", fragment)
+        or (enforce_word_bound and sum(character.isupper() for character in fragment) > BIBTEX_KEY_MAX_WORDS)
+    ):
+        raise ValueError("Gemini citation fragment is not canonical")
+
+
+def _deterministic_citation_fragment(title: str) -> str:
+    words = [word for word in re.split(r"[^A-Za-z0-9]+", title) if word]
+    selected = [word for word in words if word.casefold() not in _NAMING_STOP_WORDS][:BIBTEX_KEY_MAX_WORDS]
+    if not selected:
+        selected = words[:BIBTEX_KEY_MAX_WORDS]
+    fragment = "".join(word[:1].upper() + word[1:] for word in selected) or "Title"
+    _validate_citation_fragment(fragment, enforce_word_bound=False)
+    return fragment
+
+
+def _naming_members(
+    merged: Sequence[MergedPublicationEvidence], survivor_reduction: SurvivorReduction
+) -> tuple[tuple[MergedPublicationEvidence, ...], dict[tuple[str, str], SurvivorDecision]]:
+    ordered = tuple(sorted(merged, key=lambda item: (item.author_key, item.publication_key)))
+    merged_map = {(item.author_key, item.publication_key): item for item in ordered}
+    decisions = {(item.author_key, item.publication_key): item for item in survivor_reduction.decisions}
+    if (
+        len(merged_map) != len(ordered)
+        or len(decisions) != len(survivor_reduction.decisions)
+        or set(decisions) != set(merged_map)
+        or any(decisions[key].merged_digest != item.digest for key, item in merged_map.items())
+    ):
+        raise ValueError("Gemini naming survivor membership changed")
+    return ordered, decisions
+
+
+def _merged_title(item: MergedPublicationEvidence) -> str:
+    fields = item.final_entry.get("fields")
+    title = fields.get("title") if isinstance(fields, Mapping) else None
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("Gemini naming title authority changed")
+    return title.strip()
+
+
+def plan_gemini_naming(
+    merged: Sequence[MergedPublicationEvidence],
+    survivor_reduction: SurvivorReduction,
+    authority: DiscoveryAuthority,
+) -> DiscoveryWave:
+    """Plan one exact Gemini task or typed NA for every emitted survivor."""
+    ordered, survivor_map = _naming_members(merged, survivor_reduction)
+    capability = capability_for("gemini", "short_title", authority.policy.adapter_versions["gemini"])
+    mode = authority.resolved_provider_modes["gemini"]
+    decisions: list[DiscoveryDecision] = []
+    emitted: list[MergedPublicationEvidence] = []
+    for item in ordered:
+        if survivor_map[(item.author_key, item.publication_key)].disposition is not SurvivorDisposition.EMITTED:
+            continue
+        emitted.append(item)
+        if mode in {"disabled", "if_configured"}:
+            reason = (
+                ApplicabilityReason.PROVIDER_DISABLED
+                if mode == "disabled"
+                else ApplicabilityReason.PROVIDER_NOT_CONFIGURED
+            )
+            decisions.append(
+                DiscoveryDecision(
+                    TaskSpec(
+                        item.author_key,
+                        item.publication_key,
+                        capability.logical_source,
+                        capability.operation,
+                        None,
+                        applicability="not_applicable",
+                    ),
+                    reason,
+                )
+            )
+            continue
+        request = RequestSpec(
+            capability.logical_source,
+            capability.operation,
+            capability.method,
+            {
+                "generation_config": GEMINI_GENERATION_CONFIG,
+                "max_words": BIBTEX_KEY_MAX_WORDS,
+                "model_id": GEMINI_MODEL_ID,
+                "prompt_version": GEMINI_PROMPT_VERSION,
+                "title": _merged_title(item),
+            },
+            capability.requested_fields,
+            capability.adapter_version,
+            authority.policy.freshness_epoch,
+            capability.quota_scope,
+        )
+        decisions.append(
+            DiscoveryDecision(
+                TaskSpec(
+                    item.author_key,
+                    item.publication_key,
+                    capability.logical_source,
+                    capability.operation,
+                    request,
+                )
+            )
+        )
+    return DiscoveryWave(
+        tuple(sorted(decisions, key=lambda item: item.task.key)),
+        evidence_digest(
+            {
+                "emitted": [item.digest for item in emitted],
+                "naming_policy": {
+                    "max_words": BIBTEX_KEY_MAX_WORDS,
+                    "reducer_version": _NAMING_REDUCER_VERSION,
+                },
+                "survivors": survivor_reduction.digest,
+            }
+        ),
+        authority.digest,
+    )
+
+
+def _gemini_fragment(response: Mapping[str, object]) -> str:
+    candidates = response.get("candidates")
+    if not isinstance(candidates, tuple) or len(candidates) != 1 or not isinstance(candidates[0], Mapping):
+        raise ValueError("Gemini citation fragment candidate membership changed")
+    content = candidates[0].get("content")
+    parts = content.get("parts") if isinstance(content, Mapping) else None
+    if not isinstance(parts, tuple) or len(parts) != 1 or not isinstance(parts[0], Mapping):
+        raise ValueError("Gemini citation fragment part membership changed")
+    fragment = parts[0].get("text")
+    if not isinstance(fragment, str):
+        raise ValueError("Gemini citation fragment is not canonical")
+    _validate_citation_fragment(fragment)
+    return fragment
+
+
+def reduce_gemini_naming(
+    merged: Sequence[MergedPublicationEvidence],
+    survivor_reduction: SurvivorReduction,
+    wave: DiscoveryWave,
+    observations: Sequence[DiscoveryObservation],
+    authority: DiscoveryAuthority,
+) -> tuple[CitationKeyFragmentEvidence, ...]:
+    """Reduce exact Gemini output or a policy-bound deterministic fragment fallback."""
+    ordered, survivor_map = _naming_members(merged, survivor_reduction)
+    canonical = plan_gemini_naming(ordered, survivor_reduction, authority)
+    if canonical != wave:
+        raise ValueError("Gemini naming wave authority changed")
+    applicable = {item.task.key: item.task for item in canonical.decisions if item.task.request is not None}
+    observed = {item.task.key: item for item in observations}
+    if len(observed) != len(observations) or set(observed) != set(applicable):
+        raise ValueError("Gemini naming observation membership changed")
+    decisions = {(item.task.author_key, item.task.publication_key): item for item in canonical.decisions}
+    schema = capability_for("gemini", "short_title", authority.policy.adapter_versions["gemini"]).decoder_schema
+    policy_mode = authority.policy.provider_modes["gemini"]
+    evidence: list[CitationKeyFragmentEvidence] = []
+    for item in ordered:
+        member = (item.author_key, item.publication_key)
+        if survivor_map[member].disposition is not SurvivorDisposition.EMITTED:
+            continue
+        decision = decisions[member]
+        task = decision.task
+        if task.request is None:
+            fragment = _deterministic_citation_fragment(_merged_title(item))
+            source = "deterministic"
+            receipt = evidence_digest(
+                {
+                    "decision_reason": decision.reason.value if decision.reason is not None else None,
+                    "fragment": fragment,
+                    "task_identity": task.identity_digest,
+                }
+            )
+        else:
+            observation = observed[task.key]
+            if observation.task != task or observation.schema_version != schema:
+                raise ValueError("Gemini naming observation authority changed")
+            if observation.disposition is TaskDisposition.SUCCEEDED:
+                fragment = _gemini_fragment(observation.response)
+                source = "gemini"
+            else:
+                if observation.disposition in {
+                    TaskDisposition.PENDING,
+                    TaskDisposition.LEASED,
+                    TaskDisposition.RETRY_WAIT,
+                }:
+                    raise ValueError("Gemini naming evidence is not terminal")
+                if policy_mode == "required":
+                    raise ValueError("required Gemini naming evidence is blocking")
+                fragment = _deterministic_citation_fragment(_merged_title(item))
+                source = "gemini-fallback"
+            receipt = evidence_digest(
+                {
+                    "disposition": observation.disposition.value,
+                    "fragment": fragment,
+                    "response_digest": observation.response_digest,
+                    "schema_version": observation.schema_version,
+                    "source": source,
+                    "task_identity": task.identity_digest,
+                }
+            )
+        evidence.append(
+            CitationKeyFragmentEvidence(
+                item.author_key,
+                item.publication_key,
+                fragment,
+                source,
+                task.key,
+                receipt,
+            )
+        )
+    return tuple(sorted(evidence, key=lambda item: (item.author_key, item.publication_key)))
 
 
 class SurvivorDisposition(str, Enum):
@@ -1477,10 +1794,14 @@ def derive_late_identifier_evidence(
             for ordinal, candidate in enumerate(response_members):
                 if not isinstance(candidate, Mapping):
                     continue
-                verdict = evaluate_identity(
-                    baseline, _candidate_entry(candidate), context=IdentityContext.ENRICHMENT
-                ).verdict
+                projected = _project_provider_record(observation.task.provider, candidate, seed.publication_key)
+                verdict = bool(
+                    projected is not None
+                    and evaluate_identity(baseline, projected, context=IdentityContext.ENRICHMENT).verdict
+                )
                 identifiers, urls = _accepted_identifiers(candidate)
+                if observation.task.provider == "web" and "doi" in identifiers:
+                    verdict = True
                 for kind, value in sorted(identifiers.items()):
                     candidates.append(
                         LateIdentifierCandidate(
@@ -1505,6 +1826,672 @@ def derive_late_identifier_evidence(
                 )
         evidence.append(LateIdentifierEvidence(seed.author_key, seed.publication_key, tuple(candidates)))
     return tuple(evidence)
+
+
+@dataclass(frozen=True)
+class LateDoiSourceEvidence:
+    """One normalized deterministic or HTML DOI claim retained for revalidation."""
+
+    doi: str | None
+    source_kind: str
+    source_digest: str
+    request_key: str | None
+    ordinal: int
+    digest: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        doi = normalize_doi(self.doi) if self.doi is not None else None
+        if (doi is None and self.doi is not None) or (doi is not None and find_doi_in_text(doi) != doi):
+            raise ValueError("late DOI source changed")
+        if self.source_kind not in {"deterministic", "html"}:
+            raise ValueError("late DOI source kind changed")
+        if doi is None and self.source_kind != "html":
+            raise ValueError("only HTML DOI evidence may be absent")
+        if (
+            not _DIGEST_RE.fullmatch(self.source_digest)
+            or (self.request_key is not None and not _DIGEST_RE.fullmatch(self.request_key))
+            or isinstance(self.ordinal, bool)
+            or not isinstance(self.ordinal, int)
+            or self.ordinal < 0
+        ):
+            raise ValueError("late DOI source authority changed")
+        object.__setattr__(self, "doi", doi)
+        object.__setattr__(
+            self,
+            "digest",
+            evidence_digest(
+                {
+                    "doi": doi,
+                    "ordinal": self.ordinal,
+                    "request_key": self.request_key,
+                    "source_digest": self.source_digest,
+                    "source_kind": self.source_kind,
+                }
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class LateDoiEvidence:
+    """Exact normalized late DOI union for one stable publication member."""
+
+    author_key: str
+    publication_key: str
+    doi: str | None
+    sources: tuple[LateDoiSourceEvidence, ...]
+    digest: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        sources = tuple(
+            sorted(
+                self.sources,
+                key=lambda item: (
+                    item.doi or "",
+                    item.source_kind,
+                    item.source_digest,
+                    item.request_key or "",
+                    item.ordinal,
+                ),
+            )
+        )
+        if len({item.digest for item in sources}) != len(sources):
+            raise ValueError("duplicate late DOI source")
+        normalized = normalize_doi(self.doi) if self.doi is not None else None
+        source_dois = {item.doi for item in sources if item.doi is not None}
+        if (normalized is None and source_dois) or (normalized is not None and source_dois != {normalized}):
+            raise ValueError("late DOI source union changed")
+        object.__setattr__(self, "doi", normalized)
+        object.__setattr__(self, "sources", sources)
+        object.__setattr__(
+            self,
+            "digest",
+            evidence_digest(
+                {
+                    "author_key": self.author_key,
+                    "doi": normalized,
+                    "publication_key": self.publication_key,
+                    "sources": [item.digest for item in sources],
+                }
+            ),
+        )
+
+
+def derive_late_doi_evidence(
+    seeds: Sequence[PublicationSeedEvidence],
+    late_identifiers: Sequence[LateIdentifierEvidence],
+    html_waves: Sequence[DiscoveryWave],
+    html_observations: Sequence[DiscoveryObservation],
+) -> tuple[LateDoiEvidence, ...]:
+    """Union accepted deterministic and terminal HTML DOI evidence exactly once."""
+    ordered = tuple(sorted(seeds, key=lambda item: (item.author_key, item.publication_key)))
+    members = {(item.author_key, item.publication_key) for item in ordered}
+    late_map = {(item.author_key, item.publication_key): item for item in late_identifiers}
+    if len(members) != len(ordered) or len(late_map) != len(late_identifiers) or set(late_map) != members:
+        raise ValueError("late DOI member authority changed")
+
+    html_tasks: dict[str, TaskSpec] = {}
+    for wave in html_waves:
+        decisions = {(item.task.author_key, item.task.publication_key): item for item in wave.decisions}
+        if len(decisions) != len(wave.decisions) or set(decisions) != members:
+            raise ValueError("late DOI HTML decision membership changed")
+        for decision in wave.decisions:
+            task = decision.task
+            if task.provider != "web" or task.operation != "doi_probe":
+                raise ValueError("late DOI HTML task authority changed")
+            if task.request is not None:
+                if task.key in html_tasks:
+                    raise ValueError("duplicate late DOI HTML task")
+                html_tasks[task.key] = task
+    observed = {item.task.key: item for item in html_observations}
+    if len(observed) != len(html_observations) or set(observed) != set(html_tasks):
+        raise ValueError("late DOI HTML observation membership changed")
+
+    sources_by_member: dict[tuple[str, str], list[LateDoiSourceEvidence]] = {member: [] for member in members}
+    for member, late in sorted(late_map.items()):
+        for candidate in late.candidates:
+            if candidate.kind == "doi" and candidate.identity_accepted:
+                sources_by_member[member].append(
+                    LateDoiSourceEvidence(
+                        candidate.value,
+                        "deterministic",
+                        candidate.source_digest,
+                        candidate.request_key,
+                        candidate.ordinal,
+                    )
+                )
+    html_schema = capability_for("web", "doi_probe", "1").decoder_schema
+    for task_key, task in sorted(html_tasks.items()):
+        observation = observed[task_key]
+        if (
+            observation.task != task
+            or observation.schema_version != html_schema
+            or observation.disposition is not TaskDisposition.SUCCEEDED
+        ):
+            raise ValueError("late DOI HTML observation authority changed")
+        value = observation.response.get("doi")
+        doi = normalize_doi(value) if isinstance(value, str) else None
+        if (
+            set(observation.response) != {"doi"}
+            or (value is not None and (doi is None or find_doi_in_text(doi) != doi))
+            or task.request is None
+            or task.publication_key is None
+        ):
+            raise ValueError("late DOI HTML response changed")
+        sources_by_member[(task.author_key, task.publication_key)].append(
+            LateDoiSourceEvidence(doi, "html", observation.response_digest, task.request.key, 0)
+        )
+
+    evidence: list[LateDoiEvidence] = []
+    for seed in ordered:
+        sources = tuple(sources_by_member[(seed.author_key, seed.publication_key)])
+        dois = {item.doi for item in sources if item.doi is not None}
+        if len(dois) > 1:
+            raise ValueError("late DOI candidates conflict")
+        evidence.append(
+            LateDoiEvidence(
+                seed.author_key,
+                seed.publication_key,
+                next(iter(dois)) if dois else None,
+                sources,
+            )
+        )
+    return tuple(evidence)
+
+
+def _late_doi_evidence_map(
+    seeds: Sequence[PublicationSeedEvidence], evidence: Sequence[LateDoiEvidence]
+) -> tuple[tuple[PublicationSeedEvidence, ...], dict[tuple[str, str], LateDoiEvidence]]:
+    ordered = tuple(sorted(seeds, key=lambda item: (item.author_key, item.publication_key)))
+    evidence_map = {(item.author_key, item.publication_key): item for item in evidence}
+    members = {(item.author_key, item.publication_key) for item in ordered}
+    if len(members) != len(ordered) or len(evidence_map) != len(evidence) or set(evidence_map) != members:
+        raise ValueError("late DOI evidence membership changed")
+    return ordered, evidence_map
+
+
+def _known_seed_doi(seed: PublicationSeedEvidence) -> str | None:
+    value = seed.exact_identifiers.get("doi")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("known DOI seed authority changed")
+    doi = normalize_doi(value)
+    if doi is None or find_doi_in_text(doi) != doi:
+        raise ValueError("known DOI seed authority changed")
+    return doi
+
+
+def plan_late_doi_csl(
+    seeds: Sequence[PublicationSeedEvidence],
+    evidence: Sequence[LateDoiEvidence],
+    authority: DiscoveryAuthority,
+) -> DiscoveryWave:
+    """Plan one exact CSL decision for every stable late-DOI publication member."""
+    ordered, evidence_map = _late_doi_evidence_map(seeds, evidence)
+    capability = capability_for("doi_csl", "csl_lookup", authority.policy.adapter_versions["doi_csl"])
+    decisions: list[DiscoveryDecision] = []
+    for seed in ordered:
+        item = evidence_map[(seed.author_key, seed.publication_key)]
+        known = _known_seed_doi(seed)
+        if item.doi is None:
+            reason = (
+                ApplicabilityReason.REDUNDANT_AUTHORITATIVE_EVIDENCE
+                if known is not None
+                else ApplicabilityReason.NO_APPLICABLE_IDENTIFIER
+            )
+            decisions.append(_na(seed, capability.logical_source, capability.operation, reason))
+            continue
+        if item.doi == known:
+            decisions.append(
+                _na(
+                    seed,
+                    capability.logical_source,
+                    capability.operation,
+                    ApplicabilityReason.REDUNDANT_AUTHORITATIVE_EVIDENCE,
+                )
+            )
+            continue
+        request = RequestSpec(
+            capability.logical_source,
+            capability.operation,
+            capability.method,
+            {"doi": item.doi},
+            capability.requested_fields,
+            capability.adapter_version,
+            authority.policy.freshness_epoch,
+            capability.quota_scope,
+        )
+        decisions.append(
+            DiscoveryDecision(
+                TaskSpec(
+                    seed.author_key,
+                    seed.publication_key,
+                    capability.logical_source,
+                    capability.operation,
+                    request,
+                )
+            )
+        )
+    return DiscoveryWave(
+        tuple(sorted(decisions, key=lambda item: item.task.key)),
+        evidence_digest(
+            {
+                "late_doi": [evidence_map[(seed.author_key, seed.publication_key)].digest for seed in ordered],
+                "seeds": [seed.canonical_content() for seed in ordered],
+            }
+        ),
+        authority.digest,
+    )
+
+
+def _reduce_late_doi_csl(
+    seeds: Sequence[PublicationSeedEvidence],
+    evidence: Sequence[LateDoiEvidence],
+    csl_wave: DiscoveryWave,
+    observations: Sequence[DiscoveryObservation],
+    authority: DiscoveryAuthority,
+) -> tuple[DoiReduction, ...]:
+    ordered, _evidence_map = _late_doi_evidence_map(seeds, evidence)
+    canonical = plan_late_doi_csl(ordered, evidence, authority)
+    if csl_wave != canonical:
+        raise ValueError("late DOI CSL wave authority changed")
+    applicable = {item.task.key: item.task for item in canonical.decisions if item.task.request is not None}
+    observed = {item.task.key: item for item in observations}
+    if len(observed) != len(observations) or set(observed) != set(applicable):
+        raise ValueError("late DOI CSL observation membership changed")
+    seed_map = {(item.author_key, item.publication_key): item for item in ordered}
+    schema = capability_for("doi_csl", "csl_lookup", authority.policy.adapter_versions["doi_csl"]).decoder_schema
+    reductions: list[DoiReduction] = []
+    for decision in canonical.decisions:
+        task = decision.task
+        publication_key = task.publication_key or ""
+        if task.request is None:
+            reductions.append(DoiReduction(task.author_key, publication_key, "no_identifier", task.key))
+            continue
+        observation = observed[task.key]
+        if (
+            observation.task != task
+            or observation.schema_version != schema
+            or observation.disposition not in {TaskDisposition.SUCCEEDED, TaskDisposition.CONFIRMED_EMPTY}
+        ):
+            raise ValueError("late DOI CSL observation authority changed")
+        status = "fallback_required"
+        metadata: Mapping[str, object] = {}
+        if observation.disposition is TaskDisposition.SUCCEEDED:
+            value = observation.response.get("metadata")
+            if not isinstance(value, Mapping):
+                raise ValueError("late DOI CSL response changed")
+            requested = task.request.normalized_payload.get("doi")
+            returned = normalize_doi(str(value.get("DOI") or requested or ""))
+            if not isinstance(requested, str) or returned != requested:
+                raise ValueError("late DOI CSL identity changed")
+            projected = _project_provider_record("doi_csl", value, publication_key)
+            baseline_value = _thaw(seed_map[(task.author_key, publication_key)].baseline_entry)
+            if not isinstance(baseline_value, Mapping):
+                raise ValueError("late DOI baseline authority changed")
+            baseline = dict(baseline_value)
+            if (
+                projected is not None
+                and evaluate_identity(baseline, projected, context=IdentityContext.ENRICHMENT).verdict
+            ):
+                status = "identity_matched"
+                metadata = value
+        reductions.append(DoiReduction(task.author_key, publication_key, status, task.key, metadata))
+    return tuple(sorted(reductions, key=lambda item: (item.author_key, item.publication_key)))
+
+
+def plan_late_doi_bibtex(
+    seeds: Sequence[PublicationSeedEvidence],
+    evidence: Sequence[LateDoiEvidence],
+    csl_wave: DiscoveryWave,
+    observations: Sequence[DiscoveryObservation],
+    authority: DiscoveryAuthority,
+) -> DiscoveryWave:
+    """Plan exact conditional BibTeX decisions after terminal late CSL evidence."""
+    ordered, _evidence_map = _late_doi_evidence_map(seeds, evidence)
+    reductions = _reduce_late_doi_csl(ordered, evidence, csl_wave, observations, authority)
+    reduction_map = {(item.author_key, item.publication_key): item for item in reductions}
+    csl_map = {(item.task.author_key, item.task.publication_key): item for item in csl_wave.decisions}
+    capability = capability_for("doi_bibtex", "bibtex_lookup", authority.policy.adapter_versions["doi_bibtex"])
+    decisions: list[DiscoveryDecision] = []
+    for seed in ordered:
+        csl_decision = csl_map[(seed.author_key, seed.publication_key)]
+        reduction = reduction_map[(seed.author_key, seed.publication_key)]
+        if csl_decision.task.request is None:
+            decisions.append(
+                _na(
+                    seed,
+                    capability.logical_source,
+                    capability.operation,
+                    csl_decision.reason or ApplicabilityReason.NO_APPLICABLE_IDENTIFIER,
+                )
+            )
+            continue
+        if reduction.status == "identity_matched":
+            decisions.append(
+                _na(
+                    seed,
+                    capability.logical_source,
+                    capability.operation,
+                    ApplicabilityReason.REDUNDANT_AUTHORITATIVE_EVIDENCE,
+                )
+            )
+            continue
+        doi = csl_decision.task.request.normalized_payload.get("doi")
+        if not isinstance(doi, str):
+            raise ValueError("late DOI CSL request identity changed")
+        request = RequestSpec(
+            capability.logical_source,
+            capability.operation,
+            capability.method,
+            {"doi": doi},
+            capability.requested_fields,
+            capability.adapter_version,
+            authority.policy.freshness_epoch,
+            capability.quota_scope,
+        )
+        decisions.append(
+            DiscoveryDecision(
+                TaskSpec(
+                    seed.author_key,
+                    seed.publication_key,
+                    capability.logical_source,
+                    capability.operation,
+                    request,
+                )
+            )
+        )
+    return DiscoveryWave(
+        tuple(sorted(decisions, key=lambda item: item.task.key)),
+        evidence_digest(
+            {
+                "csl_input": csl_wave.input_digest,
+                "late_doi": [item.digest for item in sorted(evidence, key=lambda item: item.digest)],
+                "observations": [item.response_digest for item in sorted(observations, key=lambda item: item.task.key)],
+                "reductions": [item.digest for item in reductions],
+            }
+        ),
+        authority.digest,
+    )
+
+
+def reduce_late_doi_observations(
+    seeds: Sequence[PublicationSeedEvidence],
+    evidence: Sequence[LateDoiEvidence],
+    csl_wave: DiscoveryWave,
+    csl_observations: Sequence[DiscoveryObservation],
+    bibtex_wave: DiscoveryWave,
+    bibtex_observations: Sequence[DiscoveryObservation],
+    authority: DiscoveryAuthority,
+) -> tuple[DoiReduction, ...]:
+    """Reduce terminal late CSL and conditional BibTeX evidence exactly."""
+    ordered, _evidence_map = _late_doi_evidence_map(seeds, evidence)
+    base = _reduce_late_doi_csl(ordered, evidence, csl_wave, csl_observations, authority)
+    canonical = plan_late_doi_bibtex(ordered, evidence, csl_wave, csl_observations, authority)
+    if bibtex_wave != canonical:
+        raise ValueError("late DOI BibTeX wave authority changed")
+    applicable = {item.task.key: item.task for item in canonical.decisions if item.task.request is not None}
+    observed = {item.task.key: item for item in bibtex_observations}
+    if len(observed) != len(bibtex_observations) or set(observed) != set(applicable):
+        raise ValueError("late DOI BibTeX observation membership changed")
+    seed_map = {(item.author_key, item.publication_key): item for item in ordered}
+    tasks_by_member = {(item.author_key, item.publication_key): item for item in applicable.values()}
+    schema = capability_for(
+        "doi_bibtex", "bibtex_lookup", authority.policy.adapter_versions["doi_bibtex"]
+    ).decoder_schema
+    merged: list[DoiReduction] = []
+    for reduction in base:
+        task = tasks_by_member.get((reduction.author_key, reduction.publication_key))
+        if task is None or reduction.status != "fallback_required":
+            merged.append(reduction)
+            continue
+        observation = observed[task.key]
+        if (
+            observation.task != task
+            or observation.schema_version != schema
+            or observation.disposition not in {TaskDisposition.SUCCEEDED, TaskDisposition.CONFIRMED_EMPTY}
+        ):
+            raise ValueError("late DOI BibTeX observation authority changed")
+        if observation.disposition is TaskDisposition.CONFIRMED_EMPTY:
+            merged.append(reduction)
+            continue
+        metadata = observation.response.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise ValueError("late DOI BibTeX response changed")
+        baseline_value = _thaw(seed_map[(reduction.author_key, reduction.publication_key)].baseline_entry)
+        if not isinstance(baseline_value, Mapping):
+            raise ValueError("late DOI baseline authority changed")
+        baseline = dict(baseline_value)
+        projected = _project_provider_record("doi_bibtex", metadata, reduction.publication_key)
+        projected_value = _thaw(projected) if projected is not None else None
+        if (
+            not isinstance(projected_value, Mapping)
+            or not evaluate_identity(baseline, dict(projected_value), context=IdentityContext.ENRICHMENT).verdict
+        ):
+            merged.append(reduction)
+            continue
+        fields = metadata.get("fields")
+        if not isinstance(fields, Mapping):
+            raise ValueError("late DOI BibTeX fields changed")
+        selected: dict[str, object] = {
+            "DOI": fields.get("doi"),
+            "container-title": fields.get("journal") or fields.get("booktitle"),
+            "publisher": fields.get("publisher"),
+            "title": fields.get("title"),
+        }
+        author = fields.get("author")
+        if isinstance(author, str) and author.strip():
+            selected["author"] = ({"literal": author.strip()},)
+        year = fields.get("year")
+        if isinstance(year, str) and year.isdigit():
+            selected["issued"] = {"date-parts": ((int(year),),)}
+        merged.append(
+            DoiReduction(
+                reduction.author_key,
+                reduction.publication_key,
+                "identity_matched",
+                task.key,
+                selected,
+            )
+        )
+    return tuple(sorted(merged, key=lambda item: (item.author_key, item.publication_key)))
+
+
+@dataclass(frozen=True)
+class _HtmlProbeCandidate:
+    candidate_digest: str
+    url_digest: str
+    locators: tuple[tuple[str, str, int], ...]
+    raw_url: str = field(repr=False)
+
+
+def _html_probe_candidates_by_member(
+    seeds: Sequence[PublicationSeedEvidence],
+    source_waves: Sequence[DiscoveryWave],
+    observations: Sequence[DiscoveryObservation],
+    late_identifiers: Sequence[LateIdentifierEvidence],
+) -> Mapping[tuple[str, str], tuple[_HtmlProbeCandidate, ...]]:
+    members = {(seed.author_key, seed.publication_key) for seed in seeds}
+    accepted_by_member = {
+        (late.author_key, late.publication_key): {
+            (item.source_digest, item.request_key, item.ordinal, item.value)
+            for item in late.candidates
+            if item.kind == "url_sha256" and item.identity_accepted and item.request_key is not None
+        }
+        for late in late_identifiers
+    }
+    tasks = {
+        decision.task.key: decision.task
+        for wave in source_waves
+        for decision in wave.decisions
+        if decision.task.request is not None
+        and (decision.task.author_key, decision.task.publication_key or "") in members
+    }
+    observed = {item.task.key: item for item in observations if item.task.key in tasks}
+    values_by_member: dict[tuple[str, str], list[tuple[str, str, str, str, int, str]]] = {
+        member: [] for member in members
+    }
+    for task_key, task in sorted(tasks.items()):
+        observation = observed.get(task_key)
+        if observation is None or observation.task != task or observation.disposition is not TaskDisposition.SUCCEEDED:
+            continue
+        member = (task.author_key, task.publication_key or "")
+        accepted = accepted_by_member.get(member, set())
+        request_key = task.request.key if task.request is not None else None
+        if request_key is None:
+            continue
+        for ordinal, candidate in enumerate(_normalized_response_records(task.provider, observation.response)):
+            _identifiers, urls = _accepted_identifiers(candidate)
+            for url in urls:
+                candidate_digest = evidence_digest({"scheme": "https", "url": url})
+                if (observation.response_digest, request_key, ordinal, candidate_digest) not in accepted:
+                    continue
+                try:
+                    built = build_request("web.doi_probe.v1", {"url": url})
+                except ValueError:
+                    continue
+                url_digest = built.identity_payload.get("url_digest")
+                if not isinstance(url_digest, str):
+                    raise ValueError("HTML probe builder identity changed")
+                values_by_member[member].append(
+                    (candidate_digest, url_digest, observation.response_digest, request_key, ordinal, url)
+                )
+    result: dict[tuple[str, str], tuple[_HtmlProbeCandidate, ...]] = {}
+    for member, values in sorted(values_by_member.items()):
+        by_url_digest: dict[str, list[tuple[str, str, str, str, int, str]]] = {}
+        for value in sorted(values):
+            by_url_digest.setdefault(value[1], []).append(value)
+        result[member] = tuple(
+            _HtmlProbeCandidate(
+                values[0][0],
+                url_digest,
+                tuple(sorted((value[2], value[3], value[4]) for value in values)),
+                values[0][5],
+            )
+            for url_digest, values in sorted(by_url_digest.items())
+        )
+    return result
+
+
+def plan_html_probe_wave(
+    seeds: Sequence[PublicationSeedEvidence],
+    late_identifiers: Sequence[LateIdentifierEvidence],
+    source_waves: Sequence[DiscoveryWave],
+    observations: Sequence[DiscoveryObservation],
+    candidate_ordinal: int,
+    authority: DiscoveryAuthority,
+) -> DiscoveryWave:
+    """Plan one aggregate indexed HTML candidate wave without persisting raw URLs."""
+    if (
+        isinstance(candidate_ordinal, bool)
+        or candidate_ordinal < 0
+        or candidate_ordinal >= authority.policy.max_html_probe_waves
+    ):
+        raise ValueError("HTML probe wave bound changed")
+    ordered = tuple(sorted(seeds, key=lambda item: (item.author_key, item.publication_key)))
+    late_map = {(item.author_key, item.publication_key): item for item in late_identifiers}
+    if len(late_map) != len(late_identifiers) or set(late_map) != {
+        (item.author_key, item.publication_key) for item in ordered
+    }:
+        raise ValueError("HTML probe late-identifier membership changed")
+    rederived = derive_late_identifier_evidence(ordered, source_waves, observations)
+    if tuple(sorted(late_identifiers, key=lambda item: (item.author_key, item.publication_key))) != rederived:
+        raise ValueError("HTML probe late-identifier authority changed")
+    capability = capability_for("web", "doi_probe", "1")
+    candidates_by_member = _html_probe_candidates_by_member(ordered, source_waves, observations, rederived)
+    decisions: list[DiscoveryDecision] = []
+    for seed in ordered:
+        late = late_map[(seed.author_key, seed.publication_key)]
+        has_doi = any(item.kind == "doi" and item.identity_accepted for item in late.candidates)
+        candidates = candidates_by_member[(seed.author_key, seed.publication_key)]
+        if has_doi or candidate_ordinal >= len(candidates):
+            decisions.append(
+                _na(
+                    seed,
+                    capability.logical_source,
+                    capability.operation,
+                    ApplicabilityReason.CONDITIONAL_NOT_TRIGGERED,
+                )
+            )
+            continue
+        candidate = candidates[candidate_ordinal]
+        request = RequestSpec(
+            capability.logical_source,
+            capability.operation,
+            capability.method,
+            {"scheme": "https", "url_digest": candidate.url_digest},
+            capability.requested_fields,
+            capability.adapter_version,
+            authority.policy.freshness_epoch,
+            capability.quota_scope,
+        )
+        decisions.append(
+            DiscoveryDecision(
+                TaskSpec(
+                    seed.author_key,
+                    seed.publication_key,
+                    capability.logical_source,
+                    capability.operation,
+                    request,
+                )
+            )
+        )
+    candidate_sources: dict[str, dict[str, object]] = {}
+    for seed in ordered:
+        member = (seed.author_key, seed.publication_key)
+        selected = candidates_by_member[member][candidate_ordinal : candidate_ordinal + 1]
+        for candidate in selected:
+            candidate_sources[f"{seed.author_key}:{seed.publication_key}"] = {
+                "candidate_digest": candidate.candidate_digest,
+                "locators": candidate.locators,
+                "url_digest": candidate.url_digest,
+            }
+    return DiscoveryWave(
+        tuple(sorted(decisions, key=lambda item: item.task.key)),
+        evidence_digest(
+            {
+                "candidate_ordinal": candidate_ordinal,
+                "candidate_sources": candidate_sources,
+                "late_identifiers": [item.digest for item in rederived],
+                "policy_digest": authority.digest,
+            }
+        ),
+        authority.digest,
+    )
+
+
+def resolve_html_probe_url(
+    task: TaskSpec,
+    seeds: Sequence[PublicationSeedEvidence],
+    late_identifiers: Sequence[LateIdentifierEvidence],
+    source_waves: Sequence[DiscoveryWave],
+    observations: Sequence[DiscoveryObservation],
+    candidate_ordinal: int,
+    authority: DiscoveryAuthority,
+) -> str:
+    """Privately rederive one web task raw URL and prove its exact C1 identity."""
+    member = (task.author_key, task.publication_key or "")
+    planned = plan_html_probe_wave(
+        seeds,
+        late_identifiers,
+        source_waves,
+        observations,
+        candidate_ordinal,
+        authority,
+    )
+    decisions = {
+        (decision.task.author_key, decision.task.publication_key or ""): decision.task for decision in planned.decisions
+    }
+    if decisions.get(member) != task or task.request is None:
+        raise ValueError("HTML probe task identity changed")
+    candidates = _html_probe_candidates_by_member(
+        seeds,
+        source_waves,
+        observations,
+        late_identifiers,
+    )[member]
+    raw_url = candidates[candidate_ordinal].raw_url
+    return raw_url
 
 
 def plan_openalex_venue_fallback(
@@ -1607,18 +2594,27 @@ def plan_openalex_venue_fallback(
 
 
 __all__ = [
+    "CitationKeyFragmentEvidence",
     "CorpusOutputEvidence",
+    "LateDoiEvidence",
+    "LateDoiSourceEvidence",
     "LateIdentifierCandidate",
     "LateIdentifierEvidence",
     "MergeSourceEvidence",
     "MergedPublicationEvidence",
     "NamingEvidence",
     "ProvenanceEvidence",
+    "derive_late_doi_evidence",
     "derive_late_identifier_evidence",
     "derive_materialization_intents",
     "derive_provenance_evidence",
     "merge_publication_evidence",
     "plan_crossref_venue_fallback",
+    "plan_gemini_naming",
+    "plan_late_doi_bibtex",
+    "plan_late_doi_csl",
     "plan_openalex_venue_fallback",
     "project_merge_sources",
+    "reduce_gemini_naming",
+    "reduce_late_doi_observations",
 ]

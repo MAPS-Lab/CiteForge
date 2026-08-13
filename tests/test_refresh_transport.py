@@ -805,6 +805,34 @@ def test_doi_redirect_invalid_url_is_terminalized_as_one_attempt_per_hop(tmp_pat
     ledger.close()
 
 
+def test_redirect_chain_never_exceeds_capability_physical_attempt_bound(tmp_path: Path) -> None:
+    adapter = JSON_ADAPTERS["doi.csl"]
+    operation = adapter.build_operation(
+        url="https://doi.org/10.1/x",
+        normalized_payload={"doi": "10.1/x"},
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        timeout=5,
+        headers={"Accept": "application/vnd.citationstyles.csl+json"},
+    )
+    ledger, _ = _ready_ledger(tmp_path / "ledger.db", operation.request)
+    calls = 0
+
+    def sender(_operation: SendOperation) -> requests.Response:
+        nonlocal calls
+        calls += 1
+        return _response(302, headers={"Location": "https://api.crossref.org/works/10.1/x"})
+
+    result = LedgerTransport(ledger, send_once=sender, clock=lambda: NOW).send_claim(
+        _claim(ledger, "worker"), operation
+    )
+    assert result.disposition is TaskDisposition.BLOCKED
+    assert result.outcome is OutcomeClass.RETRY_EXHAUSTED
+    assert calls == 3
+    assert len(ledger.manifest().data["attempts"]) == 3
+    ledger.close()
+
+
 @pytest.mark.parametrize(
     ("second_result", "expected_outcome", "expected_disposition"),
     [
@@ -909,6 +937,54 @@ def test_later_doi_redirect_system_exit_preserves_exact_crash_marker(tmp_path: P
     assert len(manifest["attempts"]) == 1
     assert manifest["physical_send_markers"][0]["resolved_at"] is None
     ledger.close()
+
+
+def test_redirect_crash_resume_starts_at_durable_target_without_repeating_origin(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.db"
+    target = "https://api.crossref.org/works/10.1/x"
+    adapter = JSON_ADAPTERS["doi.csl"]
+    operation = adapter.build_operation(
+        url="https://doi.org/10.1/x",
+        normalized_payload={"doi": "10.1/x"},
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        timeout=5,
+        headers={"Accept": "application/vnd.citationstyles.csl+json"},
+    )
+    ledger, _ = _ready_ledger(path, operation.request)
+    sent_urls: list[str] = []
+
+    def crash_on_target(sent: SendOperation) -> requests.Response:
+        sent_urls.append(sent.url)
+        if sent.url == operation.url:
+            return _response(302, headers={"Location": target})
+        raise SystemExit("crash on redirect target")
+
+    with pytest.raises(SystemExit):
+        LedgerTransport(ledger, send_once=crash_on_target, clock=lambda: NOW).send_claim(
+            _claim(ledger, "old"), operation
+        )
+    ledger.close()
+
+    reopened = Ledger.open(path)
+    resumed_at = NOW + timedelta(minutes=11)
+
+    def finish_target(sent: SendOperation) -> requests.Response:
+        sent_urls.append(sent.url)
+        assert sent.url == target
+        return _response(
+            200,
+            {"DOI": "10.1/x", "title": "Engine"},
+            headers={"Content-Type": "application/json"},
+        )
+
+    result = LedgerTransport(reopened, send_once=finish_target, clock=lambda: resumed_at).send_claim(
+        _claim(reopened, "new", resumed_at), operation
+    )
+    assert result.disposition is TaskDisposition.SUCCEEDED
+    assert sent_urls == [operation.url, target, target]
+    assert operation.url not in sent_urls[1:]
+    reopened.close()
 
 
 @pytest.mark.parametrize(("fail_on_call", "expected_physical_calls"), [(2, 1), (3, 1), (4, 2)])

@@ -8,10 +8,12 @@ can reach a log record.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import random
 import re
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -20,6 +22,7 @@ from email.utils import parsedate_to_datetime
 from functools import wraps
 from http.cookies import SimpleCookie
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -129,6 +132,77 @@ DEFAULT_BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+class _PinnedHTTPSAdapter(HTTPAdapter):
+    """Connect to one resolved address while retaining hostname TLS validation."""
+
+    def __init__(self, hostname: str) -> None:
+        self._hostname = hostname
+        super().__init__(max_retries=0)
+
+    def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any) -> None:
+        pool_kwargs.update(assert_hostname=self._hostname, server_hostname=self._hostname)
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+
+def _public_https_target(url: str) -> tuple[str, str]:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise requests.exceptions.InvalidURL("web probe target is not canonical public HTTPS")
+    try:
+        addresses = {
+            ipaddress.ip_address(item[4][0])
+            for item in socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        }
+    except (OSError, ValueError) as exc:
+        raise requests.ConnectionError("web probe DNS resolution failed") from exc
+    if not addresses or any(not address.is_global for address in addresses):
+        raise requests.ConnectionError("web probe DNS authority includes a non-public address")
+    selected = min(addresses, key=lambda address: (address.version, address.packed))
+    host = f"[{selected.compressed}]" if selected.version == 6 else selected.compressed
+    return parsed.hostname, parsed._replace(netloc=host).geturl()
+
+
+def send_public_https_once(url: str, headers: dict[str, str], timeout: float) -> requests.Response:
+    """Send one fixed-header, environment-isolated, DNS-pinned public HTTPS GET."""
+    hostname, pinned_url = _public_https_target(url)
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.clear()
+    session.mount("https://", _PinnedHTTPSAdapter(hostname))
+    wire_headers = dict(headers)
+    wire_headers["Host"] = hostname
+    try:
+        response = session.get(
+            pinned_url,
+            headers=wire_headers,
+            timeout=(min(timeout, 10.0), timeout),
+            stream=True,
+            allow_redirects=False,
+        )
+    except Exception:
+        session.close()
+        raise
+    response.url = url
+    original_close = response.close
+
+    def close_with_session() -> None:
+        try:
+            original_close()
+        finally:
+            session.close()
+
+    response.close = close_with_session  # type: ignore[method-assign]
+    return response
 
 
 def _randomize_headers(headers: dict[str, str]) -> dict[str, str]:

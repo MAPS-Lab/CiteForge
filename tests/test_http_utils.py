@@ -511,3 +511,62 @@ class TestDecodeJsonBodyScrub:
         message = str(excinfo.value)
         assert "SECRETVALUE" not in message
         assert "REDACTED" in message
+
+
+def test_public_https_sender_rejects_any_nonpublic_dns_without_a_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        http_utils.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (http_utils.socket.AF_INET, http_utils.socket.SOCK_STREAM, 6, "", ("203.0.113.10", 443)),
+            (http_utils.socket.AF_INET, http_utils.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        http_utils.requests,
+        "Session",
+        lambda: (_ for _ in ()).throw(AssertionError("socket session must not be created")),
+    )
+    with pytest.raises(requests.ConnectionError, match="non-public"):
+        http_utils.send_public_https_once("https://papers.example.test/item", {}, 1.0)
+
+
+def test_public_https_sender_pins_dns_and_disables_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Session:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {"random": "header"}
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            captured["mount"] = (prefix, adapter)
+
+        def get(self, url: str, **kwargs: object) -> requests.Response:
+            captured.update(url=url, kwargs=kwargs, trust_env=self.trust_env, session_headers=dict(self.headers))
+            response = requests.Response()
+            response.status_code = 200
+            response.url = url
+            response.raw = type("Raw", (), {"close": lambda _self: None})()
+            return response
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(
+        http_utils.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(http_utils.socket.AF_INET, http_utils.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))],
+    )
+    monkeypatch.setattr(http_utils.requests, "Session", Session)
+    response = http_utils.send_public_https_once("https://papers.example.test/item", {"User-Agent": "fixed"}, 5.0)
+    assert captured["url"] == "https://8.8.8.8/item"
+    assert captured["trust_env"] is False
+    assert captured["session_headers"] == {}
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["headers"] == {"Host": "papers.example.test", "User-Agent": "fixed"}
+    assert kwargs["allow_redirects"] is False and kwargs["stream"] is True
+    response.close()
+    assert captured["closed"] is True

@@ -278,7 +278,14 @@ class RefreshEngine:
             return RunResult(RunStatus.INVALID_CONFIGURATION, spec.id, detail=str(exc))
 
         completed = 0
-        for pass_id in ("known_doi", "broad_discovery", "dynamic_expansion"):
+        for pass_id in (
+            "known_doi",
+            "broad_discovery",
+            "dynamic_expansion",
+            "venue_fallback",
+            "late_identifiers",
+            "html_probe",
+        ):
             non_openreview: deque[str] = deque()
             openreview: deque[str] = deque()
             while True:
@@ -290,7 +297,14 @@ class RefreshEngine:
                 )
                 if status == "uncommitted":
                     try:
-                        self._ledger.execute_and_commit_discovery_wave(pass_id, policy, now=now)
+                        if pass_id == "venue_fallback":  # noqa: S105
+                            self._ledger.execute_and_commit_venue_fallback(policy, now=now)
+                        elif pass_id == "late_identifiers":  # noqa: S105
+                            self._ledger.execute_and_commit_late_identifiers(policy, now=now)
+                        elif pass_id == "html_probe":  # noqa: S105
+                            self._ledger.execute_and_commit_html_probe(policy, now=now)
+                        else:
+                            self._ledger.execute_and_commit_discovery_wave(pass_id, policy, now=now)
                     except ValueError as exc:
                         return self._block_discovery(spec.id, completed, str(exc), now)
                     continue
@@ -308,9 +322,12 @@ class RefreshEngine:
                     due = self._ledger.discovery_wave_due_tasks(pass_id, now=now)
                     non_openreview.extend(key for key, provider in due.items() if provider != "openreview")
                     openreview.extend(key for key, provider in due.items() if provider == "openreview")
-                if not non_openreview and not openreview and pass_id == "known_doi":  # noqa: S105
+                if not non_openreview and not openreview and pass_id in {"known_doi", "venue_fallback"}:
                     try:
-                        self._ledger.execute_and_commit_discovery_wave(pass_id, policy, now=now)
+                        if pass_id == "venue_fallback":  # noqa: S105
+                            self._ledger.execute_and_commit_venue_fallback(policy, now=now)
+                        else:
+                            self._ledger.execute_and_commit_discovery_wave(pass_id, policy, now=now)
                     except ValueError as exc:
                         return self._block_discovery(spec.id, completed, str(exc), now)
                     refreshed = datetime.now(timezone.utc)
@@ -320,6 +337,30 @@ class RefreshEngine:
                     non_openreview.extend(key for key, provider in due.items() if provider != "openreview")
                     openreview.extend(key for key, provider in due.items() if provider == "openreview")
                     now = refreshed
+                if not non_openreview and not openreview and pass_id == "html_probe":  # noqa: S105
+                    if stop_requested():
+                        return RunResult(
+                            RunStatus.CONTINUATION,
+                            spec.id,
+                            completed_tasks=completed,
+                            detail="HTML probe work remains pending",
+                        )
+                    try:
+                        self._ledger.execute_and_commit_html_probe(policy, now=now)
+                    except ValueError as exc:
+                        return self._block_discovery(spec.id, completed, str(exc), now)
+                    refreshed = datetime.now(timezone.utc)
+                    if (
+                        self._ledger.discovery_phase_status(pass_id, now=refreshed) == "pending"
+                        and not self._ledger.discovery_wave_due_tasks(pass_id, now=refreshed)
+                    ):
+                        return RunResult(
+                            RunStatus.CONTINUATION,
+                            spec.id,
+                            completed_tasks=completed,
+                            detail="HTML probe work remains pending",
+                        )
+                    continue
                 if (not non_openreview and not openreview) or stop_requested() or self._transport is None:
                     return RunResult(
                         RunStatus.CONTINUATION,
@@ -401,7 +442,7 @@ class RefreshEngine:
             RunStatus.CONTINUATION,
             spec.id,
             completed_tasks=completed,
-            detail="C4 discovery waves are complete",
+            detail="bounded publication discovery waves are complete",
         )
 
     def _block_discovery(self, generation_id: str, completed: int, detail: str, now: datetime) -> RunResult:

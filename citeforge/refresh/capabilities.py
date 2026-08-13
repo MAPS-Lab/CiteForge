@@ -302,11 +302,7 @@ def _builder_callback(capability_id: str, method: str, endpoint: str) -> Callabl
                 }
             )
         elif capability_id.startswith("s2."):
-            search_text = (
-                frozen["query"]
-                if "query" in frozen
-                else f'"{frozen["title"]}" {frozen["author"]}'
-            )
+            search_text = frozen["query"] if "query" in frozen else f'"{frozen["title"]}" {frozen["author"]}'
             query = MappingProxyType(
                 {
                     "query": search_text,
@@ -379,6 +375,14 @@ def _builder_callback(capability_id: str, method: str, endpoint: str) -> Callabl
             query = MappingProxyType({})
             frozen = MappingProxyType(
                 {"url_digest": hashlib.sha256(str(frozen["url"]).encode()).hexdigest(), "scheme": "https"}
+            )
+            required_headers = MappingProxyType(
+                {
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Encoding": "identity",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "User-Agent": "CiteForge-Durable-Probe/1",
+                }
             )
         elif capability_id == "gemini.short_title.v1":
             query = MappingProxyType({})
@@ -759,6 +763,7 @@ def validate_capability_wire(
     """Verify concrete wire metadata against the exact private builder."""
     capability_by_id(capability_id)
     if capability_id == "web.doi_probe.v1":
+        built = build_request(capability_id, {"url": url})
         if set(identity_payload) != {"url_digest", "scheme"} or identity_payload.get("scheme") != "https":
             raise ValueError("web wire identity lacks exact digest evidence")
         parsed_web = urlsplit(url)
@@ -772,8 +777,10 @@ def validate_capability_wire(
             or identity_payload.get("url_digest") != hashlib.sha256(url.encode()).hexdigest()
         ):
             raise ValueError("web wire URL does not match exact identity digest")
-        if headers or body:
-            raise ValueError("web wire headers or body are undeclared")
+        expected_headers = {name.casefold(): value for name, value in built.required_headers.items()}
+        actual_headers = {name.casefold(): value for name, value in (headers or {}).items()}
+        if actual_headers != expected_headers or body:
+            raise ValueError("web wire headers or body do not match the fixed probe policy")
         return
     built = build_request(capability_id, identity_payload)
     parsed = urlsplit(url)

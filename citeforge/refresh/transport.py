@@ -15,12 +15,12 @@ from email.utils import parsedate_to_datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import Protocol
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
 from ..config import HTTP_BACKOFF_INITIAL, HTTP_BACKOFF_MAX, HTTP_MAX_RETRIES
-from ..http_utils import send_http_once
+from ..http_utils import send_http_once, send_public_https_once
 from .ledger import Ledger, ProviderObservation, RequestClaim, RequestResult, RequestSpec, StaleClaimError, TaskClaim
 from .types import TaskDisposition
 
@@ -347,6 +347,8 @@ class LedgerTransport:
 
     @staticmethod
     def _default_send_once(operation: SendOperation) -> requests.Response:
+        if operation.capability_id == "web.doi_probe.v1":
+            return send_public_https_once(operation.url, dict(operation.headers or {}), operation.timeout)
         return send_http_once(
             operation.request.method,
             operation.url,
@@ -479,6 +481,7 @@ class LedgerTransport:
 
         started = now
         unresolved = self.ledger.unresolved_physical_send(operation.request.key)
+        resume_url: str | None = None
         if unresolved is not None and not unresolved[1]:
             return self._finish_terminal(
                 task_claim,
@@ -508,8 +511,17 @@ class LedgerTransport:
                     "idempotent crash attempts exhausted",
                     persist_attempt=False,
                 )
+            if unresolved[2] is not None:
+                resume_url = unresolved[2]
+                operation = replace(operation, url=resume_url)
         try:
-            self.ledger.mark_physical_send(task_claim, request_claim, started, idempotent=operation.retryable)
+            self.ledger.mark_physical_send(
+                task_claim,
+                request_claim,
+                started,
+                idempotent=operation.retryable,
+                resume_url=resume_url,
+            )
         except ValueError:
             return self._finish_terminal(
                 task_claim,
@@ -530,6 +542,7 @@ class LedgerTransport:
         while status in {301, 302, 303, 307, 308} and operation.capability_id in {
             "doi_csl.csl_lookup.v1",
             "doi_bibtex.bibtex_lookup.v1",
+            "web.doi_probe.v1",
         }:
             redirect_hops += 1
             if redirect_hops > 3:
@@ -547,21 +560,25 @@ class LedgerTransport:
                 )
             try:
                 location = raw.headers.get("Location", "")
+                location = urljoin(operation.url, location)
                 target = urlsplit(location)
                 safe_target = (
                     target.scheme == "https"
-                    and target.hostname
-                    in {
+                    and bool(target.hostname)
+                    and not target.username
+                    and not target.password
+                    and target.port in {None, 443}
+                )
+                if operation.capability_id != "web.doi_probe.v1":
+                    safe_target = safe_target and target.hostname in {
                         "doi.org",
                         "api.crossref.org",
                         "data.crossref.org",
                         "api.datacite.org",
                         "data.crosscite.org",
                     }
-                    and not target.username
-                    and not target.password
-                    and target.port in {None, 443}
-                )
+                else:
+                    safe_target = safe_target and not target.query and not target.fragment
             except Exception:
                 safe_target = False
             if not safe_target:
@@ -575,7 +592,7 @@ class LedgerTransport:
                     TaskDisposition.PERMANENT_FAILURE,
                     OutcomeClass.INVALID_REQUEST,
                     status,
-                    "unsafe DOI redirect was rejected",
+                    "unsafe provider redirect was rejected",
                 )
             _close_response(raw)
             try:
@@ -585,10 +602,31 @@ class LedgerTransport:
             self.ledger.record_intermediate_attempt(
                 task_claim, request_claim, started, hop_finished, "redirect", status
             )
+            if self.ledger.request_attempt_count(operation.request.key) >= operation.max_attempts:
+                return self._finish_terminal(
+                    task_claim,
+                    request_claim,
+                    operation,
+                    started,
+                    hop_finished,
+                    TaskDisposition.BLOCKED,
+                    OutcomeClass.RETRY_EXHAUSTED,
+                    status,
+                    "redirect attempts exhausted",
+                    persist_attempt=False,
+                )
             started = hop_finished
-            self.ledger.mark_physical_send(task_claim, request_claim, started, idempotent=True)
-            operation = replace(
-                operation, url=location, headers={"Accept": (operation.headers or {}).get("Accept", "")}
+            self.ledger.mark_physical_send(
+                task_claim,
+                request_claim,
+                started,
+                idempotent=True,
+                resume_url=location,
+            )
+            operation = (
+                replace(operation, url=location)
+                if operation.capability_id == "web.doi_probe.v1"
+                else replace(operation, url=location, headers={"Accept": (operation.headers or {}).get("Accept", "")})
             )
             sent = self._send_marked_physical(task_claim, request_claim, operation, started)
             if isinstance(sent, ProviderResponse):

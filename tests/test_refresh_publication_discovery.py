@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -14,9 +15,11 @@ from citeforge.api_configs import (
 from citeforge.api_generics import build_bibtex_from_response, project_entry_from_response
 from citeforge.bibtex_utils import bibtex_from_dict
 from citeforge.refresh.authority import EvidenceKind, IntentKind, PublicationSeedEvidence, evidence_digest
+from citeforge.refresh.capabilities import build_request, capability_for
 from citeforge.refresh.discovery import (
     ApplicabilityReason,
     DiscoveryCredentials,
+    DiscoveryDecision,
     DiscoveryObservation,
     DiscoveryPolicy,
     DiscoveryWave,
@@ -24,23 +27,39 @@ from citeforge.refresh.discovery import (
     plan_broad_discovery,
     resolve_discovery_authority,
 )
+from citeforge.refresh.ledger import RequestSpec, TaskSpec
 from citeforge.refresh.publication_discovery import (
+    CitationKeyFragmentEvidence,
     CorpusOutputEvidence,
+    LateDoiEvidence,
     LateIdentifierCandidate,
+    LateIdentifierEvidence,
     MergedPublicationEvidence,
     MergeSourceEvidence,
     NamingEvidence,
+    SurvivorDecision,
     SurvivorDisposition,
+    SurvivorReduction,
     _accepted_venue_candidates,
+    _deterministic_citation_fragment,
+    _html_probe_candidates_by_member,
     _project_unmapped_record,
+    derive_late_doi_evidence,
     derive_late_identifier_evidence,
     derive_materialization_intents,
     derive_provenance_evidence,
     derive_survivor_reduction,
     merge_publication_evidence,
     plan_crossref_venue_fallback,
+    plan_gemini_naming,
+    plan_html_probe_wave,
+    plan_late_doi_bibtex,
+    plan_late_doi_csl,
     plan_openalex_venue_fallback,
     project_merge_sources,
+    reduce_gemini_naming,
+    reduce_late_doi_observations,
+    resolve_html_probe_url,
 )
 from citeforge.refresh.types import TaskDisposition
 
@@ -179,6 +198,31 @@ def _seed(publication: str = "Journal of Engines 12(3), 44-51, 2024") -> Publica
         {},
         "0" * 64,
         entry,
+    )
+    return replace(seed, seed_digest=seed.derived_seed_digest)
+
+
+def _seed_member(publication_key: str, *, doi: str | None = None) -> PublicationSeedEvidence:
+    baseline = {
+        "type": "article",
+        "key": publication_key,
+        "fields": {
+            "author": "Lovelace, Ada",
+            "title": f"Analytical Engine {publication_key}",
+            "year": "2024",
+        },
+    }
+    seed = PublicationSeedEvidence(
+        "generation",
+        "author-ada",
+        publication_key,
+        EvidenceKind.PUBLICATION,
+        f"inventory:author-ada:1:{publication_key}",
+        evidence_digest(("origin", publication_key)),
+        evidence_digest(baseline),
+        {"doi": doi} if doi is not None else {},
+        "0" * 64,
+        baseline,
     )
     return replace(seed, seed_digest=seed.derived_seed_digest)
 
@@ -411,6 +455,10 @@ def test_late_identifier_evidence_is_exact_normalized_and_never_changes_publicat
         TaskDisposition.SUCCEEDED,
         {
             "results": (
+                {"title": "Unrelated one"},
+                {"title": "Unrelated two"},
+                {"title": "Unrelated three"},
+                {"title": "Unrelated four"},
                 {
                     "paperId": "S2-paper",
                     "title": "Analytical Engine",
@@ -494,6 +542,653 @@ def test_late_identifier_candidate_rejects_unknown_private_or_unbound_values() -
         LateIdentifierCandidate("doi", "10.1234/x", "bad", "2" * 64, 0, True)
     with pytest.raises(ValueError, match="private contact"):
         LateIdentifierCandidate("s2_paper_id", "person@example.test", "1" * 64, "2" * 64, 0, True)
+
+
+def test_html_probe_plans_exact_indexed_candidate_without_persisting_raw_url() -> None:
+    seed = _seed()
+    authority, broad = _broad(seed)
+    target = next(item for item in broad.decisions if item.task.provider == "s2")
+    observations = list(_empty_observations(broad))
+    index = next(index for index, item in enumerate(observations) if item.task.key == target.task.key)
+    raw_url = "https://papers.example.test/publication/engine"
+    observations[index] = DiscoveryObservation(
+        target.task,
+        TaskDisposition.SUCCEEDED,
+        {
+            "results": (
+                {"title": ("Unrelated one",)},
+                {"title": ("Unrelated two",)},
+                {"title": ("Unrelated three",)},
+                {"title": ("Unrelated four",)},
+                {
+                    "paperId": "paper-one",
+                    "title": "Analytical Engine",
+                    "authors": ({"name": "Ada Lovelace"},),
+                    "url": raw_url,
+                },
+            )
+        },
+        schema_version="s2-search-v2",
+    )
+    late = derive_late_identifier_evidence((seed,), (broad,), observations)
+    wave = plan_html_probe_wave((seed,), late, (broad,), observations, 0, authority)
+    assert len(wave.decisions) == 1
+    decision = wave.decisions[0]
+    assert decision.task.request is not None
+    assert decision.task.provider == "web" and decision.task.operation == "doi_probe"
+    payload = dict(decision.task.request.normalized_payload)
+    assert payload == {
+        "url_digest": hashlib.sha256(raw_url.encode()).hexdigest(),
+        "scheme": "https",
+    }
+    assert raw_url not in repr(decision)
+    resolved = resolve_html_probe_url(decision.task, (seed,), late, (broad,), observations, 0, authority)
+    built = build_request("web.doi_probe.v1", {"url": resolved})
+    assert built.identity_payload == decision.task.request.normalized_payload
+    assert resolved == raw_url
+
+    with pytest.raises(ValueError, match="HTML probe task identity"):
+        resolve_html_probe_url(
+            replace(decision.task, author_key="other"),
+            (seed,),
+            late,
+            (broad,),
+            observations,
+            0,
+            authority,
+        )
+
+    exhausted = plan_html_probe_wave((seed,), late, (broad,), observations, 1, authority)
+    assert exhausted.decisions[0].task.request is None
+    assert exhausted.decisions[0].reason is ApplicabilityReason.CONDITIONAL_NOT_TRIGGERED
+
+
+def test_html_probe_rejects_candidate_outside_exact_c1_wire_policy() -> None:
+    seed = _seed()
+    authority, broad = _broad(seed)
+    target = next(item for item in broad.decisions if item.task.provider == "s2")
+    observations = list(_empty_observations(broad))
+    index = next(index for index, item in enumerate(observations) if item.task.key == target.task.key)
+    observations[index] = DiscoveryObservation(
+        target.task,
+        TaskDisposition.SUCCEEDED,
+        {
+            "results": (
+                {
+                    "paperId": "paper-one",
+                    "title": "Analytical Engine",
+                    "authors": ({"name": "Ada Lovelace"},),
+                    "url": "https://papers.example.test/publication/engine?view=full",
+                },
+            )
+        },
+        schema_version="s2-search-v2",
+    )
+    late = derive_late_identifier_evidence((seed,), (broad,), observations)
+    wave = plan_html_probe_wave((seed,), late, (broad,), observations, 0, authority)
+    assert wave.decisions[0].task.request is None
+    assert wave.decisions[0].reason is ApplicabilityReason.CONDITIONAL_NOT_TRIGGERED
+
+
+def test_html_probe_deduplicates_one_wire_url_across_distinct_source_records() -> None:
+    seed = _seed()
+    authority, broad = _broad(seed)
+    raw_url = "https://papers.example.test/publication/engine"
+    observations = list(_empty_observations(broad))
+    for provider in ("s2", "crossref"):
+        target = next(item for item in broad.decisions if item.task.provider == provider)
+        index = next(index for index, item in enumerate(observations) if item.task.key == target.task.key)
+        response = (
+            {
+                "results": (
+                    {"title": "Unrelated one"},
+                    {"title": "Unrelated two"},
+                    {"title": "Unrelated three"},
+                    {"title": "Unrelated four"},
+                    {
+                        "authors": ({"name": "Ada Lovelace"},),
+                        "paperId": "paper-one",
+                        "title": "Analytical Engine",
+                        "url": raw_url,
+                    },
+                )
+            }
+            if provider == "s2"
+            else {
+                "results": (
+                    {"title": ("Unrelated one",)},
+                    {"title": ("Unrelated two",)},
+                    {"title": ("Unrelated three",)},
+                    {"title": ("Unrelated four",)},
+                    {
+                        "author": ({"given": "Ada", "family": "Lovelace"},),
+                        "title": ("Analytical Engine",),
+                        "URL": raw_url,
+                    },
+                )
+            }
+        )
+        observations[index] = DiscoveryObservation(
+            target.task,
+            TaskDisposition.SUCCEEDED,
+            response,
+            schema_version="s2-search-v2" if provider == "s2" else "crossref-search-v1",
+        )
+    late = derive_late_identifier_evidence((seed,), (broad,), observations)
+    first = plan_html_probe_wave((seed,), late, (broad,), observations, 0, authority)
+    assert first.decisions[0].task.request is not None
+    candidates = _html_probe_candidates_by_member((seed,), (broad,), observations, late)
+    assert candidates[(seed.author_key, seed.publication_key)][0].locators == tuple(
+        sorted(
+            (observation.response_digest, observation.task.request.key, 4)
+            for observation in observations
+            if observation.task.provider in {"s2", "crossref"} and observation.task.request is not None
+        )
+    )
+    second = plan_html_probe_wave((seed,), late, (broad,), observations, 1, authority)
+    assert second.decisions[0].task.request is None
+
+
+def test_html_probe_stops_after_first_terminal_html_doi() -> None:
+    seed = _seed()
+    authority, broad = _broad(seed)
+    target = next(item for item in broad.decisions if item.task.provider == "s2")
+    observations = list(_empty_observations(broad))
+    index = next(index for index, item in enumerate(observations) if item.task.key == target.task.key)
+    observations[index] = DiscoveryObservation(
+        target.task,
+        TaskDisposition.SUCCEEDED,
+        {
+            "results": (
+                {
+                    "authors": ({"name": "Ada Lovelace"},),
+                    "paperId": "paper-one",
+                    "title": "Analytical Engine",
+                    "url": "https://papers.example.test/one",
+                },
+                {
+                    "authors": ({"name": "Ada Lovelace"},),
+                    "paperId": "paper-two",
+                    "title": "Analytical Engine",
+                    "url": "https://papers.example.test/two",
+                },
+            )
+        },
+        schema_version="s2-search-v2",
+    )
+    late = derive_late_identifier_evidence((seed,), (broad,), observations)
+    first = plan_html_probe_wave((seed,), late, (broad,), observations, 0, authority)
+    first_task = first.decisions[0].task
+    assert first_task.request is not None
+    html = DiscoveryObservation(
+        first_task,
+        TaskDisposition.SUCCEEDED,
+        {"doi": "10.1234/engine"},
+        schema_version="html-doi-v1",
+    )
+    all_waves = (broad, first)
+    all_observations = (*observations, html)
+    current = derive_late_identifier_evidence((seed,), all_waves, all_observations)
+    second = plan_html_probe_wave((seed,), current, all_waves, all_observations, 1, authority)
+    assert second.decisions[0].task.request is None
+    assert second.decisions[0].reason is ApplicabilityReason.CONDITIONAL_NOT_TRIGGERED
+
+
+def test_html_probe_is_typed_na_when_late_doi_already_exists_or_budget_is_zero() -> None:
+    seed = _seed()
+    authority, broad = _broad(seed)
+    target = next(item for item in broad.decisions if item.task.provider == "s2")
+    observations = list(_empty_observations(broad))
+    index = next(index for index, item in enumerate(observations) if item.task.key == target.task.key)
+    observations[index] = DiscoveryObservation(
+        target.task,
+        TaskDisposition.SUCCEEDED,
+        {
+            "results": (
+                {
+                    "paperId": "paper-one",
+                    "title": "Analytical Engine",
+                    "authors": ({"name": "Ada Lovelace"},),
+                    "externalIds": {"DOI": "10.1234/found"},
+                    "url": "https://papers.example.test/publication/engine",
+                },
+            )
+        },
+        schema_version="s2-search-v2",
+    )
+    late = derive_late_identifier_evidence((seed,), (broad,), observations)
+    wave = plan_html_probe_wave((seed,), late, (broad,), observations, 0, authority)
+    assert wave.decisions[0].task.request is None
+    assert wave.decisions[0].reason is ApplicabilityReason.CONDITIONAL_NOT_TRIGGERED
+
+    zero_policy = replace(_policy(), max_html_probe_waves=0)
+    zero_authority = resolve_discovery_authority(zero_policy, DiscoveryCredentials(s2_key="wire-only"))
+    with pytest.raises(ValueError, match="HTML probe wave bound"):
+        plan_html_probe_wave((seed,), late, (broad,), observations, 0, zero_authority)
+
+
+def _late_doi(
+    seed: PublicationSeedEvidence,
+    doi: str,
+    *,
+    source_digest: str,
+    request_key: str | None = None,
+) -> LateIdentifierEvidence:
+    return LateIdentifierEvidence(
+        seed.author_key,
+        seed.publication_key,
+        (LateIdentifierCandidate("doi", doi, source_digest, request_key, 0, True),),
+    )
+
+
+def _html_doi_wave(
+    seeds: tuple[PublicationSeedEvidence, ...],
+    selected: PublicationSeedEvidence,
+    authority: object,
+) -> tuple[DiscoveryWave, DiscoveryObservation]:
+    capability = capability_for("web", "doi_probe", "1")
+    request = RequestSpec(
+        capability.logical_source,
+        capability.operation,
+        capability.method,
+        {"scheme": "https", "url_digest": "9" * 64},
+        capability.requested_fields,
+        capability.adapter_version,
+        _policy().freshness_epoch,
+        capability.quota_scope,
+    )
+    decisions = []
+    for seed in seeds:
+        if seed == selected:
+            task = TaskSpec(seed.author_key, seed.publication_key, "web", "doi_probe", request)
+            decisions.append(DiscoveryDecision(task))
+        else:
+            task = TaskSpec(
+                seed.author_key,
+                seed.publication_key,
+                "web",
+                "doi_probe",
+                None,
+                applicability="not_applicable",
+            )
+            decisions.append(DiscoveryDecision(task, ApplicabilityReason.CONDITIONAL_NOT_TRIGGERED))
+    policy_digest = authority.digest
+    wave = DiscoveryWave(tuple(sorted(decisions, key=lambda item: item.task.key)), "8" * 64, policy_digest)
+    selected_task = next(item.task for item in wave.decisions if item.task.request is not None)
+    observation = DiscoveryObservation(
+        selected_task,
+        TaskDisposition.SUCCEEDED,
+        {"doi": "https://doi.org/10.1234/HTML"},
+        schema_version="html-doi-v1",
+    )
+    return wave, observation
+
+
+def test_late_doi_union_plans_only_unseen_normalized_csl_and_known_typed_na() -> None:
+    known = _seed_member("known", doi="10.1234/known")
+    deterministic = _seed_member("deterministic")
+    html = _seed_member("html")
+    seeds = (known, deterministic, html)
+    authority = resolve_discovery_authority(_policy(), DiscoveryCredentials(s2_key="wire-only"))
+    late = (
+        _late_doi(known, "https://doi.org/10.1234/KNOWN", source_digest="1" * 64),
+        _late_doi(deterministic, "https://doi.org/10.1234/NEW", source_digest="2" * 64),
+        LateIdentifierEvidence(html.author_key, html.publication_key, ()),
+    )
+    html_wave, html_observation = _html_doi_wave(seeds, html, authority)
+
+    evidence = derive_late_doi_evidence(seeds, late, (html_wave,), (html_observation,))
+    assert {(item.publication_key, item.doi) for item in evidence} == {
+        ("known", "10.1234/known"),
+        ("deterministic", "10.1234/new"),
+        ("html", "10.1234/html"),
+    }
+    assert isinstance(evidence[0], LateDoiEvidence)
+
+    wave = plan_late_doi_csl(seeds, evidence, authority)
+    decisions = {item.task.publication_key: item for item in wave.decisions}
+    assert decisions["known"].task.request is None
+    assert decisions["known"].reason is ApplicabilityReason.REDUNDANT_AUTHORITATIVE_EVIDENCE
+    assert decisions["deterministic"].task.request is not None
+    assert decisions["deterministic"].task.request.normalized_payload == {"doi": "10.1234/new"}
+    assert decisions["html"].task.request is not None
+    assert decisions["html"].task.request.normalized_payload == {"doi": "10.1234/html"}
+
+
+def test_late_doi_html_no_match_is_satisfied_bound_absent_evidence() -> None:
+    seed = _seed_member("html-empty")
+    authority = resolve_discovery_authority(_policy(), DiscoveryCredentials(s2_key="wire-only"))
+    wave, matched = _html_doi_wave((seed,), seed, authority)
+    empty = DiscoveryObservation(
+        matched.task,
+        TaskDisposition.SUCCEEDED,
+        {"doi": None},
+        schema_version="html-doi-v1",
+    )
+    evidence = derive_late_doi_evidence(
+        (seed,),
+        (LateIdentifierEvidence(seed.author_key, seed.publication_key, ()),),
+        (wave,),
+        (empty,),
+    )
+    assert evidence[0].doi is None
+    assert len(evidence[0].sources) == 1
+    assert evidence[0].sources[0].source_kind == "html"
+    assert evidence[0].sources[0].doi is None
+    decision = plan_late_doi_csl((seed,), evidence, authority).decisions[0]
+    assert decision.task.request is None
+    assert decision.reason is ApplicabilityReason.NO_APPLICABLE_IDENTIFIER
+
+    confirmed_empty = DiscoveryObservation(
+        matched.task,
+        TaskDisposition.CONFIRMED_EMPTY,
+        {},
+        authoritative_empty=True,
+        schema_version="html-doi-v1",
+    )
+    with pytest.raises(ValueError, match="HTML observation authority"):
+        derive_late_doi_evidence(
+            (seed,),
+            (LateIdentifierEvidence(seed.author_key, seed.publication_key, ()),),
+            (wave,),
+            (confirmed_empty,),
+        )
+
+
+def test_late_doi_shared_request_coalesces_without_changing_publication_keys() -> None:
+    first = _seed_member("pub-first")
+    second = _seed_member("pub-second")
+    authority = resolve_discovery_authority(_policy(), DiscoveryCredentials(s2_key="wire-only"))
+    evidence = derive_late_doi_evidence(
+        (second, first),
+        (
+            _late_doi(first, "10.1234/shared", source_digest="3" * 64),
+            _late_doi(second, "https://doi.org/10.1234/SHARED", source_digest="4" * 64),
+        ),
+        (),
+        (),
+    )
+    wave = plan_late_doi_csl((second, first), tuple(reversed(evidence)), authority)
+    assert wave == plan_late_doi_csl((first, second), evidence, authority)
+    tasks = tuple(item.task for item in wave.decisions)
+    assert {task.publication_key for task in tasks} == {"pub-first", "pub-second"}
+    assert len({task.request.key for task in tasks if task.request is not None}) == 1
+    assert len({task.key for task in tasks}) == 2
+
+
+def test_late_doi_conditional_bibtex_reduction_is_permutation_invariant() -> None:
+    matched = _seed_member("matched")
+    fallback = _seed_member("fallback")
+    seeds = (matched, fallback)
+    authority = resolve_discovery_authority(_policy(), DiscoveryCredentials(s2_key="wire-only"))
+    evidence = derive_late_doi_evidence(
+        seeds,
+        (
+            _late_doi(matched, "10.1234/matched", source_digest="5" * 64),
+            _late_doi(fallback, "10.1234/fallback", source_digest="6" * 64),
+        ),
+        (),
+        (),
+    )
+    csl = plan_late_doi_csl(seeds, evidence, authority)
+    tasks = {item.task.publication_key: item.task for item in csl.decisions}
+    csl_observations = (
+        DiscoveryObservation(
+            tasks["matched"],
+            TaskDisposition.SUCCEEDED,
+            {
+                "metadata": {
+                    "DOI": "10.1234/matched",
+                    "title": "Analytical Engine matched",
+                    "author": ({"literal": "Lovelace, Ada"},),
+                }
+            },
+            schema_version="doi-csl-v1",
+        ),
+        DiscoveryObservation(
+            tasks["fallback"],
+            TaskDisposition.CONFIRMED_EMPTY,
+            {},
+            authoritative_empty=True,
+            schema_version="doi-csl-v1",
+        ),
+    )
+    bibtex = plan_late_doi_bibtex(seeds, evidence, csl, csl_observations, authority)
+    decisions = {item.task.publication_key: item for item in bibtex.decisions}
+    assert decisions["matched"].task.request is None
+    assert decisions["matched"].reason is ApplicabilityReason.REDUNDANT_AUTHORITATIVE_EVIDENCE
+    assert decisions["fallback"].task.request is not None
+    assert decisions["fallback"].task.request.normalized_payload == {"doi": "10.1234/fallback"}
+
+    bib_observation = DiscoveryObservation(
+        decisions["fallback"].task,
+        TaskDisposition.SUCCEEDED,
+        {
+            "metadata": {
+                "type": "article",
+                "key": "fallback",
+                "fields": {
+                    "author": "Lovelace, Ada",
+                    "doi": "10.1234/fallback",
+                    "title": "Analytical Engine fallback",
+                    "year": "2024",
+                },
+            }
+        },
+        schema_version="doi-bibtex-v1",
+    )
+    first = reduce_late_doi_observations(
+        seeds,
+        evidence,
+        csl,
+        csl_observations,
+        bibtex,
+        (bib_observation,),
+        authority,
+    )
+    second = reduce_late_doi_observations(
+        tuple(reversed(seeds)),
+        tuple(reversed(evidence)),
+        csl,
+        tuple(reversed(csl_observations)),
+        bibtex,
+        (bib_observation,),
+        authority,
+    )
+    assert first == second
+    assert [(item.publication_key, item.status) for item in first] == [
+        ("fallback", "identity_matched"),
+        ("matched", "identity_matched"),
+    ]
+
+
+def _merged_member(publication_key: str, title: str) -> MergedPublicationEvidence:
+    entry = {
+        "type": "article",
+        "key": publication_key,
+        "fields": {
+            "author": "Lovelace, Ada",
+            "title": title,
+            "year": "2024",
+        },
+    }
+    return MergedPublicationEvidence(
+        "author-ada",
+        publication_key,
+        entry,
+        {field: evidence_digest((publication_key, field)) for field in entry["fields"]},
+        (evidence_digest(("source", publication_key)),),
+    )
+
+
+def _emitted(*merged: MergedPublicationEvidence) -> SurvivorReduction:
+    return SurvivorReduction(
+        tuple(
+            SurvivorDecision(
+                item.author_key,
+                item.publication_key,
+                SurvivorDisposition.EMITTED,
+                item.digest,
+                None,
+            )
+            for item in merged
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "configured", "applicable", "reason"),
+    (
+        ("required", True, True, None),
+        ("if_configured", True, True, None),
+        ("if_configured", False, False, ApplicabilityReason.PROVIDER_NOT_CONFIGURED),
+        ("disabled", False, False, ApplicabilityReason.PROVIDER_DISABLED),
+    ),
+)
+def test_gemini_naming_plans_exact_policy_membership(
+    mode: str,
+    configured: bool,
+    applicable: bool,
+    reason: ApplicabilityReason | None,
+) -> None:
+    merged = _merged_member("pub-one", "The Analytical Engine for Modern Computing")
+    policy = replace(_policy(), provider_modes={"gemini": mode, "s2": "required", "serply": "if_configured"})
+    credentials = DiscoveryCredentials(
+        s2_key="wire-only",
+        gemini_key="gemini-wire-only" if configured else None,
+    )
+    authority = resolve_discovery_authority(policy, credentials)
+    wave = plan_gemini_naming((merged,), _emitted(merged), authority)
+    assert len(wave.decisions) == 1
+    decision = wave.decisions[0]
+    assert decision.task.publication_key == "pub-one"
+    assert (decision.task.request is not None) is applicable
+    assert decision.reason is reason
+    if decision.task.request is not None:
+        assert decision.task.request.normalized_payload == {
+            "generation_config": {
+                "maxOutputTokens": 50,
+                "temperature": 0.3,
+                "topK": 20,
+                "topP": 0.8,
+            },
+            "max_words": 4,
+            "model_id": "gemini-2.5-flash-lite",
+            "prompt_version": "camelcase-short-title-v1",
+            "title": "The Analytical Engine for Modern Computing",
+        }
+
+
+def test_gemini_naming_reduces_canonical_fragment_and_optional_fallback_exactly() -> None:
+    gemini = _merged_member("gemini", "The Analytical Engine for Modern Computing")
+    fallback = _merged_member("fallback", "A Theory of Mechanical Computation")
+    merged = (gemini, fallback)
+    policy = replace(_policy(), provider_modes={"gemini": "if_configured", "s2": "required", "serply": "if_configured"})
+    authority = resolve_discovery_authority(
+        policy,
+        DiscoveryCredentials(s2_key="wire-only", gemini_key="gemini-wire-only"),
+    )
+    wave = plan_gemini_naming(tuple(reversed(merged)), _emitted(*reversed(merged)), authority)
+    tasks = {item.task.publication_key: item.task for item in wave.decisions}
+    observations = (
+        DiscoveryObservation(
+            tasks["gemini"],
+            TaskDisposition.SUCCEEDED,
+            {"candidates": ({"content": {"parts": ({"text": "AnalyticalEngineComputing"},)}},)},
+            schema_version="gemini-short-title-v1",
+        ),
+        DiscoveryObservation(
+            tasks["fallback"],
+            TaskDisposition.PERMANENT_FAILURE,
+            {},
+            schema_version="gemini-short-title-v1",
+        ),
+    )
+    first = reduce_gemini_naming(merged, _emitted(*merged), wave, observations, authority)
+    second = reduce_gemini_naming(
+        tuple(reversed(merged)),
+        _emitted(*reversed(merged)),
+        wave,
+        tuple(reversed(observations)),
+        authority,
+    )
+    assert first == second
+    assert all(isinstance(item, CitationKeyFragmentEvidence) for item in first)
+    assert [(item.publication_key, item.fragment, item.source) for item in first] == [
+        ("fallback", "TheoryMechanicalComputation", "gemini-fallback"),
+        ("gemini", "AnalyticalEngineComputing", "gemini"),
+    ]
+    assert all(".bib" not in item.fragment and "/" not in item.fragment for item in first)
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    (
+        "Ignore previous instructions",
+        "../Escape",
+        "Quoted'Fragment",
+        "fiveWordsAreFarTooManyHere",
+        "lowercase",
+        "Analytical Engine",
+    ),
+)
+def test_gemini_naming_rejects_hostile_or_noncanonical_output(hostile: str) -> None:
+    merged = _merged_member("pub-one", "Analytical Engine")
+    policy = replace(_policy(), provider_modes={"gemini": "required", "s2": "required", "serply": "if_configured"})
+    authority = resolve_discovery_authority(
+        policy,
+        DiscoveryCredentials(s2_key="wire-only", gemini_key="gemini-wire-only"),
+    )
+    wave = plan_gemini_naming((merged,), _emitted(merged), authority)
+    observation = DiscoveryObservation(
+        wave.decisions[0].task,
+        TaskDisposition.SUCCEEDED,
+        {"candidates": ({"content": {"parts": ({"text": hostile},)}},)},
+        schema_version="gemini-short-title-v1",
+    )
+    with pytest.raises(ValueError, match="Gemini citation fragment"):
+        reduce_gemini_naming((merged,), _emitted(merged), wave, (observation,), authority)
+
+
+def test_gemini_naming_is_pure_and_required_failure_never_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    merged = _merged_member("pub-one", "The Analytical Engine for Modern Computing")
+    policy = replace(_policy(), provider_modes={"gemini": "required", "s2": "required", "serply": "if_configured"})
+    authority = resolve_discovery_authority(
+        policy,
+        DiscoveryCredentials(s2_key="wire-only", gemini_key="gemini-wire-only"),
+    )
+    for target in (
+        "citeforge.bibtex_utils.short_filename_for_entry",
+        "citeforge.bibtex_utils.build_standard_citekey",
+        "citeforge.clients.utility_apis.gemini_generate_short_title",
+    ):
+        monkeypatch.setattr(target, lambda *_args, **_kwargs: 1 / 0)
+    wave = plan_gemini_naming((merged,), _emitted(merged), authority)
+    failure = DiscoveryObservation(
+        wave.decisions[0].task,
+        TaskDisposition.PERMANENT_FAILURE,
+        {},
+        schema_version="gemini-short-title-v1",
+    )
+    with pytest.raises(ValueError, match="required Gemini naming evidence is blocking"):
+        reduce_gemini_naming((merged,), _emitted(merged), wave, (failure,), authority)
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    (
+        ("Dairy DigiD: Edge-Cloud Keypoint Detection", "DairyDigiDEdgeCloud"),
+        ("API Design for HTTP Clients", "APIDesignHTTPClients"),
+        (r"A {LaTeX} Guide to AI", "LaTeXGuideAI"),
+        ("Étude naïve des océans", "TudeNaVeDes"),
+        ("Graph-based / Learning: Systems!", "GraphBasedLearningSystems"),
+        ("the and of to", "TheAndOfTo"),
+    ),
+)
+def test_deterministic_citation_fragment_preserves_exact_legacy_case_and_splitting(
+    title: str, expected: str
+) -> None:
+    assert _deterministic_citation_fragment(title) == expected
 
 
 def test_merge_source_projection_retains_nested_records_ordinals_and_identity_verdicts() -> None:

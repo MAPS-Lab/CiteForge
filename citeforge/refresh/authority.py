@@ -616,6 +616,28 @@ def _callback_for(
             if len(outputs) != len(seed_keys) or (seed_keys and not sources):
                 raise ValueError("late identifier source or output authority is incomplete")
             return expected, tuple(sorted(sources))
+        if pass_id == "html_probe":  # noqa: S105 - planner pass identifier
+            items = snapshot.get("items", ())
+            if not isinstance(items, Sequence) or isinstance(items, (str, bytes, bytearray)):
+                raise ValueError("HTML probe snapshot items must be a sequence")
+            seed_keys = tuple(
+                str(item.get("key"))
+                for item in items
+                if isinstance(item, Mapping) and item.get("kind") == EvidenceKind.SEED.value
+            )
+            late_outputs = tuple(
+                str(item.get("key"))
+                for item in items
+                if isinstance(item, Mapping) and str(item.get("key", "")).startswith("late-output:")
+            )
+            controls = tuple(
+                str(item.get("key"))
+                for item in items
+                if isinstance(item, Mapping) and str(item.get("key", "")).startswith("html-control:")
+            )
+            if len(late_outputs) != len(seed_keys) or len(controls) != 1:
+                raise ValueError("HTML probe source authority is incomplete")
+            return expected, tuple(sorted(late_outputs))
         return expected, expected
 
     return callback
@@ -627,11 +649,13 @@ _PRIVATE_PASSES = MappingProxyType(
         pass_id: PassDefinition(
             pass_id,
             "2"
-            if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback", "late_identifiers"}
+            if pass_id
+            in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback", "late_identifiers", "html_probe"}
             else "1",
             f"{pass_id}.callback",
             "2"
-            if pass_id in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback", "late_identifiers"}
+            if pass_id
+            in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback", "late_identifiers", "html_probe"}
             else "1",
             pass_id,
             ordinal,
@@ -645,6 +669,7 @@ _PRIVATE_PASSES = MappingProxyType(
                     "dynamic_expansion",
                     "venue_fallback",
                     "late_identifiers",
+                    "html_probe",
                 }
                 else "task5c-evidence-policy-v1"
             ),
@@ -657,6 +682,7 @@ _PRIVATE_PASSES = MappingProxyType(
                     "dynamic_expansion",
                     "venue_fallback",
                     "late_identifiers",
+                    "html_probe",
                 }
                 else "task5c-snapshot-v1"
             ),

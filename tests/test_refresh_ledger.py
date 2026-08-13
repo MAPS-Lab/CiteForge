@@ -112,12 +112,12 @@ def _open_ready(path: Path, *, enabled: bool = False) -> Ledger:
     return ledger
 
 
-def test_schema_v8_contains_exact_append_only_evidence_substrate(tmp_path: Path) -> None:
+def test_schema_v9_contains_exact_append_only_evidence_substrate(tmp_path: Path) -> None:
     path = tmp_path / "v6.db"
     with Ledger.open(path):
         pass
     connection = sqlite3.connect(path)
-    assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
+    assert connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "9"
     expected = {
         "corpus_snapshots",
         "discovery_policy_authority",
@@ -1159,11 +1159,18 @@ def test_recomputed_stored_fingerprint_cannot_bless_alien_schema(tmp_path: Path)
     assert path.read_bytes() == before
 
 
-def test_exact_v4_ledger_migrates_atomically_to_v8(tmp_path: Path) -> None:
+def _drop_v9_html_authority(connection: sqlite3.Connection) -> None:
+    connection.execute("DROP TABLE html_probe_terminal_receipts")
+    connection.execute("DROP TABLE html_probe_wave_items")
+    connection.execute("DROP TABLE html_probe_waves")
+
+
+def test_exact_v4_ledger_migrates_atomically_to_v9(tmp_path: Path) -> None:
     path = tmp_path / "v4.db"
     with Ledger.open(path):
         pass
     connection = sqlite3.connect(path)
+    _drop_v9_html_authority(connection)
     connection.execute("DROP TABLE discovery_policy_authority")
     connection.execute("DROP TABLE corpus_scan_receipts")
     for table in (
@@ -1202,11 +1209,12 @@ def test_exact_v4_ledger_migrates_atomically_to_v8(tmp_path: Path) -> None:
     with Ledger.open(path) as migrated:
         assert migrated.pragma("integrity_check") == "ok"
         version = migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        assert version[0] == "8"
+        assert version[0] == "9"
 
 
 def _downgrade_exact_v6_to_v5(path: Path) -> None:
     connection = sqlite3.connect(path)
+    _drop_v9_html_authority(connection)
     connection.execute("DROP TABLE discovery_policy_authority")
     connection.execute("DROP TABLE corpus_scan_receipts")
     for table in (
@@ -1242,7 +1250,7 @@ def _downgrade_exact_v6_to_v5(path: Path) -> None:
     connection.close()
 
 
-def test_exact_v5_ledger_migrates_atomically_to_v8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_exact_v5_ledger_migrates_atomically_to_v9(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "v5.db"
     with Ledger.open(path):
         pass
@@ -1263,7 +1271,7 @@ def test_exact_v5_ledger_migrates_atomically_to_v8(tmp_path: Path, monkeypatch: 
         assert migrated.pragma("integrity_check") == "ok"
         assert (
             migrated._connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0]
-            == "8"
+            == "9"
         )
 
 
@@ -1278,6 +1286,7 @@ def test_populated_v6_generation_without_corpus_migrates_to_v7(tmp_path: Path) -
         )
     connection = sqlite3.connect(path)
     connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
+    _drop_v9_html_authority(connection)
     connection.execute("DROP TABLE discovery_policy_authority")
     connection.execute("DROP TABLE corpus_scan_receipts")
     objects = [
@@ -1304,7 +1313,7 @@ def test_populated_v6_generation_without_corpus_migrates_to_v7(tmp_path: Path) -
         assert migrated._connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
         assert (
             migrated._connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
-            == "8"
+            == "9"
         )
 
 
@@ -1320,6 +1329,7 @@ def test_populated_v7_legacy_bind_receipt_validates_before_v8_policy_install(tmp
 
     legacy = replace(current, registry_digest=ledger_module._LEGACY_C3_PASS_REGISTRY_DIGEST)
     connection = sqlite3.connect(path)
+    _drop_v9_html_authority(connection)
     update_trigger = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'planner_passes_append_only_update'"
     ).fetchone()[0]
@@ -1349,7 +1359,7 @@ def test_populated_v7_legacy_bind_receipt_validates_before_v8_policy_install(tmp
         )
         assert (
             migrated._connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
-            == "8"
+            == "9"
         )
         assert migrated.execute_registered_pass("bind_corpus_seed") == legacy
 
@@ -1390,7 +1400,7 @@ def test_populated_c4_registry_receipt_replays_under_v8(tmp_path: Path) -> None:
         assert migrated.execute_registered_pass("bind_corpus_seed") == historical
         assert (
             migrated._connection.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
-            == "8"
+            == "9"
         )
 
 
@@ -1401,6 +1411,7 @@ def test_v6_migration_rejects_orphaned_c2_evidence(tmp_path: Path) -> None:
     connection = sqlite3.connect(path)
     connection.create_function("citeforge_authority_write_enabled", 0, lambda: 1)
     connection.execute("PRAGMA foreign_keys = OFF")
+    _drop_v9_html_authority(connection)
     connection.execute("DROP TABLE discovery_policy_authority")
     connection.execute("DROP TABLE corpus_scan_receipts")
     connection.execute(

@@ -94,6 +94,18 @@ def test_discovery_engine_advances_earliest_incomplete_wave_and_scopes_claims(
             self.committed.append(pass_id)
             return object()
 
+        def execute_and_commit_venue_fallback(self, _policy: object, *, now: datetime) -> object:
+            self.committed.append("venue_fallback")
+            return object()
+
+        def execute_and_commit_late_identifiers(self, _policy: object, *, now: datetime) -> object:
+            self.committed.append("late_identifiers")
+            return object()
+
+        def execute_and_commit_html_probe(self, _policy: object, *, now: datetime) -> object:
+            self.committed.append("html_probe")
+            return object()
+
         def discovery_wave_due_tasks(self, pass_id: str, *, now: datetime) -> dict[str, str]:
             return {claim.key: "doi_csl"} if pass_id == "known_doi" and not self.sent else {}
 
@@ -119,9 +131,60 @@ def test_discovery_engine_advances_earliest_incomplete_wave_and_scopes_claims(
         SimpleNamespace(id="generation", census=object()), policy, DiscoveryCredentials(), lambda: False
     )
     assert result.status is RunStatus.CONTINUATION
-    assert ledger.committed == ["known_doi", "broad_discovery", "dynamic_expansion"]
+    assert ledger.committed == [
+        "known_doi",
+        "broad_discovery",
+        "dynamic_expansion",
+        "venue_fallback",
+        "late_identifiers",
+        "html_probe",
+    ]
     assert built == [claim.key]
     assert ledger.claimed_scopes == [frozenset({claim.key})]
+
+
+def test_discovery_engine_does_not_spin_on_html_backoff_without_due_work() -> None:
+    class FakeLedger:
+        html_calls = 0
+
+        def manifest(self) -> object:
+            return SimpleNamespace(data={"generation": {"generation_id": "generation"}})
+
+        def create_or_resume(self, _spec: object, _census: object) -> str:
+            return "generation"
+
+        def generation_state(self) -> GenerationState:
+            return GenerationState.RUNNING
+
+        def assert_c3_discovery_ready(self) -> None:
+            return None
+
+        def bind_discovery_policy(self, _policy: object, _credentials: object) -> str:
+            return "a" * 64
+
+        def load_discovery_authority(self) -> object:
+            return object()
+
+        def discovery_phase_status(self, pass_id: str, *, now: datetime) -> str:
+            return "pending" if pass_id == "html_probe" else "complete"
+
+        def discovery_wave_due_tasks(self, _pass_id: str, *, now: datetime) -> dict[str, str]:
+            return {}
+
+        def execute_and_commit_html_probe(self, _policy: object, *, now: datetime) -> object:
+            self.html_calls += 1
+            return object()
+
+    ledger = FakeLedger()
+    engine = RefreshEngine(ledger, InventoryPolicy(2020, 1000, 10), None)  # type: ignore[arg-type]
+    result = engine.run_discovery(  # type: ignore[arg-type]
+        SimpleNamespace(id="generation", census=object()),
+        SimpleNamespace(openreview_mode="anonymous"),
+        DiscoveryCredentials(),
+        lambda: False,
+    )
+    assert result.status is RunStatus.CONTINUATION
+    assert ledger.html_calls == 1
 
 
 def test_discovery_engine_stops_cached_wave_after_first_blocking_response(

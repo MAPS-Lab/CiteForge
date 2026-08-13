@@ -899,7 +899,7 @@ def build_claimed_discovery_operation(
     if task.request is None:
         raise ValueError("claimed discovery task lacks exact request")
     request = task.request
-    expected_version = authority.policy.adapter_versions.get(task.provider)
+    expected_version = "1" if task.provider == "web" else authority.policy.adapter_versions.get(task.provider)
     if expected_version != request.adapter_version:
         raise ValueError("claimed discovery adapter authority changed")
     capability = capability_for(task.provider, task.operation, request.adapter_version)
@@ -909,7 +909,11 @@ def build_claimed_discovery_operation(
         or request.quota_scope != capability.quota_scope
     ):
         raise ValueError("claimed discovery request does not match capability")
-    built = build_request(capability.capability_id, request.normalized_payload)
+    if capability.capability_id == "web.doi_probe.v1":
+        raw_url = ledger.resolve_claimed_web_probe_url(claim, now=now)
+        built = build_request(capability.capability_id, {"url": raw_url})
+    else:
+        built = build_request(capability.capability_id, request.normalized_payload)
     if built.method != request.method or built.identity_payload != request.normalized_payload:
         raise ValueError("claimed discovery builder identity changed")
     query = dict(built.query)
@@ -923,6 +927,10 @@ def build_claimed_discovery_operation(
         if not credentials.s2_key:
             raise ValueError("configured discovery credential is unavailable")
         headers["x-api-key"] = credentials.s2_key
+    elif injection == "header:x-goog-api-key":
+        if task.provider != "gemini" or not credentials.gemini_key:
+            raise ValueError("configured discovery credential is unavailable")
+        headers["x-goog-api-key"] = credentials.gemini_key
     elif injection == "query:mailto_if_configured":
         contact = credentials.crossref_contact if task.provider == "crossref" else credentials.openalex_contact
         enabled = (

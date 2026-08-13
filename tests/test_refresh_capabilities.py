@@ -259,9 +259,7 @@ def test_distinct_operations_bind_exact_endpoint_templates() -> None:
     assert endpoints["pubmed.title_search.v1"].endswith("/esearch.fcgi")
     assert endpoints["pubmed.summary.v1"].endswith("/esummary.fcgi")
     assert len(set(endpoints.values())) == 4
-    fallback = build_request(
-        "openreview.fallback_search.v1", _builder_payload("openreview.fallback_search.v1")
-    )
+    fallback = build_request("openreview.fallback_search.v1", _builder_payload("openreview.fallback_search.v1"))
     assert fallback.query == {"query": "safe", "limit": 20}
     serply = build_request("serply.scholar_search.v1", _builder_payload("serply.scholar_search.v1")).endpoint
     assert serply.endswith("/safe")
@@ -364,6 +362,15 @@ def test_openreview_and_gemini_policies_are_non_substitutable() -> None:
     assert gemini.method == "POST"
     assert not gemini.idempotent
     assert gemini.max_attempts == 1
+
+
+def test_web_probe_wire_requires_the_exact_fixed_header_policy() -> None:
+    raw_url = "https://papers.example.test/item"
+    built = build_request("web.doi_probe.v1", {"url": raw_url})
+    validate_capability_wire("web.doi_probe.v1", built.identity_payload, raw_url, built.required_headers, None)
+    for headers in ({}, {**dict(built.required_headers), "User-Agent": "changed"}):
+        with pytest.raises(ValueError, match="fixed probe policy"):
+            validate_capability_wire("web.doi_probe.v1", built.identity_payload, raw_url, headers, None)
 
 
 def test_authoritative_capability_constructor_is_not_public() -> None:

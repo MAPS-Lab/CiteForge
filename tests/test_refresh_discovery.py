@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -14,6 +15,12 @@ from citeforge.refresh.authority import (
     EvidenceKind,
     PublicationSeedEvidence,
     evidence_digest,
+)
+from citeforge.refresh.capabilities import (
+    GEMINI_GENERATION_CONFIG,
+    GEMINI_MODEL_ID,
+    GEMINI_PROMPT_VERSION,
+    build_request,
 )
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
 from citeforge.refresh.discovery import (
@@ -398,6 +405,96 @@ def test_broad_identity_binds_every_wire_affecting_value() -> None:
         "X-API-KEY": "serply-wire",
         "X-Proxy-Location": "US",
     }
+
+
+def test_claimed_html_probe_uses_only_ledger_resolved_raw_url() -> None:
+    authority = _authority()
+    raw_url = "https://papers.example.test/publication/engine"
+    request = RequestSpec(
+        "web",
+        "doi_probe",
+        "GET",
+        {"scheme": "https", "url_digest": hashlib.sha256(raw_url.encode()).hexdigest()},
+        ("doi",),
+        "1",
+        authority.policy.freshness_epoch,
+        "web",
+    )
+    task = TaskSpec("author-ada", "pub-one", "web", "doi_probe", request)
+    claim = TaskClaim(task.key, request.key, "worker", NOW + timedelta(minutes=1))
+
+    class ClaimLedger:
+        def reconstruct_claimed_task(self, supplied: TaskClaim, _now: datetime) -> TaskSpec:
+            assert supplied == claim
+            return task
+
+        def assert_discovery_authority(self, supplied: DiscoveryAuthority) -> DiscoveryAuthority:
+            assert supplied == authority
+            return authority
+
+        def resolve_claimed_web_probe_url(self, supplied: TaskClaim, *, now: datetime) -> str:
+            assert supplied == claim and now == NOW
+            return raw_url
+
+    operation = build_claimed_discovery_operation(  # type: ignore[arg-type]
+        ClaimLedger(), claim, DiscoveryCredentials(s2_key="wire-only"), authority, now=NOW
+    )
+    assert operation.request == request
+    assert raw_url not in repr(operation)
+
+    class SubstitutingLedger(ClaimLedger):
+        def resolve_claimed_web_probe_url(self, supplied: TaskClaim, *, now: datetime) -> str:
+            return "https://papers.example.test/publication/other"
+
+    with pytest.raises(ValueError, match="builder identity"):
+        build_claimed_discovery_operation(  # type: ignore[arg-type]
+            SubstitutingLedger(), claim, DiscoveryCredentials(s2_key="wire-only"), authority, now=NOW
+        )
+
+
+def test_claimed_gemini_operation_injects_only_runtime_key() -> None:
+    authority = resolve_discovery_authority(_policy(), DiscoveryCredentials(s2_key="wire", gemini_key="secret"))
+    built = build_request(
+        "gemini.short_title.v1",
+        {
+            "title": "Analytical Engine",
+            "max_words": 4,
+            "prompt_version": GEMINI_PROMPT_VERSION,
+            "model_id": GEMINI_MODEL_ID,
+            "generation_config": dict(GEMINI_GENERATION_CONFIG),
+        },
+    )
+    request = RequestSpec(
+        "gemini",
+        "short_title",
+        built.method,
+        built.identity_payload,
+        ("candidates",),
+        "1",
+        authority.policy.freshness_epoch,
+        "gemini",
+    )
+    task = TaskSpec("author-ada", "pub-one", "gemini", "short_title", request)
+    claim = TaskClaim(task.key, request.key, "worker", NOW + timedelta(minutes=1))
+
+    class ClaimLedger:
+        def reconstruct_claimed_task(self, supplied: TaskClaim, _now: datetime) -> TaskSpec:
+            assert supplied == claim
+            return task
+
+        def assert_discovery_authority(self, supplied: DiscoveryAuthority) -> DiscoveryAuthority:
+            assert supplied == authority
+            return authority
+
+    operation = build_claimed_discovery_operation(  # type: ignore[arg-type]
+        ClaimLedger(), claim, DiscoveryCredentials(s2_key="wire", gemini_key="secret"), authority, now=NOW
+    )
+    assert operation.headers == {"x-goog-api-key": "secret"}
+    assert "secret" not in repr(operation) and "secret" not in repr(request)
+    with pytest.raises(ValueError, match="credential"):
+        build_claimed_discovery_operation(  # type: ignore[arg-type]
+            ClaimLedger(), claim, DiscoveryCredentials(s2_key="wire"), authority, now=NOW
+        )
 
 
 def test_europepmc_query_matches_legacy_embedded_quote_sanitization() -> None:
@@ -1104,10 +1201,47 @@ def test_zero_seed_generation_commits_and_replays_complete_c4_chain(tmp_path: Pa
         assert ledger.discovery_phase_status("venue_fallback", now=now) == "pending"
         ledger.execute_and_commit_venue_fallback(policy, now=now + timedelta(seconds=5))
         late = ledger.execute_and_commit_late_identifiers(policy, now=now + timedelta(seconds=6))
+        historical_c5_path = tmp_path / "populated-c5-registry.db"
+        with sqlite3.connect(historical_c5_path) as historical_c5_connection:
+            ledger._connection.backup(historical_c5_connection)
+        historical_c5_connection = sqlite3.connect(historical_c5_path)
+        update_trigger = historical_c5_connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'planner_passes_append_only_update'"
+        ).fetchone()[0]
+        historical_c5_connection.execute("DROP TRIGGER planner_passes_append_only_update")
+        c5_digest = "ac1a11deb6ea9c519b58638ac870a54d401b0ba50682fb6c82d744670a56bc7f"
+        for pass_id in (
+            "bind_corpus_seed",
+            "known_doi",
+            "broad_discovery",
+            "dynamic_expansion",
+            "venue_fallback",
+            "late_identifiers",
+        ):
+            content = json.loads(
+                historical_c5_connection.execute(
+                    "SELECT receipt_json FROM planner_passes WHERE pass_id = ?", (pass_id,)
+                ).fetchone()[0]
+            )
+            content["registry_digest"] = c5_digest
+            historical_c5_connection.execute(
+                "UPDATE planner_passes SET registry_digest = ?, receipt_json = ? WHERE pass_id = ?",
+                (c5_digest, json.dumps(content, sort_keys=True, separators=(",", ":")), pass_id),
+            )
+        historical_c5_connection.execute(str(update_trigger))
+        historical_c5_connection.commit()
+        historical_c5_connection.close()
+        with Ledger.open(historical_c5_path, corpus_repo_root=repo) as historical_c5:
+            historical_c5.manifest()
+            assert historical_c5.execute_and_commit_late_identifiers(policy, now=NOW) == replace(
+                late, registry_digest=c5_digest
+            )
+        html = ledger.execute_and_commit_html_probe(policy, now=now + timedelta(seconds=7))
         assert ledger.discovery_phase_status("known_doi", now=now) == "complete"
         assert ledger.discovery_phase_status("broad_discovery", now=now) == "complete"
         assert ledger.discovery_phase_status("dynamic_expansion", now=now) == "complete"
         assert ledger.discovery_phase_status("venue_fallback", now=now) == "complete"
+        assert ledger.discovery_phase_status("html_probe", now=now) == "complete"
         ledger.manifest()
     with Ledger.open(path, corpus_repo_root=repo) as reopened:
         assert reopened.execute_and_commit_discovery_wave("known_doi", policy, now=NOW) == known
@@ -1115,6 +1249,7 @@ def test_zero_seed_generation_commits_and_replays_complete_c4_chain(tmp_path: Pa
         assert reopened.execute_and_commit_discovery_wave("dynamic_expansion", policy, now=NOW) == dynamic
         assert reopened.execute_and_commit_venue_fallback(policy, now=NOW) == venue
         assert reopened.execute_and_commit_late_identifiers(policy, now=NOW) == late
+        assert reopened.execute_and_commit_html_probe(policy, now=NOW) == html
         reopened.manifest()
 
 
@@ -1278,14 +1413,27 @@ def test_atomic_venue_fallback_consumes_crossref_and_expands_openalex(tmp_path: 
         ledger.finish_request(
             openalex_request.key,
             "worker",
-            TaskDisposition.CONFIRMED_EMPTY,
+            TaskDisposition.SUCCEEDED,
             now + timedelta(seconds=5),
-            observation=ProviderObservation("openalex", "openalex-venue-v1", {}, authoritative_empty=True),
+            observation=ProviderObservation(
+                "openalex",
+                "openalex-venue-v1",
+                {
+                    "results": (
+                        {
+                            "authorships": ({"author": {"display_name": "Ada Lovelace"}},),
+                            "id": "https://openalex.org/W123",
+                            "publication_year": 2026,
+                            "title": "A title",
+                        },
+                    )
+                },
+            ),
         )
         ledger.finish_task(
             openalex_claim.key,
             "worker",
-            TaskDisposition.CONFIRMED_EMPTY,
+            TaskDisposition.SUCCEEDED,
             now + timedelta(seconds=5),
         )
         late_before = tuple(
@@ -1333,10 +1481,43 @@ def test_atomic_venue_fallback_consumes_crossref_and_expands_openalex(tmp_path: 
                     "items": items,
                 },
             )
+        html = ledger.execute_and_commit_html_probe(policy, now=now + timedelta(seconds=7))
+        assert ledger.discovery_phase_status("html_probe", now=now + timedelta(seconds=7)) == "pending"
+        ledger.execute_and_commit_html_probe(policy, now=now + timedelta(seconds=8))
+        due = ledger.discovery_wave_task_keys("html_probe", now=now + timedelta(seconds=8))
+        assert len(due) == 1
+        html_claim = ledger.claim_due_for_operations("worker", now + timedelta(seconds=8), timedelta(minutes=1), due)
+        assert html_claim is not None
+        assert (
+            ledger.resolve_claimed_web_probe_url(html_claim, now=now + timedelta(seconds=8))
+            == "https://openalex.org/W123"
+        )
+        html_request = ledger.claim_request(html_claim.key, "worker", now + timedelta(seconds=8), timedelta(minutes=1))
+        assert html_request is not None
+        ledger.finish_request(
+            html_request.key,
+            "worker",
+            TaskDisposition.SUCCEEDED,
+            now + timedelta(seconds=8),
+            observation=ProviderObservation("web", "html-doi-v1", {"doi": None}),
+        )
+        ledger.finish_task(html_claim.key, "worker", TaskDisposition.SUCCEEDED, now + timedelta(seconds=8))
+        ledger.execute_and_commit_html_probe(policy, now=now + timedelta(seconds=9))
+        assert ledger.discovery_phase_status("html_probe", now=now + timedelta(seconds=9)) == "complete"
+        assert ledger._connection.execute("SELECT COUNT(*) FROM html_probe_waves").fetchone()[0] == 2
+        assert ledger._connection.execute("SELECT COUNT(*) FROM html_probe_terminal_receipts").fetchone()[0] == 1
         ledger.manifest()
+        closure_path = tmp_path / "html-closure.db"
+        with sqlite3.connect(closure_path) as destination:
+            ledger._connection.backup(destination)
+        with Ledger.open(closure_path, corpus_repo_root=repo) as closable:
+            closure_digest = evidence_digest(dict(closable.closure_content()))
+            closable.close_plan(expected_closure_digest=closure_digest, now=now + timedelta(seconds=10))
+            closable.manifest()
     with Ledger.open(path, corpus_repo_root=repo) as reopened:
         assert reopened.execute_and_commit_venue_fallback(policy, now=NOW) == receipt
         assert reopened.execute_and_commit_late_identifiers(policy, now=NOW) == late
+        assert reopened.execute_and_commit_html_probe(policy, now=NOW) == html
         reopened.manifest()
 
 

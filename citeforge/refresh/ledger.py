@@ -65,20 +65,27 @@ if TYPE_CHECKING:
     from .corpus import ExistingCorpusEvidence
     from .discovery import DiscoveryAuthority, DiscoveryObservation, DiscoveryWave
 
-_SCHEMA_VERSION = "8"
+_SCHEMA_VERSION = "9"
 _SCHEMA_V4_FINGERPRINT = "ad516a324198dcb1816ab3c8c0191932405f210a32af122cdf3d225141305c13"
 _SCHEMA_V5_FINGERPRINT = "be14f7bc658bf347c5f519d0483311ff23118e0c9569f5328939b546b1fe2f46"
 _MAX_PLAN_ROUNDS = 64
 _SCHEMA_V6_FINGERPRINT = "9bf51dac21ab9a519ff8461a030d0a87c7211191554f1c06024996bd4e95ff3a"
 _SCHEMA_V7_FINGERPRINT = "4391a86ee7f96c62c42280042b09de5e7b2fe0b59006ab58e3abbe6f77545bdf"
-_EXPECTED_SCHEMA_FINGERPRINT = "c57f9536975e14391ccad53d2d49ccecca60b052e9249e695d6f5af3cb4f2f71"
+_SCHEMA_V8_FINGERPRINT = "c57f9536975e14391ccad53d2d49ccecca60b052e9249e695d6f5af3cb4f2f71"
+_EXPECTED_SCHEMA_FINGERPRINT = "c27b65db08f4ff37121f33d024560cebb7aa3b62805807da032d2a8d233d6751"
 _LEGACY_C3_PASS_REGISTRY_DIGEST = (  # immutable registry fingerprint
     "f41a0b514dcf65e30a1fd4cab17cd3a151146f3c753786bd769e2a96e52026ae"  # noqa: S105
 )
 _LEGACY_C4_PASS_REGISTRY_DIGEST = (  # immutable registry fingerprint
     "4aca44ec61c5f081b1fa372705434adb4413b6e02b5f981166829cd5d41d5696"  # noqa: S105
 )
+_LEGACY_C5_PASS_REGISTRY_DIGEST = (  # immutable registry fingerprint
+    "ac1a11deb6ea9c519b58638ac870a54d401b0ba50682fb6c82d744670a56bc7f"  # noqa: S105
+)
 _LEGACY_C4_PASS_IDS = frozenset({"bind_corpus_seed", "known_doi", "broad_discovery", "dynamic_expansion"})
+_LEGACY_C5_PASS_IDS = frozenset(
+    {"bind_corpus_seed", "known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback", "late_identifiers"}
+)
 _SNAPSHOT_DOMAIN_SEPARATOR = "citeforge-task5c2-planner-snapshot-v1"
 _CORPUS_S2_ID = re.compile(r"[0-9a-f]{40}", re.I)
 _CORPUS_OPENALEX_ID = re.compile(r"(?:https://openalex\.org/)?(W\d+)", re.I)
@@ -91,6 +98,9 @@ _V6_AUTHORITY_TABLES = frozenset(
         "corpus_scan_receipts",
         "discovery_policy_authority",
         "intent_provenance",
+        "html_probe_waves",
+        "html_probe_wave_items",
+        "html_probe_terminal_receipts",
         "materialization_intents",
         "planner_pass_expected_items",
         "planner_passes",
@@ -225,6 +235,10 @@ def _receipt_matches_authority(stored: PlannerPassReceipt, current: PlannerPassR
         stored.pass_id in _LEGACY_C4_PASS_IDS
         and stored.registry_digest == _LEGACY_C4_PASS_REGISTRY_DIGEST
         and stored == replace(current, registry_digest=_LEGACY_C4_PASS_REGISTRY_DIGEST)
+    ) or (
+        stored.pass_id in _LEGACY_C5_PASS_IDS
+        and stored.registry_digest == _LEGACY_C5_PASS_REGISTRY_DIGEST
+        and stored == replace(current, registry_digest=_LEGACY_C5_PASS_REGISTRY_DIGEST)
     )
 
 
@@ -1129,6 +1143,55 @@ class Ledger:
             "'discovery_policy_authority requires guarded authority API'); END"
         )
 
+    @staticmethod
+    def _install_schema_v9(connection: sqlite3.Connection) -> None:
+        marker_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(physical_send_markers)")}
+        if "resume_url" not in marker_columns:
+            connection.execute("ALTER TABLE physical_send_markers ADD COLUMN resume_url TEXT")
+        if "resume_url_digest" not in marker_columns:
+            connection.execute("ALTER TABLE physical_send_markers ADD COLUMN resume_url_digest TEXT")
+        statements = (
+            "CREATE TABLE html_probe_waves (generation_id TEXT NOT NULL, parent_pass_key TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL CHECK(ordinal >= 0), wave_input_digest TEXT NOT NULL, "
+            "predecessor_digest TEXT NOT NULL, decision_set_digest TEXT NOT NULL, terminal INTEGER NOT NULL "
+            "CHECK(terminal IN (0, 1)), round_key TEXT, receipt_digest TEXT NOT NULL, committed_at TEXT NOT NULL, "
+            "PRIMARY KEY (generation_id, parent_pass_key, ordinal), UNIQUE (generation_id, receipt_digest), "
+            "FOREIGN KEY (generation_id, parent_pass_key) REFERENCES planner_passes(generation_id, pass_key))",
+            "CREATE TABLE html_probe_wave_items (generation_id TEXT NOT NULL, parent_pass_key TEXT NOT NULL, "
+            "ordinal INTEGER NOT NULL, author_key TEXT NOT NULL, publication_key TEXT NOT NULL, task_key TEXT, "
+            "applicability TEXT NOT NULL, reason TEXT, evidence_json TEXT NOT NULL, item_digest TEXT NOT NULL, "
+            "PRIMARY KEY (generation_id, parent_pass_key, ordinal, author_key, publication_key), "
+            "UNIQUE (generation_id, parent_pass_key, ordinal, item_digest), "
+            "FOREIGN KEY (generation_id, parent_pass_key, ordinal) REFERENCES "
+            "html_probe_waves(generation_id, parent_pass_key, ordinal), FOREIGN KEY (generation_id, author_key, "
+            "publication_key) REFERENCES publications(generation_id, author_key, publication_key), "
+            "FOREIGN KEY (generation_id, task_key) REFERENCES tasks(generation_id, task_key))",
+            "CREATE INDEX html_probe_wave_items_task_idx ON html_probe_wave_items(generation_id, task_key)",
+            "CREATE TABLE html_probe_terminal_receipts (generation_id TEXT NOT NULL, parent_pass_key TEXT NOT NULL, "
+            "completed_after_ordinal INTEGER CHECK(completed_after_ordinal IS NULL OR completed_after_ordinal >= 0), "
+            "reason TEXT NOT NULL, evidence_digest TEXT NOT NULL, committed_at TEXT NOT NULL, "
+            "PRIMARY KEY (generation_id, parent_pass_key), UNIQUE (generation_id, evidence_digest), "
+            "FOREIGN KEY (generation_id, parent_pass_key) REFERENCES planner_passes(generation_id, pass_key))",
+        )
+        for statement in statements:
+            connection.execute(statement)
+        for table in ("html_probe_waves", "html_probe_wave_items", "html_probe_terminal_receipts"):
+            for suffix, action in (("append_only_update", "UPDATE"), ("append_only_delete", "DELETE")):
+                connection.execute(
+                    f"CREATE TRIGGER {table}_{suffix} BEFORE {action} ON {table} "
+                    f"BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END"
+                )
+            connection.execute(
+                f"CREATE TRIGGER {table}_post_close_insert BEFORE INSERT ON {table} WHEN "  # noqa: S608
+                "(SELECT plan_closed FROM generations WHERE generation_id = NEW.generation_id) != 0 "
+                f"BEGIN SELECT RAISE(ABORT, '{table} rejects post-close evidence'); END"
+            )
+            connection.execute(
+                f"CREATE TRIGGER {table}_authority_insert BEFORE INSERT ON {table} WHEN "
+                "citeforge_authority_write_enabled() != 1 BEGIN SELECT RAISE(ABORT, "
+                f"'{table} requires guarded authority API'); END"
+            )
+
     def _initialize_schema(self) -> None:
         with self._transaction(immediate=True) as connection:
             user_objects = connection.execute(
@@ -1159,7 +1222,8 @@ class Ledger:
                 connection.execute(
                     "CREATE TABLE physical_send_markers (generation_id TEXT NOT NULL, request_key TEXT NOT NULL, "
                     "owner TEXT NOT NULL, started_at TEXT NOT NULL, idempotent INTEGER NOT NULL "
-                    "CHECK(idempotent IN (0, 1)), resolved_at TEXT, PRIMARY KEY (generation_id, request_key), "
+                    "CHECK(idempotent IN (0, 1)), resolved_at TEXT, resume_url TEXT, resume_url_digest TEXT, "
+                    "PRIMARY KEY (generation_id, request_key), "
                     "FOREIGN KEY (generation_id, request_key) "
                     "REFERENCES requests(generation_id, request_key))"
                 )
@@ -1199,18 +1263,28 @@ class Ledger:
                 self._validate_schema_v7(connection)
                 self._install_schema_v8(connection)
                 actual = self._schema_fingerprint(connection)
-                expected = _EXPECTED_SCHEMA_FINGERPRINT
+                expected = _SCHEMA_V8_FINGERPRINT
                 if actual != expected:
                     raise ValueError("structurally inconsistent schema version 8 fingerprint")
                 connection.execute("UPDATE schema_meta SET value = '8' WHERE key = 'schema_version'")
                 connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (expected,))
                 existing_version = ("8",)
+            if existing_version is not None and existing_version[0] == "8":
+                self._validate_schema_v8(connection)
+                self._install_schema_v9(connection)
+                actual = self._schema_fingerprint(connection)
+                expected = _EXPECTED_SCHEMA_FINGERPRINT
+                if actual != expected:
+                    raise ValueError("structurally inconsistent schema version 9 fingerprint")
+                connection.execute("UPDATE schema_meta SET value = '9' WHERE key = 'schema_version'")
+                connection.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_fingerprint'", (expected,))
+                existing_version = ("9",)
             if existing_version is not None and existing_version[0] != _SCHEMA_VERSION:
                 raise ValueError(
                     f"unsupported or structurally inconsistent ledger schema version: {existing_version[0]}"
                 )
             if existing_version is not None:
-                self._validate_schema_v8(connection)
+                self._validate_schema_v9(connection)
                 return
             schema = """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -1321,6 +1395,7 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS physical_send_markers (generation_id TEXT NOT NULL,
                     request_key TEXT NOT NULL, owner TEXT NOT NULL, started_at TEXT NOT NULL,
                     idempotent INTEGER NOT NULL CHECK(idempotent IN (0, 1)), resolved_at TEXT,
+                    resume_url TEXT, resume_url_digest TEXT,
                     PRIMARY KEY (generation_id, request_key), FOREIGN KEY (generation_id, request_key)
                     REFERENCES requests(generation_id, request_key));
                 CREATE TABLE IF NOT EXISTS observations (
@@ -1636,8 +1711,9 @@ class Ledger:
                 self._install_schema_v6(connection)
                 self._install_schema_v7(connection)
                 self._install_schema_v8(connection)
+                self._install_schema_v9(connection)
                 actual = self._schema_fingerprint(connection)
-                expected = actual
+                expected = _EXPECTED_SCHEMA_FINGERPRINT
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)", (_SCHEMA_VERSION,)
                 )
@@ -1645,7 +1721,7 @@ class Ledger:
                     "INSERT INTO schema_meta(key, value) VALUES ('schema_fingerprint', ?)",
                     (expected,),
                 )
-            self._validate_schema_v8(connection)
+            self._validate_schema_v9(connection)
 
     @staticmethod
     def _schema_fingerprint(connection: sqlite3.Connection) -> str:
@@ -1715,7 +1791,15 @@ class Ledger:
                 "topology_digest",
             },
             "inventory_policy_authority": {"authority_json", "authority_digest"},
-            "physical_send_markers": {"request_key", "owner", "started_at", "idempotent", "resolved_at"},
+            "physical_send_markers": {
+                "request_key",
+                "owner",
+                "started_at",
+                "idempotent",
+                "resolved_at",
+                "resume_url",
+                "resume_url_digest",
+            },
         }
         for table, required in required_columns.items():
             columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -1824,9 +1908,68 @@ class Ledger:
             raise ValueError("structurally inconsistent schema version 8 policy triggers")
         fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
         actual = Ledger._schema_fingerprint(connection)
-        expected = _EXPECTED_SCHEMA_FINGERPRINT
+        expected = _SCHEMA_V8_FINGERPRINT
         if fingerprint is None or fingerprint[0] != expected or actual != expected:
             raise ValueError("structurally inconsistent schema version 8 fingerprint")
+        Ledger._assert_task5a_authority_invariant(connection)
+        for row in connection.execute("SELECT generation_id FROM generations ORDER BY generation_id"):
+            generation_id = str(row[0])
+            Ledger._v6_evidence_content(connection, generation_id)
+            Ledger._verify_v6_relationships(connection, generation_id)
+
+    @staticmethod
+    def _validate_schema_v9(connection: sqlite3.Connection) -> None:
+        required = {
+            "html_probe_waves": {
+                "parent_pass_key",
+                "ordinal",
+                "wave_input_digest",
+                "predecessor_digest",
+                "decision_set_digest",
+                "terminal",
+                "round_key",
+                "receipt_digest",
+                "committed_at",
+            },
+            "html_probe_wave_items": {
+                "parent_pass_key",
+                "ordinal",
+                "author_key",
+                "publication_key",
+                "task_key",
+                "applicability",
+                "reason",
+                "evidence_json",
+                "item_digest",
+            },
+            "html_probe_terminal_receipts": {
+                "parent_pass_key",
+                "completed_after_ordinal",
+                "reason",
+                "evidence_digest",
+                "committed_at",
+            },
+        }
+        for table, columns in required.items():
+            actual_columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+            if columns - actual_columns:
+                raise ValueError(f"structurally inconsistent schema version 9 table: {table}")
+            triggers = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?", (table,)
+                )
+            }
+            if len(triggers) != 4:
+                raise ValueError(f"structurally inconsistent schema version 9 triggers: {table}")
+        fingerprint = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_fingerprint'").fetchone()
+        actual = Ledger._schema_fingerprint(connection)
+        if (
+            fingerprint is None
+            or fingerprint[0] != _EXPECTED_SCHEMA_FINGERPRINT
+            or actual != _EXPECTED_SCHEMA_FINGERPRINT
+        ):
+            raise ValueError("structurally inconsistent schema version 9 fingerprint")
         Ledger._assert_task5a_authority_invariant(connection)
         for row in connection.execute("SELECT generation_id FROM generations ORDER BY generation_id"):
             generation_id = str(row[0])
@@ -3095,6 +3238,7 @@ class Ledger:
             "dynamic_expansion",
             "venue_fallback",
             "late_identifiers",
+            "html_probe",
             "merge_intents",
         }:
             raise ValueError("unsupported discovery snapshot")
@@ -3202,6 +3346,7 @@ class Ledger:
             "dynamic_expansion",
             "venue_fallback",
             "late_identifiers",
+            "html_probe",
         }
         if legacy_c4:
             legacy_snapshot = _freeze_json({**dict(initial_snapshot), "pass_version": "1"})
@@ -5447,7 +5592,14 @@ class Ledger:
 
     def discovery_wave_due_tasks(self, pass_id: str, *, now: datetime) -> Mapping[str, str]:
         """Return one validated task-key to provider map for due C4 work."""
-        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback"}:
+        if pass_id not in {
+            "known_doi",
+            "broad_discovery",
+            "dynamic_expansion",
+            "venue_fallback",
+            "late_identifiers",
+            "html_probe",
+        }:
             raise ValueError("unsupported discovery wave")
         generation_id = self._generation_id()
         now_text = _timestamp(now)
@@ -5494,6 +5646,16 @@ class Ledger:
                         (generation_id,),
                     ).fetchall()
                 )
+            elif pass_id == "html_probe":  # noqa: S105 - planner pass identifier
+                rows.extend(
+                    connection.execute(
+                        "SELECT task.task_key, task.provider, task.request_key, task.state, task.next_attempt_at, "
+                        "task.lease_expires_at FROM html_probe_wave_items AS item JOIN tasks AS task "
+                        "ON task.generation_id = item.generation_id AND task.task_key = item.task_key "
+                        "WHERE item.generation_id = ? AND item.parent_pass_key = ?",
+                        (generation_id, str(pass_row[0])),
+                    ).fetchall()
+                )
             due: dict[str, str] = {}
             for row in rows:
                 if row[2] is None:
@@ -5511,7 +5673,14 @@ class Ledger:
 
     def discovery_phase_status(self, pass_id: str, *, now: datetime) -> str:
         """Classify one C4 phase without exposing mutable planner internals."""
-        if pass_id not in {"known_doi", "broad_discovery", "dynamic_expansion", "venue_fallback"}:
+        if pass_id not in {
+            "known_doi",
+            "broad_discovery",
+            "dynamic_expansion",
+            "venue_fallback",
+            "late_identifiers",
+            "html_probe",
+        }:
             raise ValueError("unsupported discovery wave")
         generation_id = self._generation_id()
         if (
@@ -5534,6 +5703,8 @@ class Ledger:
             states = [TaskDisposition(str(row[0])) for row in rows]
             if any(state in _TERMINAL - _SATISFIED for state in states):
                 return "blocking"
+            if pass_id == "late_identifiers":
+                return "complete"
             if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
                 if (
                     connection.execute(
@@ -5574,6 +5745,46 @@ class Ledger:
                         (generation_id,),
                     )
                 )
+            elif pass_id == "html_probe":  # noqa: S105 - planner pass identifier
+                pass_row = connection.execute(
+                    "SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = 'html_probe'",
+                    (generation_id,),
+                ).fetchone()
+                control = (
+                    connection.execute(
+                        "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
+                        "AND pass_key = ? AND item_key LIKE 'html-control:%'",
+                        (generation_id, str(pass_row[0])),
+                    ).fetchone()
+                    if pass_row is not None
+                    else None
+                )
+                envelope = json.loads(str(control[0])) if control is not None else None
+                payload = envelope.get("payload") if isinstance(envelope, Mapping) else None
+                if isinstance(payload, Mapping) and payload.get("terminal") is True:
+                    return "complete"
+                child_states = [
+                    TaskDisposition(str(row[0]))
+                    for row in connection.execute(
+                        "SELECT task.state FROM html_probe_wave_items AS item JOIN tasks AS task "
+                        "ON task.generation_id = item.generation_id AND task.task_key = item.task_key "
+                        "WHERE item.generation_id = ? AND item.parent_pass_key = ?",
+                        (generation_id, str(pass_row[0])),
+                    )
+                ]
+                states.extend(child_states)
+                if any(state in _TERMINAL - _SATISFIED for state in child_states):
+                    return "blocking"
+                if any(state not in _SATISFIED for state in child_states):
+                    return "pending"
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM html_probe_terminal_receipts WHERE generation_id = ? AND parent_pass_key = ?",
+                        (generation_id, str(pass_row[0])),
+                    ).fetchone()
+                    is None
+                ):
+                    return "pending"
             if any(state in _TERMINAL - _SATISFIED for state in states):
                 return "blocking"
             if any(state not in _SATISFIED for state in states):
@@ -6401,7 +6612,7 @@ class Ledger:
                 }
                 source_items.append(
                     {
-                        "digest": item.digest,
+                        "digest": evidence_digest(payload),
                         "key": f"late-output:{item.author_key}:{item.publication_key}",
                         "kind": EvidenceKind.PROVENANCE.value,
                         "payload": payload,
@@ -6453,7 +6664,7 @@ class Ledger:
             existing = existing_pass_row
             if existing is not None:
                 stored = PlannerPassReceipt(**json.loads(str(existing[0])))
-                if stored != receipt:
+                if not _receipt_matches_authority(stored, receipt):
                     raise ValueError("conflicting late identifier replay")
                 return stored
             predecessor = connection.execute(
@@ -6533,6 +6744,32 @@ class Ledger:
                     committed_at,
                 ),
             )
+            late_sources = tuple(sorted(decision.task.key for decision in openalex.decisions))
+            late_durable = tuple(self._source_evidence(connection, generation_id, key) for key in late_sources)
+            late_reduction_content = {
+                "content_digest": content_digest,
+                "source_dispositions": [item[0].value for item in late_durable],
+                "source_evidence_digests": [item[1] for item in late_durable],
+                "source_task_keys": list(late_sources),
+            }
+            late_reduction_digest = _digest(late_reduction_content)
+            connection.execute(
+                "INSERT INTO reduction_receipts(generation_id, reduction_digest, round_key, source_task_keys_json, "
+                "source_dispositions_json, source_evidence_digests_json, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    late_reduction_digest,
+                    round_key,
+                    _canonical(late_sources),
+                    _canonical([item[0].value for item in late_durable]),
+                    _canonical([item[1] for item in late_durable]),
+                    committed_at,
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO reduction_sources(generation_id, source_task_key, reduction_digest) VALUES (?, ?, ?)",
+                [(generation_id, key, late_reduction_digest) for key in late_sources],
+            )
             self._inject("after_c4_round")
             cumulative = _digest(
                 [
@@ -6548,6 +6785,666 @@ class Ledger:
                 (sequence, cumulative, committed_at, generation_id),
             )
             return receipt
+
+    def execute_and_commit_html_probe(self, policy: object, *, now: datetime) -> PlannerPassReceipt:
+        """Commit the versioned HTML parent authority before bounded candidate waves."""
+        from .capabilities import REGISTRY_DIGEST as CAPABILITY_REGISTRY_DIGEST
+        from .discovery import DiscoveryPolicy
+
+        if not isinstance(policy, DiscoveryPolicy):
+            raise TypeError("HTML probe requires a typed discovery policy")
+        generation_id = self._generation_id()
+        committed_at = _timestamp(now)
+        trusted_expected = self._trusted_corpus_expected()
+        with self._transaction(immediate=True) as connection:
+            self._verify_trusted_corpus(connection, trusted_expected)
+            authority = self._load_discovery_authority(connection, generation_id)
+            if authority.policy != policy:
+                raise ValueError("HTML probe policy does not match bound authority")
+            generation = connection.execute(
+                "SELECT state, plan_closed, plan_revision, updated_at FROM generations WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+            if generation is None or generation[0] != GenerationState.RUNNING.value or int(generation[1]):
+                raise ValueError("HTML probe requires an open running generation")
+            late_row = connection.execute(
+                "SELECT pass_key, output_digest FROM planner_passes WHERE generation_id = ? "
+                "AND pass_id = 'late_identifiers'",
+                (generation_id,),
+            ).fetchone()
+            if late_row is None:
+                raise ValueError("HTML probe requires complete late identifier authority")
+            if int(generation[2]) >= _MAX_PLAN_ROUNDS or policy.round_budget > _MAX_PLAN_ROUNDS:
+                raise ValueError("HTML probe exceeds the fixed plan round budget")
+            existing = connection.execute(
+                "SELECT receipt_json FROM planner_passes WHERE generation_id = ? AND pass_id = 'html_probe'",
+                (generation_id,),
+            ).fetchone()
+            latest_round = connection.execute(
+                "SELECT committed_at FROM plan_rounds WHERE generation_id = ? ORDER BY sequence DESC LIMIT 1",
+                (generation_id,),
+            ).fetchone()
+            if existing is None and (
+                committed_at < str(generation[3]) or (latest_round is not None and committed_at < str(latest_round[0]))
+            ):
+                raise ValueError("HTML probe timestamp precedes durable generation history")
+            source_items = [
+                cast(Mapping[str, object], json.loads(str(row[0])))
+                for row in connection.execute(
+                    "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? AND pass_key = ? "
+                    "AND item_key LIKE 'late-output:%' ORDER BY item_key",
+                    (generation_id, str(late_row[0])),
+                )
+            ]
+            seed_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM publication_seed_evidence WHERE generation_id = ?", (generation_id,)
+                ).fetchone()[0]
+            )
+            if len(source_items) != seed_count:
+                raise ValueError("HTML probe late identifier membership changed")
+            unresolved_members = 0
+            for envelope in source_items:
+                payload = envelope.get("payload")
+                candidates = payload.get("candidates") if isinstance(payload, Mapping) else None
+                if not isinstance(candidates, Sequence):
+                    raise ValueError("HTML probe late identifier output changed")
+                has_doi = any(
+                    isinstance(candidate, Mapping)
+                    and candidate.get("kind") == "doi"
+                    and candidate.get("identity_accepted") is True
+                    for candidate in candidates
+                )
+                has_url = any(
+                    isinstance(candidate, Mapping)
+                    and candidate.get("kind") == "url_sha256"
+                    and candidate.get("identity_accepted") is True
+                    for candidate in candidates
+                )
+                unresolved_members += int(has_url and not has_doi)
+            control_payload = {
+                "authority_digest": authority.digest,
+                "capability_registry_digest": CAPABILITY_REGISTRY_DIGEST,
+                "late_output_digest": str(late_row[1]),
+                "max_html_probe_waves": policy.max_html_probe_waves,
+                "terminal": unresolved_members == 0 or policy.max_html_probe_waves == 0,
+                "unresolved_members": unresolved_members,
+                "web_adapter_version": "1",
+            }
+            source_items.append(
+                {
+                    "digest": evidence_digest(control_payload),
+                    "key": f"html-control:{generation_id}",
+                    "kind": EvidenceKind.REDUCTION_RECEIPT.value,
+                    "payload": control_payload,
+                }
+            )
+            snapshot = self._snapshot_for_discovery_pass(
+                connection,
+                generation_id,
+                "html_probe",
+                source_items=source_items,
+            )
+            self._verify_html_probe_snapshot(connection, generation_id, snapshot)
+            receipt = _execute_authoritative_pass("html_probe", snapshot)
+            if existing is not None:
+                stored = PlannerPassReceipt(**json.loads(str(existing[0])))
+                if not _receipt_matches_authority(stored, receipt):
+                    raise ValueError("conflicting HTML probe replay")
+                if not control_payload["terminal"]:
+                    self._commit_html_probe_child(connection, generation_id, authority, stored, committed_at)
+                return stored
+            predecessor = connection.execute(
+                "SELECT output_digest FROM planner_passes WHERE generation_id = ? ORDER BY rowid DESC LIMIT 1",
+                (generation_id,),
+            ).fetchone()
+            predecessor_digest = str(predecessor[0]) if predecessor else None
+            with self._authority_write():
+                connection.execute(
+                    "INSERT INTO planner_passes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        receipt.pass_key,
+                        receipt.pass_id,
+                        receipt.pass_version,
+                        receipt.registry_digest,
+                        receipt.snapshot_digest,
+                        receipt.output_digest,
+                        evidence_json(receipt.canonical_content()),
+                        evidence_digest(
+                            {
+                                "domain": _SNAPSHOT_DOMAIN_SEPARATOR,
+                                "generation_id": generation_id,
+                                "pass_id": "html_probe",
+                                "snapshot": snapshot,
+                                "predecessor_output_digest": predecessor_digest,
+                            }
+                        ),
+                        predecessor_digest,
+                    ),
+                )
+                self._inject("after_c4_pass_receipt")
+                connection.executemany(
+                    "INSERT INTO planner_pass_expected_items VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        (
+                            generation_id,
+                            receipt.pass_key,
+                            str(item["key"]),
+                            str(item["kind"]),
+                            str(item["digest"]),
+                            evidence_json(item),
+                            int(str(item["key"]) in receipt.unseen_keys),
+                        )
+                        for item in cast(Sequence[Mapping[str, object]], snapshot["items"])
+                    ),
+                )
+                self._inject("after_c4_expected_items")
+            sequence = int(generation[2]) + 1
+            content = self._round_content(
+                sequence,
+                PlanPhase.LATE_IDENTIFIERS,
+                "html_probe",
+                policy.planner_version,
+                (),
+                receipt.snapshot_digest,
+                (),
+                (),
+            )
+            content_digest = _digest(content)
+            round_key = _digest({"generation_id": generation_id, "content_digest": content_digest})
+            connection.execute(
+                "INSERT INTO plan_rounds(generation_id, sequence, round_key, phase, planner_id, planner_version, "
+                "source_task_keys_json, source_evidence_digest, task_set_digest, content_digest, committed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    sequence,
+                    round_key,
+                    PlanPhase.LATE_IDENTIFIERS.value,
+                    "html_probe",
+                    policy.planner_version,
+                    receipt.snapshot_digest,
+                    content["task_set_digest"],
+                    content_digest,
+                    committed_at,
+                ),
+            )
+            self._inject("after_c4_round")
+            cumulative = _digest(
+                [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT content_digest FROM plan_rounds WHERE generation_id = ? ORDER BY sequence",
+                        (generation_id,),
+                    )
+                ]
+            )
+            connection.execute(
+                "UPDATE generations SET plan_revision = ?, plan_digest = ?, updated_at = ? WHERE generation_id = ?",
+                (sequence, cumulative, committed_at, generation_id),
+            )
+            if control_payload["terminal"]:
+                terminal_reason = (
+                    "candidate_bound_exhausted"
+                    if unresolved_members and policy.max_html_probe_waves == 0
+                    else "no_probeable_members"
+                )
+                terminal_content = {
+                    "completed_after_ordinal": None,
+                    "parent_pass_key": receipt.pass_key,
+                    "reason": terminal_reason,
+                    "unresolved_members": unresolved_members,
+                }
+                with self._authority_write():
+                    connection.execute(
+                        "INSERT INTO html_probe_terminal_receipts VALUES (?, ?, NULL, ?, ?, ?)",
+                        (
+                            generation_id,
+                            receipt.pass_key,
+                            terminal_content["reason"],
+                            evidence_digest(terminal_content),
+                            committed_at,
+                        ),
+                    )
+            return receipt
+
+    @staticmethod
+    def _html_task_content(task: TaskSpec) -> Mapping[str, object]:
+        return {
+            "applicability": task.applicability,
+            "author_key": task.author_key,
+            "operation": task.operation,
+            "provider": task.provider,
+            "publication_key": task.publication_key,
+            "request": task.request.canonical_content() if task.request is not None else None,
+            "required": task.required,
+        }
+
+    @staticmethod
+    def _html_task_from_content(content: Mapping[str, object]) -> TaskSpec:
+        request_value = content.get("request")
+        request = RequestSpec(**dict(request_value)) if isinstance(request_value, Mapping) else None
+        return TaskSpec(
+            str(content["author_key"]),
+            str(content["publication_key"]),
+            str(content["provider"]),
+            str(content["operation"]),
+            request,
+            bool(content["required"]),
+            str(content["applicability"]),
+        )
+
+    @staticmethod
+    def _derive_html_probe_wave(
+        connection: sqlite3.Connection,
+        generation_id: str,
+        authority: object,
+        ordinal: int,
+    ) -> tuple[tuple[PublicationSeedEvidence, ...], object, Mapping[tuple[str, str], object]]:
+        """Rederive one child wave and its private indexed URL source authority."""
+        from .discovery import DiscoveryAuthority, DiscoveryDecision, DiscoveryObservation, DiscoveryWave
+        from .publication_discovery import (
+            _html_probe_candidates_by_member,
+            derive_late_identifier_evidence,
+            plan_html_probe_wave,
+        )
+
+        if not isinstance(authority, DiscoveryAuthority):
+            raise TypeError("HTML child requires typed discovery authority")
+        seeds: list[PublicationSeedEvidence] = []
+        for row in connection.execute(
+            "SELECT evidence_json FROM publication_seed_evidence WHERE generation_id = ? "
+            "ORDER BY author_key, publication_key",
+            (generation_id,),
+        ):
+            content = json.loads(str(row[0]))
+            content["origin_kind"] = EvidenceKind(str(content["origin_kind"]))
+            seeds.append(PublicationSeedEvidence(**content))
+        waves: list[DiscoveryWave] = []
+        observations: list[DiscoveryObservation] = []
+        for planner_id in ("broad_discovery", "venue_fallback", "openalex_venue_expansion"):
+            wave, terminal = Ledger._stored_discovery_wave(connection, generation_id, planner_id, authority.digest)
+            waves.append(wave)
+            observations.extend(terminal)
+        parent = connection.execute(
+            "SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = 'html_probe'",
+            (generation_id,),
+        ).fetchone()
+        if parent is None:
+            raise ValueError("HTML child requires parent authority")
+        for prior in range(ordinal):
+            wave_row = connection.execute(
+                "SELECT wave_input_digest FROM html_probe_waves WHERE generation_id = ? AND parent_pass_key = ? "
+                "AND ordinal = ?",
+                (generation_id, str(parent[0]), prior),
+            ).fetchone()
+            if wave_row is None:
+                raise ValueError("HTML child chronology changed")
+            decisions: list[DiscoveryDecision] = []
+            for item_row in connection.execute(
+                "SELECT evidence_json, task_key FROM html_probe_wave_items WHERE generation_id = ? "
+                "AND parent_pass_key = ? AND ordinal = ? ORDER BY author_key, publication_key",
+                (generation_id, str(parent[0]), prior),
+            ):
+                item = json.loads(str(item_row[0]))
+                task_content = item.get("task") if isinstance(item, Mapping) else None
+                if not isinstance(task_content, Mapping):
+                    raise ValueError("HTML child item authority changed")
+                task = Ledger._html_task_from_content(task_content)
+                reason_value = item.get("reason")
+                reason = ApplicabilityReason(str(reason_value)) if reason_value else None
+                decisions.append(DiscoveryDecision(task, reason))
+                if task.request is None:
+                    continue
+                if item_row[1] != task.key:
+                    raise ValueError("HTML child task membership changed")
+                observation = connection.execute(
+                    "SELECT disposition, response_json, schema_version, authoritative_empty FROM observations "
+                    "WHERE generation_id = ? AND request_key = ?",
+                    (generation_id, task.request.key),
+                ).fetchone()
+                if observation is None or TaskDisposition(str(observation[0])) not in _SATISFIED:
+                    raise ValueError("HTML child requires complete predecessor evidence")
+                observations.append(
+                    DiscoveryObservation(
+                        task,
+                        TaskDisposition(str(observation[0])),
+                        json.loads(str(observation[1])) if observation[1] is not None else {},
+                        bool(observation[3]),
+                        str(observation[2]),
+                    )
+                )
+            waves.append(
+                DiscoveryWave(
+                    tuple(sorted(decisions, key=lambda item: item.task.key)), str(wave_row[0]), authority.digest
+                )
+            )
+        ordered_observations = tuple(sorted(observations, key=lambda item: item.task.key))
+        late = derive_late_identifier_evidence(seeds, waves, ordered_observations)
+        wave = plan_html_probe_wave(seeds, late, waves, ordered_observations, ordinal, authority)
+        candidates = _html_probe_candidates_by_member(seeds, waves, ordered_observations, late)
+        return tuple(seeds), wave, candidates
+
+    def _commit_html_probe_child(
+        self,
+        connection: sqlite3.Connection,
+        generation_id: str,
+        authority: object,
+        parent: PlannerPassReceipt,
+        committed_at: str,
+    ) -> None:
+        """Commit one ordinal's logical decisions and optional physical task round."""
+        from .discovery import DiscoveryAuthority, DiscoveryWave
+
+        if not isinstance(authority, DiscoveryAuthority):
+            raise TypeError("HTML child requires typed discovery authority")
+        existing_ordinals = tuple(
+            int(row[0])
+            for row in connection.execute(
+                "SELECT ordinal FROM html_probe_waves WHERE generation_id = ? AND parent_pass_key = ? ORDER BY ordinal",
+                (generation_id, parent.pass_key),
+            )
+        )
+        if existing_ordinals != tuple(range(len(existing_ordinals))):
+            raise ValueError("HTML child chronology changed")
+        if (
+            connection.execute(
+                "SELECT 1 FROM html_probe_terminal_receipts WHERE generation_id = ? AND parent_pass_key = ?",
+                (generation_id, parent.pass_key),
+            ).fetchone()
+            is not None
+        ):
+            return
+        ordinal = len(existing_ordinals)
+        if ordinal:
+            states = [
+                TaskDisposition(str(row[0]))
+                for row in connection.execute(
+                    "SELECT task.state FROM html_probe_wave_items AS item JOIN tasks AS task "
+                    "ON task.generation_id = item.generation_id AND task.task_key = item.task_key "
+                    "WHERE item.generation_id = ? AND item.parent_pass_key = ? AND item.ordinal = ?",
+                    (generation_id, parent.pass_key, ordinal - 1),
+                )
+            ]
+            if any(state in _TERMINAL - _SATISFIED for state in states):
+                return
+            if any(state not in _SATISFIED for state in states):
+                return
+        generation = connection.execute(
+            "SELECT plan_revision, updated_at FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()
+        latest = connection.execute(
+            "SELECT committed_at FROM plan_rounds WHERE generation_id = ? ORDER BY sequence DESC LIMIT 1",
+            (generation_id,),
+        ).fetchone()
+        if generation is None or committed_at < str(generation[1]) or (latest and committed_at < str(latest[0])):
+            raise ValueError("HTML child timestamp precedes durable history")
+        if ordinal >= authority.policy.max_html_probe_waves:
+            terminal_content = {
+                "completed_after_ordinal": ordinal - 1 if ordinal else None,
+                "parent_pass_key": parent.pass_key,
+                "reason": "candidate_bound_exhausted",
+            }
+            with self._authority_write():
+                connection.execute(
+                    "INSERT INTO html_probe_terminal_receipts VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        parent.pass_key,
+                        terminal_content["completed_after_ordinal"],
+                        terminal_content["reason"],
+                        evidence_digest(terminal_content),
+                        committed_at,
+                    ),
+                )
+            return
+        _seeds, wave_value, candidates = self._derive_html_probe_wave(connection, generation_id, authority, ordinal)
+        if not isinstance(wave_value, DiscoveryWave):
+            raise TypeError("HTML child planner returned invalid wave")
+        wave = wave_value
+        planner_id = f"html_probe_candidate:{ordinal}"
+        item_rows: list[tuple[str, str, str | None, str, str | None, str, str]] = []
+        applicable: list[PlannedTask] = []
+        decision_payloads: list[Mapping[str, object]] = []
+        for decision in sorted(
+            wave.decisions, key=lambda item: (item.task.author_key, item.task.publication_key or "")
+        ):
+            task = decision.task
+            member = (task.author_key, task.publication_key or "")
+            selected = cast(Sequence[object], candidates[member])[ordinal : ordinal + 1]
+            selected_candidate = selected[0] if selected else None
+            candidate_content = (
+                {key: getattr(selected_candidate, key) for key in ("candidate_digest", "locators", "url_digest")}
+                if selected_candidate is not None
+                else None
+            )
+            payload: dict[str, object] = {
+                "candidate": candidate_content,
+                "ordinal": ordinal,
+                "reason": decision.reason.value if decision.reason is not None else None,
+                "task": self._html_task_content(task),
+                "wave_input_digest": wave.input_digest,
+            }
+            item_digest = evidence_digest(payload)
+            decision_payloads.append(payload)
+            item_rows.append(
+                (
+                    task.author_key,
+                    task.publication_key or "",
+                    task.key if task.request is not None else None,
+                    task.applicability,
+                    decision.reason.value if decision.reason is not None else None,
+                    evidence_json(payload),
+                    item_digest,
+                )
+            )
+            if task.request is not None:
+                applicable.append(PlannedTask(task, expands_plan=False))
+        predecessor_content = {
+            "ordinal": ordinal,
+            "parent_output_digest": parent.output_digest,
+            "prior_receipts": [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT receipt_digest FROM html_probe_waves WHERE generation_id = ? AND parent_pass_key = ? "
+                    "ORDER BY ordinal",
+                    (generation_id, parent.pass_key),
+                )
+            ],
+        }
+        predecessor_digest = evidence_digest(predecessor_content)
+        decision_set_digest = evidence_digest(decision_payloads)
+        terminal = not applicable
+        round_key: str | None = None
+        if int(generation[0]) >= _MAX_PLAN_ROUNDS and applicable:
+            raise ValueError("HTML child exceeds the fixed plan round budget")
+        if applicable:
+            sequence = int(generation[0]) + 1
+            content = self._round_content(
+                sequence,
+                PlanPhase.LATE_IDENTIFIERS,
+                planner_id,
+                authority.policy.planner_version,
+                (),
+                wave.input_digest,
+                (),
+                applicable,
+            )
+            content_digest = _digest(content)
+            round_key = _digest({"generation_id": generation_id, "content_digest": content_digest})
+            for planned in applicable:
+                self._insert_task(connection, generation_id, planned.task, self._inject)
+            connection.executemany(
+                "INSERT INTO plan_obligations(generation_id, task_key, identity_digest, author_key, provider, "
+                "operation, "
+                "required, applicability, round_sequence, expands_plan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (
+                    (
+                        generation_id,
+                        planned.task.key,
+                        planned.task.identity_digest,
+                        planned.task.author_key,
+                        planned.task.provider,
+                        planned.task.operation,
+                        int(planned.task.required),
+                        planned.task.applicability,
+                        sequence,
+                    )
+                    for planned in applicable
+                ),
+            )
+            connection.execute(
+                "INSERT INTO plan_rounds VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    sequence,
+                    round_key,
+                    PlanPhase.LATE_IDENTIFIERS.value,
+                    planner_id,
+                    authority.policy.planner_version,
+                    wave.input_digest,
+                    content["task_set_digest"],
+                    content_digest,
+                    committed_at,
+                ),
+            )
+        receipt_content = {
+            "decision_set_digest": decision_set_digest,
+            "ordinal": ordinal,
+            "parent_pass_key": parent.pass_key,
+            "predecessor_digest": predecessor_digest,
+            "round_key": round_key,
+            "terminal": terminal,
+            "wave_input_digest": wave.input_digest,
+        }
+        receipt_digest = evidence_digest(receipt_content)
+        with self._authority_write():
+            connection.execute(
+                "INSERT INTO html_probe_waves VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    generation_id,
+                    parent.pass_key,
+                    ordinal,
+                    wave.input_digest,
+                    predecessor_digest,
+                    decision_set_digest,
+                    int(terminal),
+                    round_key,
+                    receipt_digest,
+                    committed_at,
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO html_probe_wave_items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ((generation_id, parent.pass_key, ordinal, *row) for row in item_rows),
+            )
+            if terminal:
+                terminal_content = {
+                    "completed_after_ordinal": ordinal,
+                    "parent_pass_key": parent.pass_key,
+                    "reason": "no_applicable_candidate",
+                    "wave_receipt_digest": receipt_digest,
+                }
+                connection.execute(
+                    "INSERT INTO html_probe_terminal_receipts VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        parent.pass_key,
+                        ordinal,
+                        terminal_content["reason"],
+                        evidence_digest(terminal_content),
+                        committed_at,
+                    ),
+                )
+        if applicable:
+            cumulative = _digest(
+                [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT content_digest FROM plan_rounds WHERE generation_id = ? ORDER BY sequence",
+                        (generation_id,),
+                    )
+                ]
+            )
+            connection.execute(
+                "UPDATE generations SET plan_revision = ?, plan_digest = ?, updated_at = ? WHERE generation_id = ?",
+                (sequence, cumulative, committed_at, generation_id),
+            )
+
+    @staticmethod
+    def _verify_html_probe_snapshot(
+        connection: sqlite3.Connection, generation_id: str, snapshot: Mapping[str, object]
+    ) -> None:
+        """Prove the HTML parent is an exact projection of late identifier authority."""
+        from .capabilities import REGISTRY_DIGEST as CAPABILITY_REGISTRY_DIGEST
+
+        items = snapshot.get("items")
+        if not isinstance(items, Sequence):
+            raise ValueError("HTML probe snapshot items changed")
+        actual_late = {
+            str(item.get("key")): item
+            for item in items
+            if isinstance(item, Mapping) and str(item.get("key", "")).startswith("late-output:")
+        }
+        controls = [
+            item for item in items if isinstance(item, Mapping) and str(item.get("key", "")).startswith("html-control:")
+        ]
+        predecessor = connection.execute(
+            "SELECT pass_key, output_digest FROM planner_passes WHERE generation_id = ? "
+            "AND pass_id = 'late_identifiers'",
+            (generation_id,),
+        ).fetchone()
+        if predecessor is None or len(controls) != 1:
+            raise ValueError("HTML probe predecessor authority changed")
+        expected_late = {
+            str(envelope["key"]): envelope
+            for row in connection.execute(
+                "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? AND pass_key = ? "
+                "AND item_key LIKE 'late-output:%' ORDER BY item_key",
+                (generation_id, str(predecessor[0])),
+            )
+            if isinstance((envelope := json.loads(str(row[0]))), Mapping)
+        }
+        if evidence_json(actual_late) != evidence_json(expected_late):
+            raise ValueError("HTML probe late identifier membership changed")
+        unresolved = 0
+        for envelope in expected_late.values():
+            payload = envelope.get("payload")
+            candidates = payload.get("candidates") if isinstance(payload, Mapping) else None
+            if not isinstance(candidates, Sequence):
+                raise ValueError("HTML probe late identifier output changed")
+            has_doi = any(
+                isinstance(candidate, Mapping)
+                and candidate.get("kind") == "doi"
+                and candidate.get("identity_accepted") is True
+                for candidate in candidates
+            )
+            has_url = any(
+                isinstance(candidate, Mapping)
+                and candidate.get("kind") == "url_sha256"
+                and candidate.get("identity_accepted") is True
+                for candidate in candidates
+            )
+            unresolved += int(has_url and not has_doi)
+        authority = Ledger._load_discovery_authority(connection, generation_id)
+        control_payload = {
+            "authority_digest": authority.digest,
+            "capability_registry_digest": CAPABILITY_REGISTRY_DIGEST,
+            "late_output_digest": str(predecessor[1]),
+            "max_html_probe_waves": authority.policy.max_html_probe_waves,
+            "terminal": unresolved == 0 or authority.policy.max_html_probe_waves == 0,
+            "unresolved_members": unresolved,
+            "web_adapter_version": "1",
+        }
+        expected_control = {
+            "digest": evidence_digest(control_payload),
+            "key": f"html-control:{generation_id}",
+            "kind": EvidenceKind.REDUCTION_RECEIPT.value,
+            "payload": control_payload,
+        }
+        if evidence_json(controls[0]) != evidence_json(expected_control):
+            raise ValueError("HTML probe control authority changed")
 
     @staticmethod
     def _verify_late_identifier_snapshot(
@@ -6951,13 +7848,28 @@ class Ledger:
             str(row[0])
             for row in connection.execute(
                 "SELECT round_key FROM plan_rounds WHERE generation_id = ? AND planner_id IN "
-                "('known_doi', 'broad_discovery', 'dynamic_expansion')",
+                "('known_doi', 'broad_discovery', 'dynamic_expansion', 'venue_fallback', "
+                "'late_identifiers', 'html_probe')",
                 (generation_id,),
             )
         }
-        if later_round_keys != reduction_round_keys | discovery_round_keys:
+        html_child_round_keys = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT round_key FROM html_probe_waves WHERE generation_id = ? AND round_key IS NOT NULL",
+                (generation_id,),
+            )
+        }
+        if later_round_keys != reduction_round_keys | discovery_round_keys | html_child_round_keys:
             raise ValueError("noninitial round lacks exact reduction receipt")
-        for pass_id in ("known_doi", "broad_discovery", "dynamic_expansion"):
+        for pass_id in (
+            "known_doi",
+            "broad_discovery",
+            "dynamic_expansion",
+            "venue_fallback",
+            "late_identifiers",
+            "html_probe",
+        ):
             pass_count = connection.execute(
                 "SELECT COUNT(*) FROM planner_passes WHERE generation_id = ? AND pass_id = ?",
                 (generation_id, pass_id),
@@ -6978,9 +7890,9 @@ class Ledger:
                 raise ValueError("discovery pass lacks its exact round")
             round_key = str(discovery_round[0])
             has_reduction = round_key in reduction_round_keys
-            if pass_id == "known_doi":  # noqa: S105 - planner pass identifier
+            if pass_id in {"known_doi", "venue_fallback", "html_probe"}:
                 if has_reduction:
-                    raise ValueError("known DOI pass round cannot be a reduction round")
+                    raise ValueError("pass-only discovery round cannot be a reduction round")
                 continue
             if not has_reduction:
                 raise ValueError("later discovery pass lacks its exact reduction receipt")
@@ -7002,7 +7914,7 @@ class Ledger:
                         (generation_id,),
                     )
                 )
-            else:
+            elif pass_id == "dynamic_expansion":  # noqa: S105 - planner pass identifier
                 broad_pass = connection.execute(
                     "SELECT pass_key FROM planner_passes WHERE generation_id = ? AND pass_id = 'broad_discovery'",
                     (generation_id,),
@@ -7020,6 +7932,17 @@ class Ledger:
                         if isinstance((envelope := json.loads(str(row[0]))), Mapping)
                         and isinstance((payload := envelope.get("payload")), Mapping)
                         and isinstance(payload.get("task_key"), str)
+                    )
+                )
+            else:
+                expected_sources = tuple(
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT obligation.task_key FROM plan_obligations AS obligation "
+                        "JOIN plan_rounds AS round ON round.generation_id = obligation.generation_id "
+                        "AND round.sequence = obligation.round_sequence WHERE obligation.generation_id = ? "
+                        "AND round.planner_id = 'openalex_venue_expansion' ORDER BY obligation.task_key",
+                        (generation_id,),
                     )
                 )
             if actual_sources != expected_sources:
@@ -7498,6 +8421,99 @@ class Ledger:
                 raise ValueError("claimed request identity mismatch")
             return task
 
+    def resolve_claimed_web_probe_url(self, claim: TaskClaim, *, now: datetime) -> str:
+        """Resolve a leased web probe only from its committed private source authority."""
+        from .capabilities import build_request
+        from .publication_discovery import _accepted_identifiers, _normalized_response_records
+
+        generation_id = self._generation_id()
+        with self._transaction(immediate=True) as connection:
+            self._assert_owner("tasks", "task_key", claim.key, claim.owner, now)
+            stored_lease = connection.execute(
+                "SELECT lease_expires_at FROM tasks WHERE generation_id = ? AND task_key = ?",
+                (generation_id, claim.key),
+            ).fetchone()
+            if stored_lease is None or stored_lease[0] != _timestamp(claim.lease_expires):
+                raise StaleClaimError("stale claim fencing token")
+            task = self._load_task(connection, generation_id, claim.key)
+            if (
+                task.provider != "web"
+                or task.operation != "doi_probe"
+                or task.request is None
+                or task.request.key != claim.request_key
+            ):
+                raise ValueError("claim is not an exact committed web probe")
+            item_row = connection.execute(
+                "SELECT item.evidence_json, wave.wave_input_digest FROM html_probe_wave_items AS item "
+                "JOIN html_probe_waves AS wave ON wave.generation_id = item.generation_id "
+                "AND wave.parent_pass_key = item.parent_pass_key AND wave.ordinal = item.ordinal "
+                "WHERE item.generation_id = ? AND item.task_key = ?",
+                (generation_id, claim.key),
+            ).fetchone()
+            if item_row is None:
+                raise ValueError("claimed web probe lacks committed private source authority")
+            evidence = json.loads(str(item_row[0]))
+            if not isinstance(evidence, Mapping) or evidence.get("wave_input_digest") != str(item_row[1]):
+                raise ValueError("claimed web probe source authority changed")
+            task_content = evidence.get("task")
+            candidate = evidence.get("candidate")
+            if (
+                not isinstance(task_content, Mapping)
+                or self._html_task_from_content(task_content) != task
+                or not isinstance(candidate, Mapping)
+                or candidate.get("url_digest") != task.request.normalized_payload.get("url_digest")
+            ):
+                raise ValueError("claimed web probe task authority changed")
+            locators = candidate.get("locators")
+            candidate_digest = candidate.get("candidate_digest")
+            if not isinstance(locators, Sequence) or not isinstance(candidate_digest, str):
+                raise ValueError("claimed web probe locator authority changed")
+            matches: set[str] = set()
+            for locator in locators:
+                if (
+                    not isinstance(locator, Sequence)
+                    or isinstance(locator, (str, bytes))
+                    or len(locator) != 3
+                    or not isinstance(locator[0], str)
+                    or not isinstance(locator[1], str)
+                    or isinstance(locator[2], bool)
+                    or not isinstance(locator[2], int)
+                ):
+                    raise ValueError("claimed web probe locator authority changed")
+                response_digest, source_request_key, record_ordinal = locator
+                source = connection.execute(
+                    "SELECT observation.response_json, observation.response_digest, source.provider "
+                    "FROM request_consumers AS consumer JOIN tasks AS source "
+                    "ON source.generation_id = consumer.generation_id AND source.task_key = consumer.task_key "
+                    "JOIN observations AS observation ON observation.generation_id = consumer.generation_id "
+                    "AND observation.request_key = consumer.request_key "
+                    "WHERE observation.generation_id = ? AND observation.request_key = ? "
+                    "AND source.author_key = ? AND source.publication_key = ? LIMIT 1",
+                    (
+                        generation_id,
+                        source_request_key,
+                        task.author_key,
+                        task.publication_key,
+                    ),
+                ).fetchone()
+                if source is None or str(source[1]) != response_digest:
+                    raise ValueError("claimed web probe source observation changed")
+                response = json.loads(str(source[0])) if source[0] is not None else {}
+                records = _normalized_response_records(str(source[2]), response)
+                if record_ordinal < 0 or record_ordinal >= len(records):
+                    raise ValueError("claimed web probe record ordinal changed")
+                _identifiers, urls = _accepted_identifiers(records[record_ordinal])
+                for raw_url in urls:
+                    if evidence_digest({"scheme": "https", "url": raw_url}) != candidate_digest:
+                        continue
+                    built = build_request("web.doi_probe.v1", {"url": raw_url})
+                    if built.identity_payload != task.request.normalized_payload:
+                        continue
+                    matches.add(raw_url)
+            if len(matches) != 1:
+                raise ValueError("claimed web probe raw URL authority changed")
+            return next(iter(matches))
+
     def validate_claimed_inventory_request(self, task: TaskSpec) -> None:
         """Fail closed before wire construction when a claimed inventory is not census-authorized."""
         from .inventory import capability_for
@@ -7839,7 +8855,13 @@ class Ledger:
         return number
 
     def mark_physical_send(
-        self, task_claim: TaskClaim, request_claim: RequestClaim, started_at: datetime, *, idempotent: bool
+        self,
+        task_claim: TaskClaim,
+        request_claim: RequestClaim,
+        started_at: datetime,
+        *,
+        idempotent: bool,
+        resume_url: str | None = None,
     ) -> None:
         """Fence and persist intent immediately before a physical socket send."""
         generation_id = self._generation_id()
@@ -7853,19 +8875,35 @@ class Ledger:
             if existing is not None and existing[1] is None and not bool(existing[0]):
                 raise ValueError("unresolved non-idempotent physical send cannot be repeated")
             connection.execute(
-                "INSERT INTO physical_send_markers(generation_id, request_key, owner, started_at, idempotent) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(generation_id, request_key) DO UPDATE SET owner = excluded.owner, "
-                "started_at = excluded.started_at, idempotent = excluded.idempotent, resolved_at = NULL",
-                (generation_id, request_claim.key, task_claim.owner, _timestamp(started_at), int(idempotent)),
+                "INSERT INTO physical_send_markers(generation_id, request_key, owner, started_at, idempotent, "
+                "resume_url, resume_url_digest) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(generation_id, request_key) DO UPDATE SET "
+                "owner = excluded.owner, started_at = excluded.started_at, idempotent = excluded.idempotent, "
+                "resolved_at = NULL, resume_url = excluded.resume_url, resume_url_digest = excluded.resume_url_digest",
+                (
+                    generation_id,
+                    request_claim.key,
+                    task_claim.owner,
+                    _timestamp(started_at),
+                    int(idempotent),
+                    resume_url,
+                    hashlib.sha256(resume_url.encode()).hexdigest() if resume_url is not None else None,
+                ),
             )
 
-    def unresolved_physical_send(self, request_key: str) -> tuple[datetime, bool] | None:
+    def unresolved_physical_send(self, request_key: str) -> tuple[datetime, bool, str | None] | None:
         row = self._connection.execute(
-            "SELECT started_at, idempotent FROM physical_send_markers WHERE generation_id = ? AND request_key = ? "
+            "SELECT started_at, idempotent, resume_url, resume_url_digest FROM physical_send_markers "
+            "WHERE generation_id = ? AND request_key = ? "
             "AND resolved_at IS NULL",
             (self._generation_id(), _digest_text(request_key, "request key")),
         ).fetchone()
-        return (datetime.fromisoformat(str(row[0])), bool(row[1])) if row is not None else None
+        if row is None:
+            return None
+        resume_url = str(row[2]) if row[2] is not None else None
+        if resume_url is not None and hashlib.sha256(resume_url.encode()).hexdigest() != str(row[3]):
+            raise ValueError("physical send resume authority changed")
+        return datetime.fromisoformat(str(row[0])), bool(row[1]), resume_url
 
     def record_intermediate_attempt(
         self,
@@ -8845,6 +9883,9 @@ class Ledger:
             "provenance_contributions": "contribution_key",
             "materialization_intents": "intent_key",
             "intent_provenance": "intent_key, decision_key",
+            "html_probe_waves": "parent_pass_key, ordinal",
+            "html_probe_wave_items": "parent_pass_key, ordinal, author_key, publication_key",
+            "html_probe_terminal_receipts": "parent_pass_key",
         }
         result: dict[str, object] = {}
         for table, order_by in specs.items():
@@ -8852,7 +9893,13 @@ class Ledger:
                 connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
                 is None
             ):
-                if table in {"corpus_scan_receipts", "discovery_policy_authority"}:
+                if table in {
+                    "corpus_scan_receipts",
+                    "discovery_policy_authority",
+                    "html_probe_waves",
+                    "html_probe_wave_items",
+                    "html_probe_terminal_receipts",
+                }:
                     result[table] = []
                     continue
                 raise ValueError(f"missing Task5C evidence table: {table}")
@@ -8897,6 +9944,7 @@ class Ledger:
             is not None
         ):
             Ledger._load_discovery_authority(connection, generation_id)
+        Ledger._verify_html_probe_children(connection, generation_id)
         snapshot = connection.execute(
             "SELECT snapshot_digest, item_set_digest, evidence_json FROM corpus_snapshots WHERE generation_id = ?",
             (generation_id,),
@@ -9174,6 +10222,8 @@ class Ledger:
                 and receipt.get("registry_digest") != _LEGACY_C3_PASS_REGISTRY_DIGEST
             ):
                 Ledger._verify_late_identifier_snapshot(connection, generation_id, historical_snapshot)
+            if str(pass_row[1]) == "html_probe" and receipt.get("pass_version") == "2":
+                Ledger._verify_html_probe_snapshot(connection, generation_id, historical_snapshot)
             if receipt.get("pass_version") == "1" and receipt.get("registry_digest") == (
                 _LEGACY_C3_PASS_REGISTRY_DIGEST
             ):
@@ -9351,6 +10401,210 @@ class Ledger:
             )
             if not valid_no_output and not valid_emitted:
                 raise ValueError("intent provenance relationship is incomplete or substituted")
+
+    @staticmethod
+    def _verify_html_probe_children(connection: sqlite3.Connection, generation_id: str) -> None:
+        """Rederive every numeric HTML child and prove its exact durable links."""
+        from .discovery import DiscoveryWave
+
+        if (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'html_probe_waves'"
+            ).fetchone()
+            is None
+        ):
+            return
+        parent_row = connection.execute(
+            "SELECT pass_key, receipt_json FROM planner_passes WHERE generation_id = ? AND pass_id = 'html_probe'",
+            (generation_id,),
+        ).fetchone()
+        if parent_row is None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM html_probe_waves WHERE generation_id = ? LIMIT 1", (generation_id,)
+                ).fetchone()
+                is not None
+            ):
+                raise ValueError("HTML child lacks parent authority")
+            return
+        parent = PlannerPassReceipt(**json.loads(str(parent_row[1])))
+        if parent.pass_version != "2":  # noqa: S105 - planner pass version
+            return
+        authority = Ledger._load_discovery_authority(connection, generation_id)
+        rows = connection.execute(
+            "SELECT ordinal, wave_input_digest, predecessor_digest, decision_set_digest, terminal, round_key, "
+            "receipt_digest FROM html_probe_waves WHERE generation_id = ? AND parent_pass_key = ? ORDER BY ordinal",
+            (generation_id, parent.pass_key),
+        ).fetchall()
+        if tuple(int(row[0]) for row in rows) != tuple(range(len(rows))):
+            raise ValueError("HTML child chronology changed")
+        prior_receipts: list[str] = []
+        for row in rows:
+            ordinal = int(row[0])
+            _seeds, wave_value, candidates = Ledger._derive_html_probe_wave(
+                connection, generation_id, authority, ordinal
+            )
+            if not isinstance(wave_value, DiscoveryWave):
+                raise ValueError("HTML child planner output changed")
+            wave = wave_value
+            payloads: list[Mapping[str, object]] = []
+            expected_tasks: list[TaskSpec] = []
+            for decision in sorted(
+                wave.decisions, key=lambda item: (item.task.author_key, item.task.publication_key or "")
+            ):
+                task = decision.task
+                member = (task.author_key, task.publication_key or "")
+                selected = cast(Sequence[object], candidates[member])[ordinal : ordinal + 1]
+                candidate = selected[0] if selected else None
+                candidate_content = (
+                    {key: getattr(candidate, key) for key in ("candidate_digest", "locators", "url_digest")}
+                    if candidate is not None
+                    else None
+                )
+                payload: Mapping[str, object] = {
+                    "candidate": candidate_content,
+                    "ordinal": ordinal,
+                    "reason": decision.reason.value if decision.reason is not None else None,
+                    "task": Ledger._html_task_content(task),
+                    "wave_input_digest": wave.input_digest,
+                }
+                payloads.append(payload)
+                stored = connection.execute(
+                    "SELECT task_key, applicability, reason, evidence_json, item_digest FROM html_probe_wave_items "
+                    "WHERE generation_id = ? AND parent_pass_key = ? AND ordinal = ? AND author_key = ? "
+                    "AND publication_key = ?",
+                    (generation_id, parent.pass_key, ordinal, task.author_key, task.publication_key),
+                ).fetchone()
+                expected_task_key = task.key if task.request is not None else None
+                expected_reason = decision.reason.value if decision.reason is not None else None
+                if (
+                    stored is None
+                    or stored[0] != expected_task_key
+                    or str(stored[1]) != task.applicability
+                    or stored[2] != expected_reason
+                    or str(stored[3]) != evidence_json(payload)
+                    or str(stored[4]) != evidence_digest(payload)
+                ):
+                    raise ValueError("HTML child item authority changed")
+                if task.request is not None:
+                    if Ledger._load_task(connection, generation_id, task.key) != task:
+                        raise ValueError("HTML child task authority changed")
+                    expected_tasks.append(task)
+            stored_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM html_probe_wave_items WHERE generation_id = ? AND parent_pass_key = ? "
+                    "AND ordinal = ?",
+                    (generation_id, parent.pass_key, ordinal),
+                ).fetchone()[0]
+            )
+            predecessor_digest = evidence_digest(
+                {
+                    "ordinal": ordinal,
+                    "parent_output_digest": parent.output_digest,
+                    "prior_receipts": prior_receipts,
+                }
+            )
+            terminal = not expected_tasks
+            if (
+                stored_count != len(payloads)
+                or str(row[1]) != wave.input_digest
+                or str(row[2]) != predecessor_digest
+                or str(row[3]) != evidence_digest(payloads)
+                or bool(row[4]) != terminal
+            ):
+                raise ValueError("HTML child wave authority changed")
+            round_key = str(row[5]) if row[5] is not None else None
+            if terminal != (round_key is None):
+                raise ValueError("HTML child physical round authority changed")
+            if round_key is not None:
+                round_row = connection.execute(
+                    "SELECT sequence, phase, planner_id, source_evidence_digest, task_set_digest, content_digest "
+                    "FROM plan_rounds WHERE generation_id = ? AND round_key = ?",
+                    (generation_id, round_key),
+                ).fetchone()
+                if (
+                    round_row is None
+                    or str(round_row[1]) != PlanPhase.LATE_IDENTIFIERS.value
+                    or str(round_row[2]) != f"html_probe_candidate:{ordinal}"
+                ):
+                    raise ValueError("HTML child round linkage changed")
+                content = Ledger._round_content(
+                    int(round_row[0]),
+                    PlanPhase.LATE_IDENTIFIERS,
+                    f"html_probe_candidate:{ordinal}",
+                    authority.policy.planner_version,
+                    (),
+                    wave.input_digest,
+                    (),
+                    tuple(PlannedTask(task, expands_plan=False) for task in expected_tasks),
+                )
+                if tuple(str(value) for value in round_row[3:]) != (
+                    wave.input_digest,
+                    str(content["task_set_digest"]),
+                    _digest(content),
+                ):
+                    raise ValueError("HTML child round content changed")
+            receipt_content = {
+                "decision_set_digest": evidence_digest(payloads),
+                "ordinal": ordinal,
+                "parent_pass_key": parent.pass_key,
+                "predecessor_digest": predecessor_digest,
+                "round_key": round_key,
+                "terminal": terminal,
+                "wave_input_digest": wave.input_digest,
+            }
+            if str(row[6]) != evidence_digest(receipt_content):
+                raise ValueError("HTML child receipt changed")
+            prior_receipts.append(str(row[6]))
+        terminal_row = connection.execute(
+            "SELECT completed_after_ordinal, reason, evidence_digest FROM html_probe_terminal_receipts "
+            "WHERE generation_id = ? AND parent_pass_key = ?",
+            (generation_id, parent.pass_key),
+        ).fetchone()
+        if terminal_row is not None:
+            reason = str(terminal_row[1])
+            completed = int(terminal_row[0]) if terminal_row[0] is not None else None
+            if reason == "no_applicable_candidate":
+                if not rows or not bool(rows[-1][4]) or completed != int(rows[-1][0]):
+                    raise ValueError("HTML terminal receipt changed")
+                content = {
+                    "completed_after_ordinal": completed,
+                    "parent_pass_key": parent.pass_key,
+                    "reason": reason,
+                    "wave_receipt_digest": str(rows[-1][6]),
+                }
+            elif reason == "candidate_bound_exhausted":
+                if completed != (len(rows) - 1 if rows else None):
+                    raise ValueError("HTML terminal receipt changed")
+                content = {
+                    "completed_after_ordinal": completed,
+                    "parent_pass_key": parent.pass_key,
+                    "reason": reason,
+                }
+                if not rows:
+                    control = connection.execute(
+                        "SELECT input_json FROM planner_pass_expected_items WHERE generation_id = ? "
+                        "AND pass_key = ? AND item_key LIKE 'html-control:%'",
+                        (generation_id, parent.pass_key),
+                    ).fetchone()
+                    envelope = json.loads(str(control[0])) if control is not None else None
+                    terminal_payload = envelope.get("payload") if isinstance(envelope, Mapping) else None
+                    content["unresolved_members"] = (
+                        terminal_payload.get("unresolved_members") if isinstance(terminal_payload, Mapping) else None
+                    )
+            elif reason == "no_probeable_members":
+                if rows or completed is not None:
+                    raise ValueError("HTML terminal receipt changed")
+                content = {
+                    "completed_after_ordinal": None,
+                    "parent_pass_key": parent.pass_key,
+                    "reason": reason,
+                    "unresolved_members": 0,
+                }
+            else:
+                raise ValueError("HTML terminal receipt reason changed")
+            if str(terminal_row[2]) != evidence_digest(content):
+                raise ValueError("HTML terminal receipt digest changed")
 
     @staticmethod
     def _validate_v6_evidence_row(table: str, item: Mapping[str, object]) -> None:
