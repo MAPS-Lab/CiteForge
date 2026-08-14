@@ -53,6 +53,13 @@ def _canon(entry: dict[str, Any]) -> dict[str, Any]:
     return e
 
 
+def _postrun(entry: dict[str, Any]) -> dict[str, Any]:
+    """Run POSTRUN_ORPHAN_REPAIR canonicalize on a copy and return the mutated copy."""
+    e = copy.deepcopy(entry)
+    canonicalize(e, stage=CanonicalStage.POSTRUN_ORPHAN_REPAIR)
+    return e
+
+
 def _complete_finalize(entry: dict[str, Any]) -> dict[str, Any]:
     """Run COMPLETE_SKIP_FINALIZE canonicalize on a copy and return the mutated copy."""
     e = copy.deepcopy(entry)
@@ -136,6 +143,32 @@ def test_r19_keep_article_strips_preprint_doi() -> None:
     assert "url" not in fields
 
 
+@pytest.mark.parametrize("stage_runner", [_canon, _load_repair, _postrun], ids=["post_merge", "load_repair", "postrun"])
+def test_arxiv_howpublished_carries_the_identifier(stage_runner: Any) -> None:
+    """A bare "arXiv" tells a reader nothing they can look the paper up with.
+
+    The identifier is already in `eprint` on every such entry in the corpus, and
+    `id_utils` reads the `arXiv:ID` form back out of howpublished, so qualifying
+    it also lets more entries match on identifier during deduplication.
+    """
+    entry = _article(type="misc", howpublished="arXiv", eprint="2307.03820", archiveprefix="arXiv")
+
+    result = stage_runner(entry)
+
+    assert result["fields"]["howpublished"] == "arXiv:2307.03820"
+    # Still a @misc: the upgrade to @inproceedings must not fire on a qualified
+    # preprint label. Its guard matches PREPRINT_SERVERS by substring, which is
+    # what makes "arxiv:2307.03820" still read as a preprint.
+    assert result["type"] == "misc"
+
+
+def test_arxiv_howpublished_without_an_identifier_is_left_alone() -> None:
+    """No eprint means nothing to qualify with, and inventing one is not an option."""
+    result = _canon(_article(type="misc", howpublished="arXiv"))
+
+    assert result["fields"]["howpublished"] == "arXiv"
+
+
 def test_r20_misc_howpublished_to_inproceedings() -> None:
     """@misc with a conference/workshop howpublished -> @inproceedings."""
     result = _canon(_article(type="misc", howpublished="International Conference on Learning Representations"))
@@ -187,13 +220,6 @@ def test_load_repair_unpublished_to_misc_drops_publisher() -> None:
     assert result["type"] == "misc"
     assert "journal" not in result["fields"]
     assert "publisher" not in result["fields"]
-
-
-def _postrun(entry: dict[str, Any]) -> dict[str, Any]:
-    """Run POSTRUN_ORPHAN_REPAIR canonicalize on a copy and return the mutated copy."""
-    e = copy.deepcopy(entry)
-    canonicalize(e, stage=CanonicalStage.POSTRUN_ORPHAN_REPAIR)
-    return e
 
 
 @pytest.mark.parametrize("stage_runner", [_load_repair, _postrun], ids=["load_repair", "postrun"])

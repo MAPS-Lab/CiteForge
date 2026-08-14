@@ -742,6 +742,29 @@ def _rule_normalize_howpublished(entry: dict[str, Any], fields: dict[str, Any]) 
     return fields.get("howpublished") != before
 
 
+def _rule_qualify_arxiv_howpublished(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Carry the arXiv identifier in howpublished, not just the server name.
+
+    A bare `howpublished = {arXiv}` renders as "arXiv" and tells a reader
+    nothing they can look the paper up with, while the identifier is already
+    sitting in `eprint` on every one of these entries. arXiv's own guidance for
+    styles that do not understand `eprint` is the `arXiv:2307.03820` form, and
+    `id_utils` already reads that form out of howpublished, so qualifying it also
+    lets more entries match on identifier during deduplication.
+
+    Runs after `_rule_normalize_howpublished`, which produces the canonical
+    "arXiv" casing this matches on, and is idempotent because a value carrying
+    an identifier is left alone.
+    """
+    if (fields.get("howpublished") or "").strip() != "arXiv":
+        return False
+    eprint = (fields.get("eprint") or "").strip()
+    if not eprint:
+        return False
+    fields["howpublished"] = f"arXiv:{eprint}"
+    return True
+
+
 def _rule_howpublished_to_inproceedings(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
     """Upgrade @misc with a conference/workshop howpublished -> @inproceedings.
 
@@ -831,6 +854,8 @@ _POSTRUN_ORPHAN_REPAIR_RULES = (
     _rule_strip_lipics_pages,
     _rule_strip_proceedings_wrapper,
     _rule_add_url_from_doi,
+    _rule_normalize_howpublished,
+    _rule_qualify_arxiv_howpublished,
     # Also at this stage, not LOAD_REPAIR alone. A committed entry that a past
     # run title-cased to "Koller Jm" is never re-read through LOAD_REPAIR once
     # it is complete, so without this the repair could not reach it and the
@@ -877,6 +902,7 @@ _POST_MERGE_RULES = (
     _rule_publisher_corrections,
     _rule_fix_author_casing,
     _rule_normalize_howpublished,
+    _rule_qualify_arxiv_howpublished,
     _rule_howpublished_to_inproceedings,
 )
 
@@ -927,6 +953,7 @@ _LOAD_REPAIR_RULES = (
     _rule_backfill_howpublished,
     _rule_fix_author_casing_load,
     _rule_normalize_howpublished,
+    _rule_qualify_arxiv_howpublished,
     # Runs a second time, after howpublished exists. The earlier application
     # above sees only journal and booktitle, because backfill_howpublished and
     # normalize_howpublished have not run yet, so a @misc whose publisher equals
