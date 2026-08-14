@@ -270,7 +270,7 @@
 - [ ] Run the complete local static, type, formatting, dependency, license, security, packaging, and full test suite on all supported Python versions.
 - [ ] Prove protected corpus and input changes are exactly the intentional census migration and reviewed output differences.
 - [ ] Push the candidate branch and run hosted Required CI.
-- [ ] Run a publication-disabled monthly shadow with real providers and checkpoints. Verify current schemas, quotas, physical attempts, recovery, exact-request reuse, complete author census, zero unresolved work, staged checksum, and no publication mutation.
+- [ ] Run a publication-disabled monthly shadow with real providers and checkpoints. Verify current schemas, quotas, physical attempts, recovery, exact-request reuse, complete author census, zero unresolved work, staged checksum, and no publication mutation. Note that "complete author census, zero unresolved work" is not reachable while the Task 5A authority invariant stands, since `generations.discovery_closed` cannot be set; a dispatch settles the provider-facing half of this item only. See acceptance criterion 4 in [`ci-refresh-evidence.md`](ci-refresh-evidence.md).
 - [ ] Exercise a test App PR and prove Required CI cannot be bypassed. Verify exact merge-SHA gating without dispatching production website sync prematurely.
 - [ ] Enable production cutover only after the shadow evidence passes. Verify the next production PR, merge, and exactly one website dispatch end to end.
 - [ ] Record normalized before and after wall time, runner-hours, logical work, physical requests, retry amplification, batching where applicable, exact coalescing, checkpoints, recovery, output changes, quota, and estimated cost. Do not turn timing into a completeness gate.

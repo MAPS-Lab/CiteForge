@@ -214,7 +214,7 @@ against its collected test count.
 
 | Task | Status | Evidence |
 |---|---|---|
-| 1. Contain unsafe publication and restore truthful gates | Complete, and deliberately superseded | Commit `2b6387e`. Replaced the publishing workflow with a non-publishing diagnostic shell and added `tests/test_workflow_contracts.py`. Task 8 removes this containment by design, so the containment test was rewritten with it. `tests/test_workflow_contracts.py` now collects 31 tests. Its three parametrized document tests run against every one of the five files in `.github/workflows/`, discovered by glob rather than named, so the shadow workflow Task 10 added was covered by them the moment it landed. |
+| 1. Contain unsafe publication and restore truthful gates | Complete, and deliberately superseded | Commit `2b6387e`. Replaced the publishing workflow with a non-publishing diagnostic shell and added `tests/test_workflow_contracts.py`. Task 8 removes this containment by design, so the containment test was rewritten with it. `tests/test_workflow_contracts.py` now collects 38 tests. Its three parametrized document tests run against every one of the five files in `.github/workflows/`, discovered by glob rather than named, so the shadow workflow Task 10 added was covered by them the moment it landed. |
 | 2. Explicit input census and durable work types | Complete | `citeforge/refresh/types.py`, `citeforge/refresh/census.py`, `data/input.csv` carrying `Enabled` and `Exclusion Reason`. 86 tests in `tests/test_refresh_census.py`. |
 | 3. Transactional generation ledger | Complete | `citeforge/refresh/ledger.py`. 150 tests in `tests/test_refresh_ledger.py`. |
 | 4. Classified provider transport and exact request coalescing | Complete | `citeforge/refresh/transport.py`, `citeforge/refresh/decoders.py`, `citeforge/refresh/provider_adapters.py`. 130 tests in `tests/test_refresh_transport.py`, 60 in `tests/test_refresh_decoders.py`. |
@@ -239,7 +239,7 @@ The architecture document lists eight acceptance conditions. Their state follows
 | 1. Offline contract tests pass on every supported version | Partially met | The suite passes locally on Python 3.14 and the CI matrix covers 3.10 through 3.14 in `.github/workflows/tests.yml`. Tasks 7, 8 and 9 have all contributed their contract tests. "Passes on every supported version" is still a local-machine claim, because only 3.14 has been exercised here and the other four rest on the matrix rather than on an observed run. |
 | 2. Full static, dependency, security, packaging and test gates pass | Met locally at each landed commit | Ruff, mypy and pyrefly are clean and the suite is green apart from two live-network tests that pytest-socket blocks offline. They are `tests/test_apis.py::test_openalex_search_live` and `tests/test_apis.py::test_crossref_multiple_candidates`, named here so a third failure is never absorbed into a round "two are expected". Reproduce with `.venv/bin/python -m pytest tests/test_apis.py -q -p no:randomly`. |
 | 3. Frozen production corpus unchanged except reviewed differences | Met | 3,669 committed `.bib` files and the `baseline.json` total agree. No task through 6 wrote to `output/`. |
-| 4. A publication-disabled live shadow generation reaches complete | Wired, not executed | `.github/workflows/refresh-shadow.yml` runs `citeforge refresh --state-dir` in a bounded segment loop against live providers, reading `SEMANTICSCHOLAR`, `SERPAPI`, `SERPLY`, `GEMINI`, `OPENREVIEW` and `CROSSREF_MAILTO` from repository secrets. It is `workflow_dispatch` only, holds `permissions: contents: read`, mints no App token and runs no push, so publication is disabled structurally rather than by a flag. Its final step fails the job unless the run reports `complete` with zero unresolved tasks. The workflow has never been dispatched, so no run identifier or terminal ledger state can be cited here. |
+| 4. A publication-disabled live shadow generation reaches complete | **Unattainable as written, and the criterion is the thing that is wrong** | The workflow exists and is wired. `.github/workflows/refresh-shadow.yml` runs `citeforge refresh --state-dir` in a bounded segment loop against live providers, reading `SEMANTICSCHOLAR`, `SERPAPI`, `SERPLY`, `GEMINI`, `OPENREVIEW` and `CROSSREF_MAILTO` from repository secrets. It is `workflow_dispatch` only, holds `permissions: contents: read`, mints no App token and runs no push, so publication is disabled structurally rather than by a flag. What it cannot do is reach `complete`. `RunStatus.COMPLETE` requires `Ledger.all_required_satisfied()`, which requires `generations.discovery_closed = 1`, and the ledger schema refuses that four ways: a `BEFORE UPDATE` trigger, a `BEFORE INSERT` trigger, `_assert_task5a_authority_invariant` re-checked on every status read, manifest read and reopen, and a schema fingerprint that rejects a database whose triggers were dropped. Discovery authority is the claim that an author's publication list is complete, and Task 5A is deliberately not entitled to make it. This criterion therefore cannot be met by dispatching anything; it can only be met by lifting that invariant, which is a separate design decision. An earlier revision of the shadow workflow gated its own job on `complete`, so every dispatch would have ended red no matter what it found. That gate now tests provider reachability, which is what a shadow run can actually settle, and `tests/test_workflow_contracts.py::test_no_workflow_gates_on_a_status_the_ledger_forbids_producing` prevents the pattern returning. |
 | 5. Checkpoint resume proven across a clean runner boundary | Partially met, and the gap is not what the shadow workflow closes | The cryptographic and fallback properties are proven offline by the 33 checkpoint tests. The shadow workflow's segment loop crosses a process boundary, not a runner boundary, because its `STATE_DIR` is `runner.temp` and no step restores that directory on a later dispatch. Resume across a clean runner boundary therefore remains unevidenced and unwired. |
 | 6. A bot pull request triggers Required CI and cannot bypass it | Not evidenced | Requires the GitHub App and a hosted run. The shadow workflow does not wire this. It deliberately opens no pull request, so it exercises no part of the App permission path. |
 | 7. Production workflow carries no obsolete convergence, cache-monolith, direct-push or pre-merge dispatch path | Met, verified against the file | All four paths are absent from `.github/workflows/monthly-refresh.yml`. This row was recorded as unmet on the first pass and re-read on the second. The detail, the replacements and the reproducing commands are below the table. |
@@ -298,18 +298,18 @@ The list contracts when run identifiers and artifacts can be cited against it, n
 button becomes available.
 
 That the shadow has never run is itself a claim, so it is evidenced rather than asserted. The file is
-untracked and no commit in this repository touches it. GitHub can only run a workflow that exists on
-the remote, and `workflow_dispatch` additionally only surfaces once the workflow is on the default
-branch, so non-execution follows from the file's state rather than from nobody remembering a run.
-Both checks are repository-derived.
+now tracked and present on the default branch, which merged as `7df0c8b`, so the earlier form of this
+evidence no longer holds: the checks below previously showed an untracked file and now show a tracked
+one. Non-execution is therefore established from the run list rather than from the file's absence.
 
 ```bash
-git ls-files --error-unmatch .github/workflows/refresh-shadow.yml   # exits non-zero, file is untracked
-git log --all --oneline -- .github/workflows/refresh-shadow.yml     # prints nothing, no commit carries it
+git log --all --oneline -- .github/workflows/refresh-shadow.yml   # 7df0c8b and later, the file is tracked
+gh run list --workflow "Live Shadow Refresh" -R MAPS-Lab/CiteForge   # empty, no dispatch has occurred
 ```
 
-This also means the workflow is not yet dispatchable. It becomes so only after it is committed, merged
-and present on the default branch, which is a further step and not a property this checkout has.
+The workflow is dispatchable as of that merge, because `workflow_dispatch` surfaces once the file is on
+the default branch. Dispatching it spends real SerpAPI and Serply quota, so it is an operator action
+and not something this checkout performs.
 
 Current provider authentication is unverified. The offline suite drives every adapter against scripted
 transports, which proves the classification logic and proves nothing about whether the credentials in
