@@ -40,4 +40,4 @@ jobs:
         if [ -n "$SEMANTIC_KEY" ]; then printf '%s\n' "$SEMANTIC_KEY" > keys/Semantic.key; fi
 
     - name: Run live scholarly-service tests
-      run: pytest -m live
+      run: pytest -m live --force-enable-socket

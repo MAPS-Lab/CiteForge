@@ -21,6 +21,7 @@ PUBMED_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 EUROPEPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 SERPLY_BASE = "https://api.serply.io/v1/scholar"
 SERPAPI_BASE = "https://serpapi.com/search"
+DOI_BASE = "https://doi.org"
 
 DEFAULT_INPUT = "data/input.csv"
 DEFAULT_SERPLY_KEY_FILE = "keys/Serply.key"
@@ -130,6 +131,7 @@ REDACT_QUERY_PARAM_NAMES: tuple[str, ...] = (
 # BibTeX generation
 BIBTEX_KEY_MAX_WORDS = 4
 BIBTEX_FILENAME_MAX_LENGTH = 60
+BIBTEX_PARSE_CACHE_SIZE = 4096
 
 # Valid year range
 VALID_YEAR_MIN = 1900

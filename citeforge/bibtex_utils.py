@@ -10,15 +10,26 @@ from __future__ import annotations
 
 import html
 import re
-from typing import Any
+import threading
+import unicodedata
+from functools import lru_cache
+from typing import Any, TypeAlias
+
+import bibtexparser
+from bibtexparser.bibdatabase import BibDatabase, UndefinedString
+from bibtexparser.bparser import BibTexParser
 
 from .cache import response_cache
 from .config import (
     AUTHOR_NAME_SUFFIXES,
     BIBTEX_FILENAME_MAX_LENGTH,
     BIBTEX_KEY_MAX_WORDS,
+    BIBTEX_PARSE_CACHE_SIZE,
     CACHE_TTL_GEMINI_DAYS,
+    VALID_YEAR_MAX,
+    VALID_YEAR_MIN,
 )
+from .latex_utils import latex_to_ascii
 from .log_utils import LogCategory, logger
 from .text_utils import (
     extract_year_from_any,
@@ -51,13 +62,72 @@ _TITLE_STOP_WORDS: frozenset[str] = frozenset(
 # Compiled once at import; the parse/serialize/key helpers below run per entry.
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
 _NON_WORD_RE = re.compile(r"\W+")
-_ENTRY_HEAD_RE = re.compile(r"@\s*([a-zA-Z]+)\s*\{\s*([^,\s]+)\s*,")
-_SINGLE_LINE_ENTRY_RE = re.compile(r"@\s*[a-zA-Z]+\s*\{\s*[^,\s]+\s*,\s*(.+)\s*\}\s*$", re.DOTALL)
-_FIELD_ASSIGN_RE = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9_\-]*)\s*=\s*(.*)$")
-_QUOTED_VALUE_RE = re.compile(r'^"([^"]*)"')
 _FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_\-]+")
 _TITLE_WORD_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
 _CONTROL_CHARS_RE = re.compile(r"[\n\r\t]")
+
+_PARSER_LOCAL = threading.local()
+
+_ParsedBibtex: TypeAlias = tuple[str, str, tuple[tuple[str, str], ...]]
+_CORPUS_ENTRY_TYPES = frozenset({"article", "book", "incollection", "inproceedings", "misc", "phdthesis"})
+_CORPUS_FIELDS = frozenset(
+    {
+        "archiveprefix",
+        "author",
+        "booktitle",
+        "chapter",
+        "doi",
+        "editor",
+        "eprint",
+        "howpublished",
+        "issn",
+        "journal",
+        "month",
+        "note",
+        "number",
+        "pages",
+        "pmid",
+        "primaryclass",
+        "publisher",
+        "school",
+        "series",
+        "title",
+        "url",
+        "volume",
+        "x_openalex_id",
+        "x_pmid",
+        "x_s2_paper_id",
+        "year",
+    }
+)
+
+
+class _StrictCorpusParser(BibTexParser):
+    """Use bibtexparser's grammar while preserving duplicate-field rejection."""
+
+    def _init_expressions(self) -> None:
+        super()._init_expressions()
+
+        def reject_duplicate_fields(_source: str, _location: int, tokens: Any) -> dict[str, Any]:
+            pairs = list(tokens.get("Fields"))
+            names = [str(name).casefold() for name, _value in pairs]
+            if len(names) != len(set(names)):
+                raise ValueError("committed BibTeX contains a duplicate field")
+            return dict(reversed(pairs))
+
+        seen: set[int] = set()
+        pending = [self._expr.entry]
+        while pending:
+            expression = pending.pop()
+            if id(expression) in seen:
+                continue
+            seen.add(id(expression))
+            if getattr(expression, "resultsName", None) == "Fields":
+                expression.set_parse_action(reject_duplicate_fields)
+            pending.extend(getattr(expression, "exprs", ()))
+            child = getattr(expression, "expr", None)
+            if child is not None:
+                pending.append(child)
 
 
 def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entry") -> str:
@@ -93,140 +163,109 @@ def build_minimal_bibtex(title: str, authors: list[str], year: int, keyhint: str
     return "\n".join(lines) + "\n"
 
 
-def _parse_bibtex_head(bibtex: str) -> dict[str, str] | None:
-    """Pull the entry type and citation key from the @type{key, opening of a
-    BibTeX entry, or None when the pattern is absent."""
-    m = _ENTRY_HEAD_RE.search(bibtex)
-    if not m:
+def _parser_for_thread() -> BibTexParser:
+    """Return one prepared parser per worker thread."""
+    parser = getattr(_PARSER_LOCAL, "parser", None)
+    if parser is None:
+        parser = BibTexParser()
+        parser.expect_multiple_parse = True
+        _PARSER_LOCAL.parser = parser
+    return parser
+
+
+@lru_cache(maxsize=BIBTEX_PARSE_CACHE_SIZE)
+def _parse_bibtex_immutable(bibtex: str) -> _ParsedBibtex | None:
+    """Parse into an immutable value safe to share through the LRU cache."""
+    parser = _parser_for_thread()
+    parser.bib_database = BibDatabase()
+    if parser.common_strings:
+        parser.bib_database.load_common_strings()
+    try:
+        entries = bibtexparser.loads(bibtex, parser=parser).entries
+    except (TypeError, UndefinedString, ValueError):
+        entries = []
+    if not entries:
         return None
-    return {"type": m.group(1).strip(), "key": m.group(2).strip()}
-
-
-def _extract_balanced_braces(text: str, start: int) -> str | None:
-    """Extract the text inside a balanced brace pair starting at *start*,
-    preserving nested braces."""
-    if start >= len(text) or text[start] != "{":
+    raw = dict(entries[0])
+    entry_type = str(raw.pop("ENTRYTYPE", "")).lower()
+    key = str(raw.pop("ID", ""))
+    if not entry_type or not key:
         return None
-    depth = 0
-    result: list[str] = []
-    for ch in text[start:]:
-        if ch == "{":
-            depth += 1
-            if depth > 1:  # Don't include the outermost braces
-                result.append(ch)
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return "".join(result)
-            result.append(ch)
-        else:
-            result.append(ch)
-    return None  # unbalanced
-
-
-def _assign_field_value(fields: dict[str, str], field_name: str, full_value: str) -> None:
-    """Assign a parsed value to *fields*, handling brace-wrapped, quoted, and
-    plain text values in one place."""
-    if full_value.startswith("{"):
-        val = _extract_balanced_braces(full_value, 0)
-        fields[field_name] = val.strip() if val is not None else full_value.strip().strip("{}")
-    elif full_value.startswith('"'):
-        m2 = _QUOTED_VALUE_RE.match(full_value)
-        fields[field_name] = m2.group(1).strip() if m2 else full_value.strip()
-    else:
-        fields[field_name] = full_value.strip()
+    fields = tuple((str(name).lower(), str(value).strip()) for name, value in raw.items())
+    return entry_type, key, fields
 
 
 def parse_bibtex_to_dict(bibtex: str) -> dict[str, Any] | None:
-    """Parse a BibTeX string into {type, key, fields}, handling nested braces,
-    multi-line fields, and the single-line entries common in API responses."""
-    head = _parse_bibtex_head(bibtex)
-    if not head:
+    """Parse the first BibTeX entry into CiteForge's stable entry shape."""
+    parsed = _parse_bibtex_immutable(bibtex)
+    if parsed is None:
         logger.debug(f"header_fail | input={bibtex[:60]}", category=LogCategory.PARSE)
         return None
-    fields: dict[str, str] = {}
+    entry_type, key, fields = parsed
+    return {"type": entry_type, "key": key, "fields": dict(fields)}
 
-    single_line_pattern = _SINGLE_LINE_ENTRY_RE.search(bibtex)
 
-    if single_line_pattern and "\n" not in bibtex.strip():
-        fields_text = single_line_pattern.group(1).strip()
-
-        brace_depth = 0
-        in_quote = False
-        field_start = 0
-        field_parts = []
-
-        for i, char in enumerate(fields_text):
-            if char == "{" and not in_quote:
-                brace_depth += 1
-            elif char == "}" and not in_quote:
-                brace_depth -= 1
-            elif char == '"' and brace_depth == 0:
-                in_quote = not in_quote
-            elif char == "," and brace_depth == 0 and not in_quote:
-                field_parts.append(fields_text[field_start:i].strip())
-                field_start = i + 1
-
-        if field_start < len(fields_text):
-            last_part = fields_text[field_start:].strip()
-            if last_part:
-                field_parts.append(last_part)
-
-        # Now parse each field
-        for part in field_parts:
-            m = _FIELD_ASSIGN_RE.match(part)
-            if m:
-                field_name = m.group(1).lower()
-                field_value = m.group(2).strip()
-                _assign_field_value(fields, field_name, field_value)
-
-        return {"type": head["type"].lower(), "key": head["key"], "fields": fields}
-
-    # Multi-line format parsing
-    current_field = None
-    accumulator: list[str] = []
-
-    for line in bibtex.split("\n"):
-        m = _FIELD_ASSIGN_RE.match(line)
-
-        if m:
-            if current_field and accumulator:
-                full_value = " ".join(accumulator)
-                _assign_field_value(fields, current_field, full_value)
-
-            current_field = m.group(1).lower()
-            rest = m.group(2).strip()
-            accumulator = [rest]
-
-            if rest.startswith("{"):
-                val = _extract_balanced_braces(rest, 0)
-                if val is not None:
-                    fields[current_field] = val.strip()
-                    current_field = None
-                    accumulator = []
-            elif rest.startswith('"'):
-                m2 = _QUOTED_VALUE_RE.match(rest)
-                if m2:
-                    fields[current_field] = m2.group(1).strip()
-                    current_field = None
-                    accumulator = []
-        elif current_field:
-            stripped = line.strip()
-            if stripped:
-                accumulator.append(stripped)
-                full_value = " ".join(accumulator)
-                if full_value.startswith("{"):
-                    val = _extract_balanced_braces(full_value, 0)
-                    if val is not None:
-                        fields[current_field] = val.strip()
-                        current_field = None
-                        accumulator = []
-
-    if current_field and accumulator:
-        full_value = " ".join(accumulator)
-        _assign_field_value(fields, current_field, full_value)
-
-    return {"type": head["type"].lower(), "key": head["key"], "fields": fields}
+def parse_strict_bibtex_document(content: bytes) -> dict[str, Any]:
+    """Parse one complete committed-corpus BibTeX document without recovery."""
+    if not isinstance(content, bytes):
+        raise TypeError("committed BibTeX content must be bytes")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("committed BibTeX must be UTF-8") from exc
+    if not text.strip():
+        raise ValueError("committed BibTeX must not be empty")
+    if any(unicodedata.category(character) == "Cc" and character not in "\r\n\t" for character in text):
+        raise ValueError("committed BibTeX contains control characters")
+    parser = _StrictCorpusParser(common_strings=False)
+    parser.expect_multiple_parse = True
+    try:
+        database = bibtexparser.loads(text, parser=parser)
+    except ValueError as exc:
+        if "duplicate field" in str(exc):
+            raise
+        raise ValueError("committed BibTeX is malformed") from exc
+    except (TypeError, UndefinedString) as exc:
+        raise ValueError("committed BibTeX is malformed") from exc
+    if database.comments or database.preambles or database.strings:
+        raise ValueError("committed BibTeX contains directives or unconsumed text")
+    if len(database.entries) != 1:
+        raise ValueError("committed BibTeX requires exactly one entry")
+    raw = dict(database.entries[0])
+    entry_type = raw.pop("ENTRYTYPE", None)
+    key = raw.pop("ID", None)
+    if not isinstance(entry_type, str) or entry_type.casefold() not in _CORPUS_ENTRY_TYPES:
+        raise ValueError("committed BibTeX entry type is unsupported")
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("committed BibTeX citation key is blank")
+    if any(unicodedata.category(character) == "Cc" for character in key):
+        raise ValueError("committed BibTeX citation key contains control characters")
+    if not all(isinstance(name, str) and isinstance(value, str) for name, value in raw.items()):
+        raise ValueError("committed BibTeX fields must be strings")
+    fields = {
+        name.casefold(): (
+            re.sub(r"[ \r\n\t]+", " ", value).strip()
+            if name.casefold() in {"doi", "howpublished", "url"}
+            else _normalize_to_ascii(re.sub(r"[ \r\n\t]+", " ", value).strip())
+        )
+        for name, value in sorted(raw.items())
+    }
+    if "title" in fields:
+        fields["title"] = _sanitize_title(fields["title"]) or fields["title"]
+    fields = {name: value for name, value in fields.items() if value or name in {"title", "year"}}
+    for name, value in tuple(fields.items()):
+        if name not in {"url", "doi"} and "&" in value and r"\&" not in value:
+            fields[name] = value.replace("&", r"\&")
+    if any(any(unicodedata.category(character) == "Cc" for character in value) for value in fields.values()):
+        raise ValueError("committed BibTeX field contains control characters")
+    if not set(fields) <= _CORPUS_FIELDS:
+        raise ValueError("committed BibTeX contains an unsupported field")
+    if not fields.get("title"):
+        raise ValueError("committed BibTeX title is blank")
+    year = fields.get("year", "")
+    if not re.fullmatch(r"[0-9]{4}", year) or not VALID_YEAR_MIN <= int(year) <= VALID_YEAR_MAX:
+        raise ValueError("committed BibTeX year is absent or outside the project range")
+    return {"type": entry_type.casefold(), "key": key.strip(), "fields": fields}
 
 
 # Canonical BibTeX field emission order. Fields not listed are appended in
@@ -252,46 +291,11 @@ PREFERRED_FIELD_ORDER: tuple[str, ...] = (
 )
 
 
-# Serializer cleanup tables, compiled once at import. bibtex_from_dict runs
-# per entry, so these must not be rebuilt inside the call.
-_LATEX_FORMAT_CMD_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(r"\\" + cmd + r"\s*\{")
-    for cmd in (
-        "textit",
-        "textbf",
-        "emph",
-        "textsc",
-        "texttt",
-        "textrm",
-        "textsf",
-        "underline",
-        "uppercase",
-        "lowercase",
-        "mbox",
-        "hbox",
-        "text",
-    )
-)
-# For each old-style command, match {\xx content} first, then {\xx{content}}.
-_OLD_STYLE_CMD_PATTERNS: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] = tuple(
-    (
-        re.compile(r"\{\\" + cmd + r"\s+([^}]+)\}"),
-        re.compile(r"\{\\" + cmd + r"\s*\{([^}]+)\}\}"),
-    )
-    for cmd in ("it", "bf", "em", "sc", "tt", "rm", "sf", "sl")
-)
-_LATEX_SPECIAL_CHARS = {
-    r"\&": "&",
-    r"\%": "%",
-    r"\$": "$",
-    r"\#": "#",
-    r"\_": "_",
-    r"\{": "{",
-    r"\}": "}",
-}
-_TILDE_RE = re.compile(r"(?<![:/])~")
 _MULTI_SPACE_RE = re.compile(r"  +")
 _APOS_YEAR_RE = re.compile(r"\s+'(\d{2})\b")
+_BARE_AMP_RE = re.compile(r"(?<!\\)&")
+_URL_TILDE_RE = re.compile(r"(?<=[:/])~")
+_URL_TILDE_SENTINEL = "CITEFORGEURLTILDE"
 _UNICODE_TO_ASCII = {
     "\u2019": "'",  # Right single quotation mark → apostrophe
     "\u2018": "'",  # Left single quotation mark → apostrophe
@@ -304,65 +308,6 @@ _UNICODE_TO_ASCII = {
 }
 
 
-def _strip_latex_formatting(val: str) -> str:
-    r"""Remove LaTeX formatting commands while preserving their content.
-
-    Handles \command{...} (textit, textbf, emph, etc.), old-style {\xx ...}
-    commands (it, bf, em, etc.), escaped special characters
-    (\&, \%, \$, \#, \_, \{, \}), tildes, and dashes (-- / ---).
-    """
-    # Fast path: every transform below requires a backslash (commands and
-    # escaped specials), a tilde, a "--" run, or a double space. If none are
-    # present the function is a no-op, so skip the whole command scan.
-    if "\\" not in val and "~" not in val and "--" not in val and "  " not in val:
-        return val
-
-    prev_val = None
-    while prev_val != val:
-        prev_val = val
-        for cmd_pattern in _LATEX_FORMAT_CMD_PATTERNS:
-            # Match \command{...} with balanced braces
-            while True:
-                match = cmd_pattern.search(val)
-                if not match:
-                    break
-                # Find the matching closing brace
-                start = match.end() - 1  # Position of opening brace
-                depth = 0
-                end = start
-                for i in range(start, len(val)):
-                    if val[i] == "{":
-                        depth += 1
-                    elif val[i] == "}":
-                        depth -= 1
-                        if depth == 0:
-                            end = i
-                            break
-                if depth == 0:
-                    # Extract content and replace
-                    content = val[start + 1 : end]
-                    val = val[: match.start()] + content + val[end + 1 :]
-                else:
-                    # Unbalanced braces, skip this match
-                    break
-
-    for pattern, pattern2 in _OLD_STYLE_CMD_PATTERNS:
-        val = pattern.sub(r"\1", val)
-        val = pattern2.sub(r"\1", val)
-
-    for latex_char, plain_char in _LATEX_SPECIAL_CHARS.items():
-        val = val.replace(latex_char, plain_char)
-
-    val = _TILDE_RE.sub(" ", val)
-
-    val = val.replace("---", "--")
-    val = val.replace("--", "-")
-
-    val = _MULTI_SPACE_RE.sub(" ", val)
-
-    return val
-
-
 def _normalize_to_ascii(val: str) -> str:
     """Normalize Unicode to ASCII for BibTeX compatibility.
 
@@ -372,7 +317,17 @@ def _normalize_to_ascii(val: str) -> str:
     # html.unescape only changes a string containing an '&' entity.
     if "&" in val:
         val = html.unescape(val)
-    val = _strip_latex_formatting(val)
+        # pylatexenc treats a bare ampersand as a TeX alignment marker and
+        # drops it. Protect decoded HTML ampersands as ordinary text first.
+        val = _BARE_AMP_RE.sub(r"\\&", val)
+    val = _URL_TILDE_RE.sub(_URL_TILDE_SENTINEL, val)
+    val = latex_to_ascii(val, math_mode="verbatim")
+    val = val.replace(_URL_TILDE_SENTINEL, "~")
+    val = val.replace("---", "--")
+    val = val.replace("--", "-")
+    val = val.replace("''", '"')
+
+    val = _MULTI_SPACE_RE.sub(" ", val)
 
     # strip_accents and every _UNICODE_TO_ASCII key are non-ASCII, so both
     # are no-ops on an already-ASCII string; skip them in that common case.
@@ -385,7 +340,7 @@ def _normalize_to_ascii(val: str) -> str:
     if "'" in val:
         val = _APOS_YEAR_RE.sub(r"'\1", val)
 
-    return val
+    return val.strip()
 
 
 def _sanitize_title(title_val: str | None) -> str | None:
@@ -442,7 +397,8 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
     for k in ordered_keys:
         val = fields.get(k)
         if val is not None and str(val).strip():
-            val = _normalize_to_ascii(str(val))
+            if k not in {"doi", "howpublished", "url"}:
+                val = _normalize_to_ascii(str(val))
             if k == "title":
                 val = _sanitize_title(val) or val
             # Escape bare & for valid BibTeX (but not in URLs/DOIs)

@@ -4,6 +4,8 @@ import csv
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from citeforge import io_utils
 from citeforge.models import Record
 
@@ -29,31 +31,40 @@ def _make_flags(**overrides: bool) -> dict[str, bool]:
     return flags
 
 
-def test_read_records_from_csv(tmp_path: Path) -> None:
-    """Test reading author records from CSV."""
+def test_read_records_from_validated_census(tmp_path: Path) -> None:
+    """Enabled records retain source order while explicit exclusions remain out."""
     csv_path = tmp_path / "test.csv"
     csv_path_str = str(csv_path)
 
     csv_content = dedent("""
-        Name,Scholar Link,DBLP Link
-        Ashish Vaswani,https://scholar.google.com/citations?user=Scholar123,https://dblp.org/pid/vaswani/a
-        Noam Shazeer,https://scholar.google.com/citations?user=Scholar456,
-        ,https://scholar.google.com/citations?user=Scholar789,
-        InvalidRow,,
+        Name,Scholar Link,DBLP Link,Enabled,Exclusion Reason
+        Ashish Vaswani,https://scholar.google.com/citations?user=Scholar123,https://dblp.org/pid/vaswani/a,true,
+        Excluded Author,,,false,No public profile configured
+        Noam Shazeer,https://scholar.google.com/citations?user=Scholar456,,true,
     """).strip()
     io_utils.safe_write_file(csv_path_str, csv_content)
 
     records = io_utils.read_records(csv_path_str)
 
-    # Scholar789 has empty Name (skipped); InvalidRow has no IDs (filtered)
     assert len(records) == 2, f"Expected 2 records, got {len(records)}"
-
     assert records[0].name == "Ashish Vaswani"
     assert records[0].scholar_id == "Scholar123"
     assert records[0].dblp == "vaswani/a"
+    assert records[1].name == "Noam Shazeer"
 
     for r in records:
-        assert r.scholar_id or r.dblp, "Records without any ID should be filtered"
+        assert r.scholar_id or r.dblp
+
+
+def test_read_records_rejects_unclassified_legacy_rows(tmp_path: Path) -> None:
+    csv_path = tmp_path / "legacy.csv"
+    csv_path.write_text(
+        "Name,Scholar Link,DBLP Link\nAda Lovelace,https://example.test/?user=ada,\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Enabled, Exclusion Reason"):
+        io_utils.read_records(str(csv_path))
 
 
 def test_csv_initialization(tmp_path: Path) -> None:

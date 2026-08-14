@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -20,12 +21,24 @@ from citeforge.api_configs import (
 )
 from citeforge.api_generics import APISearchConfig
 from citeforge.cache import ResponseCache
-from citeforge.clients import search_apis
+from citeforge.clients import search_apis, utility_apis
 from citeforge.pipeline import article
-from tests.fakes import install_block_network
+from citeforge.refresh.ledger import TaskClaim
+from citeforge.refresh.transport import OutcomeClass, ProviderResponse, SchemaChangedError, ScriptedTransport
+from citeforge.refresh.types import TaskDisposition
 
 TITLE = "Ocean Forecasting"
 AUTHOR = "Ada Lovelace"
+
+
+class _RecordingRouter:
+    def __init__(self, responses: dict[str, dict[str, object]]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, object]] = []
+
+    def send(self, adapter_name: str, operation: object) -> dict[str, object]:
+        self.calls.append((adapter_name, operation))
+        return self.responses[adapter_name]
 
 
 @dataclass(frozen=True)
@@ -106,7 +119,6 @@ MIGRATED_CONTRACTS = [
 @pytest.fixture(autouse=True)
 def adapter_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ResponseCache:
     """Give every adapter contract an isolated offline response cache."""
-    install_block_network(monkeypatch)
     cache = ResponseCache(str(tmp_path / "cache"))
     monkeypatch.setattr(api_generics, "response_cache", cache)
     return cache
@@ -123,6 +135,181 @@ def _adapter_payload(case: _AdapterCase, records: list[dict[str, object]]) -> di
     if case.source_id == "openalex-venue":
         return {"results": records}
     raise AssertionError(f"unsupported adapter case: {case.source_id}")
+
+
+@pytest.mark.parametrize(
+    ("case", "payload"),
+    [
+        pytest.param(SEMANTIC_SCHOLAR, {"unexpected": []}, id="s2-missing-data"),
+        pytest.param(EUROPEPMC, {"resultList": []}, id="europepmc-wrong-envelope"),
+        pytest.param(CROSSREF_VENUE, {"message": {"items": {}}}, id="crossref-items-not-list"),
+        pytest.param(OPENALEX_VENUE, {"results": None}, id="openalex-results-null"),
+    ],
+)
+def test_adapter_schema_drift_is_not_authoritative_empty(
+    monkeypatch: pytest.MonkeyPatch, case: _AdapterCase, payload: dict[str, object]
+) -> None:
+    _install_adapter_stub(monkeypatch, payload)
+    with pytest.raises(api_generics.ProviderSchemaError):
+        api_generics.search_api_generic_multiple(TITLE, AUTHOR, case.config, case.api_key, venue=case.venue)
+
+
+@pytest.mark.parametrize("case", [SEMANTIC_SCHOLAR, EUROPEPMC, CROSSREF_VENUE, OPENALEX_VENUE])
+def test_every_generic_json_adapter_is_callable_through_provider_transport(
+    case: _AdapterCase, adapter_env: ResponseCache
+) -> None:
+    candidate = dict(case.candidate)
+    transport = ScriptedTransport(
+        [ProviderResponse(TaskDisposition.SUCCEEDED, OutcomeClass.SUCCESS, {"results": [candidate]}, 200)]
+    )
+    result = api_generics.search_api_generic_multiple(
+        TITLE,
+        AUTHOR,
+        case.config,
+        case.api_key,
+        venue=case.venue,
+        transport=transport,
+        task_claim=TaskClaim("a" * 64, "b" * 64, "worker", datetime.max.replace(tzinfo=timezone.utc)),
+        author_key="author-ada",
+        freshness_epoch="2026-08",
+        adapter_version="1",
+    )
+    assert transport.physical_calls == 1
+    assert result
+
+
+def test_classified_empty_from_provider_transport_is_not_schema_failure() -> None:
+    transport = ScriptedTransport(
+        [ProviderResponse(TaskDisposition.CONFIRMED_EMPTY, OutcomeClass.AUTHORITATIVE_EMPTY, {}, 200)]
+    )
+    assert (
+        api_generics.search_api_generic_multiple(
+            TITLE,
+            AUTHOR,
+            S2_SEARCH_CONFIG,
+            "s2-secret",
+            transport=transport,
+            task_claim=TaskClaim("a" * 64, "b" * 64, "worker", datetime.max.replace(tzinfo=timezone.utc)),
+            author_key="author-ada",
+            freshness_epoch="2026-08",
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("missing", ["task_claim", "author_key"])
+def test_durable_generic_search_rejects_missing_claim_or_stable_author_key(missing: str) -> None:
+    transport = ScriptedTransport(
+        [ProviderResponse(TaskDisposition.CONFIRMED_EMPTY, OutcomeClass.AUTHORITATIVE_EMPTY, {}, 200)]
+    )
+    kwargs: dict[str, Any] = {
+        "transport": transport,
+        "task_claim": TaskClaim("a" * 64, "b" * 64, "worker", datetime.max.replace(tzinfo=timezone.utc)),
+        "author_key": "author-ada",
+        "freshness_epoch": "2026-08",
+    }
+    kwargs[missing] = None
+    with pytest.raises(ValueError, match="stable author key"):
+        api_generics.search_api_generic_multiple(TITLE, AUTHOR, S2_SEARCH_CONFIG, "s2-secret", **kwargs)
+
+
+def test_search_operation_identity_is_order_stable_and_excludes_query_credentials() -> None:
+    left = api_generics.search_operation(
+        "https://api.example.test/search?b=2&api_key=secret&a=1",
+        S2_SEARCH_CONFIG,
+        author_scope="author-ada",
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        api_key="header-secret",
+    )
+    right = api_generics.search_operation(
+        "https://api.example.test/search?a=1&b=2&api_key=other-secret",
+        S2_SEARCH_CONFIG,
+        author_scope="author-ada",
+        freshness_epoch="2026-08",
+        adapter_version="1",
+        api_key="different-header-secret",
+    )
+    assert left.request.key == right.request.key
+    assert left.request.provider == "s2"
+    assert left.request.quota_scope == "s2"
+    assert "secret" not in str(left.request.canonical_content()).casefold()
+
+
+def test_pubmed_legacy_summary_executes_singleton_exact_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    urls: list[str] = []
+
+    def fake_get(url: str, timeout: float) -> dict[str, object]:
+        del timeout
+        urls.append(url)
+        if "esearch" in url:
+            return {"esearchresult": {"idlist": ["123", "456"]}}
+        pmid = parse_qs(urlparse(url).query)["id"][0]
+        return {
+            "result": {
+                "uids": [pmid],
+                pmid: {"uid": pmid, "title": f"Title {pmid}", "authors": [], "pubdate": "2026"},
+            }
+        }
+
+    monkeypatch.setattr(search_apis, "http_get_json", fake_get)
+    result = search_apis._pubmed_fetch_articles("ocean", 2, 5.0)
+    assert result is not None and [record["uid"] for record in result[0]] == ["123", "456"]
+    summary_ids = [parse_qs(urlparse(url).query)["id"] for url in urls if "esummary" in url]
+    assert summary_ids == [["123"], ["456"]]
+
+
+def test_pubmed_singleton_summary_rejects_wrong_member(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter(
+        [
+            {"esearchresult": {"idlist": ["123"]}},
+            {"result": {"uids": ["999"], "999": {"uid": "999"}}},
+        ]
+    )
+    monkeypatch.setattr(search_apis, "http_get_json", lambda _url, timeout: next(responses))
+    with pytest.raises(SchemaChangedError, match="PubMed"):
+        search_apis._pubmed_fetch_articles("ocean", 1, 5.0)
+
+
+def test_search_api_json_callers_route_without_legacy_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(search_apis, "http_fetch_bytes", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    monkeypatch.setattr(search_apis, "http_get_json", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    router = _RecordingRouter(
+        {
+            "doi.csl": {"metadata": {"title": "Ocean"}},
+            "openreview.term": {"notes": [{"id": "note"}]},
+            "dblp.author_search": {"hits": [{"info": {"pid": "1", "author": AUTHOR}}]},
+            "pubmed.search": {"pmids": ["123"]},
+            "pubmed.summary.singleton": {"records": {"123": {"uid": "123", "title": "Ocean"}}},
+        }
+    )
+    assert search_apis.fetch_csl_via_doi("10.1/x", durable_router=router) == {"title": "Ocean"}
+    assert search_apis._or_fetch_candidates(TITLE, {}, durable_router=router, author_key="author-ada") == [
+        {"id": "note"}
+    ]
+    assert search_apis.dblp_find_author_pid(AUTHOR, durable_router=router) == "1"
+    assert search_apis._pubmed_fetch_articles("ocean", 1, 5.0, durable_router=router, author_key="author-ada") == (
+        [{"uid": "123", "title": "Ocean"}],
+        1,
+    )
+    assert [name for name, _operation in router.calls] == [
+        "doi.csl",
+        "openreview.term",
+        "dblp.author_search",
+        "pubmed.search",
+        "pubmed.summary.singleton",
+    ]
+
+
+def test_gemini_json_caller_routes_without_legacy_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(utility_apis, "http_post_json", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    router = _RecordingRouter(
+        {"gemini.short_title": {"candidates": [{"content": {"parts": [{"text": "OceanForecast"}]}}]}}
+    )
+    assert utility_apis.gemini_generate_short_title("Ocean Forecast", "secret", durable_router=router) == (
+        "OceanForecast"
+    )
+    assert [name for name, _operation in router.calls] == ["gemini.short_title"]
 
 
 def _install_adapter_stub(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> dict[str, object]:

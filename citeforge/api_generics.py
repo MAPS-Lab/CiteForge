@@ -9,15 +9,17 @@ source shares one matching and construction path.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from .cache import response_cache
 from .clients.helpers import title_author_cache_key
 from .config import (
     CACHE_TTL_SEARCH_DAYS,
     GENERIC_SERIES_NAMES,
+    REDACT_QUERY_PARAM_NAMES,
     SIM_BEST_ITEM_THRESHOLD,
     SIM_EXACT_PICK_THRESHOLD,
     SIM_THRESHOLD_TOLERANCE,
@@ -26,13 +28,15 @@ from .exceptions import ALL_API_ERRORS, FIELD_ACCESS_ERRORS
 from .http_utils import http_get_json, s2_http_get_json
 from .id_utils import find_arxiv_in_text, find_doi_in_text
 from .log_utils import LogCategory, logger
+from .refresh.ledger import TaskClaim
+from .refresh.provider_adapters import JSON_ADAPTERS
+from .refresh.transport import ProviderTransport, SendOperation, consume_response
 from .text_utils import (
     build_url,
     extract_author_names,
     extract_year_from_any,
     has_placeholder,
     safe_get_field,
-    safe_get_nested,
 )
 from .venue import first_non_generic_container
 
@@ -99,6 +103,80 @@ class APISearchConfig:
     title_getter: Callable[[dict[str, Any]], str] | None = None
     year_getter: Callable[[dict[str, Any]], int | None] | None = None
     authors_getter: Callable[[dict[str, Any]], Any] | None = None
+
+
+class ProviderSchemaError(ValueError):
+    """A provider response no longer satisfies its configured result envelope."""
+
+
+_TRANSPORT_PROVIDER = {"semantic_scholar": "s2", "crossref_venue": "crossref", "openalex_venue": "openalex"}
+_TRANSPORT_ADAPTER = {
+    "semantic_scholar": "semantic_scholar.search",
+    "europepmc": "europepmc.search",
+    "crossref": "crossref.search",
+    "crossref_venue": "crossref.venue",
+    "openalex": "openalex.search",
+    "openalex_venue": "openalex.venue",
+}
+_SECRET_QUERY_NAMES = {item.casefold() for item in REDACT_QUERY_PARAM_NAMES}
+
+
+def _semantic_url_identity(url: str) -> dict[str, object]:
+    """Return ordered non-secret URL semantics for durable request identity."""
+    parsed = urlsplit(url)
+    query: dict[str, list[str]] = {}
+    for name, value in sorted(parse_qsl(parsed.query, keep_blank_values=True)):
+        if name.casefold() in _SECRET_QUERY_NAMES or name.casefold() == "mailto":
+            continue
+        query.setdefault(name, []).append(value)
+    return {"host": parsed.hostname or "", "path": parsed.path, "query": query}
+
+
+def _mutable_json(value: object) -> object:
+    """Copy an immutable transport payload into legacy adapter-owned JSON values."""
+    if isinstance(value, Mapping):
+        return {str(key): _mutable_json(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_mutable_json(item) for item in value]
+    return value
+
+
+def validate_result_envelope(data: dict[str, Any], config: APISearchConfig) -> list[Any]:
+    """Return the configured result list, rejecting missing or wrong-shaped envelopes."""
+    current: object = data
+    for component in config.result_path:
+        if not isinstance(current, dict) or component not in current:
+            raise ProviderSchemaError(f"{config.api_name} response is missing {'.'.join(config.result_path)}")
+        current = current[component]
+    if not isinstance(current, list):
+        raise ProviderSchemaError(f"{config.api_name} result envelope is not a list")
+    return current
+
+
+def search_operation(
+    url: str,
+    config: APISearchConfig,
+    *,
+    author_scope: str,
+    freshness_epoch: str,
+    adapter_version: str,
+    api_key: str | None = None,
+) -> SendOperation:
+    """Build the canonical fuzzy-search operation without persisting credentials."""
+    headers = {"x-api-key": api_key} if api_key and config.requires_api_key else None
+    try:
+        adapter = JSON_ADAPTERS[_TRANSPORT_ADAPTER[config.api_name]]
+    except KeyError as exc:
+        raise ValueError(f"no durable JSON adapter for {config.api_name}") from exc
+    return adapter.build_operation(
+        url=url,
+        normalized_payload={"author_scope": author_scope, "request": _semantic_url_identity(url)},
+        freshness_epoch=freshness_epoch,
+        adapter_version=adapter_version,
+        quota_scope=_TRANSPORT_PROVIDER.get(config.api_name, config.api_name),
+        timeout=config.timeout,
+        headers=headers,
+    )
 
 
 @dataclass
@@ -182,6 +260,11 @@ def _fetch_results(
     cache_key: str,
     *,
     params: dict[str, Any] | None = None,
+    transport: ProviderTransport | None = None,
+    task_claim: TaskClaim | None = None,
+    author_key: str | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
 ) -> list[Any] | None:
     """Issue the configured search request and extract the raw result list.
 
@@ -197,17 +280,38 @@ def _fetch_results(
     url = build_url(config.base_url, params)
     logger.debug(f"{config.api_name} | HTTP_REQUEST | url={url[:80]}", category=LogCategory.SCORE)
 
-    try:
-        if api_key and config.requires_api_key:
-            data = s2_http_get_json(url, api_key, timeout=config.timeout)
-        else:
-            data = http_get_json(url, timeout=config.timeout)
-    except ALL_API_ERRORS:
-        return None
-
-    results: list[Any] = safe_get_nested(data, *config.result_path, default=[])
+    if transport is not None:
+        if task_claim is None or not author_key:
+            raise ValueError("durable provider transport requires task claim and stable author key")
+        normalized = consume_response(
+            transport.send(
+                search_operation(
+                    url,
+                    config,
+                    author_scope=author_key,
+                    freshness_epoch=freshness_epoch,
+                    adapter_version=adapter_version,
+                    api_key=api_key,
+                ),
+                task_claim=task_claim,
+            )
+        )
+        mutable_results = _mutable_json(normalized.get("results", []))
+        if not isinstance(mutable_results, Sequence) or isinstance(mutable_results, (str, bytes)):
+            raise ProviderSchemaError(f"{config.api_name} normalized results are not a sequence")
+        results = list(mutable_results)
+    else:
+        try:
+            if api_key and config.requires_api_key:
+                data = s2_http_get_json(url, api_key, timeout=config.timeout)
+            else:
+                data = http_get_json(url, timeout=config.timeout)
+        except ALL_API_ERRORS:
+            return None
+        results = validate_result_envelope(data, config)
     if not results:
-        response_cache.put_negative(config.api_name, cache_key)
+        if transport is None:
+            response_cache.put_negative(config.api_name, cache_key)
         return None
     return results
 
@@ -272,6 +376,11 @@ def search_api_generic_multiple(
     year_hint: int | None = None,
     *,
     venue: str | None = None,
+    transport: ProviderTransport | None = None,
+    task_claim: TaskClaim | None = None,
+    author_key: str | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
 ) -> list[dict[str, Any]]:
     """Search one configured API and return candidates in its declared order.
 
@@ -289,7 +398,7 @@ def search_api_generic_multiple(
         if config.api_name.endswith("_venue")
         else title_author_cache_key(title, author_name, prefix="multi|")
     )
-    cached = response_cache.get(config.api_name, cache_key)
+    cached = response_cache.get(config.api_name, cache_key) if transport is None else None
     if cached is not None:
         if cached.get("_negative"):
             logger.debug(f"{config.api_name}_multi | NEG_HIT | key={cache_key[:60]}", category=LogCategory.CACHE)
@@ -308,6 +417,11 @@ def search_api_generic_multiple(
         api_key,
         cache_key,
         params=params,
+        transport=transport,
+        task_claim=task_claim,
+        author_key=author_key,
+        freshness_epoch=freshness_epoch,
+        adapter_version=adapter_version,
     )
     if results is None:
         return []
@@ -345,14 +459,14 @@ def search_api_generic_multiple(
         f"{config.api_name}_multi | RESULT | scored={scored_count}/{len(results)} | top={len(top_results)}",
         category=LogCategory.SCORE,
     )
-    if top_results:
+    if top_results and transport is None:
         response_cache.put(
             config.api_name,
             cache_key,
             {"results": [dict(r) for r in top_results]},
             ttl_days=CACHE_TTL_SEARCH_DAYS,
         )
-    else:
+    elif transport is None:
         response_cache.put_negative(config.api_name, cache_key)
     return top_results
 
@@ -490,4 +604,49 @@ def build_bibtex_from_response(response: dict[str, Any], keyhint: str, mapping: 
         url=url,
         arxiv_id=arxiv_id,
         extra_fields=extra_fields,
+    )
+
+
+def project_entry_from_response(
+    response: dict[str, Any], keyhint: str, mapping: APIFieldMapping
+) -> dict[str, object] | None:
+    """Pure provider-mapped entry projection, matching the legacy builder fields."""
+    from .bibtex_build import build_entry_dict, determine_entry_type
+
+    title = _first_resolved_str(response, mapping.title_fields, check_placeholder=True)
+    if not title:
+        return None
+    authors = (
+        mapping.custom_author_extractor(response)
+        if mapping.custom_author_extractor
+        else extract_author_names(
+            next((v for f in mapping.author_fields if (v := _resolve_dotted(response, f))), None),
+            name_key=mapping.author_name_key or "name",
+            given_key=mapping.author_given_key,
+            family_key=mapping.author_family_key,
+        )
+    )
+    if not authors or has_placeholder(", ".join(authors)):
+        return None
+    year = (
+        mapping.custom_year_extractor(response)
+        if mapping.custom_year_extractor
+        else extract_year_from_any(response, field_names=mapping.year_fields, fallback=0) or 0
+    )
+    extra = {
+        target: value
+        for source, target in mapping.extra_field_mappings.items()
+        if (value := _resolve_dotted_str(response, source))
+    }
+    return build_entry_dict(
+        determine_entry_type(response, mapping.entry_type_field, mapping.entry_type_list_field, mapping.venue_hints),
+        title,
+        authors,
+        year,
+        keyhint,
+        _extract_venue(response, mapping),
+        _first_resolved_with_transform(response, mapping.doi_fields, find_doi_in_text),
+        _first_resolved_str(response, mapping.url_fields),
+        _first_resolved_with_transform(response, mapping.arxiv_fields, find_arxiv_in_text),
+        extra,
     )

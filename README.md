@@ -11,7 +11,7 @@ CiteForge is a Python tool that builds clean, per-author BibTeX files from schol
 - Trust-based field merging that prioritizes authoritative registries over scraped content
 - Deduplication combining DOI normalization, external-identifier matching, and fuzzy title similarity (rapidfuzz)
 - Metadata correction for fragmented compound words, misclassified publication types, invalid page ranges, and all-capitals titles
-- Deterministic output, with byte-identical results on cache-hit runs
+- Deterministic materialization, with byte-identical results for equivalent cache-hit inputs
 - Parallel per-author processing under per-API rate limits, backed by a response cache with monthly expiry
 - Config-driven behavior, with trust order, similarity thresholds, rate limits, and venue mappings centralized in [`citeforge/config.py`](citeforge/config.py)
 
@@ -48,14 +48,19 @@ citeforge --force                              # Ignore cache completeness
 citeforge --input authors.csv --output results # Explicit paths
 ```
 
-The input CSV has three columns (name, Scholar link, and an optional DBLP link).
+The input CSV has five columns. Every physical author row must explicitly set
+`Enabled` to `true` or `false`. An enabled row needs at least one valid Google
+Scholar or DBLP profile. A disabled row needs a non-empty `Exclusion Reason`.
+Enabled rows cannot carry an exclusion reason. Invalid, unclassified, blank,
+or ambiguous profile rows stop the run before any API work.
 
 ```csv
-Name,Scholar Link,DBLP Link
-Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659
+Name,Scholar Link,DBLP Link,Enabled,Exclusion Reason
+Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659,true,
+Example Excluded Author,,,false,No Scholar or DBLP profile configured
 ```
 
-Output is organized per author, with a shared summary and run log. API responses are cached under `data/api_cache/` with monthly expiry.
+Output is organized per author, with a shared summary and run log. API responses are cached under `data/api_cache/` with monthly expiry. A cache hit establishes only response-cache freshness. It does not establish entry completeness or refresh completion.
 
 ```
 output/
@@ -74,7 +79,27 @@ output/
 
 CiteForge retrieves each author's publication list from Google Scholar through SerpAPI, then enriches every entry by querying scholarly services including Semantic Scholar, Crossref, arXiv, OpenAlex, and PubMed. A trust-based consolidation stage merges the collected records according to source reliability, prioritizing authoritative registries over scraped content. Duplicate detection combines DOI normalization, external identifier matching, and fuzzy title similarity. The pipeline also corrects recurrent metadata issues such as fragmented compound words, misclassified publication types, invalid page ranges, and all-capitals titles.
 
-Cache-hit runs produce byte-identical output, author queries run in parallel under per-API rate limits, and configurable parameters (source trust order, similarity thresholds, rate limits, venue mappings) are centralized in [`citeforge/config.py`](citeforge/config.py).
+Equivalent cache-hit inputs produce byte-identical materialized output. That idempotence result is distinct from entry completeness, response-cache freshness, and workflow completion. Author queries run in parallel under per-API rate limits, and configurable parameters (source trust order, similarity thresholds, rate limits, venue mappings) are centralized in [`citeforge/config.py`](citeforge/config.py).
+
+The monthly workflow runs one generation segment per Actions run rather than sweeping the whole corpus
+repeatedly. A run restores the previous sealed checkpoint, drives `citeforge refresh` once, and seals
+its progress again before exiting, so a segment that hits the job ceiling resumes where it stopped
+instead of restarting the month. Whether the generation is finished is read from the durable ledger,
+not inferred from a request count or a corpus digest that stopped moving. Only a generation the ledger
+reports as complete is published, and publication is a bot pull request gated on Required CI, never a
+direct push. The website sync fires from the merge, so nothing is dispatched before the corpus is
+actually on `main`. No encrypted response-cache branch is maintained; the only state carried between
+runs is the sealed checkpoint.
+
+The durable refresh engine behind it lives in `citeforge/refresh/`. Its census, ledger, transport,
+discovery, checkpoint, staging, and publication layers are implemented and covered by tests, and
+`citeforge refresh --state-dir <dir>` runs one bounded generation. What is not yet proven is a full
+generation against live providers. That run is wired as a manually dispatched, publication-disabled
+shadow workflow and has not been executed, so every claim about live provider authentication, schemas,
+and quotas remains unverified. [`docs/ci-refresh-architecture.md`](docs/ci-refresh-architecture.md) is
+the contract it is built against, [`docs/ci-refresh-implementation-plan.md`](docs/ci-refresh-implementation-plan.md)
+is the task breakdown, and [`docs/ci-refresh-evidence.md`](docs/ci-refresh-evidence.md) records which
+requirements have evidence, which do not, and which can only be settled by that run.
 
 ## Data sources
 
@@ -89,13 +114,28 @@ SerpAPI requires a key; the remaining sources are keyless, recommended, or optio
 
 ## Development
 
-Install the development extras, then run the three quality gates that must pass before merge.
+For reproducible installs, use the checked-in hash-locked requirements files.
+`requirements-build.lock` pins the build backend and the `uv` lock compiler,
+`requirements.lock` pins runtime dependencies, and `requirements-dev.lock`
+pins the runtime and development toolchain. Use the runtime lock for ordinary
+use, or the development lock when contributing.
 
 ```bash
-pip install -e .[dev]                        # Install with dev tools
+# Runtime setup
+python -m pip install --require-hashes -r requirements-build.lock -r requirements.lock
+python -m pip install --no-build-isolation --no-deps -e .
+
+# Development setup
+python -m pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
+python -m pip install --no-build-isolation --no-deps -e .
+```
+
+Then run the three quality gates that must pass before merge.
+
+```bash
 ruff check citeforge/ tests/ main.py         # Lint (line-length 120)
 mypy citeforge/ main.py                       # Type check (strict, ignore_missing_imports)
-pytest tests/ -v --tb=short                   # Full test suite (Python 3.10-3.13)
+pytest tests/ -v --tb=short                   # Full test suite (Python 3.10-3.14)
 ```
 
 Run a single test with `pytest tests/test_core.py::test_function_name -v --tb=short`.

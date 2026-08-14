@@ -87,68 +87,6 @@ def arxiv_published_twin() -> tuple[Entry, Enricher]:
     return preprint, published
 
 
-def repo_only_zenodo() -> Entry:
-    """A repository-only record (Zenodo DOI, no published counterpart). Must be
-    retained and represented, never dropped for lacking a journal.
-    """
-    return article(
-        title="A Reproducible Dataset for Vessel Tracking",
-        author="Spadon, Gabriel",
-        journal="Zenodo",
-        doi="10.5281/zenodo.9000001",
-    )
-
-
-def generic_proceedings_lncs() -> Entry:
-    """An entry whose booktitle is a generic series name (LNCS). The specific
-    conference name must be preferred over the generic series when available.
-    """
-    return inproceedings(
-        title="Graph Kernels for Structured Prediction",
-        booktitle="Lecture Notes in Computer Science",
-    )
-
-
-def venue_alias_neurips() -> Entry:
-    """An entry carrying a mistyped venue alias that must canonicalize to the
-    correct spelling (``NeuriPS`` -> ``NeurIPS``).
-    """
-    return inproceedings(
-        title="Attention Is All You Need",
-        booktitle="NeuriPS 2017",
-    )
-
-
-def conflicting_trusted_sources() -> tuple[Entry, list[Enricher]]:
-    """A low-rank primary carrying the full author list versus a higher-rank
-    enricher carrying a truncated author list. The fuller list must survive
-    unless the enricher is >= TRUST_DIFF_OVERRIDE_THRESHOLD ranks more trusted.
-    """
-    title = "Scaling Laws for Neural Language Models"
-    primary = article(
-        title=title,
-        author="Kaplan, Jared and McCandlish, Sam and Henighan, Tom and Brown, Tom B.",
-    )
-    truncated = enricher("s2", title=title, author="Kaplan, Jared")
-    return primary, [truncated]
-
-
-def untrusted_doi_candidate() -> tuple[Entry, Enricher]:
-    """A published-looking DOI arriving from a non-registry source with no
-    registry echo. The DOI-trust gate must reject it rather than let it pollute
-    the merged entry.
-    """
-    title = "On the Measure of Intelligence"
-    primary = article(title=title, author="Chollet, Francois")
-    polluter = enricher("scholar_page", title=title, author="Chollet, Francois", doi="10.1000/not-echoed-0001")
-    return primary, polluter
-
-
-def allcaps_title() -> Entry:
-    """An all-caps Scholar title that must be recased to sentence/title case."""
-    return article(title="DEEP LEARNING FOR SATELLITE IMAGE CLASSIFICATION")
-
-
 def nonascii_author() -> Entry:
     """A non-ASCII author name that must round-trip byte-exactly through the
     serializer without mojibake.
@@ -157,15 +95,6 @@ def nonascii_author() -> Entry:
         title="Variational Methods in Fluid Dynamics",
         author="Müller, André and Sørensen, Bjørn",
     )
-
-
-def pages_edge() -> tuple[Entry, Entry]:
-    """A pair distinguishing a real page range from a publisher article-id.
-    The valid range is admitted; the article-id-style value is rejected.
-    """
-    valid = article(title="Ocean Currents and Vessel Routing", pages="331-345")
-    invalid = article(title="Ocean Currents and Vessel Routing", pages="e0250001")
-    return valid, invalid
 
 
 def duplicate_titles_two_authors() -> tuple[Entry, Entry]:

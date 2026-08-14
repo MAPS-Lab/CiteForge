@@ -1,3 +1,22 @@
+# The monthly refresh runs the LEGACY pipeline, not the durable engine.
+#
+# That is deliberate and it is what the architecture document requires:
+# "Cutover occurs in one commit after the shadow generation passes." The shadow
+# generation has never run. An earlier revision of this file cut over anyway and
+# gated publication on `status == complete`, a status RefreshEngine cannot
+# produce: RunStatus.COMPLETE has no producer anywhere in citeforge/, because
+# discovery closure, staging, validation recording and materialization
+# recording all have zero production callers. The result was a workflow that
+# could run forever and publish nothing, which is the exact failure this whole
+# redesign exists to remove.
+#
+# The durable engine runs in refresh-shadow.yml, where it can build the evidence
+# cutover requires without being able to publish. This file cuts over when that
+# evidence exists, not before.
+#
+# The encrypted response-cache branch is gone. Cold runs cost more provider calls;
+# article-level parallelism is what pays for them.
+
 name: Monthly Pipeline Refresh
 
 on:
@@ -5,12 +24,23 @@ on:
     - cron: '0 4 1 * *'  # 4 AM UTC on the 1st of each month (midnight AST)
   workflow_dispatch:       # Allow manual trigger
 
+# Declared per job below, not blanket at the top. The refresh job needs to read
+# the checkout and nothing else; publication happens with the App token, and the
+# verify job is the only thing that needs to dispatch a workflow.
 permissions:
-  contents: write
-  actions: write
+  contents: read
+
+# One refresh at a time. Two overlapping runs race on the same output tree and
+# the same publication branch, and the loser force-pushes over the winner.
+# Never cancel in flight: a cancelled run loses its corpus progress.
+concurrency:
+  group: citeforge-refresh
+  cancel-in-progress: false
 
 jobs:
   refresh:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 360
     outputs:
@@ -50,29 +80,6 @@ jobs:
           echo "$GEMINI_KEY"    > keys/Gemini.key
           echo "$OPENREVIEW_KEY" > keys/OpenReview.key
 
-      - name: Restore cache from data-cache branch
-        env:
-          CACHE_ENCRYPTION_KEY: ${{ secrets.CACHE_ENCRYPTION_KEY }}
-        run: |
-          if [ -z "$CACHE_ENCRYPTION_KEY" ]; then
-            echo "CACHE_ENCRYPTION_KEY unset — skipping cache restore (fresh start)"
-          elif git ls-remote --heads origin data-cache | grep -q data-cache; then
-            git fetch origin data-cache
-            rm -f /tmp/api_cache.tar.gz.enc /tmp/api_cache.tar.gz
-            if git show origin/data-cache:api_cache.tar.gz.enc > /tmp/api_cache.tar.gz.enc 2>/dev/null; then
-              if openssl enc -d -aes-256-cbc -pbkdf2 -pass env:CACHE_ENCRYPTION_KEY \
-                   -in /tmp/api_cache.tar.gz.enc -out /tmp/api_cache.tar.gz 2>/dev/null; then
-                mkdir -p data
-                tar xzf /tmp/api_cache.tar.gz -C data/
-                echo "Restored $(find data/api_cache -type f | wc -l) cache entries"
-              else
-                echo "Cache decrypt failed (key rotated?) — starting fresh"
-              fi
-            fi
-          else
-            echo "No data-cache branch — starting fresh"
-          fi
-
       - name: Run pipeline loop
         id: loop
         env:
@@ -80,63 +87,7 @@ jobs:
           CITEFORGE_MAX_WORKERS: "16"
           CITEFORGE_CONCURRENCY: "20"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CACHE_ENCRYPTION_KEY: ${{ secrets.CACHE_ENCRYPTION_KEY }}
         run: |
-          save_cache() {
-            if [ -z "$CACHE_ENCRYPTION_KEY" ]; then
-              echo "CACHE_ENCRYPTION_KEY unset — skipping cache push (raw API responses must not reach the public data-cache branch)"
-              return 0
-            fi
-            if [ ! -d data/api_cache ]; then
-              return 0
-            fi
-            first_entry=$(find data/api_cache -mindepth 1 -print -quit) || return 1
-            if [ -z "$first_entry" ]; then
-              return 0
-            fi
-
-            entries=$(find data/api_cache -type f -name '*.json' | wc -l) || return 1
-            cache_tmp=$(mktemp -d) || return 1
-            (
-              trap 'status=$?; rm -rf "$cache_tmp" || status=1; exit "$status"' EXIT
-              archive_path="$cache_tmp/api_cache.tar.gz"
-              encrypted_path="$cache_tmp/api_cache.tar.gz.enc"
-              cache_dir="$cache_tmp/repo"
-              rm -f "$archive_path" "$encrypted_path" || exit 1
-              tar czf "$archive_path" -C data api_cache || exit 1
-              openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:CACHE_ENCRYPTION_KEY \
-                -in "$archive_path" -out "$encrypted_path" || exit 1
-              size=$(du -h "$encrypted_path" | cut -f1) || exit 1
-              echo "Saving $entries cache entries ($size encrypted)"
-
-              # Push cache from an isolated temporary repository without disturbing the working tree.
-              mkdir "$cache_dir" || exit 1
-              cp "$encrypted_path" "$cache_dir/api_cache.tar.gz.enc" || exit 1
-              cd "$cache_dir" || exit 1
-              git init -q || exit 1
-              git config user.name "github-actions[bot]" || exit 1
-              git config user.email "github-actions[bot]@users.noreply.github.com" || exit 1
-              git checkout --orphan data-cache || exit 1
-              git add api_cache.tar.gz.enc || exit 1
-              commit_date=$(date +%Y-%m-%d) || exit 1
-              git commit -q -m "cache: $commit_date — $entries entries ($size, encrypted)" || exit 1
-              git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" || exit 1
-              pushed=false
-              for attempt in 1 2 3; do
-                if git push origin data-cache --force -q 2>/dev/null; then
-                  pushed=true
-                  break
-                fi
-                echo "Cache push attempt $attempt failed — retrying in ${attempt}0s..."
-                sleep "${attempt}0" || exit 1
-              done
-              if [ "$pushed" != true ]; then
-                echo "::error::Cache push failed after 3 attempts"
-                exit 1
-              fi
-            )
-          }
-
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -160,18 +111,10 @@ jobs:
 
             if [ "$rc" -ne 0 ]; then
               echo "::error::Pipeline run $i failed with exit code $rc"
-              echo "Saving cache before exit..."
-              cache_rc=0
-              save_cache "$i" || cache_rc=$?
               echo "converged=false" >> "$GITHUB_OUTPUT"
               echo "runs_completed=$i" >> "$GITHUB_OUTPUT"
               echo "last_api_calls=-1" >> "$GITHUB_OUTPUT"
-              if [ "$cache_rc" -ne 0 ]; then
-                echo "::error::Cache save failed while handling pipeline failure"
-              fi
-              exit 1
-            fi
-
+  
             # Reported for observability only. This counter is logical, not
             # physical: it counts operations, not sends, so a retry storm is
             # invisible to it. It must not gate anything.
@@ -197,7 +140,6 @@ jobs:
             echo "Run $i — corpus digest ${digest:0:12} — API calls: $total"
 
             # Save cache after every iteration
-            if ! save_cache "$i"; then
               echo "::error::Cache save failed after successful pipeline run $i"
               exit 1
             fi
@@ -228,6 +170,36 @@ jobs:
 
       # Fresh token minted here (not at checkout): the pipeline loop can run for
       # hours and an app token lives only 1h, so mint it immediately before the push.
+      # Deliberately NOT output/run.log. That log records request URLs, and the
+      # query-string providers key on them, so uploading it publishes secrets to
+      # anyone who can read the run. This manifest is assembled from counts and
+      # digests only and carries no URL, no key and no provider payload.
+      - name: Build the run manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/refresh-manifest
+          {
+            echo "run_id=${{ github.run_id }}"
+            echo "converged=${{ steps.loop.outputs.converged }}"
+            echo "runs_completed=${{ steps.loop.outputs.runs_completed }}"
+            echo "bib_files=$(find output -type f -name '*.bib' | wc -l)"
+            echo "authors=$(find output -mindepth 1 -maxdepth 1 -type d ! -name a2i2 | wc -l)"
+            echo "corpus_digest=$(find output -type f \( -name '*.bib' -o -name 'summary.csv' \
+              -o -name 'baseline.json' \) -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum \
+              | sha256sum | cut -d' ' -f1)"
+          } > /tmp/refresh-manifest/manifest.txt
+          cat /tmp/refresh-manifest/manifest.txt
+
+      - name: Upload the run manifest
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: refresh-manifest
+          path: /tmp/refresh-manifest/manifest.txt
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Generate push token
         id: push_token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -283,6 +255,9 @@ jobs:
             echo "::warning::Auto-merge not armed; the pull request is open and needs a manual merge"
 
   verify:
+    permissions:
+      contents: read
+      actions: write
     needs: refresh
     if: always()
     runs-on: ubuntu-latest

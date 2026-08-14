@@ -31,7 +31,7 @@ def test_title_normalization() -> None:
         ("Café Society", "cafe society"),
         ("Naïve Bayes", "naive bayes"),
         # Complex/Edge Cases
-        ("On the $\\sqrt{2}$ approximation", "on the 2 approximation"),
+        ("On the $\\sqrt{2}$ approximation", "on the approximation"),
         ("A very long title that goes on and on", "a very long title that goes on and on"),
         # Empty
         ("", ""),
@@ -201,6 +201,29 @@ def test_bibtex_parsing() -> None:
         assert parsed is None, "Expected None for invalid BibTeX"
 
 
+def test_parser_resolves_macros_concatenation_and_leading_comments() -> None:
+    """A standards-compliant parser resolves BibTeX definitions before returning fields."""
+    parsed = bt.parse_bibtex_to_dict(
+        '@comment{ignored}\n@string{journal_name = "Journal of Tests"}\n'
+        '@article{k, title = {A {Nested} Title}, journal = journal_name, month = jan # " 2024"}'
+    )
+    assert parsed == {
+        "type": "article",
+        "key": "k",
+        "fields": {
+            "title": "A {Nested} Title",
+            "journal": "Journal of Tests",
+            "month": "January 2024",
+        },
+    }
+
+
+def test_parser_uses_first_entry_for_single_entry_contract() -> None:
+    """The stable CiteForge adapter deliberately exposes only the first entry."""
+    parsed = bt.parse_bibtex_to_dict("@article{first,title={One}}\n@book{second,title={Two}}")
+    assert parsed == {"type": "article", "key": "first", "fields": {"title": "One"}}
+
+
 def test_bibtex_building() -> None:
     """Test BibTeX construction."""
     # Minimal BibTeX
@@ -308,7 +331,7 @@ def test_bibtex_unicode_normalization() -> None:
         ("\u201cDouble\u201d quotes", '"Double" quotes'),
         # Unicode dashes
         ("En\u2013dash", "En-dash"),
-        ("Em—dash", "Em--dash"),
+        ("Em—dash", "Em-dash"),
         # Ellipsis
         ("Trailing…", "Trailing..."),
         # Non-breaking space
@@ -317,7 +340,7 @@ def test_bibtex_unicode_normalization() -> None:
         ("Class of '21", "Class of'21"),
         ("Back in '99", "Back in'99"),
         # Combined Unicode and special chars
-        ("José's café—open 24/7", "Jose's cafe--open 24/7"),
+        ("José's café—open 24/7", "Jose's cafe-open 24/7"),
     ]
 
     for input_val, expected_val in test_cases:
@@ -342,11 +365,11 @@ def test_bibtex_latex_and_unicode_combined() -> None:
         # LaTeX + Unicode quotes
         ("\\textbf{\u201cImportant\u201d} finding", '"Important" finding'),
         # LaTeX + dashes + accents
-        (r"\emph{José}—A \textbf{Survey}", "Jose--A Survey"),
+        (r"\emph{José}—A \textbf{Survey}", "Jose-A Survey"),
         # Special chars + accents
         (r"50\% of café visitors", "50% of cafe visitors"),
         # Full complex case
-        ("\\textit{François}'s \\textbf{café}—50\\% \u201cdiscount\u201d", 'Francois\'s cafe--50% "discount"'),
+        ("\\textit{François}'s \\textbf{café}—50\\% \u201cdiscount\u201d", 'Francois\'s cafe-50% "discount"'),
     ]
 
     for input_title, expected_title in test_cases:

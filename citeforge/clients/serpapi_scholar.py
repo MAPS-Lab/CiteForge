@@ -30,13 +30,14 @@ SerpAPI response structure (``/search?engine=google_scholar_author``)::
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 from ..config import HTTP_TIMEOUT_DEFAULT, SERPAPI_BASE
-from ..http_utils import http_fetch_bytes
+from ..http_utils import _decode_json_bytes, http_fetch_bytes
+from ..refresh.provider_adapters import DurableJsonRouter, route_json
+from ._http_errors import SCHOLAR_HTTP_ERRORS
 
 _log = logging.getLogger("CiteForge.serpapi")
 
@@ -48,7 +49,15 @@ _PAGE_SIZE = 100
 
 
 def _serpapi_get(
-    api_key: str, author_id: str, start: int = 0, num: int = _PAGE_SIZE, sort: str = "pubdate"
+    api_key: str,
+    author_id: str,
+    start: int = 0,
+    num: int = _PAGE_SIZE,
+    sort: str = "pubdate",
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
 ) -> dict[str, Any]:
     """Execute a GET request against the SerpAPI Scholar Author endpoint.
 
@@ -77,18 +86,40 @@ def _serpapi_get(
     headers = {"Accept": "application/json"}
 
     try:
+        if durable_router is not None:
+            normalized = route_json(
+                durable_router,
+                "serpapi.author",
+                url=url,
+                normalized_payload={
+                    "author_key": author_id,
+                    "profile_id": author_id,
+                    "start": start,
+                    "num": num,
+                    "sort": sort,
+                    "min_year": 0,
+                },
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=HTTP_TIMEOUT_DEFAULT,
+                headers=headers,
+            )
+            return {
+                "articles": list(cast(tuple[dict[str, Any], ...], normalized["articles"])),
+                "serpapi_pagination": dict(cast(dict[str, Any], normalized["serpapi_pagination"])),
+            }
         raw = http_fetch_bytes(url, headers, HTTP_TIMEOUT_DEFAULT)
-        data: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        data = _decode_json_bytes(raw, url)
         if "error" in data:
             _log.warning("SerpAPI returned error for %s: %s", author_id, data["error"])
             return {}
         return data
-    except Exception as exc:
+    except SCHOLAR_HTTP_ERRORS as exc:
         _log.warning("SerpAPI request failed for %s: %s", author_id, type(exc).__name__)
         return {}
 
 
-def _convert_article(item: dict[str, Any]) -> dict[str, Any]:
+def normalize_serpapi_article(item: dict[str, Any]) -> dict[str, Any]:
     """Convert a SerpAPI article to CiteForge format.
 
     SerpAPI provides structured fields (no description parsing needed):
@@ -176,7 +207,7 @@ def serpapi_fetch_author_publications(
 
         page_start = len(articles)
         for item in page_articles:
-            converted = _convert_article(item)
+            converted = normalize_serpapi_article(item)
             if converted:
                 articles.append(converted)
 

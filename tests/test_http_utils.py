@@ -11,7 +11,7 @@ from requests.adapters import HTTPAdapter
 from citeforge import http_utils
 from citeforge.config import HTTP_BACKOFF_MAX, SESSION_ROTATION_THRESHOLD
 from citeforge.exceptions import DecodeError
-from citeforge.http_utils import _decode_json_bytes, _scrub_secrets
+from citeforge.http_utils import _cookie_header, _decode_json_bytes, _scrub_secrets, decode_json_mapping
 from tests.corpus import RETRY_AFTER_CASES
 from tests.fakes import FakeResponse, FakeSession
 
@@ -81,6 +81,25 @@ class TestSecretRedaction:
 
     def test_decode_json_valid_passthrough(self) -> None:
         assert _decode_json_bytes(b'{"a": 1}', "https://x?key=S") == {"a": 1}
+
+
+class TestDecodeJsonMapping:
+    @pytest.mark.parametrize("raw", [b"[]", b"null", b'"unexpected"'])
+    def test_rejects_valid_json_with_a_non_mapping_root(self, raw: bytes) -> None:
+        with pytest.raises(DecodeError, match="JSON object"):
+            decode_json_mapping(raw, "https://provider.example/records")
+
+    def test_leaves_provider_envelope_validation_to_the_adapter(self) -> None:
+        response_without_a_provider_envelope = {"unrecognized": []}
+        assert (
+            decode_json_mapping(b'{"unrecognized": []}', "https://provider.example/records")
+            == response_without_a_provider_envelope
+        )
+
+
+def test_cookie_header_uses_only_cookie_pairs() -> None:
+    """Set-Cookie attributes are not forwarded in a request Cookie header."""
+    assert _cookie_header("sid=abc; Path=/; HttpOnly; SameSite=Lax") == "sid=abc"
 
 
 class TestRetryBounding:
@@ -339,6 +358,53 @@ class TestBackoffCapAndPostRetry:
 
 
 class TestLogicalAndTransportAccounting:
+    def test_isolated_durable_send_ignores_ambient_cookie_jar(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prepared_cookies: list[str | None] = []
+
+        class IsolatedSession(requests.Session):
+            def get(self, url: str, **kwargs: object) -> FakeResponse:  # type: ignore[bad-override]  # fake narrows Session.get
+                request = requests.Request("GET", url, headers=kwargs.get("headers"))
+                prepared_cookies.append(self.prepare_request(request).headers.get("Cookie"))
+                return FakeResponse(200)
+
+        monkeypatch.setattr(http_utils.requests, "Session", IsolatedSession)
+        monkeypatch.setattr(
+            http_utils,
+            "_get_session",
+            lambda: pytest.fail("isolated durable send must not use ambient session"),
+        )
+        http_utils.send_http_once(
+            "GET",
+            "https://api.openreview.net/notes",
+            {},
+            1.0,
+            isolated_session=True,
+        )
+        http_utils.send_http_once(
+            "GET",
+            "https://api.openreview.net/notes",
+            {"Cookie": "session=exact-runtime"},
+            1.0,
+            isolated_session=True,
+        )
+        assert prepared_cookies == [None, "session=exact-runtime"]
+
+    def test_single_send_preserves_buffered_default_and_allows_durable_streaming(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        streams: list[object] = []
+
+        class Session:
+            def get(self, _url: str, **kwargs: object) -> FakeResponse:
+                streams.append(kwargs.get("stream", "absent"))
+                return FakeResponse(200)
+
+        monkeypatch.setattr(http_utils, "_get_session", lambda: Session())
+        http_utils._THREAD_LOCAL.session_request_count = 0
+        http_utils.send_http_once("GET", "https://example.com/x", {}, 1.0)
+        http_utils.send_http_once("GET", "https://example.com/x", {}, 1.0, stream=True)
+        assert streams == [False, True]
+
     @pytest.mark.parametrize(("timeout", "expected"), [(5.0, (5.0, 5.0)), (20.0, (10.0, 20.0))])
     def test_timeout_tuple_preserves_connect_cap(
         self, monkeypatch: pytest.MonkeyPatch, timeout: float, expected: tuple[float, float]
@@ -448,3 +514,62 @@ class TestDecodeJsonBodyScrub:
         message = str(excinfo.value)
         assert "SECRETVALUE" not in message
         assert "REDACTED" in message
+
+
+def test_public_https_sender_rejects_any_nonpublic_dns_without_a_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        http_utils.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (http_utils.socket.AF_INET, http_utils.socket.SOCK_STREAM, 6, "", ("203.0.113.10", 443)),
+            (http_utils.socket.AF_INET, http_utils.socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        http_utils.requests,
+        "Session",
+        lambda: (_ for _ in ()).throw(AssertionError("socket session must not be created")),
+    )
+    with pytest.raises(requests.ConnectionError, match="non-public"):
+        http_utils.send_public_https_once("https://papers.example.test/item", {}, 1.0)
+
+
+def test_public_https_sender_pins_dns_and_disables_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Session:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {"random": "header"}
+
+        def mount(self, prefix: str, adapter: object) -> None:
+            captured["mount"] = (prefix, adapter)
+
+        def get(self, url: str, **kwargs: object) -> requests.Response:
+            captured.update(url=url, kwargs=kwargs, trust_env=self.trust_env, session_headers=dict(self.headers))
+            response = requests.Response()
+            response.status_code = 200
+            response.url = url
+            response.raw = type("Raw", (), {"close": lambda _self: None})()
+            return response
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    monkeypatch.setattr(
+        http_utils.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(http_utils.socket.AF_INET, http_utils.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))],
+    )
+    monkeypatch.setattr(http_utils.requests, "Session", Session)
+    response = http_utils.send_public_https_once("https://papers.example.test/item", {"User-Agent": "fixed"}, 5.0)
+    assert captured["url"] == "https://8.8.8.8/item"
+    assert captured["trust_env"] is False
+    assert captured["session_headers"] == {}
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["headers"] == {"Host": "papers.example.test", "User-Agent": "fixed"}
+    assert kwargs["allow_redirects"] is False and kwargs["stream"] is True
+    response.close()
+    assert captured["closed"] is True

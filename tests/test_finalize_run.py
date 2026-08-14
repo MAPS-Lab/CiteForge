@@ -34,7 +34,7 @@ from citeforge.config import get_min_year
 from citeforge.io_utils import append_summary_to_csv, init_summary_csv
 from citeforge.models import Record
 from citeforge.pipeline import postrun
-from citeforge.pipeline.postrun import finalize_run
+from citeforge.pipeline.postrun import FinalizationError, finalize_run
 from tests.factories import article, misc, write_bib
 
 # A year comfortably inside the contribution window regardless of any
@@ -427,15 +427,144 @@ def test_writes_valid_baseline_json(tmp_path: Path, no_a2i2: None) -> None:
     assert baseline["authors"]["Doe (abc123)"] == 2
 
 
-def test_no_summary_csv_writes_nothing(tmp_path: Path, no_a2i2: None) -> None:
-    """When the summary CSV path is None or missing, finalize_run performs no
-    cleanup and writes no baseline file (guarded by the CSV-exists check).
+def test_no_summary_csv_skips_only_the_csv_bound_steps(tmp_path: Path, no_a2i2: None) -> None:
+    """Without a summary CSV the orphan pass cannot run (it has nothing to
+    compare against), but the year-window cleanup and baseline rewrite do not
+    read the CSV and therefore still run.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    window_min = get_min_year()
+    survivor = write_bib(author, article(key="S1", title="A Solitary Paper"), f"Doe{_IN_WINDOW_YEAR}-Solo.bib")
+    stale = write_bib(
+        author,
+        article(key="S2", title="An Out Of Window Paper", year=str(window_min - 5)),
+        f"Doe{window_min - 5}-Stale.bib",
+    )
+
+    report = finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=None)
+
+    assert survivor.exists(), "an in-window file must remain"
+    assert not stale.exists(), "the year-window cleanup does not need the CSV and must still run"
+    assert not report.summary_csv_present
+    assert report.orphans_removed == 0 and report.orphans_kept == 0, "the orphan pass needs the CSV"
+    assert report.out_of_window_removed == 1
+    baseline = json.loads((out_dir / "baseline.json").read_text(encoding="utf-8"))
+    assert baseline["total"] == 1, "baseline.json is rewritten without a CSV"
+
+
+# --- STRUCTURED REPORT ------------------------------------------------------
+
+
+def test_report_counts_every_step(tmp_path: Path, no_a2i2: None) -> None:
+    """The returned report carries the counts a caller would otherwise have to
+    re-derive from the tree or scrape out of the log.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    window_min = get_min_year()
+    dup_title = "Alpha Study of Vessel Tracking Systems"
+
+    tracked = write_bib(author, article(key="DoeAlpha", title=dup_title), f"Doe{_IN_WINDOW_YEAR}-Alpha.bib")
+    write_bib(author, article(key="DoeGamma", title=dup_title), f"Doe{_IN_WINDOW_YEAR}-Gamma.bib")
+    write_bib(
+        author,
+        article(key="DoeBeta", title="Weather Prediction Using Orbital Satellites"),
+        f"Doe{_IN_WINDOW_YEAR}-Beta.bib",
+    )
+    write_bib(
+        author,
+        article(key="DoeOld", title="A Historical Record", year=str(window_min - 5)),
+        f"Doe{window_min - 5}-Old.bib",
+    )
+
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [tracked])
+
+    report = finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
+
+    assert report.summary_csv_path == str(csv_path)
+    assert report.summary_csv_present
+    assert report.orphans_removed == 1, "the title-duplicate orphan"
+    assert report.orphans_kept == 2, "the dissimilar orphan and the out-of-window orphan"
+    assert report.out_of_window_removed == 1
+    assert report.superseded_preprints_removed == 0
+    assert report.baseline_total == 2
+    assert report.baseline_authors == {"Doe (abc123)": 2}
+
+
+# --- FAILURE PROPAGATION ----------------------------------------------------
+
+
+def test_unreadable_orphan_raises(tmp_path: Path, no_a2i2: None) -> None:
+    """An orphan candidate that cannot be decoded aborts finalization instead of
+    being silently treated as title-less and kept.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    tracked = write_bib(
+        author,
+        article(key="DoeAlpha", title="Alpha Study of Vessel Tracking Systems"),
+        f"Doe{_IN_WINDOW_YEAR}-Alpha.bib",
+    )
+    broken = author / f"Doe{_IN_WINDOW_YEAR}-Broken.bib"
+    broken.write_bytes(b"@article{X, title = {\xff\xfe}}\n")
+
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [tracked])
+
+    with pytest.raises(FinalizationError, match="orphan candidate"):
+        finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
+
+
+def test_unreadable_year_window_candidate_raises(tmp_path: Path, no_a2i2: None) -> None:
+    """A tracked file with no year in its name must be parsed for the year-window
+    decision. When that read fails, finalization stops rather than keeping a file
+    it could not classify.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    # No YYYY- segment, so the year-window step falls back to reading the entry.
+    broken = author / "Doe-NoYearInName.bib"
+    broken.write_bytes(b"@article{X, title = {\xff\xfe}}\n")
+
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [broken])
+
+    with pytest.raises(FinalizationError, match="year-window check"):
+        finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
+
+
+def test_unreadable_fixup_candidate_raises(tmp_path: Path, no_a2i2: None) -> None:
+    """A tracked, in-window file that the fixup pass cannot read aborts the run.
+
+    The filename carries an in-window year, so the year-window step accepts it
+    without opening it and the fixup step is the first reader.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    broken = author / f"Doe{_IN_WINDOW_YEAR}-Broken.bib"
+    broken.write_bytes(b"@article{X, title = {\xff\xfe}}\n")
+
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [broken])
+
+    with pytest.raises(FinalizationError, match="post-run fixup"):
+        finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
+
+
+def test_failed_baseline_write_raises(tmp_path: Path, no_a2i2: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A baseline.json write that does not land aborts the run. The baseline is
+    the run's own record of what it produced, so a discarded failure there makes
+    every later comparison meaningless.
     """
     out_dir = tmp_path / "out"
     author = _author_dir(out_dir)
     survivor = write_bib(author, article(key="S1", title="A Solitary Paper"), f"Doe{_IN_WINDOW_YEAR}-Solo.bib")
 
-    finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=None)
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [survivor])
+    monkeypatch.setattr(postrun, "safe_write_json", lambda *a, **k: False)
 
-    assert survivor.exists(), "no CSV means no cleanup: the file must remain"
-    assert not (out_dir / "baseline.json").exists(), "baseline.json is only written when the CSV exists"
+    with pytest.raises(FinalizationError, match=r"baseline\.json"):
+        finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))

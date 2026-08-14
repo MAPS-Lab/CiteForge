@@ -11,6 +11,8 @@ every emitted file, and one of these assertions must fail before that ships.
 
 from __future__ import annotations
 
+import pytest
+
 from citeforge.bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict
 from tests import factories
 
@@ -53,6 +55,30 @@ _RICH_ENTRY = {
 def test_serializer_emits_exact_golden_bytes() -> None:
     """The serializer output equals the captured golden string byte for byte."""
     assert bibtex_from_dict(_RICH_ENTRY) == GOLDEN
+
+
+def test_serializer_preserves_tildes_in_urls() -> None:
+    """LaTeX whitespace handling must not corrupt a literal URL path segment."""
+    entry = {
+        "type": "misc",
+        "key": "UrlTilde",
+        "fields": {"url": "https://example.org/~researcher/article"},
+    }
+    assert bibtex_from_dict(entry) == "@misc{UrlTilde,\n  url = {https://example.org/~researcher/article}\n}\n"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_bibtex"),
+    [
+        ("The {API} Thing", "@article{CaseProtection,\n  title = {The {API} Thing}\n}\n"),
+        (r"\textbf{The {API} Thing}", "@article{CaseProtection,\n  title = {The {API} Thing}\n}\n"),
+        (r"\LaTeX{} API", "@article{CaseProtection,\n  title = {LaTeX API}\n}\n"),
+    ],
+)
+def test_serializer_preserves_bibtex_case_protection(source: str, expected_bibtex: str) -> None:
+    """Case groups survive serialization, except formatting macro wrappers."""
+    entry = {"type": "article", "key": "CaseProtection", "fields": {"title": source}}
+    assert bibtex_from_dict(entry) == expected_bibtex
 
 
 def test_preferred_fields_precede_sorted_tail() -> None:

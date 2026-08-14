@@ -1,0 +1,235 @@
+name: Live Shadow Refresh
+
+# Manual dispatch only, never a schedule. This is the first generation to reach
+# live providers, so it spends real SerpAPI and Serply quota and must not fire
+# at a moment nobody is watching it.
+on:
+  workflow_dispatch:
+    inputs:
+      max_segments:
+        description: 'Maximum refresh segments to run (one CLI invocation each)'
+        required: false
+        default: '3'
+      wall_budget_minutes:
+        description: 'Total wall budget for the segment loop'
+        required: false
+        default: '30'
+
+# Read only, and no job below escalates. This workflow is structurally
+# incapable of publishing, since it mints no App token, runs no git push,
+# opens no pull request, and dispatches nothing to the website. The only thing
+# that leaves the runner is an artifact, so a shadow generation cannot reach main
+# even if it reports itself complete.
+permissions:
+  contents: read
+
+# Two live trials at once would double-spend the same provider quota and make
+# the physical attempt counts, which are the point of this run, unreadable.
+concurrency:
+  group: citeforge-refresh-shadow
+  cancel-in-progress: false
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    # A hard ceiling above the dispatch budget. The loop is bounded by
+    # wall_budget_minutes; this only catches an input that asked for more.
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          # The job runs third-party provider code. Leaving no token in
+          # .git/config is also what makes the no-push property physical
+          # rather than a promise about the steps below.
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          pip install --require-hashes -r requirements-build.lock -r requirements.lock
+          pip install --no-build-isolation --no-deps -e .
+
+      - name: Write API keys from secrets
+        env:
+          S2_KEY: ${{ secrets.SEMANTICSCHOLAR }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI }}
+          SERPLY_KEY: ${{ secrets.SERPLY }}
+          GEMINI_KEY: ${{ secrets.GEMINI }}
+          OPENREVIEW_KEY: ${{ secrets.OPENREVIEW }}
+        run: |
+          mkdir -p keys
+          echo "$S2_KEY"        > keys/Semantic.key
+          echo "$SERPAPI_KEY"   > keys/SerpAPI.key
+          echo "$SERPLY_KEY"    > keys/Serply.key
+          echo "$GEMINI_KEY"    > keys/Gemini.key
+          echo "$OPENREVIEW_KEY" > keys/OpenReview.key
+
+      - name: Run bounded refresh segments
+        id: shadow
+        env:
+          CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
+          MAX_SEGMENTS: ${{ inputs.max_segments }}
+          WALL_BUDGET_MINUTES: ${{ inputs.wall_budget_minutes }}
+          # The encrypted response-cache branch this key sealed is deleted, so the
+          # checkpoint is now the only refresh state encrypted at rest.
+          CHECKPOINT_KEY: ${{ secrets.CACHE_ENCRYPTION_KEY }}
+          # Outside the checkout, so no ledger, checkpoint, or raw response can
+          # be picked up by a later git operation. The checkpoint directory is
+          # also outside STATE_DIR, which the engine requires, since a store
+          # under the sealed directory would seal its own previous sequences.
+          # Both live in runner.temp, so a segment resumes from a checkpoint
+          # across a process boundary but not yet across a runner boundary.
+          STATE_DIR: ${{ runner.temp }}/refresh-state
+          CHECKPOINT_DIR: ${{ runner.temp }}/refresh-checkpoints
+          EVIDENCE_DIR: ${{ runner.temp }}/refresh-evidence
+        run: |
+          set -euo pipefail
+          mkdir -p "$STATE_DIR" "$CHECKPOINT_DIR" "$EVIDENCE_DIR"
+
+          # Dispatch inputs are free text and both are used in arithmetic, where
+          # a subscript expression would execute a command substitution.
+          case "${MAX_SEGMENTS}:${WALL_BUDGET_MINUTES}" in
+            *[!0-9:]* | :* | *: | *::*)
+              echo "::error::max_segments and wall_budget_minutes must be positive integers"
+              exit 1
+              ;;
+          esac
+          if [ "$MAX_SEGMENTS" -lt 1 ] || [ "$WALL_BUDGET_MINUTES" -lt 1 ]; then
+            echo "::error::max_segments and wall_budget_minutes must be positive integers"
+            exit 1
+          fi
+
+          budget=$(( WALL_BUDGET_MINUTES * 60 ))
+          started=$(date +%s)
+          status=none
+          remaining=-1
+          segments=0
+          rc=0
+
+          for i in $(seq 1 "$MAX_SEGMENTS"); do
+            left=$(( budget - ( $(date +%s) - started ) ))
+            if [ "$left" -le 0 ]; then
+              echo "::notice::Wall budget spent after $segments segment(s)"
+              break
+            fi
+
+            echo "::group::Segment $i/$MAX_SEGMENTS (up to ${left}s)"
+            rc=0
+            # One CLI invocation runs one segment to its own natural stop, and
+            # a segment carries no internal time bound. The kill is what keeps
+            # a first live trial from running to the job ceiling, and the
+            # ledger resumes from its leases on the next dispatch.
+            timeout -k 30 "$left" citeforge refresh \
+              --state-dir "$STATE_DIR" --checkpoint-dir "$CHECKPOINT_DIR" || rc=$?
+            echo "::endgroup::"
+            segments=$i
+
+            if [ -f "$STATE_DIR/refresh.log" ]; then
+              # set_log_file truncates, so each segment's log survives only as
+              # this copy. The refresh path logs a status line and a detail
+              # string; no provider URL is ever formatted into either, which is
+              # what makes the log safe to retain as an artifact.
+              cp "$STATE_DIR/refresh.log" "$EVIDENCE_DIR/segment-$i.log"
+            fi
+
+            line=$(grep -ao 'Refresh [a-z_]*: generation=[0-9a-f]* completed_tasks=[0-9]* remaining_tasks=[0-9]*' \
+              "$STATE_DIR/refresh.log" 2>/dev/null | tail -n 1 || true)
+            if [ -n "$line" ]; then
+              echo "$line"
+              status=${line#Refresh }
+              status=${status%%:*}
+              remaining=${line##*remaining_tasks=}
+            fi
+
+            if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+              status=wall_budget_exceeded
+              echo "::notice::Segment $i was stopped by the wall budget"
+              break
+            fi
+            # 1 is BLOCKED or INVALID_CONFIGURATION and 2 is a CLI-side
+            # rejection. Neither clears by running the same inputs again.
+            if [ "$rc" -ne 0 ]; then
+              break
+            fi
+            if [ "$status" = "complete" ]; then
+              break
+            fi
+          done
+
+          {
+            echo "status=$status"
+            echo "remaining=$remaining"
+            echo "segments=$segments"
+            echo "exit_code=$rc"
+          } >> "$GITHUB_OUTPUT"
+
+      # The ledger is the completeness authority, so its manifest is the
+      # evidence. The database itself is not uploaded, because it carries
+      # normalized provider responses, while the manifest is the scrubbed
+      # durable record.
+      - name: Export ledger manifest
+        if: always()
+        continue-on-error: true
+        env:
+          STATE_DIR: ${{ runner.temp }}/refresh-state
+          EVIDENCE_DIR: ${{ runner.temp }}/refresh-evidence
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from citeforge.cli import DEFAULT_LEDGER_NAME
+          from citeforge.refresh.ledger import Ledger
+
+          ledger_path = Path(os.environ["STATE_DIR"]) / DEFAULT_LEDGER_NAME
+          out = Path(os.environ["EVIDENCE_DIR"]) / "ledger-manifest.json"
+          out.parent.mkdir(parents=True, exist_ok=True)
+          with Ledger.open(ledger_path, corpus_repo_root=Path.cwd()) as ledger:
+              manifest = ledger.manifest()
+          out.write_text(manifest.canonical_json, encoding="utf-8")
+          print(f"manifest digest {manifest.digest}, {len(manifest.canonical_json)} bytes")
+          PY
+
+      # GitHub expires job logs, and this run exists to produce evidence about
+      # provider authentication, response schemas, and physical attempt counts
+      # that cannot be reproduced offline.
+      - name: Upload shadow evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: refresh-shadow-evidence
+          path: ${{ runner.temp }}/refresh-evidence
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Report the run result and gate on unresolved work
+        if: always()
+        env:
+          STATUS: ${{ steps.shadow.outputs.status }}
+          REMAINING: ${{ steps.shadow.outputs.remaining }}
+          SEGMENTS: ${{ steps.shadow.outputs.segments }}
+          EXIT_CODE: ${{ steps.shadow.outputs.exit_code }}
+        run: |
+          set -uo pipefail
+          echo "RunResult status: ${STATUS:-none}"
+          echo "Unresolved tasks: ${REMAINING:--1}"
+          echo "Segments run:     ${SEGMENTS:-0}"
+          echo "CLI exit code:    ${EXIT_CODE:--1}"
+
+          # The acceptance gate is a complete census with nothing left open.
+          # This is expected to fail until the engine can report COMPLETE, and
+          # that failure is the finding. The run is dispatch-only and gates no
+          # merge, so a red result here blocks nothing but says what is missing.
+          if [ "${STATUS:-none}" != "complete" ] || [ "${REMAINING:--1}" != "0" ]; then
+            echo "::error::Shadow generation left required work unresolved (status=${STATUS:-none}, unresolved=${REMAINING:--1})"
+            exit 1
+          fi
+          echo "Shadow generation resolved every required task."

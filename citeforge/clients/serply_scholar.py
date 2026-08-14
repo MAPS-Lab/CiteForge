@@ -31,14 +31,15 @@ the Google Scholar format: ``"Authors - Journal/Venue, Year - domain.com"``.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from ..config import HTTP_TIMEOUT_DEFAULT, SERPLY_BASE
-from ..http_utils import http_fetch_bytes
+from ..http_utils import _decode_json_bytes, http_fetch_bytes
+from ..refresh.provider_adapters import DurableJsonRouter, route_json
+from ._http_errors import SCHOLAR_HTTP_ERRORS
 
 _log = logging.getLogger("CiteForge.serply")
 
@@ -46,7 +47,16 @@ _log = logging.getLogger("CiteForge.serply")
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 
 
-def _serply_get(api_key: str, query: str, start: int = 0) -> dict[str, Any]:
+def _serply_get(
+    api_key: str,
+    query: str,
+    start: int = 0,
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    author_key: str | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
+) -> dict[str, Any]:
     """Execute a GET request against the Serply Scholar endpoint.
 
     The Serply API uses path-based query encoding: ``/v1/scholar/{encoded_query}``.
@@ -73,10 +83,24 @@ def _serply_get(api_key: str, query: str, start: int = 0) -> dict[str, Any]:
     }
 
     try:
+        if durable_router is not None:
+            if not author_key:
+                raise ValueError("durable Serply search requires stable census author key")
+            normalized = route_json(
+                durable_router,
+                "serply.scholar",
+                url=url,
+                normalized_payload={"author_key": author_key, "query": query, "start": start},
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=HTTP_TIMEOUT_DEFAULT,
+                headers=headers,
+            )
+            return {"articles": list(cast(tuple[dict[str, Any], ...], normalized["articles"]))}
         raw = http_fetch_bytes(url, headers, HTTP_TIMEOUT_DEFAULT)
-        return json.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
-    except Exception as exc:
-        _log.debug("Serply request failed: %s", exc)
+        return _decode_json_bytes(raw, url)
+    except SCHOLAR_HTTP_ERRORS as exc:
+        _log.debug("Serply request failed: %s", type(exc).__name__)
         return {}
 
 

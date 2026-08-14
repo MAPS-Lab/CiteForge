@@ -8,6 +8,7 @@ can reach a log record.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import random
@@ -19,7 +20,9 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import wraps
+from http.cookies import SimpleCookie
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -40,10 +43,6 @@ from .exceptions import ALL_API_ERRORS, DECODE_ERRORS, NUMERIC_ERRORS, DecodeErr
 
 T = TypeVar("T")
 
-# Safety net: cap all socket operations at 60s to prevent indefinite hangs
-# from DNS resolution, SSL handshake, or connection pool waits
-socket.setdefaulttimeout(60.0)
-
 # Standard HTTP headers for API requests
 DEFAULT_JSON_HEADERS = {"User-Agent": "Mozilla/5.0 (CiteForge Client)", "Accept": "application/json"}
 
@@ -63,6 +62,14 @@ def _scrub_secrets(text: str) -> str:
     committed run logs.
     """
     return _SECRET_QS_RE.sub(r"\1REDACTED", text)
+
+
+def _cookie_header(set_cookie: str) -> str | None:
+    """Convert a Set-Cookie value to pairs suitable for a Cookie request header."""
+    jar = SimpleCookie()
+    jar.load(set_cookie)
+    pairs = [f"{name}={morsel.value}" for name, morsel in jar.items()]
+    return "; ".join(pairs) or None
 
 
 def _generate_user_agent_pool() -> list[str]:
@@ -125,6 +132,77 @@ DEFAULT_BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+class _PinnedHTTPSAdapter(HTTPAdapter):
+    """Connect to one resolved address while retaining hostname TLS validation."""
+
+    def __init__(self, hostname: str) -> None:
+        self._hostname = hostname
+        super().__init__(max_retries=0)
+
+    def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any) -> None:
+        pool_kwargs.update(assert_hostname=self._hostname, server_hostname=self._hostname)
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+
+def _public_https_target(url: str) -> tuple[str, str]:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise requests.exceptions.InvalidURL("web probe target is not canonical public HTTPS")
+    try:
+        addresses = {
+            ipaddress.ip_address(item[4][0])
+            for item in socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        }
+    except (OSError, ValueError) as exc:
+        raise requests.ConnectionError("web probe DNS resolution failed") from exc
+    if not addresses or any(not address.is_global for address in addresses):
+        raise requests.ConnectionError("web probe DNS authority includes a non-public address")
+    selected = min(addresses, key=lambda address: (address.version, address.packed))
+    host = f"[{selected.compressed}]" if selected.version == 6 else selected.compressed
+    return parsed.hostname, parsed._replace(netloc=host).geturl()
+
+
+def send_public_https_once(url: str, headers: dict[str, str], timeout: float) -> requests.Response:
+    """Send one fixed-header, environment-isolated, DNS-pinned public HTTPS GET."""
+    hostname, pinned_url = _public_https_target(url)
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.clear()
+    session.mount("https://", _PinnedHTTPSAdapter(hostname))
+    wire_headers = dict(headers)
+    wire_headers["Host"] = hostname
+    try:
+        response = session.get(
+            pinned_url,
+            headers=wire_headers,
+            timeout=(min(timeout, 10.0), timeout),
+            stream=True,
+            allow_redirects=False,
+        )
+    except Exception:
+        session.close()
+        raise
+    response.url = url
+    original_close = response.close
+
+    def close_with_session() -> None:
+        try:
+            original_close()
+        finally:
+            session.close()
+
+    response.close = close_with_session  # type: ignore[method-assign]
+    return response
 
 
 def _randomize_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -331,14 +409,87 @@ def _send_once(
     headers: dict[str, str],
     timeout: tuple[float, float],
     json_payload: dict[str, Any] | None,
+    *,
+    stream: bool = False,
+    allow_redirects: bool = True,
+    isolated_session: bool = False,
 ) -> requests.Response:
-    """Send once, with session rotation and only the transport under the semaphore."""
-    session = _get_session()
-    _THREAD_LOCAL.session_request_count += 1
-    with _GLOBAL_SEMAPHORE:
+    """Send one physical attempt through rate, pool, and concurrency controls."""
+    session = requests.Session() if isolated_session else _get_session()
+    if not isolated_session:
+        _THREAD_LOCAL.session_request_count += 1
+    _GLOBAL_SEMAPHORE.acquire()
+    try:
         if method == "POST":
-            return session.post(url, json=json_payload, headers=headers, timeout=timeout)
-        return session.get(url, headers=headers, timeout=timeout)
+            response = session.post(
+                url, json=json_payload, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+        elif method == "HEAD":
+            response = session.head(
+                url, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+        else:
+            response = session.get(
+                url, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+    except Exception:
+        if isolated_session:
+            session.close()
+        _GLOBAL_SEMAPHORE.release()
+        raise
+    if not stream:
+        if isolated_session:
+            session.close()
+        _GLOBAL_SEMAPHORE.release()
+        return response
+    original_close = getattr(response, "close", lambda: None)
+    released = False
+
+    def close_and_release() -> None:
+        nonlocal released
+        try:
+            original_close()
+        finally:
+            if isolated_session:
+                session.close()
+            if not released:
+                released = True
+                _GLOBAL_SEMAPHORE.release()
+
+    response.close = close_and_release  # type: ignore[method-assign]
+    return response
+
+
+def send_http_once(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    json_payload: dict[str, Any] | None = None,
+    *,
+    stream: bool = False,
+    allow_redirects: bool = True,
+    isolated_session: bool = False,
+) -> requests.Response:
+    """Send exactly one physical HTTP attempt for the durable refresh transport."""
+    method = method.upper()
+    if method not in {"GET", "HEAD", "POST"}:
+        raise ValueError("unsupported HTTP method")
+    namespace = _classify_url(url)
+    track_api_call(namespace)
+    limiter = _get_rate_limiter(namespace)
+    if limiter is not None:
+        limiter.acquire()
+    return _send_once(
+        method,
+        url,
+        _randomize_headers(headers),
+        (min(timeout, 10.0), timeout),
+        json_payload,
+        stream=stream,
+        allow_redirects=allow_redirects,
+        isolated_session=isolated_session,
+    )
 
 
 def _http_request(
@@ -407,20 +558,26 @@ def http_fetch_bytes(
     return _http_request("GET", url, headers, timeout)
 
 
-def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
-    """
-    Decode a UTF-8 JSON response and parse it into a Python object, including a
-    short preview of invalid data in error messages.
-    """
+def decode_json_mapping(raw: bytes, url: str) -> dict[str, Any]:
+    """Decode a UTF-8 JSON object, rejecting valid JSON with another root shape."""
     try:
-        result: dict[str, Any] = json.loads(raw.decode("utf-8"))
-        return result
+        result: Any = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as ex:
         # include a preview for debugging (scrub the preview too; an upstream
         # error body may echo request params carrying a key)
         preview = _scrub_secrets(raw[:256].decode("utf-8", errors="replace"))
         safe_url = _scrub_secrets(url)
         raise DecodeError(f"Invalid JSON from {safe_url!r}: {ex.msg} at pos {ex.pos}; preview={preview!r}") from ex
+    if not isinstance(result, dict):
+        preview = _scrub_secrets(raw[:256].decode("utf-8", errors="replace"))
+        safe_url = _scrub_secrets(url)
+        raise DecodeError(f"Expected JSON object from {safe_url!r}, got {type(result).__name__}; preview={preview!r}")
+    return result
+
+
+def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
+    """Backward-compatible private alias for :func:`decode_json_mapping`."""
+    return decode_json_mapping(raw, url)
 
 
 def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any]:
@@ -429,7 +586,7 @@ def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any
     returning the parsed response as a dictionary.
     """
     raw = http_fetch_bytes(url, DEFAULT_JSON_HEADERS.copy(), timeout)
-    return _decode_json_bytes(raw, url)
+    return decode_json_mapping(raw, url)
 
 
 def http_post_json(
@@ -446,7 +603,7 @@ def http_post_json(
     h = (headers or DEFAULT_JSON_HEADERS).copy()
     h.setdefault("Content-Type", "application/json")
     raw = _http_request("POST", url, h, timeout, json_payload=payload)
-    return _decode_json_bytes(raw, url)
+    return decode_json_mapping(raw, url)
 
 
 def s2_http_get_json(url: str, api_key: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any]:
@@ -457,7 +614,7 @@ def s2_http_get_json(url: str, api_key: str, timeout: float = HTTP_TIMEOUT_FAST)
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["x-api-key"] = api_key
     raw = http_fetch_bytes(url, headers, timeout)
-    return _decode_json_bytes(raw, url)
+    return decode_json_mapping(raw, url)
 
 
 def http_get_text(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> str:

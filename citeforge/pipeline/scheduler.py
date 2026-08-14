@@ -2,8 +2,8 @@
 
 Fetches each author's publications from Google Scholar and DBLP, merges and
 deduplicates the two lists, prioritizes authors with pending work, and drives
-`process_article` across a bounded pool of worker threads with a per-author
-time budget.
+`process_article` across a bounded pool of worker threads with an aggregate
+completion warning threshold.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
@@ -305,6 +305,27 @@ def run_all(
     """
     total_saved = 0
     processed = 0
+    accounted: set[Future[int]] = set()
+
+    def _account_result(future: Future[int], rec: Record) -> None:
+        nonlocal processed, total_saved
+        if future in accounted:
+            return
+        accounted.add(future)
+        try:
+            saved = future.result()
+            total_saved += saved
+            processed += 1
+            logger.success(
+                f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
+                category=LogCategory.AUTHOR,
+            )
+        except Exception as e:
+            processed += 1
+            logger.error(
+                f"[{processed}/{len(records)}] Error processing {rec.name} ({rec.scholar_id or rec.dblp}): {e}",
+                category=LogCategory.ERROR,
+            )
 
     # Prioritize new authors (no existing output dir) so they get API resources
     # first, before cached authors consume worker slots. This intentionally
@@ -329,14 +350,14 @@ def run_all(
 
     threading.excepthook = _thread_excepthook
 
-    # Per-author budget of 30 minutes, applied as one whole-pool deadline
-    # (author_timeout * len(records)) on as_completed, not per future
-    author_timeout = 1800  # seconds
+    # Log once when aggregate completion exceeds 30 minutes per author. Threads
+    # cannot be terminated safely, so executor shutdown still waits for them.
+    completion_warning_seconds_per_author = 1800
 
+    future_to_author: dict[Future[int], Record] = {}
     try:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             # Submit all tasks and track them
-            future_to_author = {}
             for idx, rec in enumerate(records_sorted, 1):
                 effective_id = rec.scholar_id or rec.dblp or "N/A"
                 logger.info(
@@ -361,43 +382,34 @@ def run_all(
 
             logger.step(f"All {len(records)} authors queued for processing", category=LogCategory.PLAN)
 
+
             try:
-                for future in as_completed(future_to_author, timeout=author_timeout * len(records)):
-                    rec = future_to_author[future]
-                    try:
-                        saved = future.result(timeout=30)
-                        total_saved += saved
-                        processed += 1
-                        logger.success(
-                            f"[{processed}/{len(records)}] Completed: {rec.name} ({saved} files saved)",
-                            category=LogCategory.AUTHOR,
-                        )
-                    except (TimeoutError, FuturesTimeoutError):
-                        processed += 1
-                        logger.error(
-                            f"[{processed}/{len(records)}] Timeout retrieving result for {rec.name}",
-                            category=LogCategory.ERROR,
-                        )
-                    except Exception as e:
-                        processed += 1
-                        logger.error(
-                            f"[{processed}/{len(records)}] Error processing {rec.name} "
-                            f"({rec.scholar_id or rec.dblp}): {e}",
-                            category=LogCategory.ERROR,
-                        )
+                for future in as_completed(
+                    future_to_author,
+                    timeout=completion_warning_seconds_per_author * len(records),
+                ):
+                    _account_result(future, future_to_author[future])
             except (TimeoutError, FuturesTimeoutError):
                 remaining = [r.name for f, r in future_to_author.items() if not f.done()]
-                logger.error(
-                    f"Pipeline timed out with {len(remaining)} author(s) still pending: " + ", ".join(remaining[:5]),
-                    category=LogCategory.ERROR,
+                # A warning, not a kill. Cancelling here bounded the overrun but
+                # discarded finished work: an author that completes just after
+                # the threshold returned zero saved files despite having done
+                # them. The threshold surfaces a slow run; the drain below still
+                # counts every result once, and article-level parallelism is
+                # what actually bounds the tail.
+                logger.warn(
+                    f"Pipeline completion warning threshold reached with {len(remaining)} author(s) still running: "
+                    + ", ".join(remaining[:5])
+                    + ". Waiting for worker threads before final accounting.",
+                    category=LogCategory.PLAN,
                 )
-                # Cancel authors that have not started yet. Without this the
-                # `with` exit (shutdown(wait=True)) drains the whole remaining
-                # queue, so the deadline bounded nothing. A thread cannot be
-                # killed in Python, so the overrun is still bounded by the
-                # MAX_WORKERS authors already in flight, not by zero.
-                executor.shutdown(wait=False, cancel_futures=True)
     finally:
         threading.excepthook = _orig_excepthook
+
+    # Shutdown waits for every worker that had already started. Drain futures
+    # not yielded before the deadline so every result is accounted exactly
+    # once, including the ones cancel_futures left unstarted.
+    for future, rec in future_to_author.items():
+        _account_result(future, rec)
 
     return total_saved, processed

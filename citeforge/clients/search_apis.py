@@ -10,15 +10,20 @@ the chosen record into a BibTeX entry through a ``build_bibtex_from_*`` helper.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import math
 import os
 import re
 import threading
 import time
 import xml.etree.ElementTree as ElementTree  # Element types only; parsing uses defusedxml
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+import requests
 from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
 from ..cache import response_cache
@@ -45,14 +50,15 @@ from ..exceptions import (
 )
 from ..http_utils import (
     DEFAULT_JSON_HEADERS,
+    _cookie_header,
     _get_session,
-    handle_api_errors,
     http_fetch_bytes,
     http_get_json,
     http_get_text,
 )
 from ..id_utils import _norm_doi, find_arxiv_in_text, find_doi_in_text
 from ..log_utils import LogCategory, logger
+from ..refresh.provider_adapters import DurableJsonRouter, pubmed_summary_adapter, route_json
 from ..text_utils import (
     author_name_matches,
     authors_overlap,
@@ -160,19 +166,40 @@ def crossref_search_multiple(
 # ============ DOI / CSL ============
 
 
-@handle_api_errors(default_return=None)
-def fetch_csl_via_doi(doi: str, timeout: float = 20.0) -> dict[str, Any] | None:
+def fetch_csl_via_doi(
+    doi: str,
+    timeout: float = 20.0,
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
+) -> dict[str, Any] | None:
     """Resolve a DOI using content negotiation and return the associated CSL-JSON metadata."""
     doi_norm = _norm_doi(doi)
     if not doi_norm:
         return None
-    cached, hit = _doi_cache_lookup("doi_csl", doi_norm)
+    cached, hit = _doi_cache_lookup("doi_csl", doi_norm) if durable_router is None else (None, False)
     if hit:
         return cached
     url = f"https://doi.org/{doi_norm}"
     headers = DEFAULT_JSON_HEADERS.copy()
     headers["Accept"] = "application/vnd.citationstyles.csl+json"
     try:
+        if durable_router is not None:
+            normalized = route_json(
+                durable_router,
+                "doi.csl",
+                url=url,
+                normalized_payload={"doi": doi_norm},
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=timeout,
+                headers=headers,
+            )
+            metadata = normalized["metadata"]
+            if not isinstance(metadata, Mapping):
+                raise TypeError("DOI CSL normalized metadata is not an object")
+            return dict(metadata)
         raw = http_fetch_bytes(url, headers, timeout)
         result: dict[str, Any] = json.loads(raw.decode("utf-8"))
         response_cache.put("doi_csl", doi_norm, result, ttl_days=CACHE_TTL_DOI_DAYS)
@@ -379,6 +406,107 @@ _OPENREVIEW_SESSION_CREATED_AT: float = 0.0
 _OPENREVIEW_SESSION_LOCK = threading.Lock()
 
 
+def _openreview_login_once(credentials: tuple[str, str]) -> dict[str, str] | None:
+    """Perform one runtime login without consulting any shared session cache."""
+    url = f"{OPENREVIEW_BASE}/login"
+    payload = {"id": credentials[0], "password": credentials[1]}
+    headers = DEFAULT_JSON_HEADERS.copy()
+    headers["Content-Type"] = "application/json"
+    try:
+        with requests.Session() as session:
+            response = session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=20,
+                allow_redirects=False,
+                stream=True,
+            )
+            try:
+                if response.status_code != 200 or len(str(response.headers)) > 16_384:
+                    return None
+                cookie = _cookie_header(response.headers.get("Set-Cookie", ""))
+            finally:
+                response.close()
+    except (*NETWORK_ERRORS, *PARSE_ERRORS):
+        return None
+    return {"Cookie": cookie} if cookie else None
+
+
+@dataclass(frozen=True)
+class OpenReviewRuntimeSession:
+    """Opaque runtime cookie bound to exactly one credential identity."""
+
+    _cookie: str = field(repr=False)
+    _credential_digest: str = field(repr=False)
+    _expires_at: float = field(repr=False)
+    _monotonic: Callable[[], float] = field(repr=False)
+
+    def cookie_for(self, credentials: tuple[str, str]) -> str:
+        digest = hashlib.sha256("\0".join(credentials).encode()).hexdigest()
+        if digest != self._credential_digest:
+            raise ValueError("OpenReview runtime session credential authority changed")
+        if self._monotonic() >= self._expires_at:
+            raise ValueError("OpenReview runtime session expired")
+        return self._cookie
+
+
+@dataclass
+class OpenReviewSessionBroker:
+    """Runtime-only, credential-affine OpenReview session cache for C4."""
+
+    login_once: Callable[[tuple[str, str]], dict[str, str] | None] = field(default=_openreview_login_once, repr=False)
+    monotonic: Callable[[], float] = field(default=time.monotonic, repr=False)
+    ttl_seconds: float = OPENREVIEW_SESSION_TTL_SECS
+    _session: OpenReviewRuntimeSession | None = field(default=None, init=False, repr=False)
+    _created_at: float = field(default=0.0, init=False, repr=False)
+    _credential_digest: str | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.ttl_seconds, (int, float))
+            or isinstance(self.ttl_seconds, bool)
+            or not math.isfinite(self.ttl_seconds)
+            or self.ttl_seconds <= 0
+        ):
+            raise ValueError("OpenReview session TTL must be positive")
+
+    def acquire(self, credentials: tuple[str, str]) -> OpenReviewRuntimeSession | None:
+        """Return the exact live session for these credentials, never another account's."""
+        if len(credentials) != 2 or any(
+            not isinstance(value, str) or not value.strip() or "\r" in value or "\n" in value for value in credentials
+        ):
+            raise ValueError("OpenReview credentials are invalid")
+        credential_digest = hashlib.sha256("\0".join(credentials).encode()).hexdigest()
+        with self._lock:
+            now = self.monotonic()
+            if (
+                self._session is not None
+                and self._credential_digest == credential_digest
+                and now - self._created_at < self.ttl_seconds
+            ):
+                return self._session
+            self._session = None
+            self._created_at = 0.0
+            self._credential_digest = None
+            headers = self.login_once(credentials)
+            if headers is None:
+                return None
+            cookie = headers.get("Cookie")
+            if set(headers) != {"Cookie"} or not isinstance(cookie, str) or not cookie.strip():
+                raise ValueError("OpenReview login returned invalid session authority")
+            self._created_at = self.monotonic()
+            self._session = OpenReviewRuntimeSession(
+                cookie,
+                credential_digest,
+                self._created_at + self.ttl_seconds,
+                self.monotonic,
+            )
+            self._credential_digest = credential_digest
+            return self._session
+
+
 def _or_note_title(note: dict[str, Any]) -> str:
     """Extract the title from an OpenReview note."""
     content = note.get("content") or {}
@@ -446,10 +574,10 @@ def openreview_login(creds: tuple[str, ...] | None) -> dict[str, str] | None:
         try:
             resp = _get_session().post(url, json=payload, headers=headers, timeout=20)
             resp.raise_for_status()
-            set_cookie = resp.headers.get("Set-Cookie")
-            if set_cookie:
+            cookie_header = _cookie_header(resp.headers.get("Set-Cookie", ""))
+            if cookie_header:
                 headers_with_cookie = DEFAULT_JSON_HEADERS.copy()
-                headers_with_cookie["Cookie"] = set_cookie
+                headers_with_cookie["Cookie"] = cookie_header
                 _OPENREVIEW_SESSION = headers_with_cookie
                 _OPENREVIEW_SESSION_CREATED_AT = time.monotonic()
                 logger.debug(
@@ -475,26 +603,50 @@ def openreview_login(creds: tuple[str, ...] | None) -> dict[str, str] | None:
     return None
 
 
-def _or_fetch_candidates(title: str, headers: dict[str, str]) -> list[dict[str, Any]]:
+def _or_fetch_candidates(
+    title: str,
+    headers: dict[str, str],
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    author_key: str | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
+) -> list[dict[str, Any]]:
     """Fetch OpenReview candidate notes via term lookup, falling back to search."""
+    if durable_router is not None and not author_key:
+        raise ValueError("durable OpenReview search requires stable census author key")
     candidates: list[dict[str, Any]] = []
 
-    def _extend(req_url: str) -> None:
-        raw = http_fetch_bytes(req_url, headers, timeout=30.0)
-        data = json.loads(raw.decode("utf-8"))
-        notes = data.get("notes") or data.get("data") or []
+    def _extend(req_url: str, semantic_query: dict[str, object]) -> None:
+        if durable_router is not None:
+            adapter_name = "openreview.fallback" if semantic_query.get("kind") == "search" else "openreview.term"
+            normalized = route_json(
+                durable_router,
+                adapter_name,
+                url=req_url,
+                normalized_payload={"author_key": author_key, **semantic_query},
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=30.0,
+                headers=headers,
+            )
+            notes = normalized["notes"]
+        else:
+            raw = http_fetch_bytes(req_url, headers, timeout=30.0)
+            data = json.loads(raw.decode("utf-8"))
+            notes = data.get("notes") or data.get("data") or []
         if isinstance(notes, list):
             candidates.extend(notes)
 
     try:
         url = build_url(f"{OPENREVIEW_BASE}/notes", {"term": title, "details": "metadata"})
-        _extend(url)
+        _extend(url, {"kind": "term", "term": title, "details": "metadata"})
     except (*ALL_API_ERRORS, ValueError):
         pass
     if not candidates:
         try:
-            url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"q": title, "limit": 20})
-            _extend(url)
+            url = build_url(f"{OPENREVIEW_BASE}/notes/search", {"query": title, "limit": 20})
+            _extend(url, {"kind": "search", "query": title, "limit": 20})
         except (*ALL_API_ERRORS, ValueError):
             pass
     return candidates
@@ -581,16 +733,34 @@ def dblp_extract_pid(val: str | None) -> str | None:
     return m.group(2) if m else None
 
 
-@handle_api_errors(default_return=None)
-def dblp_find_author_pid(name: str) -> str | None:
+def dblp_find_author_pid(
+    name: str,
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
+) -> str | None:
     """Look up a DBLP person identifier for an author name."""
     if not name:
         return None
     params = {"q": name, "format": "json"}
     url = build_url(DBLP_BASE, params)
-    data = http_get_json(url)
-    res = (data.get("result") or {}).get("hits") or {}
-    hits = res.get("hit") or []
+    hits: Any
+    if durable_router is not None:
+        normalized = route_json(
+            durable_router,
+            "dblp.author_search",
+            url=url,
+            normalized_payload={"name": name},
+            freshness_epoch=freshness_epoch,
+            adapter_version=adapter_version,
+            timeout=5.0,
+        )
+        hits = cast(tuple[dict[str, Any], ...], normalized["hits"])
+    else:
+        data = http_get_json(url)
+        res = (data.get("result") or {}).get("hits") or {}
+        hits = res.get("hit") or []
     name_norm = name.strip().lower()
     exact_pid = None
     first_pid = None
@@ -622,6 +792,44 @@ def _dblp_extract_names(parent: ElementTree.Element, tag: str) -> list[str]:
     return names
 
 
+def normalize_dblp_person_xml(xml: str, pid: str) -> list[dict[str, Any]]:
+    """Strictly normalize one exact DBLP person envelope without I/O or cache state."""
+    from ..refresh.inventory import decode_dblp_inventory
+
+    normalized, _empty = decode_dblp_inventory(xml.encode(), pid)
+    records = normalized.get("articles")
+    if not isinstance(records, list):
+        raise ValueError("normalized DBLP envelope is malformed")
+    articles: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ValueError("normalized DBLP record is malformed")
+        doi = _norm_doi(str(record.get("doi") or ""))
+        title = trim_title_default(str(record["title"]))
+        article: dict[str, Any] = {
+            "title": title,
+            "authors": list(record.get("authors") or record.get("editors") or ()),
+            "year": record.get("year") or 0,
+            "publication": record.get("publication") or "",
+            "link": record.get("url") or "",
+            "snippet": ", ".join(
+                value
+                for value in (
+                    str(record.get("publication") or ""),
+                    str(record.get("year") or ""),
+                    doi or "",
+                )
+                if value
+            ),
+            "source": "dblp",
+        }
+        article["result_id"] = (
+            f"dblp:doi:{doi}" if doi else f"dblp:{_NON_WORD_RE.sub('_', normalize_title(title))[:64]}"
+        )
+        articles.append(article)
+    return articles
+
+
 def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
     """Download a DBLP author XML record and convert entries into publication dicts."""
     if not pid:
@@ -640,61 +848,7 @@ def dblp_fetch_publications(pid: str) -> list[dict[str, Any]]:
         xml = http_get_text(url, timeout=HTTP_TIMEOUT_DEFAULT)
     except NETWORK_ERRORS:
         return []
-    try:
-        root = safe_xml_fromstring(xml)
-    except XML_PARSE_ERRORS:
-        return []
-    articles: list[dict[str, Any]] = []
-    for r in root.findall("r"):
-        child = None
-        for ch in r:
-            if isinstance(ch.tag, str):
-                child = ch
-                break
-        if child is None:
-            continue
-        tag_name = str(child.tag)
-        allowed = tag_name in _DBLP_ALLOWED_TAGS
-        title_el = child.find("title")
-        title_val = "".join(title_el.itertext()) if title_el is not None else ""
-        title = trim_title_default(title_val or "") if allowed else ""
-        logger.debug(
-            f"dblp | ENTRY_FILTER | tag={tag_name} | allowed={allowed} | title={title_val[:50]}",
-            category=LogCategory.SCORE,
-        )
-        if not allowed:
-            continue
-        if not title:
-            continue
-        year = 0
-        year_el = child.find("year")
-        if year_el is not None and year_el.text and _DBLP_YEAR_RE.match(year_el.text.strip()):
-            try:
-                year = int(year_el.text.strip())
-            except PARSE_ERRORS:
-                year = 0
-        authors_list: list[str] = _dblp_extract_names(child, "author")
-        if not authors_list:
-            authors_list = _dblp_extract_names(child, "editor")
-        ee = _xml_text(child.find("ee"))
-        dburl = _xml_text(child.find("url"))
-        doi = _norm_doi(find_doi_in_text(ee) or find_doi_in_text(dburl))
-        abs_or_url = ee or dburl
-        venue = _xml_text(child.find("journal")) or _xml_text(child.find("booktitle"))
-        art: dict[str, Any] = {
-            "title": title,
-            "authors": authors_list,
-            "year": year,
-            "publication": venue,
-            "link": abs_or_url,
-            "snippet": ", ".join([v for v in [venue, str(year) if year else "", doi or ""] if v]),
-            "source": "dblp",
-        }
-        if doi:
-            art["result_id"] = f"dblp:doi:{doi}"
-        else:
-            art["result_id"] = f"dblp:{_NON_WORD_RE.sub('_', normalize_title(title))[:64]}"
-        articles.append(art)
+    articles = normalize_dblp_person_xml(xml, pid)
     if articles:
         response_cache.put("dblp", cache_key, {"articles": articles}, ttl_days=CACHE_TTL_SEARCH_DAYS)
         logger.debug(
@@ -752,6 +906,11 @@ def _pubmed_fetch_articles(
     search_query: str,
     retmax: int,
     timeout: float,
+    *,
+    durable_router: DurableJsonRouter | None = None,
+    author_key: str | None = None,
+    freshness_epoch: str = "legacy",
+    adapter_version: str = "1",
 ) -> tuple[list[dict[str, Any]], int] | None:
     """Run PubMed's two-step esearch/esummary lookup.
 
@@ -764,22 +923,56 @@ def _pubmed_fetch_articles(
         {"db": "pubmed", "term": search_query, "retmax": retmax, "retmode": "json"},
     )
     try:
-        search_data = http_get_json(search_url, timeout=timeout)
+        if durable_router is not None:
+            if not author_key:
+                raise ValueError("durable PubMed search requires stable census author key")
+            normalized_search = route_json(
+                durable_router,
+                "pubmed.search",
+                url=search_url,
+                normalized_payload={"author_key": author_key, "query": search_query, "retmax": retmax},
+                freshness_epoch=freshness_epoch,
+                adapter_version=adapter_version,
+                timeout=timeout,
+            )
+            pmids = list(cast(tuple[str, ...], normalized_search["pmids"]))
+        else:
+            search_data = http_get_json(search_url, timeout=timeout)
+            pmids = (safe_get_nested(search_data, "esearchresult", "idlist", default=[]) or [])[:retmax]
     except NETWORK_ERRORS:
         return None
-    pmids = (safe_get_nested(search_data, "esearchresult", "idlist", default=[]) or [])[:retmax]
+    pmids = pmids[:retmax]
     if not pmids:
         return [], 0
-    summary_url = build_url(
-        f"{PUBMED_BASE}/esummary.fcgi",
-        {"db": "pubmed", "id": ",".join(pmids), "retmode": "json"},
-    )
-    try:
-        summary_data = http_get_json(summary_url, timeout=timeout)
-    except NETWORK_ERRORS:
-        return None
-    result = safe_get_nested(summary_data, "result", default={}) or {}
-    articles = [result[pmid] for pmid in pmids if pmid in result and isinstance(result[pmid], dict)]
+    articles: list[dict[str, Any]] = []
+    for pmid in pmids:
+        summary_url = build_url(
+            f"{PUBMED_BASE}/esummary.fcgi",
+            {"db": "pubmed", "id": pmid, "retmode": "json"},
+        )
+        try:
+            if durable_router is not None:
+                adapter = pubmed_summary_adapter((pmid,))
+                operation = adapter.build_operation(
+                    url=summary_url,
+                    normalized_payload={"pmid": pmid},
+                    freshness_epoch=freshness_epoch,
+                    adapter_version=adapter_version,
+                    timeout=timeout,
+                )
+                normalized = durable_router.send("pubmed.summary.singleton", operation)
+            else:
+                summary_data = http_get_json(summary_url, timeout=timeout)
+                normalized = pubmed_summary_adapter((pmid,)).normalize(summary_data)
+        except NETWORK_ERRORS:
+            return None
+        records = normalized["records"]
+        if not isinstance(records, Mapping):
+            raise TypeError("PubMed ESummary normalized records are not an object")
+        record = records[pmid]
+        if not isinstance(record, Mapping):
+            raise TypeError("PubMed ESummary normalized record is not an object")
+        articles.append(dict(record))
     return articles, len(pmids)
 
 

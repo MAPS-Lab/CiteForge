@@ -42,25 +42,14 @@ repos:
       - id: ruff-check
         args: [--fix]
 
-  # mypy runs from the project environment rather than from
-  # pre-commit/mirrors-mypy, which would install it into an isolated virtualenv.
-  # That isolation is the wrong shape here: rapidfuzz and unidecode would be
-  # absent, ignore_missing_imports would type them as Any, and warn_return_any
-  # would then report errors in citeforge/text_utils.py that CI does not see
-  # because CI installs the full lock. Reusing the local environment keeps the
-  # hook and the CI step (`mypy citeforge/ main.py`) on identical inputs, and
-  # the version stays pinned by requirements-dev.lock (mypy==2.1.0) instead of
-  # by a second rev that could drift from it.
-  #
-  # Requires the dev extras to be installed, which CLAUDE.md already documents
-  # as the setup step: pip install -e .[dev]
-  - repo: local
+  # Isolate the hook and supply the two imports whose typed use matters to the
+  # configured warn_return_any gate. The mirror revision pins mypy itself.
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.1.0
     hooks:
       - id: mypy
-        name: mypy
-        entry: mypy
-        language: system
-        types: [python]
         args: [citeforge/, main.py]
         pass_filenames: false
-        require_serial: true
+        additional_dependencies:
+          - rapidfuzz==3.14.5
+          - Unidecode==1.4.0

@@ -7,7 +7,9 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
+from citeforge.clients import serpapi_scholar, serply_scholar
 from citeforge.clients.scholar import (
     _deduplicate_publication_list,
     fetch_author_publications,
@@ -19,6 +21,58 @@ from citeforge.clients.serply_scholar import serply_fetch_citation
 
 _SERPLY_HTTP_PATCH = "citeforge.clients.serply_scholar.http_fetch_bytes"
 _SERPAPI_HTTP_PATCH = "citeforge.clients.serpapi_scholar.http_fetch_bytes"
+
+
+class _RecordingRouter:
+    def __init__(self, responses: dict[str, dict[str, object]]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, object]] = []
+
+    def send(self, adapter_name: str, operation: object) -> dict[str, object]:
+        self.calls.append((adapter_name, operation))
+        return self.responses[adapter_name]
+
+
+def test_scholar_json_callers_route_without_legacy_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serply_scholar, "http_fetch_bytes", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    monkeypatch.setattr(serpapi_scholar, "http_fetch_bytes", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
+    router = _RecordingRouter(
+        {
+            "serply.scholar": {"articles": [{"title": "Ocean"}]},
+            "serpapi.author": {
+                "articles": [{"title": "Ocean", "year": "2024"}],
+                "serpapi_pagination": {},
+            },
+        }
+    )
+    assert serply_scholar._serply_get("secret", "ocean", durable_router=router, author_key="author-ada")["articles"]
+    assert serpapi_scholar._serpapi_get("secret", "author", durable_router=router)["articles"]
+    assert [name for name, _operation in router.calls] == ["serply.scholar", "serpapi.author"]
+
+
+@pytest.mark.parametrize(
+    ("client_module", "getter_name", "call_args"),
+    [
+        (serpapi_scholar, "_serpapi_get", ("key", "author")),
+        (serply_scholar, "_serply_get", ("key", "query")),
+    ],
+)
+@pytest.mark.parametrize("error_type", [AssertionError, AttributeError, RuntimeError])
+def test_scholar_programming_errors_are_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+    client_module: object,
+    getter_name: str,
+    call_args: tuple[str, str],
+    error_type: type[Exception],
+) -> None:
+    """Scholar clients must not hide implementation faults as API failures."""
+    monkeypatch.setattr(
+        client_module,
+        "http_fetch_bytes",
+        lambda *_a, **_k: (_ for _ in ()).throw(error_type("bug")),
+    )
+    with pytest.raises(error_type, match="bug"):
+        getattr(client_module, getter_name)(*call_args)
 
 
 def test_exact_title_explicit_author_conflict_keeps_both() -> None:
@@ -257,7 +311,7 @@ class TestSerpapiFetchAuthorPublications:
     @patch(_SERPAPI_HTTP_PATCH)
     def test_http_exception(self, mock_http: MagicMock) -> None:
         """Exception during HTTP call should return response with no articles."""
-        mock_http.side_effect = Exception("Network error")
+        mock_http.side_effect = requests.exceptions.Timeout("Network error")
         result = serpapi_fetch_author_publications("key", "author_id")
         assert result["articles"] == []
 
@@ -457,7 +511,7 @@ class TestSerplyFetchCitation:
     @patch(_SERPLY_HTTP_PATCH)
     def test_citation_http_exception(self, mock_http: MagicMock) -> None:
         """Exception during HTTP call should return None."""
-        mock_http.side_effect = Exception("Timeout")
+        mock_http.side_effect = requests.exceptions.Timeout("Timeout")
         result = serply_fetch_citation("key", "Some Title", "Some Author")
         assert result is None
 

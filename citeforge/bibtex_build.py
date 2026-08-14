@@ -74,14 +74,31 @@ def build_bibtex_entry(
 ) -> str:
     """Build a complete BibTeX entry from publication details and optional
     identifiers, skipping missing or empty fields."""
-    key = make_bibkey(title, authors, year, fallback=_NON_WORD_RE.sub("", keyhint) or "entry")
-    container_field = get_container_field(entry_type)
+    entry = build_entry_dict(entry_type, title, authors, year, keyhint, venue, doi, url, arxiv_id, extra_fields)
     logger.debug(
-        f"BUILD_ENTRY | type={entry_type} | key={key} | title={title[:60]}"
+        f"BUILD_ENTRY | type={entry_type} | key={entry['key']} | title={title[:60]}"
         f" | authors={len(authors)} | year={year} | venue={str(venue or '')[:40]}"
         f" | doi={doi or 'none'} | arxiv={arxiv_id or 'none'}",
         category=LogCategory.SCORE,
     )
+    return bibtex_from_dict(entry)
+
+
+def build_entry_dict(
+    entry_type: str,
+    title: str,
+    authors: list[str],
+    year: int,
+    keyhint: str,
+    venue: str | None = None,
+    doi: str | None = None,
+    url: str | None = None,
+    arxiv_id: str | None = None,
+    extra_fields: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Build the entry mapping without logging or serialization."""
+    key = make_bibkey(title, authors, year, fallback=_NON_WORD_RE.sub("", keyhint) or "entry")
+    container_field = get_container_field(entry_type)
 
     fields: dict[str, str | None] = {
         "title": title,
@@ -99,8 +116,7 @@ def build_bibtex_entry(
     if extra_fields:
         fields.update(extra_fields)
 
-    entry = {"type": entry_type, "key": key, "fields": {k: v for k, v in fields.items() if v}}
-    return bibtex_from_dict(entry)
+    return {"type": entry_type, "key": key, "fields": {k: v for k, v in fields.items() if v}}
 
 
 def create_scoring_function(
@@ -111,6 +127,8 @@ def create_scoring_function(
     authors_getter: Callable[[Any], Any],
     year_getter: Callable[[Any], int | None] | None = None,
     author_match_fn: Callable[[str, Any], bool] | None = None,
+    *,
+    emit_logs: bool = True,
 ) -> Callable[[Any], float]:
     """Create a scoring function that ranks search results against a target
     title, author, and year using the supplied accessors and matching logic."""
@@ -140,6 +158,7 @@ def create_scoring_function(
             cand_year=cand_year,
             title_sim=title_similarity,
             author_match=author_match_fn,
+            emit_logs=emit_logs,
         )
 
     return score_fn

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from citeforge import config
+import pytest
+
+from citeforge import config, io_utils
 from citeforge.config import (
     _CONTRIBUTION_WINDOW_FALLBACK,
     CONTRIBUTION_WINDOW_YEARS,
@@ -11,6 +13,8 @@ from citeforge.config import (
     PUBLICATIONS_PER_YEAR,
     get_min_year,
 )
+from tests.conftest import api_keys as api_keys_fixture
+from tests.test_data import API_CONFIGS
 
 
 def test_publications_per_year_reasonable() -> None:
@@ -19,6 +23,27 @@ def test_publications_per_year_reasonable() -> None:
     assert PUBLICATIONS_PER_YEAR <= 1000, (
         f"PUBLICATIONS_PER_YEAR is very high ({PUBLICATIONS_PER_YEAR}). This may cause excessive API usage."
     )
+
+
+def test_api_keys_fixture_allows_missing_gemini_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared live-test fixture preserves Gemini's optional legacy path."""
+    monkeypatch.delitem(API_CONFIGS, "gemini", raising=False)
+    monkeypatch.setattr(io_utils, "read_serpapi_api_key", lambda _path: None)
+    monkeypatch.setattr(io_utils, "read_serply_api_key", lambda _path: None)
+    monkeypatch.setattr(io_utils, "read_semantic_api_key", lambda _path: None)
+    monkeypatch.setattr(io_utils, "read_openreview_credentials", lambda _path: None)
+    gemini_paths: list[str] = []
+
+    def fake_gemini(path: str) -> str:
+        gemini_paths.append(path)
+        return "gemini-key"
+
+    monkeypatch.setattr(io_utils, "read_gemini_api_key", fake_gemini)
+
+    keys = api_keys_fixture.__wrapped__()  # type: ignore[missing-attribute]  # pytest wraps the fixture fn
+
+    assert keys["gemini"] == "gemini-key"
+    assert gemini_paths == ["keys/Gemini.key"]
 
 
 def test_contribution_window_reasonable() -> None:
