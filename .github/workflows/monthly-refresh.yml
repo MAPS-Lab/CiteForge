@@ -1,18 +1,23 @@
 # The monthly refresh runs the LEGACY pipeline, not the durable engine.
 #
-# That is deliberate and it is what the architecture document requires:
-# "Cutover occurs in one commit after the shadow generation passes." The shadow
-# generation has never run. An earlier revision of this file cut over anyway and
-# gated publication on `status == complete`, a status RefreshEngine cannot
-# produce: RunStatus.COMPLETE has no producer anywhere in citeforge/, because
-# discovery closure, staging, validation recording and materialization
-# recording all have zero production callers. The result was a workflow that
-# could run forever and publish nothing, which is the exact failure this whole
-# redesign exists to remove.
+# That is deliberate, and the blocker is stronger than a missing shadow run.
+# An earlier revision of this file cut over and gated publication on
+# `status == complete`. RunStatus.COMPLETE requires Ledger.all_required_satisfied(),
+# which requires generations.discovery_closed = 1, and the ledger schema forbids
+# that: two triggers abort any statement setting it, an invariant re-checks it on
+# every status read, manifest read and reopen, and the schema fingerprint rejects
+# a database whose triggers were dropped. Discovery authority is the claim that an
+# author's publication list is complete, and Task 5A is not entitled to make it.
+# The result was a workflow that could run forever and publish nothing, which is
+# the exact failure this redesign exists to remove.
 #
-# The durable engine runs in refresh-shadow.yml, where it can build the evidence
-# cutover requires without being able to publish. This file cuts over when that
-# evidence exists, not before.
+# So cutover is blocked on a design decision about who may declare a corpus
+# complete, not on evidence that is merely pending. The durable engine runs in
+# refresh-shadow.yml, which can evidence live provider authentication, schemas and
+# attempt counts without being able to publish, and that is all a shadow run can
+# settle. Lifting the authority invariant is a separate, deliberate change; the
+# fence is not removed to make a gate pass. See
+# tests/test_workflow_contracts.py::test_the_ledger_refuses_to_close_discovery.
 #
 # The encrypted response-cache branch is gone. Cold runs cost more provider calls;
 # article-level parallelism is what pays for them.
