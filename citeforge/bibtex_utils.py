@@ -308,6 +308,36 @@ _UNICODE_TO_ASCII = {
 }
 
 
+# A braced LaTeX control sequence: `{\"u}`, `{\'e}`, `{\c c}`, `{\circ }`.
+# Matched whole so the accent survives `latex_to_ascii` untouched.
+_LATEX_MACRO_RE = re.compile(r"\{\\[A-Za-z]+\s*[A-Za-z]?\}|\{\\[^A-Za-z\s]\s*[A-Za-z]?\}")
+_LATEX_MACRO_SENTINEL = "CITEFORGELATEX{}X"
+
+
+def _protect_latex_accents(val: str) -> tuple[str, list[str]]:
+    """Swap every braced LaTeX macro for an alphanumeric sentinel.
+
+    Returns the rewritten string and the macros in the order they appeared, for
+    `_restore_latex_accents` to put back once ASCII folding has run.
+    """
+    if "{\\" not in val:
+        return val, []
+    captured: list[str] = []
+
+    def _swap(match: re.Match[str]) -> str:
+        captured.append(match.group(0))
+        return _LATEX_MACRO_SENTINEL.format(len(captured) - 1)
+
+    return _LATEX_MACRO_RE.sub(_swap, val), captured
+
+
+def _restore_latex_accents(val: str, captured: list[str]) -> str:
+    """Put the macros captured by `_protect_latex_accents` back."""
+    for index, macro in enumerate(captured):
+        val = val.replace(_LATEX_MACRO_SENTINEL.format(index), macro)
+    return val
+
+
 def _normalize_to_ascii(val: str) -> str:
     """Normalize Unicode to ASCII for BibTeX compatibility.
 
@@ -320,6 +350,12 @@ def _normalize_to_ascii(val: str) -> str:
         # pylatexenc treats a bare ampersand as a TeX alignment marker and
         # drops it. Protect decoded HTML ampersands as ordinary text first.
         val = _BARE_AMP_RE.sub(r"\\&", val)
+    # Accent macros are protected the same way the URL tilde is, because
+    # `latex_to_ascii` flattens `f{\"u}r` to "fur" and deletes `{\circ }`
+    # outright. Both are information the .bib file already carried correctly,
+    # so losing them here made the round trip lossy and silently degraded the
+    # committed corpus on any rewrite.
+    val, protected_accents = _protect_latex_accents(val)
     val = _URL_TILDE_RE.sub(_URL_TILDE_SENTINEL, val)
     val = latex_to_ascii(val, math_mode="verbatim")
     val = val.replace(_URL_TILDE_SENTINEL, "~")
@@ -339,6 +375,8 @@ def _normalize_to_ascii(val: str) -> str:
     # The apostrophe-year fixup requires a literal single quote to match.
     if "'" in val:
         val = _APOS_YEAR_RE.sub(r"'\1", val)
+
+    val = _restore_latex_accents(val, protected_accents)
 
     return val.strip()
 

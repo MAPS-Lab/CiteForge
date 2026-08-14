@@ -189,6 +189,80 @@ def test_load_repair_unpublished_to_misc_drops_publisher() -> None:
     assert "publisher" not in result["fields"]
 
 
+def _postrun(entry: dict[str, Any]) -> dict[str, Any]:
+    """Run POSTRUN_ORPHAN_REPAIR canonicalize on a copy and return the mutated copy."""
+    e = copy.deepcopy(entry)
+    canonicalize(e, stage=CanonicalStage.POSTRUN_ORPHAN_REPAIR)
+    return e
+
+
+@pytest.mark.parametrize("stage_runner", [_load_repair, _postrun], ids=["load_repair", "postrun"])
+def test_publisher_duplicating_howpublished_is_stripped(
+    stage_runner: Any,
+) -> None:
+    """howpublished counts as a container, not just journal and booktitle.
+
+    A preprint server is its own publisher, so `howpublished = {openRxiv}` beside
+    `publisher = {openRxiv}` is the common shape. Three such pairs reached the
+    committed corpus because the rule read only journal and booktitle, and in
+    LOAD_REPAIR it also ran before howpublished was backfilled at all.
+    """
+    result = stage_runner(
+        {
+            "type": "misc",
+            "key": "k1",
+            "fields": {
+                "title": "Scalable PBWT Queries",
+                "author": "Doe, Jane",
+                "year": "2025",
+                "howpublished": "openRxiv",
+                "publisher": "openRxiv",
+            },
+        }
+    )
+
+    assert "publisher" not in result["fields"]
+    assert result["fields"]["howpublished"] == "openRxiv"
+
+
+@pytest.mark.parametrize("stage_runner", [_load_repair, _postrun], ids=["load_repair", "postrun"])
+def test_publisher_differing_from_howpublished_is_kept(stage_runner: Any) -> None:
+    """The rule strips a duplicate, never a real publisher."""
+    result = stage_runner(
+        {
+            "type": "misc",
+            "key": "k1",
+            "fields": {
+                "title": "Altered Neurodevelopmental Trajectories",
+                "author": "Doe, Jane",
+                "year": "2026",
+                "howpublished": "medRxiv",
+                "publisher": "Cold Spring Harbor Laboratory",
+            },
+        }
+    )
+
+    assert result["fields"]["publisher"] == "Cold Spring Harbor Laboratory"
+
+
+@pytest.mark.parametrize("stage_runner", [_canon, _load_repair, _postrun], ids=["post_merge", "load_repair", "postrun"])
+def test_abbreviated_journal_is_expanded_like_a_booktitle(stage_runner: Any) -> None:
+    """Journals are abbreviated at least as often as conferences.
+
+    The rule read booktitle alone, so a dotted journal abbreviation was expanded
+    nowhere. The escaped ampersand is part of the stored form and therefore part
+    of the map key.
+    """
+    expanded = stage_runner(_article(journal="Trans. Mach. Learn. Res."))
+    assert expanded["fields"]["journal"] == "Transactions on Machine Learning Research"
+
+    ampersand = stage_runner(_article(journal="J. Intell. Prop. Info. Tech. \\& Elec. Com. L."))
+    assert ampersand["fields"]["journal"].startswith("Journal of Intellectual Property")
+
+    untouched = stage_runner(_article(journal="Journal of Unmapped Studies"))
+    assert untouched["fields"]["journal"] == "Journal of Unmapped Studies"
+
+
 def test_load_repair_patent_to_misc() -> None:
     """LOAD_REPAIR @article with a US patent number as journal -> @misc (journal -> note)."""
     result = _load_repair(_article(journal="US Patent 10,123,456"))

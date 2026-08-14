@@ -404,6 +404,12 @@ ABBREVIATED_VENUE_MAP: dict[str, str] = {
     "interaccion": "Interaccion",
     "robocup 2022:": "RoboCup 2022: Robot World Cup XXVI",
     "cvpr workshop": "CVPR Workshop on Generative Models for Computer Vision",
+    # Dotted journal abbreviations. The key is the stored form lowercased, so
+    # the escaped ampersand is part of it; a bare "&" would never match.
+    "trans. mach. learn. res.": "Transactions on Machine Learning Research",
+    "j. intell. prop. info. tech. \\& elec. com. l.": (
+        "Journal of Intellectual Property, Information Technology and Electronic Commerce Law"
+    ),
 }
 
 # Reject digit-only pages longer than this (SAGE/Wiley article IDs)

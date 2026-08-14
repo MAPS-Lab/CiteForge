@@ -81,6 +81,38 @@ def test_serializer_preserves_bibtex_case_protection(source: str, expected_bibte
     assert bibtex_from_dict(entry) == expected_bibtex
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        r"Schloss Dagstuhl - Leibniz-Zentrum f{\"u}r Informatik",
+        r"Jos{\'e} Antonio",
+        r"Mu{\~n}oz",
+        r"Fran{\c c}aise",
+        r"30 {\circ } C",
+    ],
+    ids=["umlaut", "acute", "tilde", "cedilla", "degree"],
+)
+def test_serializer_preserves_latex_accent_macros(value: str) -> None:
+    """A braced accent macro survives serialization unchanged.
+
+    `latex_to_ascii` folds `f{\\"u}r` to "fur" and deletes `{\\circ }` outright,
+    so re-serializing silently degraded 20 committed files: they held the
+    correct escape on disk and any rewrite spelled the German publisher name
+    "fur". It also made `_rule_fix_zentrum_umlaut` unreachable, because the
+    escape that rule restores was stripped again on the way out.
+    """
+    entry = {"type": "article", "key": "Accent", "fields": {"title": "T", "publisher": value}}
+
+    assert f"publisher = {{{value}}}" in bibtex_from_dict(entry)
+
+
+def test_serializer_still_folds_raw_unicode_accents() -> None:
+    """Only braced macros are protected. Raw Unicode still folds to ASCII."""
+    entry = {"type": "article", "key": "Raw", "fields": {"title": "T", "publisher": "Zentrum für Informatik"}}
+
+    assert "publisher = {Zentrum fur Informatik}" in bibtex_from_dict(entry)
+
+
 def test_preferred_fields_precede_sorted_tail() -> None:
     """Preferred citation fields come first in canonical order; every remaining
     field follows in sorted() order."""
