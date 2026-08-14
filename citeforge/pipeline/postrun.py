@@ -43,11 +43,58 @@ from citeforge.log_utils import LogCategory, logger
 from citeforge.models import Record
 from citeforge.text_utils import (
     _is_preprint_fields,
+    author_list_is_surname_initials,
     extract_year_from_any,
     title_similarity,
 )
 
 _FILENAME_YEAR_RE = re.compile(r"/[A-Za-z]+(\d{4})-")
+
+# The author prefix of a generated name: "Jin2026-AlteredNeuro.bib" and the
+# citation key "Jin2026:AlteredNeuro" share the shape <Surname><Year><sep>.
+_FILENAME_AUTHOR_RE = re.compile(r"^([A-Za-z]+)(\d{4}-.+\.bib)$")
+_CITEKEY_AUTHOR_RE = re.compile(r"^([A-Za-z]+)(\d{4}:.+)$")
+
+
+def _reconcile_author_prefix(entry: dict[str, Any], filename: str) -> tuple[str, str | None]:
+    """Return the entry's citation key and filename with a stale surname fixed.
+
+    Scoped deliberately to "Surname Initials" author lists, which is the one
+    class this repairs. `Y2026-AlteredNeurodevelopmental.bib` held a paper by
+    Jin, keyed `Y2026:...`, because "Jin Y" is that form and the trailing token
+    was read as the surname. Correcting the derivation alone would leave every
+    committed file carrying the old name, since nothing renames them.
+
+    A wider "prefix disagrees with first author" test is wrong here, and was
+    measured to be. A file can legitimately hold content whose author no longer
+    matches its name, because the deduplicator writes a surviving entry under
+    the duplicate's existing filename. Six such files exist, and renaming them
+    on the author alone yields a name that is still wrong about the year and the
+    title, while looking freshly derived. That mismatch is a separate question.
+
+    Only the surname is reconsidered even here. The title portion is left as it
+    was, because it can come from Gemini or from collision resolution and
+    re-deriving it would rewrite names that are already correct.
+    """
+    fields = entry.get("fields") or {}
+    authors = str(fields.get("author") or "")
+    names = [part.strip() for part in authors.split(" and ") if part.strip()]
+    if not author_list_is_surname_initials(names):
+        return str(entry.get("key") or ""), None
+
+    surname = bt._first_author_lastname(authors)
+    if not surname:
+        return str(entry.get("key") or ""), None
+    expected = surname[:1].upper() + surname[1:]
+
+    key = str(entry.get("key") or "")
+    if (matched := _CITEKEY_AUTHOR_RE.match(key)) and matched.group(1) != expected:
+        key = f"{expected}{matched.group(2)}"
+
+    renamed = None
+    if (matched := _FILENAME_AUTHOR_RE.match(filename)) and matched.group(1) != expected:
+        renamed = f"{expected}{matched.group(2)}"
+    return key, renamed
 
 
 class FinalizationError(RuntimeError):
@@ -73,6 +120,7 @@ class FinalizationReport:
     orphans_kept: int
     out_of_window_removed: int
     files_fixed: int
+    files_renamed: int
     superseded_preprints_removed: int
     a2i2_files: int
     baseline_total: int
@@ -207,6 +255,7 @@ def finalize_run(
     # files. This catches orphans (files not processed during enrichment) and
     # entries where Phase 4 corrections were undone by Tier 2 filling.
     postrun_fixed = 0
+    renamed_count = 0
     for pr_entry_name in iter_output_dirs(out_dir):
         if pr_entry_name == "a2i2":
             continue
@@ -219,15 +268,43 @@ def finalize_run(
                 pr_parsed = bt.parse_bibtex_to_dict(pr_content)
             except (OSError, ValueError) as exc:
                 raise FinalizationError(f"cannot read {pr_fpath} for the post-run fixup") from exc
-            if pr_parsed and _fixup_bib_entry(pr_parsed):
+            if not pr_parsed:
+                continue
+            changed = _fixup_bib_entry(pr_parsed)
+            # After the field rules, because author casing runs among them and
+            # the surname is read from the corrected author string.
+            reconciled_key, renamed = _reconcile_author_prefix(pr_parsed, pr_fname)
+            if reconciled_key and reconciled_key != pr_parsed.get("key"):
+                pr_parsed["key"] = reconciled_key
+                changed = True
+            if changed:
                 bib_str = bt.bibtex_from_dict(pr_parsed)
                 if bib_str != pr_content:
                     if not safe_write_file(pr_fpath, bib_str):
                         raise FinalizationError(f"post-run fixup could not write {pr_fpath}")
                     postrun_fixed += 1
+            if renamed:
+                target = os.path.join(pr_dir, renamed)
+                # A collision means another entry already owns the corrected
+                # name. Renaming onto it would destroy that entry, so the stale
+                # name is kept and reported instead.
+                if os.path.exists(target):
+                    logger.warn(
+                        f"Author prefix stale on {pr_fname}, but {renamed} exists; left as is",
+                        category=LogCategory.CLEANUP,
+                    )
+                else:
+                    os.rename(pr_fpath, target)
+                    renamed_count += 1
+                    logger.info(f"Renamed {pr_fname} -> {renamed}", category=LogCategory.CLEANUP)
     if postrun_fixed:
         logger.info(
             f"Post-run fixup: corrected {postrun_fixed} .bib files",
+            category=LogCategory.CLEANUP,
+        )
+    if renamed_count:
+        logger.info(
+            f"Post-run fixup: renamed {renamed_count} .bib files to their corrected author prefix",
             category=LogCategory.CLEANUP,
         )
 
@@ -267,6 +344,7 @@ def finalize_run(
         orphans_kept=kept,
         out_of_window_removed=window_removed,
         files_fixed=postrun_fixed,
+        files_renamed=renamed_count,
         superseded_preprints_removed=superseded,
         a2i2_files=a2i2_count,
         baseline_total=sum(baseline.values()),

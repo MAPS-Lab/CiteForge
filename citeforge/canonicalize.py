@@ -831,6 +831,11 @@ _POSTRUN_ORPHAN_REPAIR_RULES = (
     _rule_strip_lipics_pages,
     _rule_strip_proceedings_wrapper,
     _rule_add_url_from_doi,
+    # Also at this stage, not LOAD_REPAIR alone. A committed entry that a past
+    # run title-cased to "Koller Jm" is never re-read through LOAD_REPAIR once
+    # it is complete, so without this the repair could not reach it and the
+    # corpus would keep a surname that is really a pair of initials.
+    _rule_fix_author_casing_load,
 )
 
 # Site C applies the Phase 4 post-merge rules, in order.

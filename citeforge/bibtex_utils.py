@@ -12,6 +12,7 @@ import html
 import re
 import threading
 import unicodedata
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any, TypeAlias
 
@@ -32,9 +33,11 @@ from .config import (
 from .latex_utils import latex_to_ascii
 from .log_utils import LogCategory, logger
 from .text_utils import (
+    author_list_is_surname_initials,
     extract_year_from_any,
     normalize_title,
     strip_accents,
+    surname_from_initials_form,
 )
 
 _TITLE_STOP_WORDS: frozenset[str] = frozenset(
@@ -130,7 +133,7 @@ class _StrictCorpusParser(BibTexParser):
                 pending.append(child)
 
 
-def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entry") -> str:
+def make_bibkey(title: str, authors: Sequence[str], year: int, fallback: str = "entry") -> str:
     """Build a compact citation key from the first author's surname, the year,
     and the first title word, falling back to a generic label."""
     # .strip(), not plain truthiness: a whitespace-only name is truthy but
@@ -138,7 +141,13 @@ def make_bibkey(title: str, authors: list[str], year: int, fallback: str = "entr
     # reach here (clients/helpers.py filters falsy/"..."/"et al", not " "), and
     # IndexError is absent from FULL_OPERATION_ERRORS, so it escaped
     # process_article and killed the author's whole remaining article list.
-    last = _NON_ALNUM_RE.sub("", authors[0].split()[-1]) if authors and authors[0].strip() else ""
+    if authors and authors[0].strip():
+        # "Surname Initials" lists put the initials last, so the trailing token
+        # is only the surname for the "Given Surname" form.
+        leading = surname_from_initials_form(authors[0]) if author_list_is_surname_initials(authors) else authors[0]
+        last = _NON_ALNUM_RE.sub("", leading.split()[-1])
+    else:
+        last = ""
     title_words = title.split()
     word = _NON_ALNUM_RE.sub("", title_words[0]) if title_words else ""
     y = str(year) if year else ""
@@ -517,6 +526,11 @@ def _first_author_lastname(authors_field: str | None) -> str | None:
     first = parts[0]
     if "," in first:
         last = first.split(",")[0].strip()
+    elif author_list_is_surname_initials(parts):
+        # "Jin Y" is Surname Initials, so the trailing token is not a name.
+        # Taking it produced the citation key Y2026 and the filename
+        # Y2026-AlteredNeurodevelopmental.bib for a paper by Jin.
+        last = surname_from_initials_form(first)
     else:
         toks = first.split()
         while len(toks) > 1 and toks[-1].rstrip(".").lower() in AUTHOR_NAME_SUFFIXES:
