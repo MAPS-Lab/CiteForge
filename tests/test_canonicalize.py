@@ -613,9 +613,8 @@ def test_three_fix_sites_reach_a_fixpoint(label: str, entry: dict[str, Any]) -> 
     """Applying canonicalize at LOAD_REPAIR then POST_MERGE then POST_MERGE again
     reaches a fixpoint: the type and every field are identical after the repeat.
 
-    This is the real anti-oscillation guarantee (the three-way fix pattern in
-    CLAUDE.md), driven end to end through the dispatch rather than asserted on a
-    single rule in isolation.
+    This is the real anti-oscillation guarantee, driven end to end through the
+    dispatch rather than asserted on a single rule in isolation.
     """
     settled, after_repeat = _load_then_post_twice(entry)
     assert after_repeat["type"] == settled["type"], f"{label}: type oscillated"

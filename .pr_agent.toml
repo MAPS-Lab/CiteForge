@@ -47,7 +47,7 @@ Do not repeat what CI already reports. ruff lints, mypy typechecks, and a covera
 
 This repository is public. Treat anything that could commit an API key, a raw API response, or a contributor's private data as a defect rather than a nit. Keys are read from the gitignored keys/ directory and must never be inlined, logged or written into output.
 
-Python conventions from CLAUDE.md and pyproject.toml: type annotations on every public function and method (mypy runs with disallow_untyped_defs and check_untyped_defs), ruff at line-length 120 with rules E/F/W/I/N/UP/B/C4/SIM/RUF/S. The repository does not run ruff format, so do not propose reformatting.
+Python conventions from pyproject.toml: type annotations on every public function and method (mypy runs with disallow_untyped_defs and check_untyped_defs), ruff at line-length 120 with rules E/F/W/I/N/UP/B/C4/SIM/RUF/S. The repository does not run ruff format, so do not propose reformatting.
 
 Invariants a change must not break:
 - Config-driven. Thresholds, API endpoints, trust order, rate limits and compound word dictionaries live in citeforge/config.py and are never hardcoded elsewhere.
@@ -72,5 +72,5 @@ persistent_comment = true
 extra_instructions = """\
 Suggest a change only when the current code is wrong, unsafe, or breaks a stated invariant. Do not suggest stylistic rewrites, do not suggest adding abstractions for hypothetical future needs, and do not suggest a dependency where a few lines of the standard library would do.
 
-Never suggest adding an automated audit module; CLAUDE.md states that issues are fixed in pipeline code or by direct .bib edits. Never suggest hardcoding a threshold, endpoint or trust rank outside citeforge/config.py.
+Never suggest adding an automated audit module; issues are fixed in pipeline code or by direct .bib edits. Never suggest hardcoding a threshold, endpoint or trust rank outside citeforge/config.py.
 """
