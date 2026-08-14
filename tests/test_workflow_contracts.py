@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from ruamel.yaml import YAML
+
+from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
+from citeforge.refresh.ledger import Ledger
+from citeforge.refresh.types import GenerationSpec, TaskDisposition
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_DIRECTORY = _REPOSITORY_ROOT / ".github/workflows"
@@ -157,10 +162,12 @@ class TestMonthlyRefresh:
             assert "--auto" in merge, merge
 
     @pytest.mark.skip(
-        reason="Cutover contract, pending. The monthly workflow runs the legacy pipeline "
-        "because RunStatus.COMPLETE has no producer, and the shadow workflow runs bounded "
-        "multi-segment with ephemeral state. Neither satisfies this yet. Unskip in the same "
-        "commit that cuts monthly over to citeforge refresh."
+        reason="Cutover contract, blocked rather than pending. RunStatus.COMPLETE is "
+        "unreachable by design: it needs discovery_closed = 1, which two schema triggers "
+        "abort, because Task 5A may not assert that an author's publication list is "
+        "complete. The monthly workflow therefore runs the legacy pipeline, and the shadow "
+        "runs bounded multi-segment with ephemeral state. Unskip only if that authority "
+        "invariant is deliberately lifted, never by deleting the fence to make this pass."
     )
     def test_one_generation_segment_per_run(self) -> None:
         """Asserted against the SHADOW workflow, which is where the engine runs.
@@ -186,10 +193,12 @@ class TestMonthlyRefresh:
             assert "prev_digest" not in line, line
 
     @pytest.mark.skip(
-        reason="Cutover contract, pending. The monthly workflow runs the legacy pipeline "
-        "because RunStatus.COMPLETE has no producer, and the shadow workflow runs bounded "
-        "multi-segment with ephemeral state. Neither satisfies this yet. Unskip in the same "
-        "commit that cuts monthly over to citeforge refresh."
+        reason="Cutover contract, blocked rather than pending. RunStatus.COMPLETE is "
+        "unreachable by design: it needs discovery_closed = 1, which two schema triggers "
+        "abort, because Task 5A may not assert that an author's publication list is "
+        "complete. The monthly workflow therefore runs the legacy pipeline, and the shadow "
+        "runs bounded multi-segment with ephemeral state. Unskip only if that authority "
+        "invariant is deliberately lifted, never by deleting the fence to make this pass."
     )
     def test_the_checkpoint_is_restored_before_the_segment_and_saved_after(self) -> None:
         """Also the shadow workflow, for the same reason."""
@@ -330,6 +339,66 @@ class TestRefreshShadow:
         assert "gh pr create" not in commands
         assert "gh pr merge" not in commands
         assert "/dispatches" not in commands
+
+
+def test_no_workflow_gates_on_a_status_the_ledger_forbids_producing() -> None:
+    """No workflow may make publication wait on `complete`.
+
+    `RunStatus.COMPLETE` requires `Ledger.all_required_satisfied()`, which
+    requires `generations.discovery_closed = 1`. Two schema triggers abort any
+    statement that sets it, `_assert_task5a_authority_invariant` re-checks it on
+    every status read, manifest read and reopen, and the schema fingerprint
+    rejects a database whose triggers were dropped. Discovery authority is the
+    claim that an author's publication list is complete, and Task 5A is
+    deliberately not entitled to make it.
+
+    So a workflow gating on `complete` does not wait for a slow generation, it
+    waits forever. An earlier revision of the monthly refresh did exactly that
+    and could publish nothing. The fix is never to remove the fence; it is to
+    gate on evidence the ledger can actually produce.
+    """
+    for path in _WORKFLOW_PATHS:
+        for statement in _shell_statements(_workflow_run_commands(_load_workflow(path))):
+            if "complete" not in statement:
+                continue
+            # A notice or an echo may say the word. A conditional may not branch on it.
+            assert not re.search(r'(?:status|STATUS)[^\n]*(?:=|-eq)[^\n]*["\x27]?complete', statement), (
+                f"{path.name} gates on a status the ledger cannot produce: {statement}"
+            )
+
+
+def test_the_ledger_refuses_to_close_discovery(tmp_path: Path) -> None:
+    """The premise of the contract above, exercised rather than asserted.
+
+    Pinned here as well as in the ledger suite because it is what licenses the
+    monthly workflow to run the legacy pipeline. If this ever starts passing,
+    that workflow's cutover comment is stale and its gate can be revisited.
+    """
+    row = AuthorCensusRow(
+        physical_row=2,
+        row_key="author-ada",
+        name="Ada Lovelace",
+        normalized_name="ada lovelace",
+        scholar_id="Scholar123",
+        dblp_id="",
+        enabled=True,
+        exclusion_reason="",
+        disposition=TaskDisposition.PENDING,
+    )
+    census = AuthorCensus((row,))
+    path = tmp_path / "authority.db"
+
+    with Ledger.open(path) as ledger:
+        ledger.create_or_resume(GenerationSpec(census, "policy-v1", {"scholar": "1"}, "abc123"), census)
+        assert not ledger.all_required_satisfied()
+
+    connection = sqlite3.connect(path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="Task 5A"):
+            connection.execute("UPDATE generations SET discovery_closed = 1")
+    finally:
+        connection.close()
+
 
 @pytest.mark.parametrize("path", _WORKFLOW_PATHS, ids=lambda item: item.name)
 def test_job_level_env_does_not_reference_the_runner_context(path: Path) -> None:
