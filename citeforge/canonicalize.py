@@ -314,9 +314,15 @@ def _rule_publisher_corrections(entry: dict[str, Any], fields: dict[str, Any]) -
 
 
 def _rule_strip_publisher_duplicate(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """Strip publisher when it duplicates the journal/booktitle name."""
+    """Strip publisher when it duplicates the container name.
+
+    All three container fields count, not just journal and booktitle. A @misc
+    entry carries its venue in howpublished, and preprint servers are their own
+    publisher, so `howpublished = {openRxiv}, publisher = {openRxiv}` is the
+    common shape. Omitting howpublished here left that pair in the corpus.
+    """
     pub = (fields.get("publisher") or "").strip()
-    container = (fields.get("journal") or fields.get("booktitle") or "").strip()
+    container = (fields.get("journal") or fields.get("booktitle") or fields.get("howpublished") or "").strip()
     if pub and container and pub.lower() == container.lower():
         del fields["publisher"]
         return True
@@ -324,14 +330,22 @@ def _rule_strip_publisher_duplicate(entry: dict[str, Any], fields: dict[str, Any
 
 
 def _rule_expand_abbreviated_venue(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """Expand abbreviated venue names in booktitle (e.g., "NIME 2021" -> full name)."""
-    bt = (fields.get("booktitle") or "").strip()
-    if bt and bt.lower() in ABBREVIATED_VENUE_MAP:
-        expanded_bt = ABBREVIATED_VENUE_MAP[bt.lower()]
-        if expanded_bt != bt:
-            fields["booktitle"] = expanded_bt
-            return True
-    return False
+    """Expand abbreviated venue names (e.g., "NIME 2021" -> full name).
+
+    Both container fields, not booktitle alone. Journals are abbreviated at
+    least as often as conferences ("Trans. Mach. Learn. Res."), and a
+    booktitle-only rule left those in the corpus expanded nowhere.
+    """
+    changed = False
+    for field in ("booktitle", "journal"):
+        venue = (fields.get(field) or "").strip()
+        if not venue:
+            continue
+        expanded = ABBREVIATED_VENUE_MAP.get(venue.lower())
+        if expanded and expanded != venue:
+            fields[field] = expanded
+            changed = True
+    return changed
 
 
 def _rule_venue_case_corrections(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
@@ -908,6 +922,12 @@ _LOAD_REPAIR_RULES = (
     _rule_backfill_howpublished,
     _rule_fix_author_casing_load,
     _rule_normalize_howpublished,
+    # Runs a second time, after howpublished exists. The earlier application
+    # above sees only journal and booktitle, because backfill_howpublished and
+    # normalize_howpublished have not run yet, so a @misc whose publisher equals
+    # its howpublished (preprint servers are their own publisher) kept both.
+    # The rule deletes a key or does nothing, so repeating it is idempotent.
+    _rule_strip_publisher_duplicate,
 )
 
 # COMPLETE_SKIP_FINALIZE runs the single fixup that applies just before a
