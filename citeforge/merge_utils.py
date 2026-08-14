@@ -43,7 +43,13 @@ from .id_utils import (
 )
 from .identity import IdentityContext, evaluate_identity
 from .log_utils import LogCategory, logger
-from .text_utils import format_author_dirname, has_placeholder, parse_authors_any, title_similarity
+from .text_utils import (
+    author_list_is_surname_initials,
+    format_author_dirname,
+    has_placeholder,
+    parse_authors_any,
+    title_similarity,
+)
 
 # _matches_journal_named_proceedings and infer_howpublished_from_doi are
 # re-exported for canonicalize.py and tests that access them as merge_utils.*.
@@ -106,6 +112,11 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
     val = val.replace(" And ", _AUTHOR_SEPARATOR)
     and_was_fixed = val != author_val
     parts = [p.strip() for p in val.split(_AUTHOR_SEPARATOR)]
+    # In a "Surname Initials" list the trailing token is initials, not a short
+    # surname, so the 2-letter rule below must not touch it. It did, and turned
+    # "Koller JM" into "Koller Jm", which reads as a surname "Jm" and destroys
+    # the one signal that says where the surname actually is.
+    initials_last = author_list_is_surname_initials(parts)
     fixed_parts: list[str] = []
     any_fixed = False
     for ap in parts:
@@ -113,9 +124,15 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
         if len(tokens) >= 2:
             new_tokens: list[str] = []
             has_mixed_case = any(len(t) > 1 and not t.isupper() and t[0].isupper() for t in tokens if t.isalpha())
-            for t in tokens:
+            for index, t in enumerate(tokens):
+                trailing_initials = initials_last and index == len(tokens) - 1 and len(t) <= 2 and t.isalpha()
                 if not t or not t[0].isalpha():
                     new_tokens.append(t)
+                elif trailing_initials:
+                    # Restore the initials an earlier run title-cased away.
+                    if t != t.upper():
+                        any_fixed = True
+                    new_tokens.append(t.upper())
                 elif (
                     # 3+ letter ALL-CAPS → always fix (e.g. "SMITH" → "Smith")
                     (len(t) > 2 and t.isupper())
