@@ -367,6 +367,76 @@ def test_year_window_keeps_boundary_year(tmp_path: Path, no_a2i2: None) -> None:
     assert boundary.exists(), "file at the boundary year (== window_min) must be kept"
 
 
+def test_year_window_trusts_the_entry_year_over_a_stale_filename(tmp_path: Path, no_a2i2: None) -> None:
+    """A filename is a derived label and can go stale; the entry's year is data.
+
+    The deduplicator writes a surviving entry under the duplicate's existing
+    filename, so a file can be named for a year its contents do not carry. This
+    is a deletion path, so reading the label would eventually destroy an
+    in-window paper because its name says otherwise, and keep an out-of-window
+    one for the same reason. Both directions are asserted.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    window_min = get_min_year()
+
+    # Named out-of-window, actually in-window. Must survive.
+    keep = write_bib(
+        author,
+        article(key="Keep", title="Actually A Recent Paper", year=str(window_min + 2)),
+        f"Doe{window_min - 3}-StaleName.bib",
+    )
+    # Named in-window, actually out-of-window. Must be removed.
+    drop = write_bib(
+        author,
+        article(key="Drop", title="Actually An Old Paper", year=str(window_min - 3)),
+        f"Doe{window_min + 2}-StaleName.bib",
+    )
+
+    finalize_run(str(out_dir), _records(), total_saved=2, processed=2, summary_csv_path=None)
+
+    assert keep.exists(), "an in-window entry must not be deleted because its filename says otherwise"
+    assert not drop.exists(), "an out-of-window entry must not survive because its filename says otherwise"
+
+
+def test_year_window_keeps_a_file_with_no_usable_year_anywhere(tmp_path: Path, no_a2i2: None) -> None:
+    """No evidence is not evidence of being out of window.
+
+    The permissive path is unchanged by the precedence swap: when neither the
+    entry nor the filename yields a valid year, the file stays. Deletion
+    requires a year, never the absence of one.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+
+    undated = write_bib(
+        author,
+        article(key="NoYear", title="An Undated Paper", year=""),
+        "undated-paper.bib",
+    )
+
+    finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=None)
+
+    assert undated.exists(), "a file with no usable year must be kept, not deleted"
+
+
+def test_year_window_falls_back_to_the_filename_when_the_entry_has_no_year(tmp_path: Path, no_a2i2: None) -> None:
+    """The filename is still consulted, just second rather than first."""
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    window_min = get_min_year()
+
+    old = write_bib(
+        author,
+        article(key="OldNoYear", title="An Old Undated Paper", year=""),
+        f"Doe{window_min - 5}-OldUndated.bib",
+    )
+
+    finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=None)
+
+    assert not old.exists(), "with no entry year, the filename year still decides"
+
+
 # --- PHANTOM-WRITE GUARD ----------------------------------------------------
 
 
@@ -535,11 +605,14 @@ def test_unreadable_year_window_candidate_raises(tmp_path: Path, no_a2i2: None) 
         finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
 
 
-def test_unreadable_fixup_candidate_raises(tmp_path: Path, no_a2i2: None) -> None:
-    """A tracked, in-window file that the fixup pass cannot read aborts the run.
+def test_unreadable_candidate_raises(tmp_path: Path, no_a2i2: None) -> None:
+    """A tracked file that cannot be read aborts the run rather than being skipped.
 
-    The filename carries an in-window year, so the year-window step accepts it
-    without opening it and the fixup step is the first reader.
+    The year-window step is the first reader, because it reads every entry's own
+    year instead of trusting the filename. It previously accepted an in-window
+    filename without opening the file, leaving the fixup pass to raise; the
+    contract that an unreadable file stops the run is what matters here, not
+    which step notices.
     """
     out_dir = tmp_path / "out"
     author = _author_dir(out_dir)
@@ -549,8 +622,10 @@ def test_unreadable_fixup_candidate_raises(tmp_path: Path, no_a2i2: None) -> Non
     csv_path = tmp_path / "summary.csv"
     _track_in_csv(csv_path, [broken])
 
-    with pytest.raises(FinalizationError, match="post-run fixup"):
+    with pytest.raises(FinalizationError, match="year-window check"):
         finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
+
+    assert broken.exists(), "aborting must not have deleted the file it could not read"
 
 
 def test_failed_baseline_write_raises(tmp_path: Path, no_a2i2: None, monkeypatch: pytest.MonkeyPatch) -> None:

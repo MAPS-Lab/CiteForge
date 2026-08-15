@@ -220,27 +220,32 @@ def finalize_run(
         d = os.path.join(out_dir, entry)
         for fname in iter_author_bibs(d):
             fpath = os.path.join(d, fname)
-            # Try filename year first
-            m = _FILENAME_YEAR_RE.search(f"/{fname}")
-            if m:
-                if int(m.group(1)) < window_min:
-                    logger.debug(
-                        f"YEAR_WINDOW | removing {fname} (year={m.group(1)} < {window_min})",
-                        category=LogCategory.CLEANUP,
-                    )
-                    os.remove(fpath)
-                    window_removed += 1
-                continue
-            # Fall back to the BibTeX year field for non-standard filenames
+            # The entry's own year decides, not the filename's. A filename is a
+            # derived label and it does go stale: the deduplicator writes a
+            # surviving entry under the duplicate's existing filename, so 13
+            # committed files are named for a year their contents do not carry
+            # (Saha2020-EnergyAware.bib holds a 2023 paper). None of those
+            # straddles the window today, which is luck rather than a guarantee,
+            # and this is a deletion. Reading the label would eventually delete
+            # an in-window paper because its name says otherwise.
             try:
                 with open(fpath, encoding="utf-8") as bf:
                     parsed = bt.parse_bibtex_to_dict(bf.read())
             except (OSError, ValueError) as exc:
                 raise FinalizationError(f"cannot read {fpath} for the year-window check") from exc
-            bib_year = extract_year_from_any((parsed or {}).get("fields", {}).get("year"), fallback=0) or 0
-            if 0 < bib_year < window_min:
+            year = extract_year_from_any((parsed or {}).get("fields", {}).get("year"), fallback=0) or 0
+            source = "bib_year"
+            if not year and (m := _FILENAME_YEAR_RE.search(f"/{fname}")):
+                # Only when the entry states no usable year. extract_year_from_any
+                # already rejects anything outside the valid range, so a garbage
+                # year field falls through here rather than deciding the delete.
+                year = int(m.group(1))
+                source = "filename_year"
+            # No year from either source means no evidence, and no evidence
+            # means the file stays. Deletion needs a year, not the absence of one.
+            if 0 < year < window_min:
                 logger.debug(
-                    f"YEAR_WINDOW | removing {fname} (bib_year={bib_year} < {window_min})",
+                    f"YEAR_WINDOW | removing {fname} ({source}={year} < {window_min})",
                     category=LogCategory.CLEANUP,
                 )
                 os.remove(fpath)
