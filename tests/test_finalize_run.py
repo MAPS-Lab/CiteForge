@@ -437,6 +437,52 @@ def test_year_window_falls_back_to_the_filename_when_the_entry_has_no_year(tmp_p
     assert not old.exists(), "with no entry year, the filename year still decides"
 
 
+# --- RENAME vs ORPHAN SWEEP -------------------------------------------------
+
+
+def test_a_renamed_file_survives_the_next_run(tmp_path: Path, no_a2i2: None) -> None:
+    """A file the author-prefix repair renamed is not deleted by the next run.
+
+    Three steps have to agree for this to hold, and they run in this order:
+    phantom reconciliation, orphan removal, then the fixup pass that renames.
+    The rename therefore lands AFTER the CSV has been read, so on the next run
+    the file is untracked. The summary CSV persists across runs
+    (``preserve_existing=True``), so the stale row naming the old path is still
+    in it, and an untracked ``.bib`` whose title matches a tracked title is
+    exactly what the orphan sweep deletes.
+
+    What saves it is that reconciliation strips the stale row first, taking the
+    matching title with it, so the renamed file is kept and warned about instead
+    of removed. That is a real guarantee resting on step order rather than on
+    anything local, which is why it is pinned here: reordering finalize_run or
+    making reconciliation conditional would silently delete corrected files.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    pubmed = "Jin Y and Guo Y and Koller Jm and Grossen Sc and Uhlmann A and Forde Nj"
+    stale = write_bib(
+        author,
+        misc(key="Y2026:Neuro", title="Altered Neurodevelopmental Trajectories", author=pubmed, year="2026"),
+        "Y2026-AlteredNeuro.bib",
+    )
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [stale])
+
+    first = finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
+
+    renamed = author / "Jin2026-AlteredNeuro.bib"
+    assert first.files_renamed == 1
+    assert renamed.exists()
+
+    # The same CSV, still naming the path the rename invalidated.
+    second = finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
+
+    assert renamed.exists(), "the corrected file must not be swept as an orphan of its own former name"
+    assert second.phantom_rows_removed == 1, "the stale row is what has to go, and it must go first"
+    assert second.orphans_removed == 0
+    assert second.orphans_kept == 1
+
+
 # --- PHANTOM-WRITE GUARD ----------------------------------------------------
 
 
