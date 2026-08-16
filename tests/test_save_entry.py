@@ -374,3 +374,35 @@ def test_composite_boundary_flips_verdict(tmp_path: Path, authors: tuple[str, st
     save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
 
     assert len(_bib_files(author_dir)) == expected_files
+
+def test_year_change_renames_the_file_to_match_the_new_year(tmp_path: Path) -> None:
+    """A record whose year changed must not keep the old year in its filename.
+
+    The dedup branch for this case logged DECISION | USE_NEW_NAME and did
+    nothing else: `filename` had already been overwritten with the duplicate's
+    basename, so the "generated filename" it claimed to keep no longer existed.
+    The record kept the losing file's year permanently, which is why 13
+    committed files are named for a year their contents do not carry
+    (Saha2020-EnergyAware.bib holds a 2023 paper). The filename year is not
+    cosmetic: it is what a reader browsing the corpus sees.
+    """
+    title = "A Study That Changed Its Year On Publication"
+    author_dir = tmp_path / format_author_dirname("Doe, Jane", "x1")
+    author_dir.mkdir(parents=True)
+    factories.write_bib(
+        author_dir,
+        factories.article(key="Old", title=title, year="2020", journal="Some Journal"),
+        "Doe2020-AStudy.bib",
+    )
+    incoming = {
+        "type": "article",
+        "key": "New",
+        "fields": {"title": title, "author": "Doe, Jane", "year": "2023", "journal": "Some Journal"},
+    }
+
+    save_entry_to_file(str(tmp_path), "x1", incoming, author_name="Doe, Jane")
+
+    survivors = sorted(p.name for p in author_dir.glob("*.bib"))
+    assert len(survivors) == 1, f"the superseded name must not linger: {survivors}"
+    assert "2023" in survivors[0], f"filename must carry the new year: {survivors[0]}"
+    assert "2020" not in survivors[0]

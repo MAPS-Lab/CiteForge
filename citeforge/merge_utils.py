@@ -1058,6 +1058,7 @@ def save_entry_to_file(
     dedup_replaced = False
     if duplicate_found and duplicate_path:
         # Reuse the duplicate's filename by default (overridden below when parseable)
+        generated_filename = filename
         filename = os.path.basename(duplicate_path)
         try:
             with open(duplicate_path, encoding="utf-8") as ef:
@@ -1132,11 +1133,20 @@ def save_entry_to_file(
                     )
                     _replace_existing()
                 elif existing_year and new_year and existing_year != new_year:
-                    # Year changed, same or no DOIs -- keep generated filename for year correction
+                    # Year changed, same or no DOIs: correct the name to match.
+                    # This branch only logged. `filename` had already been
+                    # overwritten with the duplicate's basename above, so the
+                    # "generated filename" it claimed to keep was gone and the
+                    # record kept the losing file's year forever. That is why 13
+                    # committed files are named for a year their contents do not
+                    # carry, e.g. Saha2020-EnergyAware.bib holding a 2023 paper.
                     logger.debug(
-                        f"DECISION | USE_NEW_NAME | reason=year_change | old_year={existing_year} new_year={new_year}",
+                        f"DECISION | USE_NEW_NAME | reason=year_change | old_year={existing_year} "
+                        f"new_year={new_year} | name={generated_filename}",
                         category=LogCategory.DEDUP,
                     )
+                    filename = generated_filename
+                    _replace_existing()
                 else:
                     # Same year, same DOI (or both missing) -> reuse existing filename
                     existing_key = existing_entry.get("key", "")
