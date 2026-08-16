@@ -352,6 +352,21 @@ def finalize_run(
             category=LogCategory.CLEANUP,
         )
 
+    # Everything that removes a .bib runs after the CSV was reconciled, so a
+    # deletion leaves a row naming a file that no longer exists and the run
+    # returns asserting a consistency it does not have. The rename step repoints
+    # its own rows; deletions cannot, so the CSV is reconciled once more here.
+    # The invariant this restores is the one the report implies: at return, the
+    # CSV names exactly the files on disk.
+    if csv_path is not None and (window_removed or superseded):
+        trailing = reconcile_summary_csv(csv_path)
+        if trailing:
+            phantoms += trailing
+            logger.info(
+                f"Reconciled summary CSV: removed {trailing} row(s) for files deleted after the first pass",
+                category=LogCategory.CLEANUP,
+            )
+
     # Build a2i2 joint output folder
     a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
     if a2i2_count:
