@@ -23,8 +23,10 @@ at a nonexistent path so build_a2i2_folder returns early without clearing the
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -496,6 +498,43 @@ def test_a_renamed_file_survives_the_next_run(tmp_path: Path, no_a2i2: None) -> 
     assert second.phantom_rows_removed == 0, "the CSV must already name the renamed file"
     assert second.orphans_removed == 0
     assert second.orphans_kept == 0, "the renamed file must be tracked, not merely spared"
+
+
+def test_csv_names_exactly_the_files_on_disk_at_return(tmp_path: Path, no_a2i2: None) -> None:
+    """The CSV must be consistent when finalize_run returns, not one run later.
+
+    Every step that removes a .bib runs after reconciliation, so a deletion left
+    a row naming a file that no longer exists while the report said
+    phantom_rows_removed=0. The rename step repoints its own rows; deletions
+    cannot, so a trailing reconcile restores the invariant the report implies.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    window_min = get_min_year()
+
+    keep = write_bib(
+        author,
+        article(key="Keep", title="An In Window Paper", year=str(window_min + 1)),
+        f"Doe{window_min + 1}-Keep.bib",
+    )
+    # Deleted by the year window, which runs after the CSV was reconciled.
+    doomed = write_bib(
+        author,
+        article(key="Old", title="An Out Of Window Paper", year=str(window_min - 4)),
+        f"Doe{window_min - 4}-Old.bib",
+    )
+    csv_path = tmp_path / "summary.csv"
+    _track_in_csv(csv_path, [keep, doomed])
+
+    report = finalize_run(str(out_dir), _records(), total_saved=2, processed=2, summary_csv_path=str(csv_path))
+
+    assert not doomed.exists()
+    assert report.out_of_window_removed == 1
+    assert report.phantom_rows_removed == 1, "the row for the file this run deleted must be gone at return"
+
+    rows = [row["file_path"] for row in csv.DictReader(csv_path.open(newline="", encoding="utf-8"))]
+    on_disk = {str(p) for p in author.glob("*.bib")}
+    assert {os.path.abspath(r) for r in rows} == {os.path.abspath(p) for p in on_disk}
 
 
 # --- PHANTOM-WRITE GUARD ----------------------------------------------------
