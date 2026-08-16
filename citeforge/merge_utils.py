@@ -956,6 +956,25 @@ def merge_with_policy(
     return {"type": etype, "key": primary.get("key"), "fields": merged}
 
 
+def _prefer_path_is_distinct_work(prefer_path: str, entry: dict[str, Any]) -> bool:
+    """True when the baseline file holds a different publication from *entry*.
+
+    prefer_path is chosen upstream by a title-only similarity test, so it is not
+    guaranteed to be the baseline for this article. Deleting it is only safe
+    once the two records are established as one work, which is what
+    DISK_SURVIVOR decides everywhere else that two files are compared.
+    Unreadable or unparseable means unknown, and unknown means keep.
+    """
+    try:
+        with open(prefer_path, encoding="utf-8") as handle:
+            existing = parse_bibtex_to_dict(handle.read())
+    except (OSError, ValueError):
+        return True
+    if not existing:
+        return False
+    return not evaluate_identity(existing, entry, context=IdentityContext.DISK_SURVIVOR).verdict
+
+
 def save_entry_to_file(
     out_dir: str,
     author_id: str,
@@ -1134,11 +1153,22 @@ def save_entry_to_file(
     # (e.g., published entry vs incoming preprint), skip writing and return early
     if skip_write:
         logger.debug(f"SKIP_WRITE | file={duplicate_path} | reason=existing_is_better", category=LogCategory.DEDUP)
-        # Clean up the baseline file that was written before enrichment
+        # Clean up the baseline file that was written before enrichment, but only
+        # once it is established that prefer_path really is that baseline. It is
+        # selected upstream by the same title-only test, so a Part I file can
+        # arrive as the baseline for a Part II article; removing it here on an
+        # existence check alone destroyed the only copy of a different paper.
+        # The sibling exit already refuses this, and the asymmetry was the bug.
         if prefer_path and os.path.abspath(prefer_path) != os.path.abspath(duplicate_path or ""):
-            with contextlib.suppress(OSError):
-                if os.path.exists(prefer_path):
-                    os.remove(prefer_path)
+            if _prefer_path_is_distinct_work(prefer_path, entry):
+                logger.debug(
+                    f"FILE_CLEANUP_BLOCKED | prefer={os.path.basename(prefer_path)} is a distinct record | keeping",
+                    category=LogCategory.DEDUP,
+                )
+            else:
+                with contextlib.suppress(OSError):
+                    if os.path.exists(prefer_path):
+                        os.remove(prefer_path)
         return duplicate_path or os.path.join(author_dir, filename), False
 
     while os.path.exists(os.path.join(author_dir, filename)):

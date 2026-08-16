@@ -25,17 +25,21 @@ from citeforge.canonicalize import (
     _fixup_bib_entry,
 )
 from citeforge.config import (
+    A2I2_OUTPUT_DIR,
     DEFAULT_A2I2_INPUT,
-    SIM_MERGE_DUPLICATE_THRESHOLD,
+    PREPRINT_SERVERS,
     get_min_year,
 )
 from citeforge.fsscan import iter_author_bibs, iter_output_dirs
 from citeforge.http_utils import get_api_call_counts
+from citeforge.id_utils import is_secondary_doi
+from citeforge.identity import IdentityContext, evaluate_identity
 from citeforge.io_utils import (
     build_a2i2_folder,
     collect_orphan_files,
     flush_summary_csv,
     reconcile_summary_csv,
+    retarget_summary_csv_paths,
     safe_write_file,
     safe_write_json,
 )
@@ -45,10 +49,7 @@ from citeforge.text_utils import (
     _is_preprint_fields,
     author_list_is_surname_initials,
     extract_year_from_any,
-    title_similarity,
 )
-
-_FILENAME_YEAR_RE = re.compile(r"/[A-Za-z]+(\d{4})-")
 
 # The author prefix of a generated name: "Jin2026-AlteredNeuro.bib" and the
 # citation key "Jin2026:AlteredNeuro" share the shape <Surname><Year><sep>.
@@ -121,6 +122,7 @@ class FinalizationReport:
     out_of_window_removed: int
     files_fixed: int
     files_renamed: int
+    renames_blocked: int
     superseded_preprints_removed: int
     a2i2_files: int
     baseline_total: int
@@ -175,21 +177,27 @@ def finalize_run(
         # Safe orphan removal (duplicates only)
         orphans = collect_orphan_files(csv_path, out_dir)
         if orphans:
-            csv_titles = _load_csv_titles(csv_path)
+            csv_entries = _load_csv_entries(csv_path)
             for orphan in orphans:
                 try:
                     with open(orphan, encoding="utf-8") as of:
                         orphan_entry = bt.parse_bibtex_to_dict(of.read())
                 except (OSError, ValueError) as exc:
                     raise FinalizationError(f"cannot read orphan candidate {orphan}") from exc
-                orphan_title = (orphan_entry or {}).get("fields", {}).get("title", "")
 
                 author_dir_path = os.path.dirname(orphan)
-                tracked_titles = csv_titles.get(author_dir_path, [])
-                is_dup = (
-                    any(title_similarity(orphan_title, t) >= SIM_MERGE_DUPLICATE_THRESHOLD for t in tracked_titles)
-                    if orphan_title
-                    else False
+                tracked = csv_entries.get(author_dir_path, [])
+                # Full identity, not a title score. A title score alone deleted a
+                # distinct paper: "...new locus associated with OCD" (2021, 192
+                # authors) against "...new loci associated with OCD" (2024, 37
+                # authors) scores 0.978 and the two carry different DOIs.
+                # DISK_SURVIVOR is the same predicate save_entry_to_file already
+                # uses to decide that two files are one work, and it rejects that
+                # pair on DOI_CONFLICT. Deleting on weaker evidence than the
+                # writer required to merge is what made this unsafe.
+                is_dup = orphan_entry is not None and any(
+                    evaluate_identity(entry, orphan_entry, context=IdentityContext.DISK_SURVIVOR).verdict
+                    for entry in tracked
                 )
 
                 if is_dup:
@@ -215,7 +223,7 @@ def finalize_run(
     window_min = get_min_year()
     window_removed = 0
     for entry in iter_output_dirs(out_dir):
-        if entry == "a2i2":
+        if entry == A2I2_OUTPUT_DIR:
             continue
         d = os.path.join(out_dir, entry)
         for fname in iter_author_bibs(d):
@@ -234,18 +242,22 @@ def finalize_run(
             except (OSError, ValueError) as exc:
                 raise FinalizationError(f"cannot read {fpath} for the year-window check") from exc
             year = extract_year_from_any((parsed or {}).get("fields", {}).get("year"), fallback=0) or 0
-            source = "bib_year"
-            if not year and (m := _FILENAME_YEAR_RE.search(f"/{fname}")):
-                # Only when the entry states no usable year. extract_year_from_any
-                # already rejects anything outside the valid range, so a garbage
-                # year field falls through here rather than deciding the delete.
-                year = int(m.group(1))
-                source = "filename_year"
-            # No year from either source means no evidence, and no evidence
-            # means the file stays. Deletion needs a year, not the absence of one.
-            if 0 < year < window_min:
+            # No filename fallback. An earlier revision of this loop kept one for
+            # entries stating no usable year, which sounds harmless and is not:
+            # "in press", "n.d.", an empty year and a malformed one all land
+            # here, and the filename is a stale label on 13 committed files. That
+            # combination deletes an in-window paper on a name inherited from
+            # some other record, with zero evidence about its own contents.
+            # Deletion needs the entry's own year; nothing else is evidence.
+            if not year:
                 logger.debug(
-                    f"YEAR_WINDOW | removing {fname} ({source}={year} < {window_min})",
+                    f"YEAR_WINDOW | keeping {fname}: the entry states no usable year",
+                    category=LogCategory.CLEANUP,
+                )
+                continue
+            if year < window_min:
+                logger.debug(
+                    f"YEAR_WINDOW | removing {fname} (bib_year={year} < {window_min})",
                     category=LogCategory.CLEANUP,
                 )
                 os.remove(fpath)
@@ -261,8 +273,10 @@ def finalize_run(
     # entries where Phase 4 corrections were undone by Tier 2 filling.
     postrun_fixed = 0
     renamed_count = 0
+    renames_blocked = 0
+    applied_renames: dict[str, str] = {}
     for pr_entry_name in iter_output_dirs(out_dir):
-        if pr_entry_name == "a2i2":
+        if pr_entry_name == A2I2_OUTPUT_DIR:
             continue
         pr_dir = os.path.join(out_dir, pr_entry_name)
         for pr_fname in iter_author_bibs(pr_dir):
@@ -294,6 +308,7 @@ def finalize_run(
                 # name. Renaming onto it would destroy that entry, so the stale
                 # name is kept and reported instead.
                 if os.path.exists(target):
+                    renames_blocked += 1
                     logger.warn(
                         f"Author prefix stale on {pr_fname}, but {renamed} exists; left as is",
                         category=LogCategory.CLEANUP,
@@ -301,6 +316,7 @@ def finalize_run(
                 else:
                     os.rename(pr_fpath, target)
                     renamed_count += 1
+                    applied_renames[os.path.abspath(pr_fpath)] = os.path.abspath(target)
                     logger.info(f"Renamed {pr_fname} -> {renamed}", category=LogCategory.CLEANUP)
     if postrun_fixed:
         logger.info(
@@ -310,6 +326,21 @@ def finalize_run(
     if renamed_count:
         logger.info(
             f"Post-run fixup: renamed {renamed_count} .bib files to their corrected author prefix",
+            category=LogCategory.CLEANUP,
+        )
+
+    if renames_blocked:
+        logger.warn(
+            f"Post-run fixup: {renames_blocked} rename(s) blocked by an existing target",
+            category=LogCategory.CLEANUP,
+        )
+    # The CSV was reconciled before these renames happened, so it now names the
+    # old paths. Repoint it here rather than leaving the next run to discover
+    # the drift as phantom rows plus untracked orphans.
+    retargeted = retarget_summary_csv_paths(csv_path, applied_renames) if csv_path else 0
+    if retargeted:
+        logger.info(
+            f"Repointed {retargeted} summary CSV row(s) at their renamed file",
             category=LogCategory.CLEANUP,
         )
 
@@ -350,6 +381,7 @@ def finalize_run(
         out_of_window_removed=window_removed,
         files_fixed=postrun_fixed,
         files_renamed=renamed_count,
+        renames_blocked=renames_blocked,
         superseded_preprints_removed=superseded,
         a2i2_files=a2i2_count,
         baseline_total=sum(baseline.values()),
@@ -368,10 +400,23 @@ def _looks_published(entry: dict[str, Any]) -> bool:
     fields = entry.get("fields", {}) or {}
     if _is_preprint_fields(fields):
         return False
-    if str(fields.get("doi") or "").strip():
-        return True
+    # A DOI alone is not publication. `_is_preprint_fields` reads the DOI prefix
+    # and the journal, never howpublished, so a record whose only evidence is
+    # `howpublished = {arXiv}` or a data-repository DOI (Zenodo, Figshare, which
+    # are absent from PREPRINT_DOI_PREFIXES) reached here as "published" and
+    # became a licence to delete a real preprint. The weakest record in a
+    # directory must not be the one that authorises a removal.
+    howpublished = str(fields.get("howpublished") or "").casefold()
+    if any(server in howpublished for server in PREPRINT_SERVERS):
+        return False
+    doi = str(fields.get("doi") or "").strip()
+    if doi and is_secondary_doi(doi):
+        return False
     container = get_container_field(str(entry.get("type") or ""))
-    return bool(container and str(fields.get(container) or "").strip())
+    has_container = bool(container and str(fields.get(container) or "").strip())
+    # A published record names where it was published. A bare DOI with no
+    # container is a stub, and a stub cannot supersede anything.
+    return has_container or (bool(doi) and bool(str(fields.get("publisher") or "").strip()))
 
 
 def _remove_superseded_preprints(out_dir: str) -> int:
@@ -390,7 +435,7 @@ def _remove_superseded_preprints(out_dir: str) -> int:
     """
     removed = 0
     for entry_name in iter_output_dirs(out_dir):
-        if entry_name == "a2i2":
+        if entry_name == A2I2_OUTPUT_DIR:
             continue
         author_dir = os.path.join(out_dir, entry_name)
         parsed: list[tuple[str, dict[str, Any]]] = []
@@ -415,10 +460,14 @@ def _remove_superseded_preprints(out_dir: str) -> int:
             title = str(fields.get("title") or "")
             if not title:
                 continue
+            # Same reasoning as the orphan sweep: a title score is not evidence
+            # that two records are one work. "Machine learning for ship
+            # detection: Part I" against "Part II" scores 0.988, and a preprint
+            # is often the only full text on disk. DISK_SURVIVOR understands the
+            # preprint-to-published relationship this sweep is built on, and
+            # rejects a pair whose DOIs or arXiv ids contradict each other.
             has_published_twin = any(
-                pub_path != path
-                and title_similarity(title, str((pub_entry.get("fields", {}) or {}).get("title") or ""))
-                >= SIM_MERGE_DUPLICATE_THRESHOLD
+                pub_path != path and evaluate_identity(pub_entry, entry, context=IdentityContext.DISK_SURVIVOR).verdict
                 for pub_path, pub_entry in published
             )
             if has_published_twin:
@@ -434,9 +483,16 @@ def _remove_superseded_preprints(out_dir: str) -> int:
     return removed
 
 
-def _load_csv_titles(csv_path: str) -> dict[str, list[str]]:
-    """Load titles from CSV-tracked .bib files, grouped by author directory."""
-    result: dict[str, list[str]] = {}
+def _load_csv_entries(csv_path: str) -> dict[str, list[dict[str, Any]]]:
+    """Load CSV-tracked .bib entries, grouped by author directory.
+
+    Whole entries, not titles alone. The orphan sweep deletes, and a title is
+    not enough evidence to delete on: the corpus holds two distinct OCD
+    genome-wide papers whose titles differ only in "locus" versus "loci"
+    (similarity 0.978, different DOIs, 192 versus 37 authors). Keeping the DOI
+    is what lets `evaluate_identity` reject that pair.
+    """
+    result: dict[str, list[dict[str, Any]]] = {}
     try:
         with open(csv_path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
@@ -446,9 +502,8 @@ def _load_csv_titles(csv_path: str) -> dict[str, list[str]]:
                 try:
                     with open(abs_fp, encoding="utf-8") as bf:
                         entry = bt.parse_bibtex_to_dict(bf.read())
-                    t = (entry or {}).get("fields", {}).get("title", "")
-                    if t:
-                        result.setdefault(author_dir_path, []).append(t)
+                    if entry and (entry.get("fields") or {}).get("title"):
+                        result.setdefault(author_dir_path, []).append(entry)
                 except (OSError, ValueError):
                     pass
     except (OSError, ValueError):
