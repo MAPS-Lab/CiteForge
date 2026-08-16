@@ -356,7 +356,13 @@ def collect_orphan_files(csv_path: str, output_dir: str) -> list[str]:
 
     orphans: list[str] = []
     try:
-        subdirs = [os.path.join(output_dir, d) for d in iter_output_dirs(output_dir)]
+        # a2i2 is rebuilt from the author directories on every run and is never
+        # tracked in the summary CSV, so every one of its files looks orphaned.
+        # It was reported as 1094 kept orphans per run, burying any real one, and
+        # those files were eligible for deletion: they survived only because
+        # tracked titles are keyed by author directory and no CSV row points
+        # inside a2i2. The three other whole-tree passes already skip it.
+        subdirs = [os.path.join(output_dir, d) for d in iter_output_dirs(output_dir) if d != A2I2_OUTPUT_DIR]
     except OSError:
         return []
 
@@ -370,6 +376,51 @@ def collect_orphan_files(csv_path: str, output_dir: str) -> list[str]:
             continue
 
     return sorted(orphans)
+
+
+def retarget_summary_csv_paths(csv_path: str, renames: dict[str, str]) -> int:
+    """Repoint CSV rows at files that were renamed after the CSV was written.
+
+    The post-run fixup renames a file at step 6, long after reconciliation
+    cleaned the CSV at step 3. Without this the CSV names a path that no longer
+    exists and omits the one that does, so the run returns claiming a
+    consistency it does not have, and the renamed file enters the NEXT run as an
+    untracked orphan. It survives that only because reconciliation happens to
+    strip its stale row first, which is an ordering accident rather than a
+    guarantee.
+
+    *renames* maps old absolute path to new absolute path. Returns the number of
+    rows repointed.
+    """
+    if not renames:
+        return 0
+    with _CSV_LOCK:
+        rows: list[dict[str, Any]] = []
+        changed = 0
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as csvfile:
+                for row in csv.DictReader(csvfile):
+                    target = renames.get(os.path.abspath(row.get("file_path", "")))
+                    if target is not None:
+                        row["file_path"] = (
+                            os.path.relpath(target) if not os.path.isabs(row.get("file_path", "")) else target
+                        )
+                        changed += 1
+                    rows.append(row)
+        except (OSError, csv.Error):
+            return 0
+        if changed:
+
+            def _write(handle: IO[str]) -> None:
+                writer = csv.DictWriter(handle, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+                writer.writeheader()
+                writer.writerows(rows)
+
+            try:
+                _atomic_write(csv_path, _write, "utf-8")
+            except OSError:
+                return 0
+        return changed
 
 
 def reconcile_summary_csv(csv_path: str) -> int:
@@ -460,11 +511,13 @@ def build_a2i2_folder(
 
     all_entries: list[tuple[dict[str, Any], str]] = []  # (parsed_entry, source_path)
 
+    resolved_members = 0
     for a2i2_name in a2i2_names:
         member = name_to_rec.get(normalize_person_name(a2i2_name))
         if member is None:
             log.warning("A2I2 member %r not found in input records; skipping", a2i2_name)
             continue
+        resolved_members += 1
 
         author_id = member.scholar_id or member.dblp or ""
         dirname = format_author_dirname(member.name, author_id)
@@ -548,10 +601,25 @@ def build_a2i2_folder(
     # --- Step 5: clear and rebuild a2i2 directory ---------------------------
     a2i2_dir = os.path.join(out_dir, A2I2_OUTPUT_DIR)
     os.makedirs(a2i2_dir, exist_ok=True)
-    for fname in sorted(os.listdir(a2i2_dir)):
-        fpath = os.path.join(a2i2_dir, fname)
-        if os.path.isfile(fpath):
-            os.remove(fpath)
+    existing = [f for f in sorted(os.listdir(a2i2_dir)) if os.path.isfile(os.path.join(a2i2_dir, f))]
+    # Refuse to empty a populated folder on the strength of a member list that
+    # mostly did not resolve. `--input` is operator-settable and defaults to the
+    # same tree, so `citeforge --input subset.csv` reached here with 2 of 21
+    # members present and deleted 1035 of 1094 files, reported only as
+    # "a2i2_files=59" -- a build count, not a net change. The rebuild is a
+    # refresh of a derived folder, and a derived folder is not a licence to
+    # discard the previous one when the inputs went missing.
+    if existing and resolved_members < len(a2i2_names) / 2:
+        log.error(
+            "a2i2 rebuild aborted: only %d of %d members resolved against the input records, "
+            "which would delete %d existing file(s). Pass the full author list to rebuild.",
+            resolved_members,
+            len(a2i2_names),
+            len(existing),
+        )
+        return 0
+    for fname in existing:
+        os.remove(os.path.join(a2i2_dir, fname))
 
     # --- Step 6: copy surviving files (byte-fidelity from source) -----------
     written = 0

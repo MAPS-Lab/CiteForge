@@ -420,21 +420,31 @@ def test_year_window_keeps_a_file_with_no_usable_year_anywhere(tmp_path: Path, n
     assert undated.exists(), "a file with no usable year must be kept, not deleted"
 
 
-def test_year_window_falls_back_to_the_filename_when_the_entry_has_no_year(tmp_path: Path, no_a2i2: None) -> None:
-    """The filename is still consulted, just second rather than first."""
+@pytest.mark.parametrize("year_field", ["", "in press", "n.d.", "MMXXIV", "forthcoming"])
+def test_year_window_never_deletes_on_the_filename_year(tmp_path: Path, no_a2i2: None, year_field: str) -> None:
+    """A stale filename must not delete a file its entry says nothing about.
+
+    The fallback here used to decide the delete whenever the entry stated no
+    usable year, which covers an empty year, "in press", "n.d." and anything
+    unparseable. Filenames go stale: 13 committed files are named for a year
+    their contents do not carry, because the deduplicator writes a survivor
+    under the losing duplicate's name. That pairing removes an in-window paper
+    on a label inherited from some other record, with no evidence about its own
+    contents. Deletion needs the entry's own year and nothing else.
+    """
     out_dir = tmp_path / "out"
     author = _author_dir(out_dir)
     window_min = get_min_year()
 
-    old = write_bib(
+    undated = write_bib(
         author,
-        article(key="OldNoYear", title="An Old Undated Paper", year=""),
-        f"Doe{window_min - 5}-OldUndated.bib",
+        article(key="Undated", title="A Paper With No Parseable Year", year=year_field),
+        f"Doe{window_min - 5}-StaleOldName.bib",
     )
 
     finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=None)
 
-    assert not old.exists(), "with no entry year, the filename year still decides"
+    assert undated.exists(), "no entry year is no evidence, and no evidence must not delete"
 
 
 # --- RENAME vs ORPHAN SWEEP -------------------------------------------------
@@ -478,9 +488,14 @@ def test_a_renamed_file_survives_the_next_run(tmp_path: Path, no_a2i2: None) -> 
     second = finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
 
     assert renamed.exists(), "the corrected file must not be swept as an orphan of its own former name"
-    assert second.phantom_rows_removed == 1, "the stale row is what has to go, and it must go first"
+    # The rename now repoints the CSV row inside the same run, so the second run
+    # finds nothing stale and nothing untracked. Previously the file survived
+    # only because reconciliation happened to strip the stale row before the
+    # orphan sweep read it, which was an ordering accident rather than a
+    # guarantee; now there is no stale row to strip and no orphan to judge.
+    assert second.phantom_rows_removed == 0, "the CSV must already name the renamed file"
     assert second.orphans_removed == 0
-    assert second.orphans_kept == 1
+    assert second.orphans_kept == 0, "the renamed file must be tracked, not merely spared"
 
 
 # --- PHANTOM-WRITE GUARD ----------------------------------------------------

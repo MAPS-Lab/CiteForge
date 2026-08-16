@@ -543,6 +543,12 @@ def process_article(
             # Parse failed - should be rare since we generated the BibTeX
             logger.error("Failed to parse Scholar BibTeX; using minimal fallback structure", category=LogCategory.ERROR)
             baseline_entry = {"type": "misc", "key": result_id or "entry", "fields": {"title": title} if title else {}}
+        # Scholar's title, authors and year are what this record is built from,
+        # so the provenance row must say so. The flag was initialised False and
+        # never assigned anywhere in the package, making its summary.csv column
+        # structurally 0 for all 2,575 rows while Scholar seeded every one of
+        # them. A provenance column that cannot be true is worse than absent.
+        flags["scholar_bib"] = True
         _bl_source = "scholar_minimal"
     else:
         _bl_source = "existing_file"
