@@ -25,8 +25,7 @@ from citeforge.pipeline.postrun import _reconcile_author_prefix, finalize_run
 from citeforge.text_utils import author_list_is_surname_initials, surname_from_initials_form
 from tests.factories import article, misc, write_bib
 
-# Drawn from real committed records rather than invented, so the contracts stay
-# tied to what the sources actually emit.
+# Real author lists, as the sources emit them.
 _PUBMED = "Jin Y and Guo Y and Koller Jm and Grossen Sc and Uhlmann A and Forde Nj"
 _PUBMED_THREE_INITIALS = "Duke Aee and Crider R and Harri Bi and Anjorin O and Agyapong Vio and Orji R"
 _WESTERN_SHORT_SURNAMES = "Meng He and Qihao Li and Xiaoyan Lv and Hongwei Du"
@@ -88,7 +87,7 @@ def test_surname_from_initials_form(name: str, expected: str) -> None:
 
 
 def test_citation_key_and_lastname_use_the_surname_not_the_initials() -> None:
-    """The defect this exists to prevent, at both derivation sites."""
+    """Both derivation sites take the surname, never the trailing initials."""
     names = _PUBMED.split(" and ")
 
     assert _first_author_lastname(_PUBMED) == "jin"
@@ -104,11 +103,11 @@ def test_western_lists_are_unaffected() -> None:
 @pytest.mark.parametrize(
     ("authors", "expected"),
     [
-        # Initials a past run title-cased are restored.
+        # Title-cased initials are restored to caps.
         (_PUBMED, "Jin Y and Guo Y and Koller JM and Grossen SC and Uhlmann A and Forde NJ"),
         # A real two-letter surname in caps is still title-cased, unchanged.
         ("Shu FU and Wen Wu", "Shu Fu and Wen Wu"),
-        # Leading initials were already handled and stay handled.
+        # Leading initials are left alone.
         ("JI Munro and Meng He", "JI Munro and Meng He"),
         (_WESTERN_SHORT_SURNAMES, _WESTERN_SHORT_SURNAMES),
     ],
@@ -123,7 +122,7 @@ def test_author_casing_respects_the_form(authors: str, expected: str) -> None:
 
 
 def test_reconcile_rewrites_a_stale_author_prefix() -> None:
-    """A file written before the fix is renamed and rekeyed, not left behind."""
+    """A stale author prefix is renamed and rekeyed, not left behind."""
     entry = {
         "type": "misc",
         "key": "Y2026:NeuroTicTrajectories",

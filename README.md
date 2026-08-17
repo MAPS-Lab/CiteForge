@@ -2,194 +2,140 @@
 
 [![Tests](https://github.com/MAPS-Lab/CiteForge/actions/workflows/tests.yml/badge.svg)](https://github.com/MAPS-Lab/CiteForge/actions/workflows/tests.yml)
 
-CiteForge builds clean, per-author BibTeX files from scholarly APIs. Give it a CSV of
-authors with Google Scholar or DBLP profiles and it retrieves each author's publications,
-enriches every entry against active scholarly registries, deduplicates records, and merges
-fields according to source trust.
+CiteForge builds clean per-author BibTeX files from scholarly APIs. Point it at a CSV of
+authors and it retrieves each one's publications, enriches every entry against the major
+metadata registries, removes duplicates, and merges fields by source reliability.
 
-Google Scholar entries are routinely incomplete. DOIs are missing, venue names are
-inconsistent, author lists are malformed, and titles arrive in all capitals. Fixing that by
-hand means cross-referencing Crossref, Semantic Scholar, arXiv, and PubMed for every entry,
-which does not scale to a research group. CiteForge automates the cross-referencing and the
-consolidation that follows it.
+Google Scholar is a good index and a poor bibliography. DOIs are missing, venue names are
+inconsistent, author lists are mangled, titles arrive in block capitals. Fixing that by hand
+means checking Crossref, Semantic Scholar, arXiv and PubMed for every entry, which does not
+scale past a handful of people. CiteForge does the cross-referencing.
 
-It runs on Python 3.10 or later with a small dependency footprint (requests, rapidfuzz,
-unidecode, and a few helpers), and it is developed and maintained by the
-[MAPS Lab](https://mapslab.tech/) at Dalhousie University.
+Built and maintained by the [MAPS Lab](https://mapslab.tech/) at Dalhousie University.
 
-## Features
+## Install
 
-- Per-author BibTeX generation from Google Scholar profiles through SerpAPI
-- Enrichment across Semantic Scholar, Crossref, OpenAlex, arXiv, PubMed, Europe PMC, DBLP, OpenReview, and DOI resolvers
-- Trust-based field merging that prefers authoritative registries over scraped content
-- Deduplication combining DOI normalization, external-identifier matching, and fuzzy title similarity
-- Metadata repair for fragmented compound words, misclassified entry types, invalid page ranges, and all-capitals titles
-- Deterministic output, byte-identical across equivalent cache-hit inputs
-- Parallel per-author and per-article processing under per-API rate limits
-- Config-driven behaviour, with trust order, thresholds, rate limits, and venue mappings centralized in [`citeforge/config.py`](citeforge/config.py)
-
-## Installation
-
-Requires Python 3.10 or later.
+Python 3.10 or later.
 
 ```bash
 git clone https://github.com/MAPS-Lab/CiteForge.git && cd CiteForge
 pip install -e .
 ```
 
-Place API keys in the `keys/` directory. Only SerpAPI is required.
+API keys go in `keys/`. Only SerpAPI is required.
 
 ```bash
 mkdir -p keys
-echo "your_serpapi_key" > keys/SerpAPI.key    # Required
-echo "your_serply_key" > keys/Serply.key      # Recommended, citation detail is skipped without it
-echo "your_semantic_key" > keys/Semantic.key  # Recommended
-echo "your_gemini_key" > keys/Gemini.key      # Optional
-printf "user\npass" > keys/OpenReview.key     # Optional
+echo "your_serpapi_key" > keys/SerpAPI.key    # required
+echo "your_serply_key" > keys/Serply.key      # recommended, citation counts
+echo "your_semantic_key" > keys/Semantic.key  # recommended, higher rate limit
+echo "your_gemini_key" > keys/Gemini.key      # optional, shorter filenames
+printf "user\npass" > keys/OpenReview.key     # optional
 ```
 
 ## Usage
 
-Relative paths resolve from the current working directory.
-
 ```bash
 citeforge                                      # data/input.csv -> output/
-citeforge --force                              # Ignore cache completeness
-citeforge --input authors.csv --output results # Explicit paths
+citeforge --force                              # re-enrich complete entries
+citeforge --input authors.csv --output results
 ```
 
-The input CSV has five columns. Every row must set `Enabled` to `true` or `false`
-explicitly. An enabled row needs at least one valid Google Scholar or DBLP profile and
-cannot carry an exclusion reason. A disabled row needs a non-empty `Exclusion Reason`.
-Invalid, unclassified, blank, or ambiguous profile rows stop the run before any API work,
-rather than being skipped quietly.
+The input CSV needs five columns. Set `Enabled` explicitly on every row: an enabled row needs
+a Google Scholar or DBLP profile, a disabled one needs a reason. Rows that are ambiguous stop
+the run before any API calls, rather than being skipped silently.
 
 ```csv
 Name,Scholar Link,DBLP Link,Enabled,Exclusion Reason
 Gabriel Spadon,https://scholar.google.com/citations?user=bfdGsGUAAAAJ,https://dblp.org/pid/192/1659,true,
-Example Excluded Author,,,false,No Scholar or DBLP profile configured
+Example Author,,,false,No Scholar or DBLP profile
 ```
 
-Output is organized per author with a shared summary and run log. API responses cache under
-`data/api_cache/` with monthly expiry. A cache hit establishes response freshness only. It
-says nothing about whether an entry is complete.
+Output is one directory per author, plus a summary CSV recording which sources contributed to
+each entry:
 
 ```
 output/
 ├── baseline.json
-├── run.log
 ├── summary.csv
-├── a2i2/
-│   └── ...
 └── Spadon (bfdGsGUAAAAJ)/
-    ├── author.log
     ├── Spadon2024-MaritimeTracking.bib
     └── ...
 ```
 
+Responses cache under `data/api_cache/` for a month. A cache hit means the response is fresh,
+not that the entry is complete.
+
 ## How it works
 
-Each author's publication list comes from Google Scholar through SerpAPI. Every entry then
-passes through four phases: DOI validation, multi-API enrichment, late DOI inference, and a
-trust-based merge that writes the result. A SerpAPI publication-string fallback sits between
-enrichment and inference for entries that reach it without a usable venue.
+Each publication starts from its Scholar record and goes through four phases: DOI validation,
+enrichment against the registries, late DOI inference, and a trust-based merge.
 
-Merging is not a last-writer-wins union. `merge_with_policy()` ranks sources and applies
-per-field override rules, so a published DOI beats a preprint DOI, a journal name is never
-downgraded to a preprint server, the longer of two titles wins, invalid page ranges are
-rejected, and a generic series name is upgraded to the actual conference name where one is
-known. Duplicate detection combines DOI normalization, external identifier matching, and
-fuzzy title similarity.
+The merge is the interesting part. `merge_with_policy()` ranks sources and applies per-field
+rules rather than letting the last writer win, so a published DOI beats a preprint DOI, a
+journal name is never replaced by a preprint server, and a generic series name gives way to
+the real conference name. Duplicates are matched on normalized DOIs, external identifiers and
+title similarity together, never on the title alone.
 
-Equivalent cache-hit inputs produce byte-identical output. That is an idempotence property
-and it is deliberately distinct from three things it is easy to confuse it with: whether an
-entry is complete, whether the response cache is fresh, and whether a refresh run finished.
+Given the same cached responses, a run produces byte-identical output.
 
 ### Monthly refresh
 
-The scheduled workflow runs the legacy pipeline (`python3 main.py`) in a bounded loop,
-stopping when the corpus digest over the generated `.bib`, `summary.csv`, and `baseline.json`
-files stops moving. It publishes by opening a bot pull request gated on Required CI, never by
-pushing to `main`. The website sync fires from the merge, so nothing is dispatched before the
-corpus is actually on the default branch.
+A scheduled workflow re-runs the pipeline until the corpus digest stops changing, then opens
+a pull request. Publication always goes through review and Required CI; nothing is pushed to
+`main` directly, and the website sync only fires once the corpus has actually merged.
 
-### Durable refresh engine
+### Refresh engine
 
-A second, separate system lives in `citeforge/refresh/`. Its census, ledger, transport,
-discovery, checkpoint, staging, and publication layers are implemented and covered by tests,
-and `citeforge refresh --state-dir <dir>` drives one bounded, resumable generation. It shares
-no enrichment code with the pipeline above; the two meet only at `citeforge/cli.py`.
+`citeforge/refresh/` holds a second, resumable implementation with a durable ledger, reachable
+as `citeforge refresh --state-dir <dir>`. It shares no enrichment code with the pipeline above
+and is not yet used in production. Two things to know before relying on it: no generation has
+run against live providers, and the ledger deliberately refuses to mark a generation complete,
+because declaring an author's publication list finished is not an authority it holds.
 
-It does not yet run in production, and two limits are worth stating plainly rather than
-leaving to be discovered.
+## Sources
 
-A full generation has never run against live providers. That run is wired as a manually
-dispatched, publication-disabled shadow workflow, so every claim about live provider
-authentication, schemas, and quotas is unverified until one can be cited.
+| | |
+|---|---|
+| Required | [SerpAPI](https://serpapi.com/) (Google Scholar) |
+| Recommended | [Serply](https://serply.io/), [Semantic Scholar](https://www.semanticscholar.org/) |
+| No key needed | [Crossref](https://www.crossref.org/), [OpenAlex](https://openalex.org/), [arXiv](https://arxiv.org/), [PubMed](https://pubmed.ncbi.nlm.nih.gov/), [Europe PMC](https://europepmc.org/), [DBLP](https://dblp.org/) |
+| Optional | [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/) |
 
-The engine also cannot report a generation complete, and that is by design rather than an
-unfinished edge. Doing so would require the ledger to record discovery as closed, and the
-schema refuses it through triggers, an invariant re-checked on every read, and a schema
-fingerprint. Declaring an author's publication list complete is an authority this stage of
-the system does not hold, so nothing may gate on that status.
-`tests/test_workflow_contracts.py::test_no_workflow_gates_on_a_status_the_ledger_forbids_producing`
-enforces it.
-
-## Data sources
-
-SerpAPI requires a key. The rest are keyless, recommended, or optional. Set `CROSSREF_MAILTO`
-to join Crossref's polite pool.
-
-| Tier | Sources |
-|------|---------|
-| Required (key) | [SerpAPI](https://serpapi.com/) (Google Scholar) |
-| Recommended (key) | [Serply](https://serply.io/) (citation details), [Semantic Scholar](https://www.semanticscholar.org/) |
-| Free (no key) | [Crossref](https://www.crossref.org/), [OpenAlex](https://openalex.org/), [arXiv](https://arxiv.org/), [PubMed](https://pubmed.ncbi.nlm.nih.gov/), [Europe PMC](https://europepmc.org/), [DBLP](https://dblp.org/) |
-| Optional (key) | [OpenReview](https://openreview.net/), [Google Gemini](https://ai.google.dev/) |
+Set `CROSSREF_MAILTO` to use Crossref's polite pool.
 
 ## Development
 
-Use the checked-in hash-locked requirements files for a reproducible install.
-`requirements-build.lock` pins the build backend and the `uv` lock compiler,
-`requirements.lock` pins runtime dependencies, and `requirements-dev.lock` pins the runtime
-plus the development toolchain.
+Install from the hash-locked requirements for a reproducible environment:
 
 ```bash
-# Runtime
-python -m pip install --require-hashes -r requirements-build.lock -r requirements.lock
-python -m pip install --no-build-isolation --no-deps -e .
-
-# Development
 python -m pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
 python -m pip install --no-build-isolation --no-deps -e .
 ```
 
-Three gates must pass before merge.
+Three checks gate a merge:
 
 ```bash
-ruff check citeforge/ tests/ main.py   # Lint, line-length 120
-mypy citeforge/ main.py                # Type check, strict
-pytest tests/ -v --tb=short            # Full suite, Python 3.10 to 3.14
+ruff check citeforge/ tests/ main.py
+mypy citeforge/ main.py
+pytest tests/ -m 'not live'
 ```
 
-Run one test with `pytest tests/test_core.py::test_function_name -v --tb=short`. Tests never
-make real API calls; use `monkeypatch` for HTTP. Integration tests that need keys skip
+Tests never touch the network; patch HTTP with `monkeypatch`. Tests needing real keys skip
 themselves when the keys are absent.
 
-The installed command is implemented in `citeforge/cli.py`, and root `main.py` is only a
-compatibility launcher. The CLI loads keys and author records, then delegates to `article.py`,
-`scheduler.py`, and `postrun.py` under `citeforge/pipeline/`.
+`citeforge/cli.py` is the entry point (`main.py` is a thin launcher) and delegates to
+`article.py`, `scheduler.py` and `postrun.py` under `citeforge/pipeline/`.
 
-Two conventions carry more weight than their size suggests. Entry-type and text normalization
-is single-sourced in `citeforge/canonicalize.py`, where callers pick one of four ordered
-stages; a rule belongs to every stage whose path can emit the affected entry, so changing one
-means checking all four. And thresholds, endpoints, trust order, rate limits, and venue
-mappings belong in `citeforge/config.py`, never inline at a call site.
+Two conventions matter more than they look:
+
+- Entry-type and text normalization lives only in `citeforge/canonicalize.py`, split across
+  four ordered stages. A rule belongs in every stage that can emit the affected entry, so
+  adding one means checking all four.
+- Thresholds, endpoints, trust order, rate limits and venue mappings belong in
+  `citeforge/config.py`, never inline.
 
 ## Citation
-
-Metadata is also provided in [CITATION.cff](CITATION.cff). If you use CiteForge in your work,
-please cite it with the entry below.
 
 ```bibtex
 @software{CiteForge2026:GSpadon,
@@ -203,7 +149,8 @@ please cite it with the entry below.
 }
 ```
 
+See also [CITATION.cff](CITATION.cff).
+
 ## License
 
-Distributed under the terms of the GNU Affero General Public License version 3 or later
-(AGPL-3.0-or-later). See [LICENSE](LICENSE) for details.
+GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).

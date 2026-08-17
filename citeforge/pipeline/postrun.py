@@ -60,22 +60,19 @@ _CITEKEY_AUTHOR_RE = re.compile(r"^([A-Za-z]+)(\d{4}:.+)$")
 def _reconcile_author_prefix(entry: dict[str, Any], filename: str) -> tuple[str, str | None]:
     """Return the entry's citation key and filename with a stale surname fixed.
 
-    Scoped deliberately to "Surname Initials" author lists, which is the one
-    class this repairs. `Y2026-AlteredNeurodevelopmental.bib` held a paper by
-    Jin, keyed `Y2026:...`, because "Jin Y" is that form and the trailing token
-    was read as the surname. Correcting the derivation alone would leave every
-    committed file carrying the old name, since nothing renames them.
+    Scoped to "Surname Initials" author lists, where the trailing token is
+    initials rather than a name, so a file for a paper by Jin ends up named
+    `Y2026-...`. Fixing the derivation does not fix files already on disk, which
+    is what this is for.
 
-    A wider "prefix disagrees with first author" test is wrong here, and was
-    measured to be. A file can legitimately hold content whose author no longer
-    matches its name, because the deduplicator writes a surviving entry under
-    the duplicate's existing filename. Six such files exist, and renaming them
-    on the author alone yields a name that is still wrong about the year and the
-    title, while looking freshly derived. That mismatch is a separate question.
+    Do not widen it to "prefix disagrees with the first author". A file may
+    legitimately hold content whose author no longer matches its name, because
+    the deduplicator writes a survivor under the losing duplicate's filename;
+    renaming on the author alone produces a name that is still wrong about the
+    year and title while looking freshly derived.
 
-    Only the surname is reconsidered even here. The title portion is left as it
-    was, because it can come from Gemini or from collision resolution and
-    re-deriving it would rewrite names that are already correct.
+    Only the surname is reconsidered. The title portion may come from Gemini or
+    from collision resolution, and re-deriving it would churn correct names.
     """
     fields = entry.get("fields") or {}
     authors = str(fields.get("author") or "")
@@ -187,14 +184,11 @@ def finalize_run(
 
                 author_dir_path = os.path.dirname(orphan)
                 tracked = csv_entries.get(author_dir_path, [])
-                # Full identity, not a title score. A title score alone deleted a
-                # distinct paper: "...new locus associated with OCD" (2021, 192
-                # authors) against "...new loci associated with OCD" (2024, 37
-                # authors) scores 0.978 and the two carry different DOIs.
-                # DISK_SURVIVOR is the same predicate save_entry_to_file already
-                # uses to decide that two files are one work, and it rejects that
-                # pair on DOI_CONFLICT. Deleting on weaker evidence than the
-                # writer required to merge is what made this unsafe.
+                # Full identity, never a title score. Near-identical titles are
+                # routine in this corpus (successive genome-wide studies differ
+                # by a word) and conflicting DOIs settle it. DISK_SURVIVOR is
+                # what save_entry_to_file requires to merge two files, so
+                # deleting on anything weaker would be inconsistent with it.
                 is_dup = orphan_entry is not None and any(
                     evaluate_identity(entry, orphan_entry, context=IdentityContext.DISK_SURVIVOR).verdict
                     for entry in tracked
@@ -242,13 +236,10 @@ def finalize_run(
             except (OSError, ValueError) as exc:
                 raise FinalizationError(f"cannot read {fpath} for the year-window check") from exc
             year = extract_year_from_any((parsed or {}).get("fields", {}).get("year"), fallback=0) or 0
-            # No filename fallback. An earlier revision of this loop kept one for
-            # entries stating no usable year, which sounds harmless and is not:
-            # "in press", "n.d.", an empty year and a malformed one all land
-            # here, and the filename is a stale label on 13 committed files. That
-            # combination deletes an in-window paper on a name inherited from
-            # some other record, with zero evidence about its own contents.
-            # Deletion needs the entry's own year; nothing else is evidence.
+            # The entry's own year decides, with no fallback to the filename.
+            # "in press", "n.d." and an unparseable year all arrive here, and a
+            # filename can be inherited from another record, so falling back
+            # would delete an in-window paper on no evidence about its contents.
             if not year:
                 logger.debug(
                     f"YEAR_WINDOW | keeping {fname}: the entry states no usable year",
@@ -501,11 +492,8 @@ def _remove_superseded_preprints(out_dir: str) -> int:
 def _load_csv_entries(csv_path: str) -> dict[str, list[dict[str, Any]]]:
     """Load CSV-tracked .bib entries, grouped by author directory.
 
-    Whole entries, not titles alone. The orphan sweep deletes, and a title is
-    not enough evidence to delete on: the corpus holds two distinct OCD
-    genome-wide papers whose titles differ only in "locus" versus "loci"
-    (similarity 0.978, different DOIs, 192 versus 37 authors). Keeping the DOI
-    is what lets `evaluate_identity` reject that pair.
+    Whole entries rather than titles, because the orphan sweep deletes and
+    `evaluate_identity` needs the DOI to tell near-identical titles apart.
     """
     result: dict[str, list[dict[str, Any]]] = {}
     try:

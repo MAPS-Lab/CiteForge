@@ -662,7 +662,7 @@ def test_real_dispatch_journal_preprint_never_becomes_conference(journal: str) -
 
 def test_real_dispatch_misc_conference_howpublished_still_promotes() -> None:
     """A @misc whose howpublished is a genuine conference is still upgraded to
-    @inproceedings (the fix narrows the rule, it does not disable it)."""
+    @inproceedings (the preprint guard narrows the rule, it does not disable it)."""
     result = _canon(_article(type="misc", howpublished="Workshop on Machine Learning for Health"))
     assert result["type"] == "inproceedings"
     assert result["fields"]["booktitle"] == "Workshop on Machine Learning for Health"

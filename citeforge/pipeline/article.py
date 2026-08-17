@@ -543,11 +543,8 @@ def process_article(
             # Parse failed - should be rare since we generated the BibTeX
             logger.error("Failed to parse Scholar BibTeX; using minimal fallback structure", category=LogCategory.ERROR)
             baseline_entry = {"type": "misc", "key": result_id or "entry", "fields": {"title": title} if title else {}}
-        # Scholar's title, authors and year are what this record is built from,
-        # so the provenance row must say so. The flag was initialised False and
-        # never assigned anywhere in the package, making its summary.csv column
-        # structurally 0 for all 2,575 rows while Scholar seeded every one of
-        # them. A provenance column that cannot be true is worse than absent.
+        # Scholar supplied the title, authors and year this record is built
+        # from, so its provenance column has to record that.
         flags["scholar_bib"] = True
         _bl_source = "scholar_minimal"
     else:
@@ -1385,7 +1382,7 @@ def process_article(
         # ===== Enrichment Summary =====
         logger.info("▶ Enrichment Summary", category=LogCategory.ARTICLE)
 
-        # Count total enrichment sources (excluding doi_csl and doi_bibtex as they're part of doi_validated)
+        # doi_csl and doi_bibtex are excluded here; DOI status is reported separately below.
         enrichment_sources = {
             "scholar_page": "Scholar Citation",
             "s2": "Semantic Scholar",
