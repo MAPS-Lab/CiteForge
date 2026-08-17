@@ -39,9 +39,7 @@ from citeforge.pipeline import postrun
 from citeforge.pipeline.postrun import FinalizationError, finalize_run
 from tests.factories import article, misc, write_bib
 
-# A year comfortably inside the contribution window regardless of any
-# CITEFORGE_MIN_YEAR override (under the default env this is exactly 2024, so the
-# filenames read Foo2024-*.bib as in the assignment).
+# A year inside the contribution window under any CITEFORGE_MIN_YEAR override.
 _IN_WINDOW_YEAR = get_min_year() + 4
 
 
@@ -426,13 +424,9 @@ def test_year_window_keeps_a_file_with_no_usable_year_anywhere(tmp_path: Path, n
 def test_year_window_never_deletes_on_the_filename_year(tmp_path: Path, no_a2i2: None, year_field: str) -> None:
     """A stale filename must not delete a file its entry says nothing about.
 
-    The fallback here used to decide the delete whenever the entry stated no
-    usable year, which covers an empty year, "in press", "n.d." and anything
-    unparseable. Filenames go stale: 13 committed files are named for a year
-    their contents do not carry, because the deduplicator writes a survivor
-    under the losing duplicate's name. That pairing removes an in-window paper
-    on a label inherited from some other record, with no evidence about its own
-    contents. Deletion needs the entry's own year and nothing else.
+    A filename can be inherited from another record, since the deduplicator
+    writes a survivor under the losing duplicate's name, so an unparseable year
+    field must never fall back to it. Deletion needs the entry's own year.
     """
     out_dir = tmp_path / "out"
     author = _author_dir(out_dir)

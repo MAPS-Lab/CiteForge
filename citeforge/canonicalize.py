@@ -43,10 +43,7 @@ class CanonicalStage(Enum):
     POSTRUN_ORPHAN_REPAIR = "postrun_orphan_repair"
 
 
-# Pre-compiled patterns for the multi-site title/venue fixups. These rule bodies
-# are single-sourced as helper functions below and dispatched per CanonicalStage
-# by canonicalize(); _fixup_bib_entry (Site A / orphan repair) and the Phase-4
-# post-merge block (Site C) share the SAME helper bodies.
+# Patterns for the shared title/venue fixups.
 _TRAILING_DASH_RE = re.compile(r"[\s][-\u2013]\s*$")
 _SUBTITLE_WRAPPER_RE = re.compile(r":\s*-([^-]+)-\s*$")
 _SPIRE_STRIP_RE = re.compile(r"\s*:\s*SPIRE\b.*$")

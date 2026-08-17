@@ -1,8 +1,7 @@
 name: Live Shadow Refresh
 
-# Manual dispatch only, never a schedule. This is the first generation to reach
-# live providers, so it spends real SerpAPI and Serply quota and must not fire
-# at a moment nobody is watching it.
+# Manual dispatch only, never a schedule: this spends real SerpAPI and Serply
+# quota and must not fire at a moment nobody is watching it.
 on:
   workflow_dispatch:
     inputs:

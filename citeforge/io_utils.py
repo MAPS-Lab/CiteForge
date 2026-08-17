@@ -356,12 +356,9 @@ def collect_orphan_files(csv_path: str, output_dir: str) -> list[str]:
 
     orphans: list[str] = []
     try:
-        # a2i2 is rebuilt from the author directories on every run and is never
-        # tracked in the summary CSV, so every one of its files looks orphaned.
-        # It was reported as 1094 kept orphans per run, burying any real one, and
-        # those files were eligible for deletion: they survived only because
-        # tracked titles are keyed by author directory and no CSV row points
-        # inside a2i2. The three other whole-tree passes already skip it.
+        # a2i2 is rebuilt from the author directories every run and is never
+        # tracked in the CSV, so its files would all read as orphans and become
+        # deletion candidates. The other whole-tree passes skip it too.
         subdirs = [os.path.join(output_dir, d) for d in iter_output_dirs(output_dir) if d != A2I2_OUTPUT_DIR]
     except OSError:
         return []
@@ -602,13 +599,10 @@ def build_a2i2_folder(
     a2i2_dir = os.path.join(out_dir, A2I2_OUTPUT_DIR)
     os.makedirs(a2i2_dir, exist_ok=True)
     existing = [f for f in sorted(os.listdir(a2i2_dir)) if os.path.isfile(os.path.join(a2i2_dir, f))]
-    # Refuse to empty a populated folder on the strength of a member list that
-    # mostly did not resolve. `--input` is operator-settable and defaults to the
-    # same tree, so `citeforge --input subset.csv` reached here with 2 of 21
-    # members present and deleted 1035 of 1094 files, reported only as
-    # "a2i2_files=59" -- a build count, not a net change. The rebuild is a
-    # refresh of a derived folder, and a derived folder is not a licence to
-    # discard the previous one when the inputs went missing.
+    # Never empty a populated folder because the member list mostly failed to
+    # resolve. `--input` is operator-settable against the standing output tree,
+    # so a subset CSV would otherwise wipe the aggregate and report only the
+    # small number it rebuilt.
     if existing and resolved_members < len(a2i2_names) / 2:
         log.error(
             "a2i2 rebuild aborted: only %d of %d members resolved against the input records, "

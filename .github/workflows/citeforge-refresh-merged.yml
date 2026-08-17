@@ -1,10 +1,9 @@
 name: CiteForge Refresh Merged
 
-# Fires only when a refresh pull request actually lands on main. The previous
-# arrangement dispatched the website from the refresh job as soon as the
-# pipeline reported convergence, which is upstream of publication: the
-# generation can converge and its pull request can still sit unreviewed, be
-# closed, or fail Required CI. main carrying the corpus is the real event.
+# Fires only when a refresh pull request actually lands on main. Convergence is
+# upstream of publication: a generation can converge while its pull request sits
+# unreviewed, is closed, or fails Required CI. main carrying the corpus is the
+# real event.
 
 on:
   pull_request:

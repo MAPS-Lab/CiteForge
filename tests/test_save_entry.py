@@ -32,8 +32,7 @@ from tests import factories
 
 AUTHOR_ID = "TestScholar01"
 
-# Golden DOIs used across the boundary/precedence fixtures. Preprint vs
-# published classification was confirmed against the live ``_is_preprint_doi``.
+# Preprint and published DOIs, as ``_is_preprint_doi`` classifies them.
 PREPRINT_DOI = "10.48550/arxiv.2401.00001"
 PUBLISHED_DOI = "10.1145/3580305"
 BOUNDARY_TITLE = "Neural Operators for Turbulent Flow Prediction"
