@@ -62,7 +62,6 @@ _TITLE_STOP_WORDS: frozenset[str] = frozenset(
     }
 )
 
-# Compiled once at import; the parse/serialize/key helpers below run per entry.
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
 _NON_WORD_RE = re.compile(r"\W+")
 _FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_\-]+")

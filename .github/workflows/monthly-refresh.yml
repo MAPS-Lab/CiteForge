@@ -27,7 +27,7 @@ name: Monthly Pipeline Refresh
 on:
   schedule:
     - cron: '0 4 1 * *'  # 4 AM UTC on the 1st of each month (midnight AST)
-  workflow_dispatch:       # Allow manual trigger
+  workflow_dispatch:
 
 # Declared per job below, not blanket at the top. The refresh job needs to read
 # the checkout and nothing else; publication happens with the App token, and the
@@ -127,14 +127,9 @@ jobs:
             last_total=$total
 
             # Convergence is "this iteration changed nothing that gets
-            # published", read off the corpus itself. The previous test
-            # compared the API-call count between iterations and declared
-            # convergence when the delta fell to 50 or less. It never fired:
-            # the August 2026 chain went 3121, 2686, 2447, 2233, deltas of
-            # 435, 239 and 214, so the loop ran to the six-hour ceiling and
-            # the runner was cancelled. It also needed three to four full
-            # corpus sweeps to decide, and four warm sweeps at the measured
-            # 82.35 min do not fit in the 360 min budget.
+            # published", read off the corpus itself rather than off API-call
+            # counts: a call-count delta never settles inside the job's
+            # six-hour ceiling, and it measures traffic rather than output.
             # NUL-delimited throughout: author directories are named
             # "Surname (ScholarID)" and the space splits under plain xargs,
             # which leaves sha256sum reading a subset and reporting a digest
@@ -212,11 +207,10 @@ jobs:
           app-id: ${{ secrets.CI_BOT_APP_ID }}
           private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
 
-      # Publication goes through a pull request, never a direct push. The
-      # direct push this replaced was rejected by repo ruleset 10020080, which
-      # is why nothing has published since 2026-07-05.
+      # Publication goes through a pull request, never a direct push: ruleset
+      # 10020080 rejects a direct push to main.
       #
-      # The rules were split so this can run unattended without weakening CI.
+      # The rules are split so this can run unattended without weakening CI.
       # Ruleset 20801390 "Required CI on default branch" carries the strict
       # required_status_checks rule and has no bypass actors at all, so nothing
       # merges without a green "Required CI". Ruleset 10020080 keeps deletion,

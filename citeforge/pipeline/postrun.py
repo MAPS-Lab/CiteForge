@@ -166,7 +166,6 @@ def finalize_run(
     if csv_path is not None:
         flush_summary_csv(csv_path)
 
-        # Remove phantom CSV entries
         phantoms = reconcile_summary_csv(csv_path)
         if phantoms:
             logger.info(f"Reconciled summary CSV: removed {phantoms} phantom entries", category=LogCategory.CLEANUP)
@@ -335,7 +334,6 @@ def finalize_run(
             category=LogCategory.CLEANUP,
         )
 
-    # Drop preprints superseded by a published record of the same work.
     superseded = _remove_superseded_preprints(out_dir)
     if superseded:
         logger.info(
@@ -358,7 +356,6 @@ def finalize_run(
                 category=LogCategory.CLEANUP,
             )
 
-    # Build a2i2 joint output folder
     a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
     if a2i2_count:
         logger.info(

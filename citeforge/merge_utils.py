@@ -129,7 +129,7 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
                 if not t or not t[0].isalpha():
                     new_tokens.append(t)
                 elif trailing_initials:
-                    # Restore the initials an earlier run title-cased away.
+                    # Initials stay uppercase; a previous pass may have lowered them.
                     if t != t.upper():
                         any_fixed = True
                     new_tokens.append(t.upper())

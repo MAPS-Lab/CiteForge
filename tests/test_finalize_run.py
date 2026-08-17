@@ -703,10 +703,8 @@ def test_unreadable_candidate_raises(tmp_path: Path, no_a2i2: None) -> None:
     """A tracked file that cannot be read aborts the run rather than being skipped.
 
     The year-window step is the first reader, because it reads every entry's own
-    year instead of trusting the filename. It previously accepted an in-window
-    filename without opening the file, leaving the fixup pass to raise; the
-    contract that an unreadable file stops the run is what matters here, not
-    which step notices.
+    year instead of trusting the filename. Which step notices does not matter;
+    that an unreadable file stops the run rather than being skipped does.
     """
     out_dir = tmp_path / "out"
     author = _author_dir(out_dir)

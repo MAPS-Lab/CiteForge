@@ -502,10 +502,6 @@ def test_doi_fixtures_are_classified_as_expected() -> None:
 
 def test_real_dispatch_article_no_journal_becomes_misc() -> None:
     """@article with no journal -> @misc through the REAL POST_MERGE dispatch.
-
-    Regression counterpart: TestVenuelessTypeDowngrade
-    .test_article_no_journal_with_published_doi_becomes_misc, which sets
-    result["type"] = "misc" itself. Here the dispatch does the downgrade.
     """
     result = _canon(_article())  # title/author/year only; no journal
     assert result["type"] == "misc"
@@ -528,9 +524,6 @@ def test_real_dispatch_article_no_journal_downgrades_even_with_published_doi() -
 
 def test_real_dispatch_inproceedings_no_booktitle_becomes_misc() -> None:
     """@inproceedings with no booktitle -> @misc through the REAL POST_MERGE dispatch.
-
-    Regression counterpart: TestVenuelessTypeDowngrade
-    .test_inproceedings_no_booktitle_becomes_misc (which re-implements the flip).
     """
     result = _canon(_article(type="inproceedings"))  # no booktitle
     assert result["type"] == "misc"

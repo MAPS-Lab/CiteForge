@@ -109,7 +109,6 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
     doi = fields.get("doi")
     has_venue = any(fields.get(v) and not has_placeholder(str(fields.get(v))) for v in ("journal", "booktitle"))
 
-    # Completeness requires the essential fields, a venue, and a non-preprint DOI
     doi_is_preprint = False
     journal_is_preprint = False
 
@@ -444,7 +443,6 @@ def process_article(
                     existing_bib = f.read()
                 existing_entry = bt.parse_bibtex_to_dict(existing_bib)
 
-                # Check if this file matches our article by comparing title
                 if existing_entry:
                     existing_title = existing_entry.get("fields", {}).get("title", "")
                     if isinstance(existing_title, list):

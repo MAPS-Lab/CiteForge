@@ -353,9 +353,8 @@ def test_no_workflow_gates_on_a_status_the_ledger_forbids_producing() -> None:
     deliberately not entitled to make it.
 
     So a workflow gating on `complete` does not wait for a slow generation, it
-    waits forever. An earlier revision of the monthly refresh did exactly that
-    and could publish nothing. The fix is never to remove the fence; it is to
-    gate on evidence the ledger can actually produce.
+    waits forever and publishes nothing. Gate on evidence the ledger can
+    produce; never remove the fence to make a gate pass.
     """
     for path in _WORKFLOW_PATHS:
         for statement in _shell_statements(_workflow_run_commands(_load_workflow(path))):

@@ -309,7 +309,7 @@ def test_checkpoint_restore_uses_the_same_digests_the_save_side_wrote(tmp_path: 
     assert restored.sequence == 1
     assert (tmp_path / "restored" / DEFAULT_LEDGER_NAME).read_bytes() == b"ledger-state"
 
-    # The shape this replaced. Without this the test above passes vacuously.
+    # A mismatched policy digest must NOT restore, or the assertion above is vacuous.
     with pytest.raises(CheckpointError, match="different input census or policy"):
         store.load_latest_valid(
             generation_id=generation_id,
