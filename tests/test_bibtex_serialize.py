@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from citeforge.bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict
+from citeforge.bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict, parse_strict_bibtex_document
 from tests import factories
 
 # Captured from the live serializer. Regenerate only through a reviewed step if
@@ -163,3 +163,40 @@ def test_nonascii_author_folds_to_stable_ascii() -> None:
     reparsed = parse_bibtex_to_dict(once)
     assert reparsed is not None
     assert bibtex_from_dict(reparsed) == once
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("CD16a\nhigh NK cell infiltration", "CD16a high NK cell infiltration"),
+        ("Detecting Opioid Misuse (\nNER\n) With Deep Learning", "Detecting Opioid Misuse ( NER ) With Deep Learning"),
+        ("tabs\tand   runs", "tabs and runs"),
+    ],
+    ids=["newline", "wrapped-parenthetical", "tabs-and-runs"],
+)
+def test_field_values_are_written_on_one_line(raw: str, expected: str) -> None:
+    """A provider title containing a newline must not reach the file verbatim.
+
+    The strict parser collapses whitespace on read, so a multi-line value makes
+    the entry unequal to its own re-serialization. The post-run repair then
+    rewrites it every run, the corpus digest never repeats, and the monthly
+    refresh loop cannot converge.
+    """
+    entry = {"type": "article", "key": "K", "fields": {"title": raw, "author": "Doe, J", "year": "2021"}}
+
+    out = bibtex_from_dict(entry)
+
+    assert f"title = {{{expected}}}" in out
+    assert out.count("\n") == len([line for line in out.splitlines() if line])
+
+
+def test_a_written_entry_round_trips_byte_identically() -> None:
+    """Serialize, parse, serialize again: the bytes must not move."""
+    entry = {
+        "type": "article",
+        "key": "K",
+        "fields": {"title": "CD16a\nhigh NK cells", "author": "Doe, J", "year": "2021", "journal": "J"},
+    }
+
+    once = bibtex_from_dict(entry)
+
+    assert bibtex_from_dict(parse_strict_bibtex_document(once.encode())) == once
