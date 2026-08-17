@@ -531,6 +531,37 @@ def test_csv_names_exactly_the_files_on_disk_at_return(tmp_path: Path, no_a2i2: 
     assert {os.path.abspath(r) for r in rows} == {os.path.abspath(p) for p in on_disk}
 
 
+def test_a_file_unequal_to_its_own_serialization_is_repaired(tmp_path: Path, no_a2i2: None) -> None:
+    """The post-run fixup must settle a file no rule wants to change.
+
+    A title written with a newline in it parses back with the whitespace
+    collapsed, so the entry differs from its own re-serialization while every
+    canonicalization rule reports no change. Gating the write on the rules left
+    such a file rewritten on every run and never settled, which kept the corpus
+    digest moving and stopped the monthly refresh converging.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    damaged = author / f"Doe{_IN_WINDOW_YEAR}-Multiline.bib"
+    damaged.write_text(
+        "@article{Doe" + str(_IN_WINDOW_YEAR) + ":Multi,\n"
+        "  title = {CD16a\nhigh NK cell infiltration},\n"
+        '  author = {Doe, Jane},\n'
+        f"  year = {{{_IN_WINDOW_YEAR}}},\n"
+        "  journal = {Some Journal}\n}\n",
+        encoding="utf-8",
+    )
+
+    first = finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=None)
+
+    assert first.files_fixed == 1, "a file unequal to its own serialization must be repaired"
+    assert "CD16a high NK cell" in damaged.read_text(encoding="utf-8")
+
+    second = finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=None)
+
+    assert second.files_fixed == 0, "the repair must reach a fixpoint, not rewrite every run"
+
+
 # --- PHANTOM-WRITE GUARD ----------------------------------------------------
 
 

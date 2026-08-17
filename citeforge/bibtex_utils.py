@@ -67,6 +67,9 @@ _NON_WORD_RE = re.compile(r"\W+")
 _FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_\-]+")
 _TITLE_WORD_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
 _CONTROL_CHARS_RE = re.compile(r"[\n\r\t]")
+# Any run of whitespace inside a field value, collapsed on write so the file
+# round-trips through the strict parser, which collapses it on read.
+_FIELD_WHITESPACE_RE = re.compile(r"[ \r\n\t]+")
 
 _PARSER_LOCAL = threading.local()
 
@@ -443,8 +446,15 @@ def bibtex_from_dict(entry: dict[str, Any]) -> str:
     for k in ordered_keys:
         val = fields.get(k)
         if val is not None and str(val).strip():
+            # One line per field. A provider occasionally returns a title with a
+            # newline in it, and writing that verbatim produces a file the strict
+            # parser reads back with the whitespace collapsed, so the entry never
+            # equals its own re-serialization. The post-run repair then rewrites
+            # it every run, the corpus digest never repeats, and the refresh
+            # loop cannot converge.
+            val = _FIELD_WHITESPACE_RE.sub(" ", str(val)).strip()
             if k not in {"doi", "howpublished", "url"}:
-                val = _normalize_to_ascii(str(val))
+                val = _normalize_to_ascii(val)
             if k == "title":
                 val = _sanitize_title(val) or val
             # Escape bare & for valid BibTeX (but not in URLs/DOIs)

@@ -279,19 +279,22 @@ def finalize_run(
                 raise FinalizationError(f"cannot read {pr_fpath} for the post-run fixup") from exc
             if not pr_parsed:
                 continue
-            changed = _fixup_bib_entry(pr_parsed)
+            _fixup_bib_entry(pr_parsed)
             # After the field rules, because author casing runs among them and
             # the surname is read from the corrected author string.
             reconciled_key, renamed = _reconcile_author_prefix(pr_parsed, pr_fname)
             if reconciled_key and reconciled_key != pr_parsed.get("key"):
                 pr_parsed["key"] = reconciled_key
-                changed = True
-            if changed:
-                bib_str = bt.bibtex_from_dict(pr_parsed)
-                if bib_str != pr_content:
-                    if not safe_write_file(pr_fpath, bib_str):
-                        raise FinalizationError(f"post-run fixup could not write {pr_fpath}")
-                    postrun_fixed += 1
+            # The serialized form decides, not whether a rule reported a change.
+            # A file can differ from its own re-serialization with no rule
+            # firing at all, and gating on the rules left those files rewritten
+            # on every run and never settled, so the corpus digest never
+            # repeated and the refresh loop could not converge.
+            bib_str = bt.bibtex_from_dict(pr_parsed)
+            if bib_str != pr_content:
+                if not safe_write_file(pr_fpath, bib_str):
+                    raise FinalizationError(f"post-run fixup could not write {pr_fpath}")
+                postrun_fixed += 1
             if renamed:
                 target = os.path.join(pr_dir, renamed)
                 # A collision means another entry already owns the corrected
