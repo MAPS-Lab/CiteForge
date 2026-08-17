@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
+import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,9 @@ from ruamel.yaml import YAML
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
 from citeforge.refresh.ledger import Ledger
 from citeforge.refresh.types import GenerationSpec, TaskDisposition
+
+# Resolved rather than spelled, so the path is absolute on any host.
+_BASH = shutil.which("bash") or "/bin/bash"
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_DIRECTORY = _REPOSITORY_ROOT / ".github/workflows"
@@ -143,6 +148,85 @@ class TestWorkflowDocuments:
 
 class TestMonthlyRefresh:
     """The monthly refresh may publish, but only by offering a pull request."""
+
+    def test_every_shell_block_in_every_workflow_is_balanced(self) -> None:
+        """A run block must parse as a shell script.
+
+        Deleting an `if ! save_cache ...; then` line while leaving its body took
+        the `fi` that closed the enclosing failure branch. The counts still
+        balanced, so nothing caught it, but the digest computation moved inside
+        the failure branch and every successful run compared two unset variables
+        and declared convergence after a single pass. `bash -n` sees the pairing
+        that a count cannot.
+        """
+        for path in _WORKFLOW_PATHS:
+            for job_id, job in (_load_workflow(path).get("jobs") or {}).items():
+                for index, step in enumerate(job.get("steps") or []):
+                    script = step.get("run")
+                    if not script or script.lstrip().startswith("python"):
+                        continue
+                    # `${{ }}` is not shell, so it is neutralised before parsing.
+                    neutral = re.sub(r"\$\{\{[^}]*\}\}", "EXPR", script)
+                    # -n parses without executing, and the input is this
+                    # repository's own workflow files.
+                    result = subprocess.run(  # noqa: S603
+                        [_BASH, "-n"], input=neutral, capture_output=True, text=True, check=False
+                    )
+                    assert result.returncode == 0, (
+                        f"{path.name}:{job_id}[{index}] {step.get('name', '')}: {result.stderr.strip()}"
+                    )
+
+    def test_convergence_requires_a_confirming_pass(self) -> None:
+        """An empty digest must never satisfy the convergence test.
+
+        `prev_digest` starts empty, so a bare `[ "$digest" = "$prev_digest" ]`
+        is true on the first iteration whenever `digest` is also empty, which
+        publishes a corpus no second pass has confirmed.
+        """
+        loop = next(
+            step["run"]
+            for step in _workflow_steps(_load_workflow(_MONTHLY_REFRESH_WORKFLOW))
+            if step.get("id") == "loop"
+        )
+        comparison = [line for line in _shell_statements([loop]) if '"$digest" = "$prev_digest"' in line]
+
+        assert comparison, "the convergence comparison is gone"
+        for line in comparison:
+            assert '-n "$digest"' in line, f"convergence must reject an empty digest: {line}"
+
+    def test_publication_retries_and_preserves_the_corpus(self) -> None:
+        """An hour of provider quota must not die with a transient API error.
+
+        A platform incident returned 403 on the push after a converged run and
+        the corpus was discarded, because it lives only on the runner.
+        """
+        workflow = _load_workflow(_MONTHLY_REFRESH_WORKFLOW)
+        statements = _shell_statements(_workflow_run_commands(workflow))
+
+        pushes = [line for line in statements if "git push" in line]
+        assert pushes and all(line.lstrip().startswith("retry ") for line in pushes), pushes
+
+        preserving = [
+            step
+            for step in _workflow_steps(workflow)
+            if "upload-artifact" in str(step.get("uses", "")) and "output/" in str(step.get("with", {}).get("path"))
+        ]
+        assert preserving, "no step preserves output/ when publication fails"
+        assert "failure()" in str(preserving[0].get("if")), preserving[0]
+
+    def test_publication_failure_does_not_end_the_run(self) -> None:
+        """A converged run that could not publish must retry, not dead-end.
+
+        The re-trigger required success and the failure branch merely exited 1,
+        so a converged-but-unpublished run did neither and its corpus was lost.
+        """
+        verify = _load_workflow(_MONTHLY_REFRESH_WORKFLOW)["jobs"]["verify"]["steps"]
+        retrigger = next(step for step in verify if "Re-trigger" in step.get("name", ""))
+        failing = next(step for step in verify if step.get("name", "").startswith("Fail if"))
+
+        assert "converged == 'true'" in str(retrigger.get("if")), retrigger.get("if")
+        # Only an unconverged run is a real failure.
+        assert "converged != 'true'" in str(failing.get("if")), failing.get("if")
 
     def test_publication_offers_a_candidate_pull_request(self) -> None:
         """The corpus reaches main through a branch Required CI has passed. The
