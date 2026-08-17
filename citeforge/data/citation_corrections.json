@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "records": [
+    {
+      "match": {
+        "title": "Aprendizado por Reforço para Alocação de Rins: Uma Abordagem Baseada em Policy Gradient com Dados Reais do Sistema Brasileiro de Transplantes",
+        "year": 2026
+      },
+      "type": "inproceedings",
+      "fields": {
+        "title": "Aprendizado por Reforço para Alocação de Rins: Uma Abordagem Baseada em Policy Gradient com Dados Reais do Sistema Brasileiro de Transplantes",
+        "author": "Ivar V. Belizario and Douglas Teodoro and Luís G. M. Andrade and Gabriel Spadon and Jose F. Rodrigues-Jr",
+        "year": "2026",
+        "booktitle": "Simpósio Brasileiro de Banco de Dados (SBBD)",
+        "pages": "238-249",
+        "publisher": "SBC",
+        "issn": "2763-8979",
+        "doi": "10.5753/sbbd.2026.249194",
+        "url": "https://doi.org/10.5753/sbbd.2026.249194"
+      },
+      "source": "https://sol.sbc.org.br/index.php/sbbd/article/view/43973"
+    },
+    {
+      "match": {
+        "title": "System and method for adverse event detection or severity estimation from surgical data",
+        "year": 2023
+      },
+      "type": "misc",
+      "fields": {
+        "title": "System and method for adverse event detection or severity estimation from surgical data",
+        "author": "Haiqi Wei and Teodor Pantchev Grantcharov and Babak Taati and Yichen Zhang and Frank Rudzicz and Kevin Lee Yang",
+        "year": "2023",
+        "howpublished": "US Patent 11,645,745",
+        "url": "https://patents.google.com/patent/US11645745B2/en"
+      },
+      "source": "https://patents.google.com/patent/US11645745B2/en"
+    },
+    {
+      "match": {
+        "title": "System and method for adversarial vulnerability testing of machine learning models",
+        "year": 2024
+      },
+      "type": "misc",
+      "fields": {
+        "title": "System and method for adversarial vulnerability testing of machine learning models",
+        "author": "Giuseppe Marcello Antonio Castiglione and Weiguang Ding and Sayedmasoud Hashemi Amroabadi and Ga Wu and Christopher Côté Srinivasa",
+        "year": "2024",
+        "howpublished": "US Patent 12,164,649",
+        "url": "https://patents.google.com/patent/US12164649B2/en"
+      },
+      "source": "https://patents.google.com/patent/US12164649B2/en"
+    },
+    {
+      "match": {
+        "title": "A Systematic Review of Data Exhaust in IoT Devices",
+        "year": 2022
+      },
+      "type": "misc",
+      "fields": {
+        "title": "A Systematic Review of Data Exhaust in IoT Devices",
+        "author": "Mahdieh Mellaty and Srinivas Sampalli and Nur Zincir-Heywood and Kevin de Snayer and Terri Dougall",
+        "year": "2022"
+      },
+      "source": "https://d26wgh18tyxdzi.cloudfront.net/downloads/data-exhaust-in-iot-devices.pdf"
+    },
+    {
+      "match": {
+        "title": "LOMAD: Local Anomaly Detection in Maritime Trajectories Using LSTM Prediction and Visual Analytics",
+        "year": 2026
+      },
+      "type": "inproceedings",
+      "fields": {
+        "title": "LOMAD: Local Anomaly Detection in Maritime Trajectories Using LSTM Prediction and Visual Analytics",
+        "author": "Martim R. Teixeira and Gabriel Spadon and Claudio D. G. Linhares and Amilcar Soares",
+        "year": "2026",
+        "booktitle": "2026 27th IEEE International Conference on Mobile Data Management (MDM)",
+        "publisher": "IEEE",
+        "pages": "351-354",
+        "doi": "10.1109/mdm71479.2026.00053",
+        "url": "https://doi.org/10.1109/mdm71479.2026.00053"
+      },
+      "source": "https://doi.org/10.1109/MDM71479.2026.00053"
+    }
+  ]
+}

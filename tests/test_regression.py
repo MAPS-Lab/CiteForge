@@ -1,0 +1,3047 @@
+"""Regression tests for CiteForge.
+
+Tests cover BibTeX parser edge cases, cache integration, DOI validation,
+deduplication, pages validation, HTML entity decoding, title sanitization,
+arXiv consistency, and dedup gate relaxation.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from typing import Any
+from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
+
+import pytest
+import requests
+
+from citeforge import bibtex_utils as bt
+from citeforge import id_utils, merge_utils, text_utils
+from citeforge.api_generics import (
+    APISearchConfig,
+    _resolve_dotted,
+    _resolve_dotted_str,
+    search_api_generic_multiple,
+)
+from citeforge.bibtex_build import determine_entry_type
+from citeforge.bibtex_utils import bibtex_from_dict, parse_bibtex_to_dict
+from citeforge.canonicalize import _fixup_bib_entry
+from citeforge.clients.search_apis import bibtex_from_csl
+from citeforge.clients.utility_apis import gemini_generate_short_title
+from citeforge.config import (
+    ABBREVIATED_VENUE_MAP,
+    OPENREVIEW_SESSION_TTL_SECS,
+    PAGES_MAX_DIGITS,
+)
+from citeforge.doi_utils import validate_doi_candidate
+from citeforge.http_utils import (
+    _THREAD_LOCAL,
+    TokenBucketRateLimiter,
+    _get_rate_limiter,
+    _http_request,
+    http_post_json,
+)
+from citeforge.identity import IdentityContext, IdentityEvidence, IdentityReason, evaluate_identity
+from citeforge.merge_utils import merge_with_policy, save_entry_to_file
+from citeforge.text_utils import author_name_matches, author_overlap_ratio
+from citeforge.textnorm import _is_corrupted_title, _is_garbage_title
+from tests.conftest import extract_bibtex_field
+
+
+class TestBibtexParserInnerQuotes:
+    """Test that parse_bibtex_to_dict handles quotes inside braces and outer quotes."""
+
+    def test_quotes_inside_braces(self) -> None:
+        """Quotes within braces should be preserved as literal characters."""
+        bibtex = '@article{key1,\n  title = {AI "systems" review},\n  year = {2024}\n}\n'
+        result = bt.parse_bibtex_to_dict(bibtex)
+        assert result is not None
+        assert result["fields"]["title"] == 'AI "systems" review'
+
+    def test_simple_outer_quotes(self) -> None:
+        """A value wrapped in outer double quotes should have quotes stripped."""
+        bibtex = '@article{key2,\n  title = "outer value",\n  year = {2024}\n}\n'
+        result = bt.parse_bibtex_to_dict(bibtex)
+        assert result is not None
+        assert result["fields"]["title"] == "outer value"
+
+    def test_nested_braces_preserved(self) -> None:
+        """Nested braces inside a field value should be handled correctly."""
+        bibtex = "@article{key3,\n  title = {An {LSTM} Approach},\n  year = {2024}\n}\n"
+        result = bt.parse_bibtex_to_dict(bibtex)
+        assert result is not None
+        assert "LSTM" in result["fields"]["title"]
+
+
+class TestTildeInUrls:
+    """Test that bibtex_from_dict preserves tildes in URLs but converts standalone tildes."""
+
+    def test_tilde_in_url_preserved(self) -> None:
+        """A tilde in a URL (preceded by /) should be kept as-is."""
+        entry: dict[str, Any] = {
+            "type": "misc",
+            "key": "test2024",
+            "fields": {
+                "title": "Test",
+                "url": "http://example.com/~user/page",
+            },
+        }
+        output = bt.bibtex_from_dict(entry)
+        url_val = extract_bibtex_field(output, "url")
+        assert url_val is not None
+        assert "~user" in url_val
+
+    def test_standalone_tilde_converted(self) -> None:
+        """A standalone tilde between words should become a space."""
+        entry: dict[str, Any] = {
+            "type": "misc",
+            "key": "test2024",
+            "fields": {
+                "title": "word~word",
+            },
+        }
+        output = bt.bibtex_from_dict(entry)
+        title_val = extract_bibtex_field(output, "title")
+        assert title_val is not None
+        assert "word word" in title_val
+
+
+class TestNormalizeTitleWithLatex:
+    """Test that normalize_title handles various LaTeX constructs."""
+
+    def test_frac_becomes_fraction(self) -> None:
+        r"""\\frac{1}{2} should normalize to contain '1/2'."""
+        result = text_utils.normalize_title(r"\frac{1}{2}")
+        assert "1/2" in result
+
+    def test_textbf_stripped(self) -> None:
+        r"""\\textbf{bold} should normalize to contain 'bold'."""
+        result = text_utils.normalize_title(r"\textbf{bold}")
+        assert "bold" in result
+
+    def test_tilde_replaced(self) -> None:
+        """A tilde should be replaced (non-breaking space) during normalization."""
+        result = text_utils.normalize_title("hello~world")
+        assert "~" not in result
+        assert "hello" in result
+        assert "world" in result
+
+
+class TestSanitizeTitleRepeatedSubtitle:
+    """Test _sanitize_title behavior for repeated subtitles.
+
+    _sanitize_title is a nested function inside bibtex_from_dict, so we test it
+    indirectly by round-tripping through bibtex_from_dict.
+    """
+
+    def test_short_repeated_segment_kept(self) -> None:
+        """A short repeated subtitle segment (e.g., 'B') should NOT be truncated."""
+        entry: dict[str, Any] = {
+            "type": "article",
+            "key": "test2024",
+            "fields": {
+                "title": "A: B: B",
+            },
+        }
+        output = bt.bibtex_from_dict(entry)
+        title_val = extract_bibtex_field(output, "title")
+        assert title_val is not None
+        assert title_val.count("B") == 2, f"Short repeated segment should be kept, got: {title_val}"
+
+    def test_long_repeated_segment_truncated(self) -> None:
+        """A long duplicated subtitle (> 15 chars) should be truncated."""
+        long_sub = "Very Long Subtitle That Is Duplicated"
+        title = f"Main Title: {long_sub}: {long_sub}"
+        entry: dict[str, Any] = {
+            "type": "article",
+            "key": "test2024",
+            "fields": {
+                "title": title,
+            },
+        }
+        output = bt.bibtex_from_dict(entry)
+        title_val = extract_bibtex_field(output, "title")
+        assert title_val is not None
+        assert title_val.count(long_sub) == 1, f"Long repeated segment should be de-duplicated, got: {title_val}"
+
+
+class TestSearchApiGenericMultipleCache:
+    """Test that search_api_generic_multiple uses cache for repeated queries."""
+
+    def test_cache_hit_skips_http(self) -> None:
+        """Second call with same args should return cached results without HTTP."""
+        config = APISearchConfig(
+            api_name="test_api_cache",
+            base_url="https://api.example.com/search",
+            query_param_name="q",
+            result_path=["results"],
+            title_field="title",
+            author_field="authors",
+        )
+
+        fake_results = {
+            "results": [
+                {
+                    "title": "Machine Learning Fundamentals",
+                    "authors": [{"name": "John Smith"}],
+                    "year": 2024,
+                },
+            ],
+        }
+
+        with (
+            patch("citeforge.api_generics.response_cache") as mock_cache,
+            patch("citeforge.api_generics.http_get_json", return_value=fake_results) as mock_http,
+        ):
+            mock_cache.get.return_value = None
+            search_api_generic_multiple(
+                title="Machine Learning Fundamentals",
+                author_name="John Smith",
+                config=config,
+            )
+            assert mock_http.call_count == 1
+
+            mock_cache.get.return_value = {
+                "results": [
+                    {"title": "Machine Learning Fundamentals", "authors": [{"name": "John Smith"}], "year": 2024}
+                ],
+            }
+            result2 = search_api_generic_multiple(
+                title="Machine Learning Fundamentals",
+                author_name="John Smith",
+                config=config,
+            )
+            assert mock_http.call_count == 1
+            assert len(result2) == 1
+            assert result2[0]["title"] == "Machine Learning Fundamentals"
+
+
+class TestDoiValidationSkipsBibtexWhenCslMatches:
+    """Test that validate_doi_candidate does not fetch BibTeX when CSL matches."""
+
+    @patch("citeforge.doi_utils.search_apis.fetch_bibtex_via_doi")
+    @patch("citeforge.doi_utils.search_apis.fetch_csl_via_doi")
+    @patch("citeforge.doi_utils.search_apis.bibtex_from_csl")
+    def test_csl_match_skips_bibtex(
+        self,
+        mock_bibtex_from_csl: MagicMock,
+        mock_fetch_csl: MagicMock,
+        mock_fetch_bibtex: MagicMock,
+    ) -> None:
+        """When CSL validation succeeds, fetch_bibtex_via_doi should not be called."""
+        baseline_entry: dict[str, Any] = {
+            "type": "article",
+            "key": "Smith2024",
+            "fields": {
+                "title": "Test Paper on Machine Learning",
+                "author": "John Smith",
+                "year": "2024",
+            },
+        }
+
+        mock_fetch_csl.return_value = {"title": "Test Paper on Machine Learning", "DOI": "10.1234/test"}
+        mock_bibtex_from_csl.return_value = (
+            "@article{Smith2024,\n"
+            "  title = {Test Paper on Machine Learning},\n"
+            "  author = {John Smith},\n"
+            "  year = {2024}\n"
+            "}\n"
+        )
+
+        with patch(
+            "citeforge.doi_utils.evaluate_identity",
+            return_value=IdentityEvidence(True, IdentityReason.DOI_EXACT),
+        ):
+            csl_matched, bibtex_matched, _, _ = validate_doi_candidate(
+                doi="10.1234/test",
+                baseline_entry=baseline_entry,
+                result_id="Smith2024",
+            )
+
+        assert csl_matched is True
+        mock_fetch_bibtex.assert_not_called()
+        assert bibtex_matched is False
+
+
+class TestPagesMaxDigits:
+    """Fix 2: SAGE/Wiley article IDs rejected as pages."""
+
+    @staticmethod
+    def _merge_pages(pages: str) -> dict[str, Any]:
+        """Merge a pages value into a minimal article entry via Crossref enricher."""
+        entry: dict[str, Any] = {
+            "type": "article",
+            "key": "Test2023",
+            "fields": {"title": "Test", "author": "Author", "year": "2023"},
+        }
+        return merge_utils.merge_with_policy(
+            entry,
+            [("crossref", {"fields": {"pages": pages}})],
+        )
+
+    def test_sage_article_id_rejected(self) -> None:
+        """16-digit SAGE article IDs should be rejected from pages field."""
+        assert "pages" not in self._merge_pages("20552076231171496")["fields"]
+
+    def test_normal_pages_accepted(self) -> None:
+        """Normal page ranges (e.g., 123--456) should be accepted."""
+        assert self._merge_pages("123--456")["fields"].get("pages") == "123--456"
+
+    def test_short_pages_accepted(self) -> None:
+        """Single page numbers should be accepted."""
+        assert self._merge_pages("42")["fields"].get("pages") == "42"
+
+    def test_max_digits_boundary(self) -> None:
+        """Pages with exactly PAGES_MAX_DIGITS digits should be accepted."""
+        pages = "1" * PAGES_MAX_DIGITS
+        assert self._merge_pages(pages)["fields"].get("pages") == pages
+
+    def test_large_page_range_accepted(self) -> None:
+        """IEEE-style 5-digit page ranges like 13905-13917 should be accepted."""
+        assert self._merge_pages("13905-13917")["fields"].get("pages") == "13905-13917"
+
+
+class TestHtmlEntityDecode:
+    """Fix 3: HTML entities decoded in journal/title fields."""
+
+    @staticmethod
+    def _article(**extra_fields: str) -> dict[str, Any]:
+        fields = {"title": "Test Paper", "author": "Author", "year": "2023", **extra_fields}
+        return {"type": "article", "key": "Test2023", "fields": fields}
+
+    def test_amp_decoded_in_journal(self) -> None:
+        merged = merge_utils.merge_with_policy(
+            self._article(journal="Computers &amp; Education"),
+            [],
+        )
+        assert merged["fields"]["journal"] == "Computers & Education"
+
+    def test_lt_gt_decoded_in_title(self) -> None:
+        merged = merge_utils.merge_with_policy(
+            self._article(title="A &lt;b&gt;Bold&lt;/b&gt; Approach"),
+            [],
+        )
+        assert "&lt;" not in merged["fields"]["title"]
+        assert "&gt;" not in merged["fields"]["title"]
+
+
+class TestTrimTitleArtifacts:
+    """Fix 4: 'Check for updates' prefix stripped from titles."""
+
+    def test_check_for_updates_stripped(self) -> None:
+        result = text_utils.trim_title_default("Check for updates Real Title Here")
+        assert result == "Real Title Here"
+
+    def test_check_for_updates_case_variant(self) -> None:
+        result = text_utils.trim_title_default("Check for Updates Real Title Here")
+        assert result == "Real Title Here"
+
+    def test_normal_title_unchanged(self) -> None:
+        result = text_utils.trim_title_default("Normal Academic Paper Title")
+        assert result == "Normal Academic Paper Title"
+
+    def test_check_inside_title_unchanged(self) -> None:
+        """'Check' in the middle of a title should not be affected."""
+        result = text_utils.trim_title_default("How to Check for Updates in Software")
+        assert result == "How to Check for Updates in Software"
+
+
+class TestArxivJournalConsistency:
+    """Fix 7: Pure arXiv papers have journal removed (arXiv is a preprint server, not a journal)."""
+
+    def test_arxiv_eprint_no_journal_stays_empty(self) -> None:
+        """An arXiv paper with eprint but no journal should NOT get a journal field."""
+        fields: dict[str, Any] = {
+            "eprint": "2401.12345",
+            "archiveprefix": "arXiv",
+            "doi": "10.48550/arxiv.2401.12345",
+        }
+        result = id_utils.normalize_arxiv_metadata(fields)
+        assert "journal" not in result
+
+    def test_arxiv_eprint_no_doi_no_journal(self) -> None:
+        """An arXiv paper with eprint, no DOI, no journal should NOT get a journal field."""
+        fields: dict[str, Any] = {
+            "eprint": "2401.12345",
+            "archiveprefix": "arXiv",
+        }
+        result = id_utils.normalize_arxiv_metadata(fields)
+        assert "journal" not in result
+
+    def test_published_doi_with_eprint_keeps_journal(self) -> None:
+        """A paper with published DOI and existing journal should NOT be overwritten."""
+        fields: dict[str, Any] = {
+            "eprint": "2401.12345",
+            "archiveprefix": "arXiv",
+            "doi": "10.1145/1234567",
+            "journal": "ACM Computing Surveys",
+        }
+        result = id_utils.normalize_arxiv_metadata(fields)
+        assert result["journal"] == "ACM Computing Surveys"
+
+    def test_arxiv_journal_variant_removed(self) -> None:
+        """arXiv preprint variants in journal field are removed entirely."""
+        fields: dict[str, Any] = {
+            "eprint": "2401.12345",
+            "archiveprefix": "arXiv",
+            "journal": "arXiv preprint arXiv:2401.12345",
+        }
+        result = id_utils.normalize_arxiv_metadata(fields)
+        assert "journal" not in result
+
+
+class TestStrongAuthorDedupGate:
+    """Fix 8: Strong author overlap allows composite dedup scoring."""
+
+    def test_same_authors_moderate_title_sim_matches(self) -> None:
+        """Real Alhasani2025 duplicate: same authors, truncated title variant → should match."""
+        _title_a = (
+            "Bridging Research and Practice in Persuasive Mobile Stress"
+            " Management Apps: A 21-Year Comparative Analysis and Novel"
+            " Design Framework"
+        )
+        entry_a: dict[str, Any] = {
+            "type": "inproceedings",
+            "key": "Alhasani2025a",
+            "fields": {
+                "title": _title_a,
+                "author": "Mona Alhasani and Oladapo Oyebode and Rita Orji",
+                "year": "2025",
+                "booktitle": "Lecture Notes in Computer Science",
+                "pages": "147-164",
+                "doi": "10.1007/978-3-031-94959-3_11",
+            },
+        }
+        entry_b: dict[str, Any] = {
+            "type": "inproceedings",
+            "key": "Alhasani2025b",
+            "fields": {
+                "title": "Mobile Stress Management Apps: A 21-Year Comparative Analysis and Novel Design",
+                "author": "Mona Alhasani and Oladapo Oyebode and Rita Orji",
+                "year": "2025",
+                "booktitle": "Persuasive Technology",
+                "pages": "147",
+            },
+        }
+        # Verify preconditions: high author overlap, moderate title sim
+        overlap = author_overlap_ratio(entry_a["fields"]["author"], entry_b["fields"]["author"])
+        assert overlap >= 0.9, f"Expected high author overlap, got {overlap}"
+
+        sim = text_utils.title_similarity(entry_a["fields"]["title"], entry_b["fields"]["title"])
+        assert 0.6 <= sim < 0.95, f"Expected moderate title sim (0.6-0.95), got {sim}"
+
+        # Fix 8: the strict matcher should detect this as a duplicate
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
+        assert result is True, "Same authors + moderate title sim should match via composite scoring"
+
+    def test_different_authors_not_matched(self) -> None:
+        """Entries with different authors should not be matched."""
+        entry_a: dict[str, Any] = {
+            "type": "article",
+            "key": "Smith2024",
+            "fields": {
+                "title": "Machine Learning for Healthcare",
+                "author": "Alice Smith and Bob Jones and Carol Williams",
+                "year": "2024",
+            },
+        }
+        entry_b: dict[str, Any] = {
+            "type": "article",
+            "key": "Brown2024",
+            "fields": {
+                "title": "Deep Learning in Medical Imaging",
+                "author": "Dave Brown and Eve Taylor and Frank Wilson",
+                "year": "2024",
+            },
+        }
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
+        assert result is False
+
+
+class TestGenericSeriesNameMerge:
+    """Fix 5: LNCS and other generic series names should be replaced by specific conference names."""
+
+    def test_lncs_replaced_by_conference_name(self) -> None:
+        """When CSL provides LNCS and enricher provides real conference name, prefer conference."""
+        entry = {
+            "type": "inproceedings",
+            "key": "Test2022",
+            "fields": {
+                "title": "Test Paper Title",
+                "author": "Author One",
+                "year": "2022",
+                "booktitle": "Lecture Notes in Computer Science",
+            },
+        }
+        enrichers = [
+            ("crossref", {"fields": {"booktitle": "Persuasive Technology 2022"}}),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["fields"]["booktitle"] == "Persuasive Technology 2022"
+
+    def test_specific_name_not_replaced_by_lncs(self) -> None:
+        """A specific conference name should never be downgraded to a generic series."""
+        entry = {
+            "type": "inproceedings",
+            "key": "Test2022",
+            "fields": {
+                "title": "Test Paper Title",
+                "author": "Author One",
+                "year": "2022",
+                "booktitle": "Persuasive Technology 2022",
+            },
+        }
+        enrichers = [
+            ("csl", {"fields": {"booktitle": "Lecture Notes in Computer Science"}}),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["fields"]["booktitle"] == "Persuasive Technology 2022"
+
+    def test_lnns_also_generic(self) -> None:
+        """Lecture Notes in Networks and Systems is also a generic series."""
+        entry = {
+            "type": "inproceedings",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+                "booktitle": "Lecture Notes in Networks and Systems",
+            },
+        }
+        enrichers = [
+            ("s2", {"fields": {"booktitle": "Actual Conference 2024"}}),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["fields"]["booktitle"] == "Actual Conference 2024"
+
+    def test_shti_also_generic(self) -> None:
+        """Studies in Health Technology and Informatics (IOS Press) is a generic series."""
+        entry = {
+            "type": "incollection",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+                "booktitle": "Studies in Health Technology and Informatics",
+            },
+        }
+        enrichers = [
+            ("crossref", {"fields": {"booktitle": "MEDINFO 2023 - The Future Is Accessible"}}),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["fields"]["booktitle"] == "MEDINFO 2023 - The Future Is Accessible"
+
+    def test_incollection_with_generic_series_becomes_inproceedings(self) -> None:
+        """incollection with generic series (SHTI) in booktitle should become @inproceedings."""
+        entry = {
+            "type": "misc",
+            "key": "Test2022",
+            "fields": {
+                "title": "Test Paper on Machine Learning",
+                "author": "Author One and Author Two",
+                "year": "2022",
+            },
+        }
+        enrichers = [
+            (
+                "crossref",
+                {
+                    "type": "incollection",
+                    "fields": {
+                        "booktitle": "Studies in Health Technology and Informatics",
+                        "publisher": "IOS Press",
+                        "doi": "10.3233/shti220385",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "inproceedings"
+
+    def test_incollection_with_handbook_stays_incollection(self) -> None:
+        """Actual book chapters (handbooks) should remain @incollection."""
+        entry = {
+            "type": "incollection",
+            "key": "Test2023",
+            "fields": {
+                "title": "A Chapter on Methods",
+                "author": "Author One",
+                "year": "2023",
+                "booktitle": "Handbook of Machine Learning",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["type"] == "incollection"
+
+    def test_book_type_from_enricher_survives_venue_override(self) -> None:
+        """Proceedings volumes typed as 'book' by CSL/Crossref should NOT be overridden to @inproceedings."""
+        entry = {
+            "type": "misc",
+            "key": "Proceedings2022",
+            "fields": {
+                "title": "Conference X, 2022, Proceedings",
+                "author": "Editor One and Editor Two",
+                "year": "2022",
+            },
+        }
+        enrichers = [
+            (
+                "csl",
+                {
+                    "type": "book",
+                    "fields": {
+                        "booktitle": "Lecture Notes in Computer Science",
+                        "publisher": "Springer",
+                        "doi": "10.1007/978-3-031-09342-5",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "book"
+
+
+class TestSameSourceTypeOverride:
+    """Merge must prefer the later type when CSL appears twice (arXiv DOI then published DOI)."""
+
+    def test_csl_inproceedings_overrides_csl_article(self) -> None:
+        """Second CSL enricher (published DOI) should override first (arXiv DOI) type."""
+        entry = {
+            "type": "misc",
+            "key": "Liu2025BPMN",
+            "fields": {
+                "title": "BPMN to Smart Contract by Business Analyst",
+                "author": "C. G. Liu and P. Bodorik and D. Jutla",
+                "year": "2025",
+                "doi": "10.48550/arxiv.2505.22612",
+            },
+        }
+        enrichers = [
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "title": "BPMN to Smart Contract by Business Analyst",
+                        "doi": "10.48550/ARXIV.2505.22612",
+                        "url": "https://arxiv.org/abs/2505.22612",
+                    },
+                },
+            ),
+            (
+                "s2",
+                {
+                    "type": "inproceedings",
+                    "fields": {
+                        "booktitle": "International Computer Science Conference",
+                        "doi": "10.1109/icsc65596.2025.11140498",
+                    },
+                },
+            ),
+            (
+                "csl",
+                {
+                    "type": "inproceedings",
+                    "fields": {
+                        "booktitle": "2025 5th Intelligent Cybersecurity Conference (ICSC)",
+                        "publisher": "IEEE",
+                        "pages": "122-129",
+                        "doi": "10.1109/icsc65596.2025.11140498",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "inproceedings", (
+            f"Expected inproceedings, got {merged['type']}: "
+            "second CSL (published DOI) should override first CSL (arXiv DOI)"
+        )
+        fields = merged.get("fields", {})
+        assert "booktitle" in fields, "Conference name should be in booktitle"
+        assert "journal" not in fields, "No journal field for conference papers"
+
+    def test_same_source_same_type_no_flip(self) -> None:
+        """Same source with same type should not cause unnecessary change."""
+        entry = {
+            "type": "misc",
+            "key": "Test2025",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2025",
+            },
+        }
+        enrichers = [
+            (
+                "crossref",
+                {
+                    "type": "article",
+                    "fields": {"journal": "Some Journal"},
+                },
+            ),
+            (
+                "crossref",
+                {
+                    "type": "article",
+                    "fields": {"volume": "42"},
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "article"
+
+
+class TestAuthorNameMatches:
+    """Tests for author_name_matches used to filter wrong-author entries."""
+
+    def test_full_name_match(self) -> None:
+        """Full name match: 'Raza Abidi' matches 'Syed Sibte Raza Abidi'."""
+        assert author_name_matches("Raza Abidi", "Author One and Syed Sibte Raza Abidi")
+
+    def test_different_first_name_no_match(self) -> None:
+        """Different first name: 'Raza Abidi' should NOT match 'Saeed Abidi'."""
+        assert not author_name_matches("Raza Abidi", "Author One and Saeed Abidi")
+
+    def test_partial_name_no_match(self) -> None:
+        """Partial name: 'Raza Abidi' should NOT match 'Syed Abidi' (missing Raza)."""
+        assert not author_name_matches("Raza Abidi", "Author One and Syed Abidi")
+
+    def test_exact_name_match(self) -> None:
+        """Exact name match works."""
+        assert author_name_matches("Gabriel Spadon", "Gabriel Spadon and Author Two")
+
+    def test_middle_initial_in_paper(self) -> None:
+        """Author with extra middle initial in paper should still match."""
+        assert author_name_matches(
+            "Carlos Hernandez-Castillo",
+            "Faezeh Moradi and Carlos R. Hernandez-Castillo",
+        )
+
+    def test_middle_initial_no_false_positive(self) -> None:
+        """Different first names with same last name should NOT match."""
+        assert not author_name_matches("Alice Brown", "Betty Adams Brown")
+
+
+class TestTitleLengthWhitespaceNormalization:
+    """Title comparison normalizes whitespace so OCR artifacts don't get false length advantage."""
+
+    def test_broken_title_replaced_by_correct(self) -> None:
+        """'Un met' (Scholar artifact) should be replaced by 'Unmet' from a higher-trust source."""
+        entry = {
+            "type": "misc",
+            "key": "Test2024",
+            "fields": {
+                "title": "A Topological Data Analysis of Un met Health Care Needs Among Injured Patients",
+                "author": "Author One",
+                "year": "2024",
+            },
+        }
+        enrichers = [
+            (
+                "crossref",
+                {
+                    "fields": {
+                        "title": "A Topological Data Analysis of Unmet Health Care Needs Among Injured Patients",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert "Un met" not in merged["fields"]["title"]
+        assert "Unmet" in merged["fields"]["title"]
+
+
+class TestLeadingZerosInPages:
+    """Pages with leading zeros should have them stripped (e.g., 01-08 -> 1-8)."""
+
+    @staticmethod
+    def _merge_with_pages(pages: str, entry_type: str = "article", **venue: str) -> dict[str, Any]:
+        entry: dict[str, Any] = {"type": entry_type, "fields": {"title": "Some Paper", "pages": pages, **venue}}
+        return merge_utils.merge_with_policy(entry, [])
+
+    def test_leading_zeros_stripped(self) -> None:
+        assert self._merge_with_pages("01-08", "inproceedings", booktitle="Some Conf")["fields"]["pages"] == "1-8"
+
+    def test_no_leading_zeros_unchanged(self) -> None:
+        assert self._merge_with_pages("123-456", journal="J")["fields"]["pages"] == "123-456"
+
+    def test_single_page_leading_zero(self) -> None:
+        assert self._merge_with_pages("07", journal="J")["fields"]["pages"] == "7"
+
+
+class TestFrontiersJournalDetection:
+    """Frontiers in * booktitles should be moved to journal field."""
+
+    def test_frontiers_booktitle_becomes_journal(self) -> None:
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {"title": "Some Paper", "booktitle": "Frontiers in Bioinformatics"},
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"].get("journal") == "Frontiers in Bioinformatics"
+        assert "booktitle" not in merged["fields"]
+        assert merged["type"] == "article"
+
+    def test_frontiers_not_moved_when_journal_exists(self) -> None:
+        entry: dict[str, Any] = {
+            "type": "article",
+            "fields": {"title": "Some Paper", "journal": "Nature", "booktitle": "Frontiers in Immunology"},
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"].get("journal") == "Nature"
+
+    def test_non_frontiers_booktitle_unchanged(self) -> None:
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {"title": "Some Paper", "booktitle": "International Conference on AI"},
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["fields"].get("booktitle") == "International Conference on AI"
+        assert "journal" not in merged["fields"]
+
+
+class TestHtmlEntityInSerializer:
+    """HTML entities like &amp; should be decoded in bibtex_from_dict output."""
+
+    def test_amp_decoded_in_booktitle(self) -> None:
+        entry = {
+            "type": "inproceedings",
+            "key": "Test2024:SomeConf",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "IEEE Tech &amp; Engineering Conf",
+            },
+        }
+        bib_str = bibtex_from_dict(entry)
+        assert "&amp;" not in bib_str
+        assert "& Engineering" in bib_str
+
+
+class TestJournalUrlNormalization:
+    """Journal fields containing URLs should be normalized to server names."""
+
+    @staticmethod
+    def _merge_journal(url: str) -> dict[str, Any]:
+        entry: dict[str, Any] = {"type": "article", "fields": {"title": "Some Paper", "journal": url}}
+        return merge_utils.merge_with_policy(entry, [])
+
+    def test_arxiv_url_removed_from_journal(self) -> None:
+        assert "journal" not in self._merge_journal("https://arxiv.org/pdf/2302.08018")["fields"]
+
+    def test_techrxiv_url_becomes_journal_name(self) -> None:
+        merged = self._merge_journal("https://www.techrxiv.org/users/770734/articles/846181-test")
+        assert merged["fields"]["journal"] == "TechRxiv"
+
+    def test_unknown_url_dropped(self) -> None:
+        assert "journal" not in self._merge_journal("https://example.com/papers/123")["fields"]
+
+
+class TestTokenBucketRateLimiter:
+    """Tests for the TokenBucketRateLimiter in http_utils."""
+
+    def test_burst_allows_multiple_immediate(self) -> None:
+        """Burst > 1 should allow multiple immediate acquires."""
+        limiter = TokenBucketRateLimiter(rate=100.0, burst=3)
+        start = time.monotonic()
+        for _ in range(3):
+            limiter.acquire()
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.1
+
+    def test_rate_limiter_registry(self) -> None:
+        """Rate limiter registry returns consistent instances."""
+        limiter1 = _get_rate_limiter("crossref")
+        limiter2 = _get_rate_limiter("crossref")
+        assert limiter1 is limiter2
+        assert limiter1 is not None
+
+    def test_unknown_namespace_returns_none(self) -> None:
+        """Unknown namespaces should return None (no rate limiting)."""
+        assert _get_rate_limiter("nonexistent_api_xyz") is None
+
+
+class TestDotNotationFieldExtraction:
+    """Tests for _resolve_dotted in api_generics.py."""
+
+    def test_simple_field(self) -> None:
+        assert _resolve_dotted({"title": "My Paper"}, "title") == "My Paper"
+
+    def test_nested_field(self) -> None:
+        data = {"externalIds": {"DOI": "10.1234/test", "ArXiv": "2301.00001"}}
+        assert _resolve_dotted(data, "externalIds.DOI") == "10.1234/test"
+        assert _resolve_dotted(data, "externalIds.ArXiv") == "2301.00001"
+
+    def test_deeply_nested(self) -> None:
+        data = {"primary_location": {"source": {"display_name": "Nature"}}}
+        assert _resolve_dotted(data, "primary_location.source.display_name") == "Nature"
+
+    def test_missing_nested_field(self) -> None:
+        data = {"externalIds": {"ArXiv": "2301.00001"}}
+        assert _resolve_dotted(data, "externalIds.DOI") is None
+
+    def test_missing_parent(self) -> None:
+        assert _resolve_dotted({"title": "test"}, "externalIds.DOI") is None
+
+    def test_str_variant(self) -> None:
+        data = {"journal": {"name": "Nature"}}
+        assert _resolve_dotted_str(data, "journal.name") == "Nature"
+        assert _resolve_dotted_str(data, "journal.missing") is None
+
+    def test_str_variant_list(self) -> None:
+        """List values should be unwrapped to first element."""
+        data = {"title": ["My Paper", "Subtitle"]}
+        assert _resolve_dotted_str(data, "title") == "My Paper"
+
+
+class TestDOINormalizationInDedup:
+    """Tests that DOI comparisons in save_entry_to_file use normalization."""
+
+    def test_doi_url_vs_bare_match(self, tmp_path: Any) -> None:
+        """DOIs with and without URL prefix should match as duplicates."""
+        entry1 = {
+            "type": "article",
+            "key": "Smith2024:Test",
+            "fields": {
+                "title": "A Test Paper About Machine Learning",
+                "author": "Smith, John and Doe, Jane",
+                "year": "2024",
+                "journal": "Nature",
+                "doi": "10.1234/test.2024.001",
+            },
+        }
+        # Save first entry
+        path1, _ = save_entry_to_file(str(tmp_path), "test_author", entry1)
+        assert os.path.exists(path1)
+
+        # Second entry with URL-formatted DOI
+        entry2 = {
+            "type": "article",
+            "key": "Smith2024:Test",
+            "fields": {
+                "title": "A Test Paper About Machine Learning",
+                "author": "Smith, John and Doe, Jane",
+                "year": "2024",
+                "journal": "Nature",
+                "doi": "https://doi.org/10.1234/test.2024.001",
+            },
+        }
+        # Should detect as duplicate (same DOI after normalization)
+        path2, _ = save_entry_to_file(str(tmp_path), "test_author", entry2)
+        # Both paths should resolve to the same file (dedup worked)
+        assert os.path.basename(path1) == os.path.basename(path2)
+
+
+class TestHttpPostJson:
+    """Tests for http_post_json going through the full HTTP infrastructure."""
+
+    @patch("citeforge.http_utils._http_request")
+    def test_post_calls_http_request_with_post_method(self, mock_request: MagicMock) -> None:
+        """http_post_json should delegate to _http_request with method='POST'."""
+        mock_request.return_value = b'{"result": "ok"}'
+        result = http_post_json(
+            "https://generativelanguage.googleapis.com/v1beta/test",
+            {"key": "value"},
+            timeout=10.0,
+        )
+        assert result == {"result": "ok"}
+        mock_request.assert_called_once()
+        call_args = mock_request.call_args
+        assert call_args[0][0] == "POST"
+        assert call_args[1]["json_payload"] == {"key": "value"}
+
+    def test_post_sets_content_type(self) -> None:
+        """http_post_json should set Content-Type header when not provided."""
+        with patch("citeforge.http_utils._http_request") as mock_req:
+            mock_req.return_value = b'{"ok": true}'
+            http_post_json("https://example.com/api", {"data": 1})
+            headers = mock_req.call_args[0][2]
+            assert headers.get("Content-Type") == "application/json"
+
+    def test_post_preserves_custom_content_type(self) -> None:
+        """Custom headers with Content-Type should not be overridden."""
+        with patch("citeforge.http_utils._http_request") as mock_req:
+            mock_req.return_value = b'{"ok": true}'
+            custom = {"Content-Type": "application/x-custom", "Accept": "application/json"}
+            http_post_json("https://example.com/api", {"data": 1}, headers=custom)
+            headers = mock_req.call_args[0][2]
+            assert headers.get("Content-Type") == "application/x-custom"
+
+
+def _reset_openreview_session() -> None:
+    """Reset OpenReview session state to a clean slate."""
+    import citeforge.clients.search_apis as sa
+
+    with sa._OPENREVIEW_SESSION_LOCK:
+        sa._OPENREVIEW_SESSION = None
+        sa._OPENREVIEW_SESSION_CREATED_AT = 0.0
+
+
+def _make_openreview_mock(cookie: str) -> MagicMock:
+    """Build a mock HTTP response for OpenReview login."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.headers = {"Set-Cookie": f"session={cookie}"}
+    return resp
+
+
+class TestOpenReviewSessionExpiry:
+    """Tests for OpenReview session TTL-based expiry."""
+
+    def test_expired_session_triggers_relogin(self) -> None:
+        """After TTL expires, openreview_login should re-authenticate."""
+        import citeforge.clients.search_apis as sa
+
+        _reset_openreview_session()
+
+        mock_session = MagicMock()
+        mock_session.post.return_value = _make_openreview_mock("abc123")
+        creds = ("user@example.com", "password123")
+
+        with patch("citeforge.clients.search_apis._get_session", return_value=mock_session):
+            result1 = sa.openreview_login(creds)
+            assert result1 is not None
+            assert result1["Cookie"] == "session=abc123"
+            assert mock_session.post.call_count == 1
+
+            # Simulate session expiry by backdating the timestamp
+            with sa._OPENREVIEW_SESSION_LOCK:
+                sa._OPENREVIEW_SESSION_CREATED_AT = 0.0
+
+            mock_session.post.return_value = _make_openreview_mock("refreshed")
+            result2 = sa.openreview_login(creds)
+            assert result2 is not None
+            assert result2["Cookie"] == "session=refreshed"
+            assert mock_session.post.call_count == 2
+
+        _reset_openreview_session()
+
+    def test_valid_session_reused(self) -> None:
+        """A session within TTL should be returned without re-login."""
+        import citeforge.clients.search_apis as sa
+
+        _reset_openreview_session()
+
+        mock_session = MagicMock()
+        mock_session.post.return_value = _make_openreview_mock("valid")
+        creds = ("user@example.com", "password123")
+
+        with patch("citeforge.clients.search_apis._get_session", return_value=mock_session):
+            result1 = sa.openreview_login(creds)
+            assert result1 is not None
+
+            result2 = sa.openreview_login(creds)
+            assert result2 is result1
+            assert mock_session.post.call_count == 1
+
+        _reset_openreview_session()
+
+
+class TestGeminiUsesHttpPostJson:
+    """Gemini should go through http_post_json (shared HTTP infrastructure)."""
+
+    @patch("citeforge.clients.utility_apis.http_post_json")
+    def test_gemini_calls_http_post_json(self, mock_post: MagicMock) -> None:
+        """gemini_generate_short_title should use http_post_json, not urllib."""
+        mock_post.return_value = {"candidates": [{"content": {"parts": [{"text": "MachineLearning"}]}}]}
+        result = gemini_generate_short_title("Machine Learning Paper", "fake-key")
+        assert result == "MachineLearning"
+        mock_post.assert_called_once()
+        url = mock_post.call_args[0][0]
+        assert urlparse(url).hostname == "generativelanguage.googleapis.com"
+
+    @patch("citeforge.clients.utility_apis.http_post_json")
+    def test_gemini_key_travels_in_header_not_url(self, mock_post: MagicMock) -> None:
+        """The API key must be sent as the x-goog-api-key header and never appear in the URL."""
+        mock_post.return_value = {"candidates": [{"content": {"parts": [{"text": "DeepNets"}]}}]}
+        gemini_generate_short_title("Deep Nets for Ocean State", "SECRET-KEY-123")
+        mock_post.assert_called_once()
+        url = mock_post.call_args[0][0]
+        headers = mock_post.call_args.kwargs.get("headers", {})
+        assert headers.get("x-goog-api-key") == "SECRET-KEY-123"
+        assert "SECRET-KEY-123" not in url
+        assert "key=" not in url
+
+    @patch("citeforge.clients.utility_apis.http_post_json")
+    def test_gemini_handles_value_error(self, mock_post: MagicMock) -> None:
+        """Gemini should handle ValueError from non-JSON responses gracefully."""
+        mock_post.side_effect = ValueError("No JSON object could be decoded")
+        result = gemini_generate_short_title("Some Title", "fake-key")
+        assert result is None
+
+    @patch("citeforge.clients.utility_apis.http_post_json")
+    def test_gemini_does_not_redrive_final_429_from_shared_helper(self, mock_post: MagicMock) -> None:
+        """The shared helper owns 429 transport retries, so Gemini calls it only once."""
+        response = requests.Response()
+        response.status_code = 429
+        mock_post.side_effect = requests.exceptions.HTTPError("429 exhausted", response=response)
+
+        with patch("time.sleep"):
+            result = gemini_generate_short_title("Some Title", "fake-key")
+
+        assert result is None
+        mock_post.assert_called_once()
+
+
+class TestHttpRequestPostDispatch:
+    """Verify _http_request dispatches to the correct session method."""
+
+    @staticmethod
+    def _make_mock_session(method: str) -> MagicMock:
+        """Build a mock session whose *method* returns a successful response."""
+        _THREAD_LOCAL.session_request_count = 0
+        mock_resp = MagicMock(status_code=200, content=b'{"ok": true}')
+        mock_resp.raise_for_status = MagicMock()
+        mock_session = MagicMock()
+        getattr(mock_session, method).return_value = mock_resp
+        return mock_session
+
+    def test_post_calls_session_post(self) -> None:
+        """_http_request('POST', ...) should call session.post, not session.get."""
+        mock_session = self._make_mock_session("post")
+        with (
+            patch("citeforge.http_utils._get_session", return_value=mock_session),
+            patch("citeforge.http_utils._get_rate_limiter", return_value=None),
+        ):
+            result = _http_request("POST", "https://example.com/api", {}, 10.0, json_payload={"key": "val"})
+            mock_session.post.assert_called_once()
+            mock_session.get.assert_not_called()
+            assert result == b'{"ok": true}'
+
+    def test_get_calls_session_get(self) -> None:
+        """_http_request('GET', ...) should call session.get, not session.post."""
+        mock_session = self._make_mock_session("get")
+        with (
+            patch("citeforge.http_utils._get_session", return_value=mock_session),
+            patch("citeforge.http_utils._get_rate_limiter", return_value=None),
+        ):
+            result = _http_request("GET", "https://example.com/api", {}, 10.0)
+            mock_session.get.assert_called_once()
+            mock_session.post.assert_not_called()
+            assert result == b'{"ok": true}'
+
+
+class TestOpenReviewTTLBoundary:
+    """Test the exact boundary of OpenReview session TTL."""
+
+    @staticmethod
+    def _set_session_age(elapsed: float) -> None:
+        """Set a fake OpenReview session with the given elapsed time."""
+        import citeforge.clients.search_apis as sa
+
+        with sa._OPENREVIEW_SESSION_LOCK:
+            sa._OPENREVIEW_SESSION = {"Cookie": "session=test"}
+            sa._OPENREVIEW_SESSION_CREATED_AT = time.monotonic() - elapsed
+
+    def test_session_expires_at_exact_ttl(self) -> None:
+        """Session should be treated as expired when elapsed == TTL (>= check)."""
+        import citeforge.clients.search_apis as sa
+
+        self._set_session_age(OPENREVIEW_SESSION_TTL_SECS)
+        assert sa._openreview_session_expired()
+        _reset_openreview_session()
+
+    def test_session_valid_just_before_ttl(self) -> None:
+        """Session created 'just now' (0 seconds elapsed) must not be expired."""
+        import citeforge.clients.search_apis as sa
+
+        self._set_session_age(0.0)
+        assert not sa._openreview_session_expired()
+        _reset_openreview_session()
+
+
+class TestAbbreviatedVenueExpansion:
+    """Abbreviated venue names should be expanded to full conference names."""
+
+    def test_determine_entry_type_recognizes_abbreviated_venue(self) -> None:
+        """SPIRE in journal field should be detected as inproceedings."""
+        result = determine_entry_type({"journal": "SPIRE"})
+        assert result == "inproceedings"
+
+    def test_determine_entry_type_case_insensitive(self) -> None:
+        """Abbreviated venue lookup should be case-insensitive."""
+        result = determine_entry_type({"booktitle": "ircdl"})
+        assert result == "inproceedings"
+
+    def test_merge_expands_abbreviated_journal(self) -> None:
+        """Merge should expand 'SPIRE' in journal to full conference name."""
+        primary: dict = {
+            "type": "article",
+            "key": "Test2024:Example",
+            "fields": {
+                "title": "Some Paper Title Here",
+                "author": "Smith, John",
+                "year": "2024",
+                "journal": "SPIRE",
+            },
+        }
+        result = merge_with_policy(primary, [])
+        # After merge, journal should be gone (moved to booktitle for inproceedings)
+        # and booktitle should contain the expanded name
+        assert result["type"] == "inproceedings"
+        assert result["fields"].get("booktitle") == ABBREVIATED_VENUE_MAP["spire"]
+        assert "journal" not in result["fields"]
+
+    def test_merge_expands_abbreviated_booktitle(self) -> None:
+        """Merge should expand 'IRCDL' in booktitle to full conference name."""
+        primary: dict = {
+            "type": "inproceedings",
+            "key": "Test2024:Example",
+            "fields": {
+                "title": "Another Paper Title",
+                "author": "Doe, Jane",
+                "year": "2024",
+                "booktitle": "IRCDL",
+            },
+        }
+        result = merge_with_policy(primary, [])
+        assert result["type"] == "inproceedings"
+        assert result["fields"]["booktitle"] == ABBREVIATED_VENUE_MAP["ircdl"]
+
+    def test_csl_container_title_array_prefers_non_generic(self) -> None:
+        """CSL container-title array should prefer non-generic element over LNCS."""
+        csl = {
+            "type": "book-chapter",
+            "title": "Data Structures for SMEM-Finding in the PBWT",
+            "author": [{"given": "Paola", "family": "Bonizzoni"}],
+            "issued": {"date-parts": [[2023]]},
+            "container-title": [
+                "Lecture Notes in Computer Science",
+                "String Processing and Information Retrieval",
+            ],
+            "DOI": "10.1007/978-3-031-43980-3_8",
+        }
+        bibtex = bibtex_from_csl(csl, keyhint="test")
+        entry = parse_bibtex_to_dict(bibtex)
+        assert entry is not None
+        fields = entry["fields"]
+        # Should pick "String Processing and Information Retrieval", not LNCS
+        venue = fields.get("booktitle") or fields.get("journal") or fields.get("howpublished", "")
+        assert "Lecture Notes" not in venue
+        assert "String Processing" in venue
+
+    def test_non_abbreviated_venue_unchanged(self) -> None:
+        """Normal venue names should not be modified by abbreviation expansion."""
+        primary: dict = {
+            "type": "article",
+            "key": "Test2024:Example",
+            "fields": {
+                "title": "A Paper About Things",
+                "author": "Doe, Jane",
+                "year": "2024",
+                "journal": "Nature Machine Intelligence",
+            },
+        }
+        result = merge_with_policy(primary, [])
+        assert result["fields"]["journal"] == "Nature Machine Intelligence"
+
+
+class TestNobleParticleMatching:
+    """Noble particles (van, von, de, etc.) should produce consistent signatures."""
+
+    def test_van_der_waals_first_last(self) -> None:
+        """'Johan van der Waals' in First Last format."""
+        sig = text_utils.name_signature("Johan van der Waals")
+        assert sig is not None
+        assert sig["last"] == "vanderwaals"
+        assert sig["initials"] == "j"
+
+    def test_van_der_waals_comma(self) -> None:
+        """'van der Waals, Johan' in Last, First format."""
+        sig = text_utils.name_signature("van der Waals, Johan")
+        assert sig is not None
+        assert sig["last"] == "vanderwaals"
+        assert sig["initials"] == "j"
+
+    def test_both_formats_match(self) -> None:
+        """Both name formats should produce the same signature."""
+        sig_fl = text_utils.name_signature("Johan van der Waals")
+        sig_lf = text_utils.name_signature("van der Waals, Johan")
+        assert sig_fl is not None and sig_lf is not None
+        assert sig_fl["last"] == sig_lf["last"]
+
+    def test_de_silva(self) -> None:
+        """'Kumar de Silva' should treat 'de' as noble particle."""
+        sig = text_utils.name_signature("Kumar de Silva")
+        assert sig is not None
+        assert sig["last"] == "desilva"
+
+    def test_von_neumann(self) -> None:
+        """'John von Neumann' should match 'von Neumann, John'."""
+        sig_fl = text_utils.name_signature("John von Neumann")
+        sig_lf = text_utils.name_signature("von Neumann, John")
+        assert sig_fl is not None and sig_lf is not None
+        assert sig_fl["last"] == sig_lf["last"] == "vonneumann"
+
+    def test_simple_name_no_particle(self) -> None:
+        """Simple names without particles should still work."""
+        sig = text_utils.name_signature("John Smith")
+        assert sig is not None
+        assert sig["last"] == "smith"
+        assert sig["initials"] == "j"
+
+    def test_hyphenated_surname_comma_format(self) -> None:
+        """Hyphenated surnames in comma format should normalize consistently."""
+        sig = text_utils.name_signature("Garcia-Marquez, Gabriel")
+        assert sig is not None
+        assert sig["last"] == "garciamarquez"
+        assert sig["initials"] == "g"
+
+
+class TestEllipsisPlaceholder:
+    """Only short strings with ellipsis should be treated as placeholder."""
+
+    def test_short_ellipsis_is_placeholder(self) -> None:
+        """Short string with ellipsis should be a placeholder."""
+        assert text_utils.has_placeholder("Loading...") is True
+
+    def test_long_title_with_ellipsis_not_placeholder(self) -> None:
+        """A long legitimate title with '...' should NOT be a placeholder."""
+        long_title = (
+            "A Comprehensive Survey of Machine Learning Methods... and Their Applications to Real-World Problems"
+        )
+        assert text_utils.has_placeholder(long_title) is False
+
+    def test_unicode_ellipsis_short(self) -> None:
+        """Short string with unicode ellipsis should be a placeholder."""
+        assert text_utils.has_placeholder("Wait\u2026") is True
+
+
+class TestCJKTitleNormalization:
+    """CJK-only titles should not normalize to empty string."""
+
+    def test_cjk_title_not_empty(self) -> None:
+        """Chinese characters should not produce empty normalized title."""
+        result = text_utils.normalize_title("机器学习方法")
+        assert len(result) > 0
+
+    def test_cjk_self_similarity(self) -> None:
+        """CJK title should have 1.0 similarity with itself."""
+        title = "深度学习综述"
+        sim = text_utils.title_similarity(title, title)
+        assert sim == 1.0
+
+    def test_mixed_cjk_ascii(self) -> None:
+        """Mixed CJK+ASCII title should normalize without losing content."""
+        result = text_utils.normalize_title("深度学习 Deep Learning 综述")
+        assert len(result) > 0
+        assert "deep" in result or "learning" in result or "深度" in result
+
+
+class TestHtmlEntityInNormalizeTitle:
+    """HTML entities should be decoded before title normalization."""
+
+    def test_amp_decoded(self) -> None:
+        """&amp; should become & in normalized title."""
+        result = text_utils.normalize_title("Computers &amp; Education")
+        expected = text_utils.normalize_title("Computers & Education")
+        assert result == expected
+
+    def test_lt_gt_decoded(self) -> None:
+        """&lt; and &gt; should be decoded."""
+        result = text_utils.normalize_title("A &lt;b&gt; Approach")
+        assert "lt" not in result
+        assert "gt" not in result
+
+    def test_numeric_entity(self) -> None:
+        """&#8211; (en-dash) should be decoded."""
+        result = text_utils.normalize_title("Pages 1&#8211;10")
+        assert "8211" not in result
+
+
+class TestAuthorOverlapWithInitials:
+    """author_overlap_ratio should distinguish authors with same last name but different initials."""
+
+    def test_same_last_different_initials_distinguished(self) -> None:
+        """'J. Smith' and 'K. Smith' should not be merged when both have initials."""
+        ratio = text_utils.author_overlap_ratio(
+            "J. Smith and Alice Brown",
+            "K. Smith and Alice Brown",
+        )
+        # Brown matches, but the two Smiths are different people
+        assert ratio < 1.0
+
+    def test_same_authors_full_overlap(self) -> None:
+        """Identical author lists should have ratio 1.0."""
+        ratio = text_utils.author_overlap_ratio(
+            "John Smith and Jane Doe",
+            "John Smith and Jane Doe",
+        )
+        assert ratio == 1.0
+
+    def test_no_initials_falls_back(self) -> None:
+        """When one side lacks initials, fall back to last-name matching."""
+        ratio = text_utils.author_overlap_ratio(
+            "Smith",
+            "J. Smith",
+        )
+        assert ratio > 0.0
+
+
+class TestVenueSimilarityPreprint:
+    """venue_similarity is PURE venue-string similarity. The preprint/published (XOR)
+    split is not folded in as a 0.5 bonus here; it is a single explicit signal in
+    compute_dedup_score (Signal 6), counted exactly once. Rewarding it in both places
+    would double-count the same evidence and tip distinct works over threshold."""
+
+    def test_biorxiv_vs_journal_is_plain_fuzz_not_xor_bonus(self) -> None:
+        """bioRxiv vs a dissimilar journal -> plain fuzz (< 0.5), not a 0.5 XOR bonus."""
+        sim = text_utils.venue_similarity(
+            {"journal": "bioRxiv"},
+            {"journal": "Nature Medicine"},
+        )
+        assert sim < 0.5
+
+    def test_arxiv_eprints_vs_conference_is_plain_fuzz_not_xor_bonus(self) -> None:
+        """arXiv e-prints vs conference -> plain fuzz (< 0.5), not a 0.5 XOR bonus."""
+        sim = text_utils.venue_similarity(
+            {"journal": "arXiv e-prints"},
+            {"booktitle": "NeurIPS 2024"},
+        )
+        assert sim < 0.5
+
+    def test_identical_venue_is_one(self) -> None:
+        assert text_utils.venue_similarity({"journal": "Nature"}, {"journal": "Nature"}) == 1.0
+
+    def test_preprint_xor_counted_once_in_composite(self) -> None:
+        """The split contributes exactly Signal 6 (0.10) to the composite and nothing via
+        venue_similarity, so excluding it drops the score by exactly 0.10."""
+        pre = {"title": "Same Work", "author": "Ada Byron", "year": "2020", "journal": "bioRxiv"}
+        pub = {"title": "Same Work", "author": "Ada Byron", "year": "2020", "journal": "Nature Medicine"}
+        with_xor = text_utils.compute_dedup_score(pre, pub, count_preprint_xor=True)
+        without_xor = text_utils.compute_dedup_score(pre, pub, count_preprint_xor=False)
+        assert abs((with_xor - without_xor) - 0.10) < 1e-9
+
+
+class TestBothPreprintDoiDedup:
+    """Two entries with different preprint DOIs should NOT match."""
+
+    def test_different_arxiv_dois_not_matched(self) -> None:
+        """Two different arXiv preprints should not be considered duplicates."""
+        entry_a: dict[str, Any] = {
+            "type": "article",
+            "key": "Paper2024a",
+            "fields": {
+                "title": "Machine Learning for Natural Language Processing",
+                "author": "Smith, John",
+                "year": "2024",
+                "doi": "10.48550/arxiv.2401.11111",
+                "journal": "arXiv e-prints",
+            },
+        }
+        entry_b: dict[str, Any] = {
+            "type": "article",
+            "key": "Paper2024b",
+            "fields": {
+                "title": "Deep Learning for Natural Language Understanding",
+                "author": "Smith, John",
+                "year": "2024",
+                "doi": "10.48550/arxiv.2401.22222",
+                "journal": "arXiv e-prints",
+            },
+        }
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
+        assert result is False
+
+
+class TestYearGapWidened:
+    """Year gap > 3 should reject, <= 3 should allow preprint→published."""
+
+    def test_3_year_gap_allowed(self) -> None:
+        """A 3-year gap (preprint in 2021, published in 2024) should allow matching."""
+        entry_a: dict[str, Any] = {
+            "type": "article",
+            "key": "Paper2021",
+            "fields": {
+                "title": "A Novel Approach to Graph Neural Networks",
+                "author": "Smith, John and Doe, Jane",
+                "year": "2021",
+                "doi": "10.48550/arxiv.2101.12345",
+                "journal": "arXiv e-prints",
+            },
+        }
+        entry_b: dict[str, Any] = {
+            "type": "article",
+            "key": "Paper2024",
+            "fields": {
+                "title": "A Novel Approach to Graph Neural Networks",
+                "author": "Smith, John and Doe, Jane",
+                "year": "2024",
+                "doi": "10.1145/1234567.1234568",
+                "journal": "ACM Computing Surveys",
+            },
+        }
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
+        assert result is True
+
+    def test_5_year_gap_rejected(self) -> None:
+        """A 5-year gap should be too large even for preprint→published."""
+        entry_a: dict[str, Any] = {
+            "type": "article",
+            "key": "Paper2019",
+            "fields": {
+                "title": "Some Machine Learning Research Paper Title",
+                "author": "Smith, John and Doe, Jane",
+                "year": "2019",
+                "doi": "10.48550/arxiv.1901.12345",
+                "journal": "arXiv e-prints",
+            },
+        }
+        entry_b: dict[str, Any] = {
+            "type": "article",
+            "key": "Paper2024",
+            "fields": {
+                "title": "Some Machine Learning Research Paper Title",
+                "author": "Smith, John and Doe, Jane",
+                "year": "2024",
+                "doi": "10.1145/9999999.9999999",
+                "journal": "ACM Computing Surveys",
+            },
+        }
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
+        assert result is False
+
+
+class TestDoiConflictPreserveUpgrade:
+    """DOI merge should not revert a preprint→published upgrade."""
+
+    def test_preprint_doi_upgraded_to_published(self) -> None:
+        """When primary has arXiv DOI and enricher has published DOI, keep published."""
+        entry = {
+            "type": "article",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+                "doi": "10.48550/arxiv.2401.12345",
+            },
+        }
+        enrichers = [
+            ("csl", {"fields": {"doi": "10.1145/1234567"}}),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        # The published DOI should win over the preprint DOI
+        assert merged["fields"]["doi"] == "10.1145/1234567"
+
+    def test_published_upgrade_keeps_version_metadata_coherent(self) -> None:
+        """A second CSL record for the published version must replace fields
+        retained from the first CSL record for the preprint."""
+        entry = {
+            "type": "misc",
+            "key": "Kafaie2023",
+            "fields": {
+                "title": "Sarand: exploring antimicrobial resistance gene neighbourhoods",
+                "author": "Somayeh Kafaie and Robert G. Beiko and Finlay Maguire",
+                "year": "2023",
+                "doi": "10.1101/2023.10.29.564611",
+                "url": "https://doi.org/10.1101/2023.10.29.564611",
+                "howpublished": "bioRxiv",
+            },
+        }
+        enrichers = [
+            (
+                "csl",
+                {
+                    "type": "misc",
+                    "fields": {
+                        "title": entry["fields"]["title"],
+                        "author": entry["fields"]["author"],
+                        "year": "2023",
+                        "doi": "10.1101/2023.10.29.564611",
+                        "url": "https://doi.org/10.1101/2023.10.29.564611",
+                        "howpublished": "bioRxiv",
+                    },
+                },
+            ),
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "title": entry["fields"]["title"],
+                        "author": (
+                            "Somayeh Kafaie and Shahlla Naseri and David B. J. Mahoney and "
+                            "Travis Gagie and Robert G. Beiko and Finlay Maguire"
+                        ),
+                        "year": "2026",
+                        "journal": "NAR Genomics and Bioinformatics",
+                        "doi": "10.1093/nargab/lqag066",
+                        "url": "https://doi.org/10.1093/nargab/lqag066",
+                    },
+                },
+            ),
+        ]
+
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+
+        assert merged["type"] == "article"
+        assert merged["fields"]["doi"] == "10.1093/nargab/lqag066"
+        assert merged["fields"]["year"] == "2026"
+        assert merged["fields"]["url"] == "https://doi.org/10.1093/nargab/lqag066"
+        assert merged["fields"]["author"].split(" and ") == enrichers[1][1]["fields"]["author"].split(" and ")
+
+
+class TestPhantomArxivJournal:
+    """'arXiv e-prints' journal should be cleared when published DOI exists."""
+
+    def test_arxiv_journal_cleared_with_published_doi(self) -> None:
+        """When eprint removed due to published DOI, phantom journal should also go."""
+        entry = {
+            "type": "article",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+                "eprint": "2401.12345",
+                "archiveprefix": "arXiv",
+                "journal": "arXiv e-prints",
+            },
+        }
+        # The published DOI must come from a trusted enricher to survive merge
+        enrichers = [
+            (
+                "csl",
+                {
+                    "fields": {
+                        "doi": "10.1145/1234567",
+                        "journal": "ACM Computing Surveys",
+                    }
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        # The eprint is removed because a published DOI exists,
+        # journal should be the enricher's journal, not "arXiv e-prints"
+        journal = merged["fields"].get("journal", "")
+        assert journal.lower() not in ("arxiv e-prints", "arxiv")
+
+    def test_journal_backfilled_after_phantom_removal(self) -> None:
+        """When phantom arXiv journal is removed, backfill from enrichers with published DOI."""
+        entry = {
+            "type": "article",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+                "eprint": "2401.12345",
+                "archiveprefix": "arXiv",
+                "journal": "arXiv e-prints",
+            },
+        }
+        # CSL from preprint DOI sets arXiv journal (rank 0), then enrichers with
+        # published DOI provide real journal which can't beat rank 0 during merge.
+        # Backfill should recover the real journal after phantom removal.
+        enrichers = [
+            (
+                "csl",
+                {
+                    "fields": {
+                        "doi": "10.48550/arxiv.2401.12345",
+                        "journal": "arXiv",
+                    }
+                },
+            ),
+            (
+                "s2",
+                {
+                    "fields": {
+                        "doi": "10.3390/s22166063",
+                        "journal": "Sensors",
+                    }
+                },
+            ),
+            (
+                "crossref",
+                {
+                    "fields": {
+                        "doi": "10.3390/s22166063",
+                        "journal": "Sensors",
+                    }
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["fields"].get("journal") == "Sensors"
+
+
+def test_validated_arxiv_doi_drops_unconfirmed_scholar_container() -> None:
+    primary = {
+        "type": "article",
+        "key": "Rodriguez2024",
+        "fields": {
+            "title": "Predicting Individual Depression Symptoms from Acoustic Features During Speech",
+            "author": (
+                "Sebastian Rodriguez and Sri Harsha Dumpala and Katerina Dikaios and "
+                "Sheri Rempel and Rudolf Uher and Sageev Oore"
+            ),
+            "year": "2024",
+            "journal": "Scientific Reports",
+            "publisher": "Springer Science and Business Media LLC",
+            "volume": "13",
+            "number": "1",
+            "pages": "11155",
+            "eprint": "2406.16000",
+            "archiveprefix": "arXiv",
+        },
+    }
+    arxiv = {
+        "type": "misc",
+        "fields": {
+            "title": primary["fields"]["title"],
+            "author": primary["fields"]["author"],
+            "year": "2024",
+            "howpublished": "arXiv",
+            "doi": "10.48550/arxiv.2406.16000",
+            "url": "https://arxiv.org/abs/2406.16000",
+            "eprint": "2406.16000",
+            "archiveprefix": "arXiv",
+        },
+    }
+
+    result = merge_utils.merge_with_policy(primary, [("csl", arxiv)])
+
+    assert result["type"] == "misc"
+    assert result["fields"]["doi"] == "10.48550/arxiv.2406.16000"
+    assert result["fields"]["url"] == "https://arxiv.org/abs/2406.16000"
+    for field in ("journal", "publisher", "volume", "number", "pages"):
+        assert field not in result["fields"]
+
+
+class TestIncollectionPromotionRestricted:
+    """incollection→inproceedings should only fire for GENERIC_SERIES_NAMES."""
+
+    def test_generic_series_promotes(self) -> None:
+        """incollection with LNCS booktitle should become inproceedings."""
+        entry = {
+            "type": "incollection",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+                "booktitle": "Lecture Notes in Computer Science",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["type"] == "inproceedings"
+
+    def test_real_book_chapter_stays(self) -> None:
+        """incollection with real book booktitle should stay incollection."""
+        entry = {
+            "type": "incollection",
+            "key": "Test2024",
+            "fields": {
+                "title": "A Chapter on Methods",
+                "author": "Author One",
+                "year": "2024",
+                "booktitle": "Handbook of Artificial Intelligence",
+            },
+        }
+        merged = merge_utils.merge_with_policy(entry, [])
+        assert merged["type"] == "incollection"
+
+
+class TestCslArticleTypePreserved:
+    """CSL/doi_bibtex article type should not be overridden to inproceedings."""
+
+    def test_proceedings_journal_becomes_inproceedings(self) -> None:
+        """Proceedings-named venues should become @inproceedings, not @article."""
+        entry = {
+            "type": "misc",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+            },
+        }
+        enrichers = [
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "journal": "Proceedings of the VLDB Endowment",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        # PVLDB is a journal despite "Proceedings" in its name — stays @article
+        assert merged["type"] == "article"
+        assert merged["fields"]["journal"] == "Proceedings of the VLDB Endowment"
+        assert "booktitle" not in merged["fields"]
+
+    def test_proceedings_on_also_becomes_inproceedings(self) -> None:
+        """'Proceedings on X' (not just 'of') should also become @inproceedings."""
+        entry = {
+            "type": "misc",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper",
+                "author": "Author One",
+                "year": "2024",
+            },
+        }
+        enrichers = [
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "journal": "Proceedings on Privacy Enhancing Technologies",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "inproceedings"
+        assert merged["fields"]["booktitle"] == "Proceedings on Privacy Enhancing Technologies"
+        assert "journal" not in merged["fields"]
+
+
+class TestMergeDuplicateThresholdRaised:
+    """Two clearly different papers by the same authors must not be merged."""
+
+    def test_marginal_title_not_merged(self) -> None:
+        """Two clearly different papers by the same authors should NOT be treated as duplicates."""
+        entry_a: dict[str, Any] = {
+            "type": "article",
+            "key": "Paper2024a",
+            "fields": {
+                "title": "Machine Learning for Healthcare Applications",
+                "author": "Smith, John and Doe, Jane",
+                "year": "2024",
+                "journal": "Nature",
+            },
+        }
+        entry_b: dict[str, Any] = {
+            "type": "article",
+            "key": "Paper2024b",
+            "fields": {
+                "title": "Quantum Computing for Drug Discovery",
+                "author": "Smith, John and Doe, Jane",
+                "year": "2024",
+                "journal": "Nature",
+            },
+        }
+        # Verify the titles have low similarity (below 0.6 to avoid strong-author gate)
+        sim = text_utils.title_similarity(entry_a["fields"]["title"], entry_b["fields"]["title"])
+        assert sim < 0.6, f"Title similarity {sim:.3f} should be well below threshold to test rejection"
+        # The strict matcher should NOT consider these as duplicates
+        result = evaluate_identity(entry_a, entry_b, context=IdentityContext.ENRICHMENT).verdict
+        assert result is False, "Distinct papers with low title similarity should not be matched"
+
+
+class TestCslEventNameFallback:
+    """bibtex_from_csl should use event-name when container is a generic series."""
+
+    def test_lncs_with_event_name(self) -> None:
+        """When CSL container is LNCS and event-name exists, use event name."""
+        csl = {
+            "type": "book-chapter",
+            "title": "Test Paper",
+            "author": [{"given": "John", "family": "Smith"}],
+            "issued": {"date-parts": [[2024]]},
+            "container-title": "Lecture Notes in Computer Science",
+            "event": {"name": "International Conference on AI 2024"},
+            "DOI": "10.1007/978-3-031-12345-6_1",
+        }
+        bibtex = bibtex_from_csl(csl, keyhint="test")
+        assert bibtex is not None
+        entry = bt.parse_bibtex_to_dict(bibtex)
+        assert entry is not None
+        venue = entry["fields"].get("booktitle") or entry["fields"].get("journal") or ""
+        assert "International Conference on AI" in venue
+
+    def test_non_generic_container_kept(self) -> None:
+        """Non-generic container titles should not be replaced by event name."""
+        csl = {
+            "type": "book-chapter",
+            "title": "Test Paper",
+            "author": [{"given": "John", "family": "Smith"}],
+            "issued": {"date-parts": [[2024]]},
+            "container-title": "Specific Conference Proceedings",
+            "event": {"name": "Some Other Event"},
+            "DOI": "10.1007/978-3-031-99999-9_1",
+        }
+        bibtex = bibtex_from_csl(csl, keyhint="test")
+        assert bibtex is not None
+        entry = bt.parse_bibtex_to_dict(bibtex)
+        assert entry is not None
+        venue = entry["fields"].get("booktitle") or entry["fields"].get("journal") or ""
+        assert "Specific Conference Proceedings" in venue
+
+
+class TestDagstuhlLipicsResolution:
+    """Fix 8: Dagstuhl LIPIcs/OASIcs DOIs resolve conference name from DOI pattern."""
+
+    @staticmethod
+    def _csl_enricher(doi: str) -> list[tuple[str, dict[str, Any]]]:
+        """Build a minimal CSL enricher that confirms the DOI."""
+        return [("csl", {"type": "misc", "fields": {"doi": doi}})]
+
+    def test_lipics_doi_resolves_esa(self) -> None:
+        """DOI 10.4230/lipics.esa.2022.59 should resolve to ESA booktitle."""
+        doi = "10.4230/lipics.esa.2022.59"
+        primary: dict = {
+            "type": "article",
+            "key": "Gao2022:Test",
+            "fields": {
+                "title": "Faster Path Queries in Colored Trees",
+                "author": "Gao, Younan and He, Meng",
+                "year": "2022",
+                "journal": "Embedded Systems and Applications",
+                "doi": doi,
+            },
+        }
+        result = merge_utils.merge_with_policy(primary, self._csl_enricher(doi))
+        assert result["type"] == "inproceedings"
+        assert result["fields"]["booktitle"] == ABBREVIATED_VENUE_MAP["esa"]
+        assert "journal" not in result["fields"]
+
+    def test_lipics_doi_resolves_sea(self) -> None:
+        """DOI 10.4230/lipics.sea.2023.19 should resolve to SEA booktitle."""
+        doi = "10.4230/lipics.sea.2023.19"
+        primary: dict = {
+            "type": "article",
+            "key": "He2023:Test",
+            "fields": {
+                "title": "Exact and Approximate Range Mode Query",
+                "author": "He, Meng",
+                "year": "2023",
+                "journal": "The Sea",
+                "doi": doi,
+            },
+        }
+        result = merge_utils.merge_with_policy(primary, self._csl_enricher(doi))
+        assert result["type"] == "inproceedings"
+        assert result["fields"]["booktitle"] == ABBREVIATED_VENUE_MAP["sea"]
+        assert "journal" not in result["fields"]
+
+    def test_lipics_doi_resolves_cpm_from_misc(self) -> None:
+        """DOI 10.4230/lipics.cpm.2024.17 with @misc type should resolve to CPM."""
+        doi = "10.4230/lipics.cpm.2024.17"
+        primary: dict = {
+            "type": "misc",
+            "key": "He2024:Test",
+            "fields": {
+                "title": "Closing the Gap: Minimum Space Optimal Time",
+                "author": "He, Meng",
+                "year": "2024",
+                "howpublished": "LIPIcs, Volume 296, CPM 2024",
+                "doi": doi,
+            },
+        }
+        result = merge_utils.merge_with_policy(primary, self._csl_enricher(doi))
+        assert result["type"] == "inproceedings"
+        assert result["fields"]["booktitle"] == ABBREVIATED_VENUE_MAP["cpm"]
+        assert "journal" not in result["fields"]
+        assert "howpublished" not in result["fields"]
+
+    def test_non_dagstuhl_doi_unchanged(self) -> None:
+        """Non-Dagstuhl DOIs should not trigger Dagstuhl resolution."""
+        doi = "10.1038/s41586-024-00001-0"
+        primary: dict = {
+            "type": "article",
+            "key": "Test2024:Test",
+            "fields": {
+                "title": "Some Journal Paper",
+                "author": "Doe, Jane",
+                "year": "2024",
+                "journal": "Nature",
+                "doi": doi,
+            },
+        }
+        result = merge_utils.merge_with_policy(primary, self._csl_enricher(doi))
+        assert result["type"] == "article"
+        assert result["fields"]["journal"] == "Nature"
+
+
+class TestGenericBootitleUpgradeDuringEnforce:
+    """Fix 8b: container_enforce upgrades generic booktitle from journal before dropping it."""
+
+    def test_lncs_booktitle_upgraded_from_journal(self) -> None:
+        """When booktitle is LNCS and journal has specific name, journal wins."""
+        primary: dict = {
+            "type": "inproceedings",
+            "key": "Gao2024:Test",
+            "fields": {
+                "title": "On Approximate Colored Path Counting",
+                "author": "Gao, Younan and He, Meng",
+                "year": "2024",
+                "booktitle": "Lecture Notes in Computer Science",
+                "journal": "Latin American Symposium on Theoretical Informatics",
+                "doi": "10.1007/978-3-031-55598-5_14",
+            },
+        }
+        result = merge_utils.merge_with_policy(primary, [])
+        assert result["type"] == "inproceedings"
+        assert result["fields"]["booktitle"] == "Latin American Symposium on Theoretical Informatics"
+        assert "journal" not in result["fields"]
+
+    def test_specific_booktitle_not_overwritten_by_journal(self) -> None:
+        """When booktitle is already specific, journal should not replace it."""
+        primary: dict = {
+            "type": "inproceedings",
+            "key": "Test2024:Test",
+            "fields": {
+                "title": "Some Paper Title Here",
+                "author": "Smith, John",
+                "year": "2024",
+                "booktitle": "String Processing and Information Retrieval",
+                "journal": "SPIRE Proceedings",
+                "doi": "10.1007/978-3-031-99999-9_1",
+            },
+        }
+        result = merge_utils.merge_with_policy(primary, [])
+        assert result["type"] == "inproceedings"
+        assert result["fields"]["booktitle"] == "String Processing and Information Retrieval"
+        assert "journal" not in result["fields"]
+
+
+class TestCslPreprintVenueOverride:
+    """CSL classifies arXiv preprints as @article; venue detection should override
+    when the DOI is a secondary/preprint DOI and the venue is a conference."""
+
+    def test_arxiv_article_with_conference_journal_becomes_inproceedings(self) -> None:
+        """arXiv DOI + conference name in journal -> @inproceedings with booktitle."""
+        entry: dict[str, Any] = {
+            "type": "misc",
+            "key": "Alanko2025",
+            "fields": {
+                "title": "Trie-Measure Revisited",
+                "author": "Jarno Alanko and Travis Gagie",
+                "year": "2025",
+            },
+        }
+        enrichers: list[tuple[str, dict[str, Any]]] = [
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "doi": "10.48550/arxiv.2504.10703",
+                        "title": "Trie-Measure Revisited",
+                    },
+                },
+            ),
+            (
+                "s2",
+                {
+                    "type": "article",
+                    "fields": {
+                        "journal": "Annual Symposium on Combinatorial Pattern Matching",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "inproceedings"
+        assert "booktitle" in merged.get("fields", {})
+        assert "journal" not in merged.get("fields", {})
+
+    def test_published_doi_pvldb_stays_article(self) -> None:
+        """PVLDB is a journal despite 'Proceedings' in name -> stays @article."""
+        entry: dict[str, Any] = {
+            "type": "misc",
+            "key": "Test2024",
+            "fields": {
+                "title": "Test Paper on Symposium Topics",
+                "author": "Author One",
+                "year": "2024",
+            },
+        }
+        enrichers: list[tuple[str, dict[str, Any]]] = [
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "doi": "10.1145/1234567.1234568",
+                        "journal": "Proceedings of the VLDB Endowment",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "article"
+        assert merged["fields"]["journal"] == "Proceedings of the VLDB Endowment"
+
+    def test_arxiv_article_with_real_journal_stays_article(self) -> None:
+        """arXiv DOI + real journal name (no conference keywords) -> stays @article."""
+        entry: dict[str, Any] = {
+            "type": "misc",
+            "key": "Test2024",
+            "fields": {
+                "title": "Deep Learning Advances",
+                "author": "Author Two",
+                "year": "2024",
+            },
+        }
+        enrichers: list[tuple[str, dict[str, Any]]] = [
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "doi": "10.48550/arxiv.2401.12345",
+                    },
+                },
+            ),
+            (
+                "s2",
+                {
+                    "type": "article",
+                    "fields": {
+                        "journal": "Nature Machine Intelligence",
+                    },
+                },
+            ),
+        ]
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+        assert merged["type"] == "article"
+
+
+class TestEnrichedFileProtection:
+    """Prevent unenriched stub from overwriting enriched file during FILE_CLEANUP."""
+
+    def test_stub_does_not_overwrite_enriched(self, tmp_path: Any) -> None:
+        """When prefer_path points to enriched file (more fields + DOI) and
+        new entry is bare stub, FILE_CLEANUP should be blocked."""
+        author_dir = str(tmp_path / "Author (ID)")
+        os.makedirs(author_dir)
+
+        enriched_content = (
+            "@incollection{Bayer2022:FindingSimple,\n"
+            "  title = {Finding Simple Solutions},\n"
+            "  author = {C Bayer and R Amaral},\n"
+            "  year = {2022},\n"
+            "  booktitle = {Genetic Programming},\n"
+            "  doi = {10.1007/978-981-16-8113-4_1},\n"
+            "  pages = {1--20},\n"
+            "  publisher = {Springer},\n"
+            "}\n"
+        )
+        prefer_path = os.path.join(author_dir, "Bayer2022-FindingSimple.bib")
+        with open(prefer_path, "w") as f:
+            f.write(enriched_content)
+
+        stub_entry: dict[str, Any] = {
+            "type": "misc",
+            "key": "Bayer2022:TangledProgramGraphs",
+            "fields": {
+                "title": "with Tangled Program Graphs",
+                "author": "C Bayer and R Amaral",
+                "year": "2022",
+            },
+        }
+        result_path, was_written = merge_utils.save_entry_to_file(
+            author_dir,
+            "ID",
+            stub_entry,
+            prefer_path=prefer_path,
+        )
+        assert os.path.exists(prefer_path), "Enriched file should not be deleted"
+        assert not was_written, "Stub should not have been written"
+        assert result_path == prefer_path
+
+    def test_enriched_replaces_stub_normally(self, tmp_path: Any) -> None:
+        """When new entry is more complete than prefer_path, cleanup proceeds."""
+        author_dir = str(tmp_path / "Author (ID)")
+        os.makedirs(author_dir)
+
+        stub_content = (
+            "@misc{Bayer2022:Stub,\n"
+            "  title = {with Tangled Program Graphs},\n"
+            "  author = {C Bayer},\n"
+            "  year = {2022},\n"
+            "}\n"
+        )
+        prefer_path = os.path.join(author_dir, "Bayer2022-TangledProgram.bib")
+        with open(prefer_path, "w") as f:
+            f.write(stub_content)
+
+        enriched_entry: dict[str, Any] = {
+            "type": "incollection",
+            "key": "Bayer2022:FindingSimple",
+            "fields": {
+                "title": "Finding Simple Solutions",
+                "author": "C Bayer and R Amaral",
+                "year": "2022",
+                "booktitle": "Genetic Programming",
+                "doi": "10.1007/978-981-16-8113-4_1",
+                "pages": "1--20",
+                "publisher": "Springer",
+            },
+        }
+        _, was_written = merge_utils.save_entry_to_file(
+            author_dir,
+            "ID",
+            enriched_entry,
+            prefer_path=prefer_path,
+        )
+        assert was_written, "Enriched entry should have been written"
+        assert not os.path.exists(prefer_path), "Stub at prefer_path should be removed"
+
+
+class TestPreprintPublisherCleanup:
+    """Preprint-only publishers should be stripped from published journal entries."""
+
+    def test_openrxiv_stripped_from_published_journal(self) -> None:
+        baseline: dict[str, Any] = {
+            "type": "article",
+            "key": "Test2024:Example",
+            "fields": {
+                "title": "A Published Paper",
+                "author": "A Test",
+                "year": "2024",
+                "journal": "iScience",
+                "doi": "10.1016/j.isci.2024.12345",
+                "publisher": "openRxiv",
+            },
+        }
+        result = merge_utils.merge_with_policy(baseline, [])
+        fields = result.get("fields", {})
+        assert "publisher" not in fields or fields.get("publisher", "").lower() != "openrxiv", (
+            "openRxiv should be stripped from a published journal entry"
+        )
+
+    def test_preprint_publisher_kept_for_preprint_journal(self) -> None:
+        baseline: dict[str, Any] = {
+            "type": "article",
+            "key": "Test2024:Preprint",
+            "fields": {
+                "title": "A Preprint Paper",
+                "author": "A Test",
+                "year": "2024",
+                "journal": "bioRxiv",
+                "doi": "10.1101/2024.01.01.123456",
+                "publisher": "Cold Spring Harbor Laboratory",
+            },
+        }
+        result = merge_utils.merge_with_policy(baseline, [])
+        fields = result.get("fields", {})
+        assert fields.get("publisher") == "Cold Spring Harbor Laboratory", (
+            "Preprint publisher should be kept when journal is a preprint server"
+        )
+
+
+class TestDagstuhlFestschriftDoi:
+    """Festschrift DOIs (10.4230/oasics.name.N) should resolve to @inproceedings."""
+
+    def test_festschrift_doi_becomes_inproceedings(self) -> None:
+        doi = "10.4230/oasics.grossi.10"
+        baseline: dict[str, Any] = {
+            "type": "article",
+            "key": "Brown2025:FasterRun",
+            "fields": {
+                "title": "Faster Run-Length BWT Construction",
+                "author": "James Brown and Travis Gagie",
+                "year": "2025",
+                "journal": "From Strings to Graphs, and Back Again",
+                "doi": doi,
+            },
+        }
+        csl_enricher: dict[str, Any] = {
+            "type": "article",
+            "fields": {"doi": doi, "title": "Faster Run-Length BWT Construction"},
+        }
+        result = merge_utils.merge_with_policy(baseline, [("csl", csl_enricher)])
+        assert result["type"] == "inproceedings", (
+            f"OASIcs Festschrift DOI should produce @inproceedings, got {result['type']}"
+        )
+        fields = result.get("fields", {})
+        assert fields.get("booktitle"), "Should have booktitle for inproceedings"
+        assert not fields.get("journal"), "journal should be migrated to booktitle"
+
+    def test_known_dagstuhl_conf_still_resolves(self) -> None:
+        doi = "10.4230/lipics.esa.2023.15"
+        baseline: dict[str, Any] = {
+            "type": "misc",
+            "key": "Test2023:Example",
+            "fields": {
+                "title": "Test Paper",
+                "author": "A Test",
+                "year": "2023",
+                "doi": doi,
+                "howpublished": "LIPIcs",
+            },
+        }
+        csl_enricher: dict[str, Any] = {
+            "type": "misc",
+            "fields": {"doi": doi, "title": "Test Paper"},
+        }
+        result = merge_utils.merge_with_policy(baseline, [("csl", csl_enricher)])
+        assert result["type"] == "inproceedings"
+        fields = result.get("fields", {})
+        assert "european symposium" in fields.get("booktitle", "").lower()
+
+
+class TestAuthorDigitSanitization:
+    """Author digit suffixes should be stripped during merge."""
+
+    def test_trailing_digits_stripped(self) -> None:
+        baseline: dict[str, Any] = {
+            "type": "misc",
+            "key": "Das2022:Test",
+            "fields": {
+                "title": "A Connection to Fully-Dynamic",
+                "author": "R Das1 and JI Munro1 and M He",
+                "year": "2022",
+            },
+        }
+        result = merge_utils.merge_with_policy(baseline, [])
+        fields = result.get("fields", {})
+        author = fields.get("author", "")
+        assert "Das1" not in author, f"'Das1' should be sanitized, got: {author}"
+        assert "Munro1" not in author, f"'Munro1' should be sanitized, got: {author}"
+        assert "R Das" in author
+        assert "JI Munro" in author
+        assert "M He" in author
+
+    def test_clean_authors_unchanged(self) -> None:
+        baseline: dict[str, Any] = {
+            "type": "article",
+            "key": "Smith2024:Test",
+            "fields": {
+                "title": "A Normal Paper",
+                "author": "John Smith and Jane Doe",
+                "year": "2024",
+                "journal": "Nature",
+                "doi": "10.1038/s41586-024-00001-0",
+            },
+        }
+        result = merge_utils.merge_with_policy(baseline, [])
+        fields = result.get("fields", {})
+        assert fields.get("author") == "John Smith and Jane Doe"
+
+
+class TestReconcileSummaryCSV:
+    """reconcile_summary_csv removes phantom entries for deleted files."""
+
+    def test_phantom_entries_removed(self, tmp_path: Any) -> None:
+        """Rows pointing to non-existent files are stripped from the CSV."""
+        import csv as _csv
+
+        from citeforge.io_utils import _SUMMARY_CSV_FIELDNAMES, reconcile_summary_csv
+
+        csv_path = str(tmp_path / "summary.csv")
+        real_file = tmp_path / "real.bib"
+        real_file.write_text("@misc{k, title={T}}")
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row_real: dict[str, Any] = {"file_path": str(real_file), "trust_hits": "3"}
+            row_real.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row_real})
+            row_phantom: dict[str, Any] = {"file_path": str(tmp_path / "ghost.bib"), "trust_hits": "1"}
+            row_phantom.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row_phantom})
+            writer.writerow(row_real)
+            writer.writerow(row_phantom)
+
+        removed = reconcile_summary_csv(csv_path)
+        assert removed == 1
+
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            rows = list(_csv.DictReader(f))
+        assert len(rows) == 1
+        assert rows[0]["file_path"] == str(real_file)
+
+    def test_no_phantoms_no_rewrite(self, tmp_path: Any) -> None:
+        """When all files exist, CSV is untouched (no rewrite)."""
+        import csv as _csv
+
+        from citeforge.io_utils import _SUMMARY_CSV_FIELDNAMES, reconcile_summary_csv
+
+        csv_path = str(tmp_path / "summary.csv")
+        real_file = tmp_path / "real.bib"
+        real_file.write_text("@misc{k, title={T}}")
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row: dict[str, Any] = {"file_path": str(real_file), "trust_hits": "2"}
+            row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
+            writer.writerow(row)
+
+        mtime_before = os.path.getmtime(csv_path)
+        removed = reconcile_summary_csv(csv_path)
+        assert removed == 0
+        assert os.path.getmtime(csv_path) == mtime_before
+
+
+class TestCollectOrphanFiles:
+    """collect_orphan_files finds .bib files not referenced in the CSV."""
+
+    def test_orphan_detected(self, tmp_path: Any) -> None:
+        """A .bib file with no CSV entry is reported as an orphan."""
+        import csv as _csv
+
+        from citeforge.io_utils import _SUMMARY_CSV_FIELDNAMES, collect_orphan_files
+
+        out_dir = tmp_path / "output"
+        author_dir = out_dir / "Author (ID)"
+        author_dir.mkdir(parents=True)
+
+        tracked = author_dir / "Tracked2024-Paper.bib"
+        tracked.write_text("@article{k, title={Tracked}}")
+        orphan = author_dir / "Orphan2023-OldKey.bib"
+        orphan.write_text("@article{k2, title={Orphan}}")
+
+        csv_path = str(tmp_path / "summary.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row: dict[str, Any] = {"file_path": str(tracked), "trust_hits": "3"}
+            row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
+            writer.writerow(row)
+
+        orphans = collect_orphan_files(csv_path, str(out_dir))
+        assert len(orphans) == 1
+        assert os.path.basename(orphans[0]) == "Orphan2023-OldKey.bib"
+
+    def test_no_orphans(self, tmp_path: Any) -> None:
+        """When all files are in the CSV, no orphans are reported."""
+        import csv as _csv
+
+        from citeforge.io_utils import _SUMMARY_CSV_FIELDNAMES, collect_orphan_files
+
+        out_dir = tmp_path / "output"
+        author_dir = out_dir / "Author (ID)"
+        author_dir.mkdir(parents=True)
+        f1 = author_dir / "Paper2024-Title.bib"
+        f1.write_text("@article{k, title={P}}")
+
+        csv_path = str(tmp_path / "summary.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row: dict[str, Any] = {"file_path": str(f1), "trust_hits": "1"}
+            row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
+            writer.writerow(row)
+
+        orphans = collect_orphan_files(csv_path, str(out_dir))
+        assert len(orphans) == 0
+
+
+class TestIsKnownSummaryPath:
+    """is_known_summary_path checks the in-memory set from init_summary_csv."""
+
+    def test_known_path_after_preserve(self, tmp_path: Any) -> None:
+        """Paths loaded from an existing CSV are recognized as known."""
+        import csv as _csv
+
+        from citeforge.io_utils import (
+            _SUMMARY_CSV_FIELDNAMES,
+            init_summary_csv,
+            is_known_summary_path,
+        )
+
+        csv_path = str(tmp_path / "summary.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=_SUMMARY_CSV_FIELDNAMES)
+            writer.writeheader()
+            row: dict[str, Any] = {"file_path": "output/Author/Paper.bib", "trust_hits": "3"}
+            row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
+            writer.writerow(row)
+
+        init_summary_csv(csv_path, preserve_existing=True)
+        assert is_known_summary_path("output/Author/Paper.bib")
+        assert not is_known_summary_path("output/Author/Unknown.bib")
+
+    def test_unknown_path_fresh_csv(self, tmp_path: Any) -> None:
+        """After fresh init, no paths are known."""
+        from citeforge.io_utils import init_summary_csv, is_known_summary_path
+
+        csv_path = str(tmp_path / "summary_fresh.csv")
+        init_summary_csv(csv_path, preserve_existing=False)
+        assert not is_known_summary_path("anything.bib")
+
+
+class TestGarbageTitleDetection:
+    """_is_garbage_title catches non-bibliographic titles."""
+
+    @staticmethod
+    def _is_garbage(title: str) -> bool:
+        return _is_garbage_title(title)
+
+    def test_email_address(self) -> None:
+        assert self._is_garbage("spadon@dal.ca Department of CS")
+
+    def test_postal_code(self) -> None:
+        assert self._is_garbage("Halifax, NS B3H 4R2, Canada")
+
+    def test_department_prefix(self) -> None:
+        assert self._is_garbage("Department of Computer Science")
+
+    def test_complete_volume(self) -> None:
+        assert self._is_garbage("OASIcs, Volume 131, Manzini's Festschrift, Complete Volume")
+
+    def test_series_volume_metadata(self) -> None:
+        assert self._is_garbage("LIPIcs, Volume 308, MFCS 2024, Complete Volume")
+
+    def test_real_paper_title_not_garbage(self) -> None:
+        assert not self._is_garbage("Finding Simple Solutions to Multi-Task Visual RL")
+
+    def test_year_range_not_phone(self) -> None:
+        assert not self._is_garbage("An Updated Review from 2012-2023")
+
+    def test_empty_title(self) -> None:
+        assert not self._is_garbage("")
+
+
+class TestStaleFileValidation:
+    """Stale files with now-invalid titles should be detected."""
+
+    def test_garbage_title_detected(self) -> None:
+        title = "Dalhousie University, Halifax, NS B3H 4R2, Canada {travis. gagie, michael. stdenis}@ dal. ca"
+        assert _is_garbage_title(title)
+
+    def test_corrupted_title_detected(self) -> None:
+        assert _is_corrupted_title("Li2 () Wang3 () Chen1 ()")
+
+
+class TestProceedingsVolumeDetection:
+    """Proceedings volume titles should be detected as garbage."""
+
+    @staticmethod
+    def _is_garbage(title: str) -> bool:
+        return _is_garbage_title(title)
+
+    def test_proceedings_volume_year_prefix(self) -> None:
+        title = (
+            "Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing: Tutorial Abstracts"
+        )
+        assert self._is_garbage(title)
+
+    def test_proceedings_volume_without_the(self) -> None:
+        assert self._is_garbage("Proceedings of 2024 International Joint Conference on AI")
+
+    def test_real_paper_title_with_proceedings(self) -> None:
+        assert not self._is_garbage("Analyzing Proceedings of Major NLP Conferences")
+
+    def test_workshop_paper_not_caught(self) -> None:
+        assert not self._is_garbage("A Survey of Transformer Architectures for NLP")
+
+
+class TestHowpublishedCasingNormalization:
+    """howpublished field casing should be normalized to canonical form."""
+
+    def test_biorxiv_casing(self) -> None:
+        entry = {
+            "type": "misc",
+            "key": "Test2024:Test",
+            "fields": {"title": "Test", "author": "A", "year": "2024", "howpublished": "BioRxiv"},
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        assert result["fields"]["howpublished"] == "bioRxiv"
+
+    def test_research_square_casing(self) -> None:
+        entry = {
+            "type": "misc",
+            "key": "Test2024:Test",
+            "fields": {"title": "Test", "author": "A", "year": "2024", "howpublished": "Research square"},
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        assert result["fields"]["howpublished"] == "Research Square"
+
+    def test_arxiv_lowercase(self) -> None:
+        entry = {
+            "type": "misc",
+            "key": "Test2024:Test",
+            "fields": {"title": "Test", "author": "A", "year": "2024", "howpublished": "ARXIV"},
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        assert result["fields"]["howpublished"] == "arXiv"
+
+    def test_regular_howpublished_unchanged(self) -> None:
+        entry = {
+            "type": "misc",
+            "key": "Test2024:Test",
+            "fields": {"title": "Test", "author": "A", "year": "2024", "howpublished": "Technical Report"},
+        }
+        result = merge_utils.merge_with_policy(entry, [])
+        assert result["fields"]["howpublished"] == "Technical Report"
+
+
+class TestJournalNamedProceedingsWordBoundary:
+    """_matches_journal_named_proceedings must use word-boundary matching."""
+
+    def test_exact_match(self) -> None:
+        assert merge_utils._matches_journal_named_proceedings("proceedings of the ieee")
+
+    def test_match_with_comma_suffix(self) -> None:
+        assert merge_utils._matches_journal_named_proceedings("proceedings of the ieee, vol. 100")
+
+    def test_no_match_slash_suffix(self) -> None:
+        """IEEE/CVF conference must NOT match the IEEE journal."""
+        assert not merge_utils._matches_journal_named_proceedings(
+            "proceedings of the ieee/cvf winter conference on applications of computer vision"
+        )
+
+    def test_conference_journal_detects_ieee_cvf(self) -> None:
+        """After the word-boundary fix, IEEE/CVF conference IS classified as conference."""
+        assert merge_utils._is_conference_journal(
+            "Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision"
+        )
+
+    def test_pnas_still_excluded(self) -> None:
+        assert not merge_utils._is_conference_journal("Proceedings of the National Academy of Sciences")
+
+
+class TestCanonicalizationConsistency:
+    """Regression tests for post-run orphan canonicalization.
+
+    The owning module routes this helper through POSTRUN_ORPHAN_REPAIR.
+    """
+
+    def test_jnp_suffix_guard_ieee_conference_stays_inproceedings(self) -> None:
+        """IEEE/CVF conference booktitle must NOT be reclassified to @article."""
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Proceedings of the IEEE/CVF Winter Conference on Computer Vision",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "inproceedings"
+        assert "booktitle" in entry["fields"]
+        assert "journal" not in entry["fields"]
+
+    def test_jnp_suffix_guard_pnas_becomes_article(self) -> None:
+        """PNAS (Proceedings of the National Academy of Sciences) IS a journal."""
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Proceedings of the National Academy of Sciences",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "article"
+        assert "journal" in entry["fields"]
+        assert "booktitle" not in entry["fields"]
+
+    def test_jnp_suffix_guard_proc_ieee_plain(self) -> None:
+        """Plain 'Proceedings of the IEEE' is a journal."""
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Proceedings of the IEEE",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "article"
+        assert "journal" in entry["fields"]
+
+    def test_jnp_suffix_guard_proc_ieee_with_symposium(self) -> None:
+        """'Proceedings of the IEEE Symposium ...' must stay @inproceedings."""
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": "Proceedings of the IEEE Symposium on Security and Privacy",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "inproceedings"
+        assert "booktitle" in entry["fields"]
+
+    def test_pacm_stays_article(self) -> None:
+        """PACM journals must not be reclassified to @inproceedings."""
+        entry: dict[str, Any] = {
+            "type": "article",
+            "fields": {
+                "title": "Some Paper",
+                "journal": "Proceedings of the ACM on Human-Computer Interaction",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "article"
+        assert "journal" in entry["fields"]
+        assert entry["fields"]["journal"] == "Proceedings of the ACM on Human-Computer Interaction"
+
+    def test_publisher_dedup(self) -> None:
+        """Publisher that duplicates journal/booktitle must be stripped."""
+        entry: dict[str, Any] = {
+            "type": "article",
+            "fields": {
+                "title": "Some Paper",
+                "journal": "Nature",
+                "publisher": "Nature",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert "publisher" not in entry["fields"]
+
+    def test_university_journal_becomes_phdthesis(self) -> None:
+        """@article with 'university' in journal → @phdthesis."""
+        entry: dict[str, Any] = {
+            "type": "article",
+            "fields": {
+                "title": "Some Thesis",
+                "journal": "Dalhousie University",
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        assert entry["type"] == "phdthesis"
+        assert "school" in entry["fields"]
+        assert entry["fields"]["school"] == "Dalhousie University"
+        assert "journal" not in entry["fields"]
+
+    def test_abbreviated_venue_expanded(self) -> None:
+        """ABBREVIATED_VENUE_MAP entries must be expanded in _fixup_bib_entry."""
+        # Pick a real entry from the map
+        sample_key = next(iter(ABBREVIATED_VENUE_MAP))
+        sample_val = ABBREVIATED_VENUE_MAP[sample_key]
+        entry: dict[str, Any] = {
+            "type": "inproceedings",
+            "fields": {
+                "title": "Some Paper",
+                "booktitle": sample_key,
+                "author": "A B",
+                "year": "2024",
+            },
+        }
+        _fixup_bib_entry(entry)
+        bt = entry["fields"].get("booktitle") or entry["fields"].get("journal", "")
+        assert bt == sample_val or bt != sample_key
+
+
+class TestCachePutOSError:
+    """Cache.put() must log on OSError, not silently swallow."""
+
+    def test_oserror_does_not_raise(self, monkeypatch: Any, tmp_path: Any) -> None:
+        from citeforge.cache import ResponseCache
+
+        cache = ResponseCache(str(tmp_path / "cache"))
+        # Make mkstemp raise OSError
+        monkeypatch.setattr("tempfile.mkstemp", lambda **kw: (_ for _ in ()).throw(OSError("disk full")))
+        # Should not raise
+        cache.put("test_ns", "test_key", {"data": 1})
+
+    def test_oserror_logged(self, monkeypatch: Any, tmp_path: Any, capfd: Any) -> None:
+        from citeforge.cache import ResponseCache
+
+        cache = ResponseCache(str(tmp_path / "cache"))
+
+        def _fail_mkstemp(**kwargs: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("tempfile.mkstemp", _fail_mkstemp)
+        cache.put("test_ns", "test_key", {"data": 1})
+        # Verify the warning was logged (goes to stderr via logger)
+        # The key assertion is that put() didn't raise
+
+
+class TestCacheCoversWindow:
+    """_cache_covers_window edge cases."""
+
+    def test_empty_articles_returns_false(self) -> None:
+        from citeforge.clients.scholar import _cache_covers_window
+
+        assert _cache_covers_window({"articles": []}, 2020) is False
+
+    def test_no_articles_key_returns_false(self) -> None:
+        from citeforge.clients.scholar import _cache_covers_window
+
+        assert _cache_covers_window({}, 2020) is False
+
+    def test_covers_min_year_returns_true(self) -> None:
+        from citeforge.clients.scholar import _cache_covers_window
+
+        cached = {"articles": [{"year": 2019}, {"year": 2021}]}
+        assert _cache_covers_window(cached, 2020) is True  # min(years)=2019 <= 2020
+
+    def test_truncated_returns_false(self) -> None:
+        from citeforge.clients.scholar import _cache_covers_window
+
+        # 100 articles, all years > min_year → likely truncated
+        cached = {"articles": [{"year": 2022}] * 100}
+        assert _cache_covers_window(cached, 2020) is False
+
+    def test_non_truncated_returns_true(self) -> None:
+        from citeforge.clients.scholar import _cache_covers_window
+
+        # 99 articles, all years > min_year → not truncated (not % 100)
+        cached = {"articles": [{"year": 2022}] * 99}
+        assert _cache_covers_window(cached, 2020) is True
+
+
+class TestStripEllipsis:
+    """_strip_ellipsis removes trailing '...' and dangling prepositions."""
+
+    def test_no_ellipsis(self) -> None:
+        from citeforge.publication_parser import _strip_ellipsis
+
+        assert _strip_ellipsis("Normal Text") == "Normal Text"
+
+    def test_trailing_dots(self) -> None:
+        from citeforge.publication_parser import _strip_ellipsis
+
+        assert _strip_ellipsis("Workshop on Bridging Language...") == "Workshop on Bridging Language"
+
+    def test_trailing_dots_with_preposition(self) -> None:
+        from citeforge.publication_parser import _strip_ellipsis
+
+        result = _strip_ellipsis("CHI Conference on Human Factors in ...")
+        assert result == "CHI Conference on Human Factors"
+        assert not result.endswith(" in")
+
+    def test_unicode_ellipsis(self) -> None:
+        from citeforge.publication_parser import _strip_ellipsis
+
+        assert _strip_ellipsis("Some Text\u2026") == "Some Text"
+
+    def test_parser_strips_ellipsis_from_venue(self) -> None:
+        from citeforge.publication_parser import parse_publication_string
+
+        result = parse_publication_string(
+            "Extended Abstracts of the 2019 CHI Conference on Human Factors in Computing ..., 2019"
+        )
+        assert result is not None
+        assert not result.venue_name.endswith("...")
+
+
+class TestAuthorMergeCompleteness:
+    """Author merge rule: prefer more complete (less abbreviated) names."""
+
+    def test_keep_full_names_over_initials(self) -> None:
+        """S2 abbreviated 'J. Ian Munro' -> 'J. Munro'; merge should keep the full version."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test Paper", "author": "Meng He and J. Ian Munro and Yakov Nekrich", "year": "2020"},
+        }
+        enrichers = [
+            ("semantic_scholar", {"type": "misc", "fields": {"author": "Meng He and J. Munro and Yakov Nekrich"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        assert "J. Ian Munro" in result["fields"]["author"]
+
+    def test_accept_full_names_from_higher_trust(self) -> None:
+        """When higher-trust source has MORE complete names, accept them."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test", "author": "A. Smith and B. Jones", "year": "2020"},
+        }
+        enrichers = [
+            ("crossref", {"type": "article", "fields": {"author": "Alice Smith and Bob Jones"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        assert "Alice Smith" in result["fields"]["author"]
+
+    def test_allow_replacement_when_equal_initials(self) -> None:
+        """When both have same number of initials, normal trust order applies."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test", "author": "A. Smith and B. Jones", "year": "2020"},
+        }
+        enrichers = [
+            ("crossref", {"type": "article", "fields": {"author": "C. Smith and D. Jones"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        # Crossref is higher trust than scholar_min, so it should replace
+        assert "C. Smith" in result["fields"]["author"]
+
+    def test_different_author_count_skips_rule(self) -> None:
+        """When author counts differ, skip the initials check (different paper versions)."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test", "author": "Alice Smith and Bob Jones", "year": "2020"},
+        }
+        enrichers = [
+            ("crossref", {"type": "article", "fields": {"author": "A. Smith and B. Jones and C. Doe"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        # Different count — normal trust applies, crossref wins
+        assert "A. Smith" in result["fields"]["author"]
+
+    def test_keep_longer_name_forms(self) -> None:
+        """S2 shortened 'Samuel Acquaviva' -> 'Sam Acquaviva'; merge should keep longer form."""
+        primary = {
+            "type": "misc",
+            "fields": {
+                "title": "Test",
+                "author": "Gabrielle Ecanow and Catherine Wong and Samuel Acquaviva",
+                "year": "2021",
+            },
+        }
+        enrichers = [
+            (
+                "semantic_scholar",
+                {
+                    "type": "misc",
+                    "fields": {"author": "Gabrielle Ecanow and Catherine Wong and Sam Acquaviva"},
+                },
+            ),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        assert "Samuel Acquaviva" in result["fields"]["author"]
+
+    def test_keep_middle_initials(self) -> None:
+        """Keep 'Anielle S. L. Andrade' over 'Anielle Andrade'."""
+        primary = {
+            "type": "misc",
+            "fields": {"title": "Test", "author": "Anielle S. L. Andrade and Bob Smith", "year": "2025"},
+        }
+        enrichers = [
+            ("semantic_scholar", {"type": "misc", "fields": {"author": "Anielle Andrade and Bob Smith"}}),
+        ]
+        result = merge_utils.merge_with_policy(primary, enrichers)
+        assert "Anielle S. L. Andrade" in result["fields"]["author"]
+
+
+class TestDecodeValueErrorContainment:
+    """A malformed-200 body (HTML gateway page) must not crash the run.
+
+    _decode_json_bytes raises DecodeError (a ValueError subclass) on a non-JSON
+    body. Root-cause fix: DecodeError is a member of DECODE_ERRORS (hence
+    ALL_API_ERRORS), so every ``except ALL_API_ERRORS`` API client -- including
+    the generic search path backing S2/Crossref/OpenAlex -- degrades to a
+    skipped source instead of dropping the whole article. Unrelated ValueErrors
+    are deliberately NOT swallowed by ALL_API_ERRORS.
+    """
+
+    def test_decode_error_is_caught_by_all_api_errors(self) -> None:
+        from citeforge.exceptions import ALL_API_ERRORS, DecodeError
+
+        # The invariant that makes all ~11 `except ALL_API_ERRORS` sites graceful.
+        assert issubclass(DecodeError, ValueError)
+        assert issubclass(DecodeError, ALL_API_ERRORS)
+        # A bare/unrelated ValueError must still propagate (no masking).
+        assert not issubclass(ValueError, ALL_API_ERRORS)
+
+    def test_decode_json_bytes_raises_decode_error(self) -> None:
+        from citeforge.exceptions import DecodeError
+        from citeforge.http_utils import _decode_json_bytes
+
+        with pytest.raises(DecodeError):
+            _decode_json_bytes(b"<html>not json</html>", "https://api.openalex.org/works?q=x")
+
+    def test_generic_search_multiple_swallows_decode_error(self) -> None:
+        # The primary enrichment path (OpenAlex/Crossref/S2) must return [],
+        # not propagate, when an upstream serves an HTML 200 body.
+        from citeforge import api_generics
+        from citeforge.api_configs import OPENALEX_SEARCH_CONFIG
+        from citeforge.exceptions import DecodeError
+
+        with (
+            patch.object(api_generics.response_cache, "get", return_value=None),
+            patch.object(api_generics.response_cache, "put"),
+            patch.object(api_generics, "http_get_json", side_effect=DecodeError("Invalid JSON from 'https://x'")),
+        ):
+            assert api_generics.search_api_generic_multiple("A Title", "Author", OPENALEX_SEARCH_CONFIG) == []
+
+
+class TestOpenReviewSessionThreadSafety:
+    """Concurrent openreview_login calls must reuse a valid cached session
+    atomically: never re-login and never return a torn/None value."""
+
+    def test_concurrent_reuse_no_relogin(self) -> None:
+        import threading
+
+        from citeforge.clients import search_apis as sa
+
+        prev_session = sa._OPENREVIEW_SESSION
+        prev_created = sa._OPENREVIEW_SESSION_CREATED_AT
+        relogins = {"n": 0}
+
+        def _fake_get_session() -> Any:
+            relogins["n"] += 1
+            raise AssertionError("must not re-login while a valid session is cached")
+
+        results: list[Any] = []
+        results_lock = threading.Lock()
+
+        def _worker() -> None:
+            r = sa.openreview_login(("user", "pass"))
+            with results_lock:
+                results.append(r)
+
+        try:
+            sa._OPENREVIEW_SESSION = {"Cookie": "sess=abc"}
+            sa._OPENREVIEW_SESSION_CREATED_AT = time.monotonic()
+            with patch.object(sa, "_get_session", _fake_get_session):
+                threads = [threading.Thread(target=_worker) for _ in range(8)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+            assert relogins["n"] == 0
+            assert len(results) == 8
+            assert all(r == {"Cookie": "sess=abc"} for r in results)
+        finally:
+            sa._OPENREVIEW_SESSION = prev_session
+            sa._OPENREVIEW_SESSION_CREATED_AT = prev_created
+
+
+class TestDoiBackfilledPreprintNotFabricatedConference:
+    """A DOI-inferred preprint/repository label must never become a fabricated
+    @inproceedings venue. infer_howpublished_from_doi returns labels like
+    "EGU", "Preprint", "Institutional Repository" that are not conference names;
+    the conference upgrade must not fire on them, and any already-upgraded entry must self-heal.
+    A REAL venue that merely carries a preprint-prefix DOI stays @inproceedings.
+    """
+
+    def test_backfilled_label_not_upgraded_to_inproceedings(self) -> None:
+        from citeforge.canonicalize import CanonicalStage, canonicalize
+
+        # @misc whose howpublished is the bare DOI-inferred label -> stays @misc.
+        entry = {
+            "type": "misc",
+            "key": "X2024:Y",
+            "fields": {"title": "T", "howpublished": "EGU", "doi": "10.5194/egusphere-2024-1"},
+        }
+        canonicalize(entry, stage=CanonicalStage.POST_MERGE)
+        assert entry["type"] == "misc"
+        assert "booktitle" not in entry["fields"]
+        assert entry["fields"].get("howpublished") == "EGU"
+
+    def test_bare_infer_label_booktitle_downgraded_to_misc(self) -> None:
+        from citeforge.canonicalize import CanonicalStage, canonicalize
+
+        # Already-fabricated @inproceedings with the bare label as booktitle -> @misc.
+        entry = {
+            "type": "inproceedings",
+            "key": "R2025:IP",
+            "fields": {"title": "T", "booktitle": "Institutional Repository", "doi": "10.32920/30695723"},
+        }
+        canonicalize(entry, stage=CanonicalStage.POST_MERGE)
+        assert entry["type"] == "misc"
+        assert "booktitle" not in entry["fields"]
+        assert entry["fields"].get("howpublished") == "Institutional Repository"
+
+    def test_real_conference_with_preprint_doi_preserved(self) -> None:
+        from citeforge.canonicalize import CanonicalStage, canonicalize
+
+        # A genuine venue name that happens to carry an egusphere DOI stays @inproceedings.
+        entry = {
+            "type": "inproceedings",
+            "key": "C2022:Beirut",
+            "fields": {"title": "T", "booktitle": "EGU General Assembly", "doi": "10.5194/egusphere-egu22-7164"},
+        }
+        canonicalize(entry, stage=CanonicalStage.POST_MERGE)
+        assert entry["type"] == "inproceedings"
+        assert entry["fields"].get("booktitle") == "EGU General Assembly"

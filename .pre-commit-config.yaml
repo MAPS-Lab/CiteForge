@@ -1,0 +1,55 @@
+# Local pre-commit hooks. These mirror the CI quality gates in
+# .github/workflows/tests.yml rather than adding new ones, so a clean local run
+# predicts a clean CI run. Tool versions are pinned to the same releases that
+# requirements-dev.lock installs, so local and CI cannot drift.
+#
+# Install with: pip install pre-commit && pre-commit install
+
+exclude: |
+  (?x)^(
+      output/.*
+    | data/api_cache/.*
+    | requirements\.lock
+    | requirements-dev\.lock
+  )$
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+      - id: debug-statements
+      # This repository is public and keys/ is gitignored. This is the last
+      # line of defence if a key file is ever force-added.
+      - id: detect-private-key
+
+  # Matches requirements-dev.lock ruff==0.15.20 and the CI step
+  # `ruff check citeforge/ tests/ main.py`. ruff-format is deliberately absent:
+  # the repository configures ruff for linting only (pyproject.toml [tool.ruff]
+  # sets line-length and a lint rule set, with no formatter section), and CI
+  # never runs `ruff format --check`.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+
+  # Isolate the hook and supply the two imports whose typed use matters to the
+  # configured warn_return_any gate. The mirror revision pins mypy itself.
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.1.0
+    hooks:
+      - id: mypy
+        args: [citeforge/, main.py]
+        pass_filenames: false
+        additional_dependencies:
+          - rapidfuzz==3.14.5
+          - Unidecode==1.4.0

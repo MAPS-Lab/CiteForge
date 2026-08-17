@@ -1,0 +1,1009 @@
+"""Text and author-name normalization and similarity scoring.
+
+Normalizes titles and author names and scores record similarity. The merge,
+deduplication, and BibTeX-building layers all compare records through these
+functions, so any output change here shifts dedup thresholds pipeline-wide.
+"""
+
+from __future__ import annotations
+
+import functools
+import html as html_module
+import re
+import urllib.parse
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from typing import Any
+
+from rapidfuzz.fuzz import ratio as fuzz_ratio
+from unidecode import unidecode
+
+from .config import (
+    PREPRINT_DOI_PREFIXES,
+    PREPRINT_SERVERS,
+    VALID_YEAR_MAX,
+    VALID_YEAR_MIN,
+)
+from .exceptions import DECODE_ERRORS, NUMERIC_ERRORS, PARSE_ERRORS
+from .id_utils import external_ids_match
+from .latex_utils import latex_to_ascii
+
+_ET_AL = "et al."
+_ABBREVIATED_AUTHOR_PATTERN = re.compile(r"^[A-Z]\.?[ \t]*[A-Z]?\.?[ \t]*[A-Z]?\.?[ \t]+[A-Z][a-z]+", re.IGNORECASE)
+
+__all__ = [
+    "author_in_text",
+    "author_list_is_surname_initials",
+    "author_name_matches",
+    "author_overlap_ratio",
+    "authors_overlap",
+    "build_url",
+    "compute_dedup_score",
+    "extract_author_names",
+    "extract_authors_from_any",
+    "extract_last_name",
+    "extract_valid_title",
+    "extract_year_from_any",
+    "format_author_dirname",
+    "has_placeholder",
+    "name_signature",
+    "normalize_person_name",
+    "normalize_title",
+    "parse_authors_any",
+    "safe_get_field",
+    "safe_get_nested",
+    "strip_accents",
+    "surname_from_initials_form",
+    "title_is_truncated_match",
+    "title_similarity",
+    "to_text",
+    "trim_title_default",
+    "venue_similarity",
+]
+
+
+def _name_from_dict(d: dict[str, Any]) -> str:
+    """Build a display name from a dict with a "name" field or given/family
+    (first/last) components. Returns "" when nothing usable is present."""
+    name = str(d.get("name") or "").strip()
+    if name:
+        return name
+    given = str(d.get("given") or d.get("first") or "").strip()
+    family = str(d.get("family") or d.get("last") or "").strip()
+    return (f"{given} {family}" if (given or family) else "").strip()
+
+
+def build_url(base: str, params: dict[str, Any]) -> str:
+    """Attach URL-encoded query parameters to a base URL."""
+    q = urllib.parse.urlencode(params)
+    return f"{base}?{q}"
+
+
+def to_text(obj: Any) -> str:
+    """Convert an arbitrary value (nested dicts, author lists, other common
+    API metadata shapes) into a readable string."""
+    if obj is None:
+        return ""
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, list):
+        parts: list[str] = []
+        for x in obj:
+            if isinstance(x, dict):
+                nm = x.get("name") or x.get("text") or x.get("summary") or ""
+                if not nm:
+                    given = x.get("given") or x.get("first") or ""
+                    family = x.get("family") or x.get("last") or ""
+                    nm = f"{given} {family}".strip()
+                parts.append(str(nm).strip())
+            else:
+                parts.append(str(x).strip())
+        return ", ".join(p for p in parts if p)
+    if isinstance(obj, dict):
+        if obj.get("name"):
+            return str(obj["name"])
+        if obj.get("summary"):
+            return str(obj["summary"])
+        if obj.get("text"):
+            return str(obj["text"])
+        try:
+            return ", ".join(str(v) for v in obj.values() if v)
+        except PARSE_ERRORS + DECODE_ERRORS:
+            return str(obj)
+    return str(obj)
+
+
+def strip_accents(s: str) -> str:
+    """Transliterate Unicode to ASCII via unidecode, removing accents and
+    diacritics so text from different locales compares reliably."""
+    try:
+        return unidecode(s)
+    except PARSE_ERRORS + DECODE_ERRORS:
+        return s
+
+
+_TITLE_PUNCT_RE = re.compile(r"[,.;:!?\n\t\r'\"\-\(\)\[\]\{\}~]")
+
+
+@functools.lru_cache(maxsize=4096)
+def normalize_title(t: str | None) -> str:
+    """Normalize a title for comparison. Strips accents, lowercases, removes
+    punctuation, brackets, and LaTeX formatting, collapses whitespace."""
+    if not t:
+        return ""
+
+    t_str = str(t)
+
+    t_str = latex_to_ascii(html_module.unescape(t_str), math_mode="remove")
+    t2 = t_str.lower()
+    t2 = _TITLE_PUNCT_RE.sub(" ", t2)
+    result = " ".join(t2.split())
+    # If unidecode stripped everything (e.g., CJK-only title), fall back to
+    # the original lowercased+collapsed string so similarity can still work.
+    if not result and t_str.strip():
+        fallback = t_str.lower()
+        fallback = _TITLE_PUNCT_RE.sub(" ", fallback)
+        result = " ".join(fallback.split())
+    return result
+
+
+_ARTIFACT_PREFIXES = ("Check for updates ", "Check for Updates ")
+
+# Words that should stay uppercase when converting ALL-CAPS titles to title case
+_ACRONYMS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "but",
+        "by",
+        "for",
+        "if",
+        "in",
+        "nor",
+        "of",
+        "on",
+        "or",
+        "so",
+        "the",
+        "to",
+        "up",
+        "vs",
+        "yet",
+    }
+)
+
+
+def _fix_allcaps_title(s: str) -> str:
+    """Convert ALL-CAPS title to title case, preserving known acronyms.
+
+    Only activates when >60% of alphabetic characters are uppercase,
+    indicating publisher metadata in ALL-CAPS rather than intentional styling.
+    """
+    alpha_chars = [c for c in s if c.isalpha()]
+    if not alpha_chars:
+        return s
+    upper_ratio = sum(1 for c in alpha_chars if c.isupper()) / len(alpha_chars)
+    if upper_ratio <= 0.6:
+        return s
+    # Split on spaces, preserving hyphens within words
+    words = s.split()
+    result: list[str] = []
+    for i, word in enumerate(words):
+        if "-" in word:
+            parts = [p.capitalize() if len(p) > 1 else p for p in word.split("-")]
+            result.append("-".join(parts))
+        elif word[0] in "([":
+            result.append(word[0] + word[1:].capitalize())
+        elif i == 0:
+            result.append(word.capitalize())
+        elif word.lower() in _ACRONYMS:
+            result.append(word.lower())
+        else:
+            result.append(word.capitalize())
+    return " ".join(result)
+
+
+def trim_title_default(t: str | None) -> str:
+    """Trim whitespace, remove trailing full stops (preserving genuine
+    ellipses), and normalize ALL-CAPS titles to title case."""
+    if t is None:
+        return ""
+    s = str(t).strip()
+    if not s:
+        return ""
+    for prefix in _ARTIFACT_PREFIXES:
+        if s.startswith(prefix):
+            s = s[len(prefix) :]
+            break
+    if s.endswith("…") or s.endswith("..."):
+        return _fix_allcaps_title(s)
+    s = s.rstrip("*").rstrip()
+    i = len(s) - 1
+    dots = 0
+    while i >= 0 and s[i] == ".":
+        dots += 1
+        i -= 1
+    if dots and dots < 3:
+        s = s[: len(s) - dots].rstrip()
+    return _fix_allcaps_title(s)
+
+
+def has_placeholder(s: str | None) -> bool:
+    """Detect placeholder values such as "n/a", "unknown", "et al", or a
+    short run of dots instead of real content."""
+    if s is None:
+        return True
+    s2 = str(s).strip()
+    if not s2:
+        return True
+    low = s2.lower()
+    if ("..." in s2 or "…" in s2) and len(s2) < 50:
+        return True
+    if "et al" in low:
+        return True
+    return any(bad in low for bad in ("n/a", "tbd", "unknown", "placeholder"))
+
+
+_PERSON_PUNCT_RE = re.compile(r"[^a-z0-9\s]")
+
+
+def normalize_person_name(n: Any | None) -> str:
+    """Normalize a person name for matching. Lowercases, strips accents and
+    punctuation, collapses spaces."""
+    if not n:
+        return ""
+    n_str = to_text(n)
+    n2 = strip_accents(n_str).lower()
+    n2 = n2.replace("'", "").replace("\u2019", "").replace("\u02bc", "")
+    n2 = _PERSON_PUNCT_RE.sub(" ", n2)
+    return " ".join(n2.split())
+
+
+_NOBLE_PARTICLES = frozenset(
+    {
+        "van",
+        "von",
+        "de",
+        "del",
+        "der",
+        "den",
+        "di",
+        "la",
+        "le",
+        "al",
+        "el",
+        "bin",
+        "ibn",
+        "da",
+        "dos",
+        "das",
+        "du",
+        "lo",
+    }
+)
+
+
+_INITIALS_EXCLUSIONS = frozenset({"jr", "sr", "ii", "iii", "iv", "md", "phd"})
+
+
+def _is_initials_token(token: str) -> bool:
+    """Check if a token is uppercase initials (1-4 chars, not a suffix/title)."""
+    clean = token.replace(".", "").strip()
+    return 1 <= len(clean) <= 4 and clean.isalpha() and clean.isupper() and clean.lower() not in _INITIALS_EXCLUSIONS
+
+
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+_NON_ALPHA_RE = re.compile(r"[^a-z]")
+
+
+def name_signature(n: Any | None) -> dict[str, Any] | None:
+    """Derive a compact {last, initials} signature for a person name, handling
+    "Last, First", "First Last", and "Lastname INITIALS" (PubMed/Europe PMC)
+    formats.
+
+    Noble particles (van, von, de, etc.) are included in the last name so that
+    "Johan van der Waals" and "van der Waals, Johan" produce the same signature.
+
+    String inputs are memoized (dedup loops resolve the same names O(n^2)
+    times); each call still returns a fresh dict.
+    """
+    if not n:
+        return None
+    if isinstance(n, str):
+        sig = _name_signature_cached(n)
+        return dict(sig) if sig is not None else None
+    return _compute_name_signature(n)
+
+
+@functools.lru_cache(maxsize=4096)
+def _name_signature_cached(n: str) -> dict[str, Any] | None:
+    """Cached name_signature core for hashable (string) names."""
+    return _compute_name_signature(n)
+
+
+def _compute_name_signature(n: Any) -> dict[str, Any] | None:
+    """Uncached name_signature core; see name_signature for the contract."""
+    n_clean = normalize_person_name(n)
+    if not n_clean:
+        return None
+    if "," in to_text(n):
+        parts = [p.strip() for p in to_text(n).split(",")]
+        last = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+        rest_tokens = [t for t in normalize_person_name(rest).split() if t]
+        initials = "".join(t[0] for t in rest_tokens if t)
+        last_norm = _NON_ALNUM_RE.sub("", normalize_person_name(last))
+        return {"last": last_norm, "initials": initials}
+    tokens = n_clean.split()
+    if not tokens:
+        return None
+    # Detect PubMed/Europe PMC "Lastname INITIALS" format (e.g. "Alanko JN")
+    # by checking if the last token in the original text is all uppercase
+    raw_tokens = to_text(n).strip().split()
+    if len(tokens) == 2 and len(raw_tokens) == 2 and _is_initials_token(raw_tokens[-1]):
+        last_norm = _NON_ALNUM_RE.sub("", tokens[0])
+        initials = _NON_ALPHA_RE.sub("", tokens[1])
+        return {"last": last_norm, "initials": initials}
+    last_start = len(tokens) - 1
+    for i in range(len(tokens) - 2, -1, -1):
+        if tokens[i] in _NOBLE_PARTICLES:
+            last_start = i
+        else:
+            break
+    last_tokens = tokens[last_start:]
+    first_tokens = tokens[:last_start]
+    last_norm = _NON_ALNUM_RE.sub("", "".join(last_tokens))
+    initials = "".join(t[0] for t in first_tokens if t)
+    return {"last": last_norm, "initials": initials}
+
+
+# Longest run of letters treated as an initials cluster rather than a name.
+# Three, because "Duke AEE" and "Agyapong VIO" are both real records here. Four
+# consecutive initials is vanishingly rare and a four-letter surname is not.
+_MAX_INITIALS_CLUSTER = 3
+
+
+def author_list_is_surname_initials(names: Sequence[str]) -> bool:
+    """True when an author list is rendered PubMed-style, "Surname Initials".
+
+    PubMed and the biomedical sources that mirror it emit "Jin Y", "Koller JM",
+    "Van Den Heuvel OA", where the trailing token is initials rather than a
+    surname. Every other source emits "Given Surname". Read one name at a time
+    the two are indistinguishable, because "Jin Y" and "Meng He" have the same
+    shape and "He", "Li", "Lv", "Du" are real surnames. The list as a whole does
+    distinguish them, so this is deliberately a property of the list.
+
+    Two conditions, both required. At least two authors must end in a SINGLE
+    letter, which no surname is, and at least 70 percent must end in an initials
+    cluster. The first condition is what carries the decision: a Western list
+    with Chinese surnames ends every name in two letters and so satisfies the
+    second, but contains no single-letter name and is never matched.
+
+    Measured on the committed corpus: 17 records matched, every one genuinely
+    PubMed-style, and no "Given Surname" record matched.
+    """
+    finals = [tokens[-1] for name in names if "," not in name and (tokens := name.split())]
+    if len(finals) < 2:
+        return False
+    singles = sum(1 for token in finals if len(token) == 1 and token.isalpha())
+    clusters = sum(1 for token in finals if len(token) <= _MAX_INITIALS_CLUSTER and token.isalpha())
+    return singles >= 2 and clusters / len(finals) >= 0.7
+
+
+def author_list_is_initials_surname(names: Sequence[str]) -> bool:
+    """True when an author list is rendered "Initials Surname" (leading initials).
+
+    Google Scholar and sources that mirror its scrape emit "IV Belizario", "JF
+    Rodrigues-Jr", "LGM Andrade", where the LEADING token is initials rather
+    than a given name. Every other source emits "Given Surname". Read one name
+    at a time the two are indistinguishable, because a short given name has
+    the same shape; the list as a whole does distinguish them, the same way
+    `author_list_is_surname_initials` does for the trailing PubMed form, so
+    this is deliberately a property of the list.
+
+    Two conditions, both required, mirroring the trailing detector. At least
+    two authors must lead with a SINGLE letter, which no given name ever is on
+    its own, and at least 70 percent must lead with an initials cluster. The
+    first condition carries the decision: a genuinely mangled ALL-CAPS
+    surname-first list ("SMITH John") has no single-letter lead, since no
+    surname is one letter, and so is never matched.
+    """
+    leads = [tokens[0] for name in names if "," not in name and len(tokens := name.split()) >= 2]
+    if len(leads) < 2:
+        return False
+    singles = sum(1 for token in leads if len(token) == 1 and token.isalpha())
+    clusters = sum(1 for token in leads if len(token) <= _MAX_INITIALS_CLUSTER and token.isalpha() and token.isupper())
+    return singles >= 2 and clusters / len(leads) >= 0.7
+
+
+def surname_from_initials_form(name: str) -> str:
+    """Return the surname of a PubMed-style "Surname Initials" name.
+
+    Only meaningful once `author_list_is_surname_initials` has confirmed the
+    list. Multi-token surnames are preserved, so "Van Den Heuvel Oa" yields
+    "Van Den Heuvel", and a name carrying no trailing initials is returned whole.
+
+    "Initials cluster" means the same thing here as in the detector, so the two
+    cannot disagree about which token is a name.
+    """
+    tokens = name.split()
+    if len(tokens) >= 2 and len(tokens[-1]) <= _MAX_INITIALS_CLUSTER and tokens[-1].isalpha():
+        return " ".join(tokens[:-1])
+    return name
+
+
+def extract_last_name(full_name: str | None) -> str:
+    """Extract the last name from "First Last" or "Last, First", preserving
+    capitalization. Returns the original name if extraction fails."""
+    if not full_name:
+        return "Unknown"
+
+    name_str = str(full_name).strip()
+    if not name_str:
+        return "Unknown"
+
+    if "," in name_str:
+        last_name = name_str.split(",", 1)[0].strip()
+        if last_name:
+            return last_name
+
+    tokens = name_str.split()
+    return tokens[-1] if tokens else name_str
+
+
+_DIRNAME_SANITIZE_RE = re.compile(r'[/\\:*?"<>|]+')
+
+
+def format_author_dirname(author_name: str | None, author_id: str) -> str:
+    """Format an author directory name as "LastName (author_id)". Falls back
+    to the id alone when name extraction fails, or to LastName when the id is
+    empty."""
+    # The name is sanitized like the id, not trusted like a literal. It comes
+    # from the input CSV and becomes a real filesystem path (the per-author .bib
+    # directory and the author log file), so an embedded separator escapes
+    # out_dir. A name that is only dots and spaces would still yield ".." when
+    # the id is empty, so it is dropped rather than sanitized.
+    last_name = _DIRNAME_SANITIZE_RE.sub("-", extract_last_name(author_name))
+    if not last_name.strip(". "):
+        last_name = ""
+
+    sanitized_id = _DIRNAME_SANITIZE_RE.sub("-", author_id)
+
+    if not sanitized_id:
+        if last_name and last_name != "Unknown":
+            return last_name
+        return "unknown"
+
+    if last_name and last_name != "Unknown":
+        return f"{last_name} ({sanitized_id})"
+
+    return sanitized_id
+
+
+def parse_authors_any(authors: Any) -> list[str]:
+    """Extract author names from flexible input formats (lists, dicts with
+    given/family fields, BibTeX-style strings). Convenience wrapper around
+    extract_authors_from_any."""
+    return extract_authors_from_any(authors)
+
+
+def _normalized_fuzz(a: str, b: str) -> float:
+    """Fuzzy-ratio score over normalized strings, 0-1, exactly 1.0 on equality.
+
+    Shared core of title_similarity and venue_similarity; rapidfuzz returns
+    0-100, rescaled here to 0-1.
+    """
+    norm_a = normalize_title(a)
+    norm_b = normalize_title(b)
+    if norm_a == norm_b:
+        return 1.0
+    return fuzz_ratio(norm_a, norm_b) / 100.0
+
+
+def title_similarity(a: str | None, b: str | None) -> float:
+    """Similarity score between two titles after normalization, 0-1, higher
+    means more similar."""
+    return _normalized_fuzz(a or "", b or "")
+
+
+def title_is_truncated_match(a: str | None, b: str | None, min_length: int = 15) -> bool:
+    """Check if one title is a truncated version of the other (a strict prefix
+    or suffix after normalization). Scholar truncates long titles from either
+    end, producing entries like "Passive Co-presence" (prefix truncation) or
+    "Support Using Semantic GLEAN Workflows" when the full title starts with
+    "Decentralized Web-Based Clinical Decision" (suffix truncation).
+
+    Requires the shorter title to be at least *min_length* characters to avoid
+    trivially matching short common substrings.
+    """
+    norm_a = normalize_title(a or "")
+    norm_b = normalize_title(b or "")
+    if not norm_a or not norm_b or norm_a == norm_b:
+        return False
+    shorter, longer = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
+    return len(shorter) >= min_length and (longer.startswith(shorter) or longer.endswith(shorter))
+
+
+def authors_overlap(authors_a: str | None, authors_b: str | None) -> bool:
+    """Check whether two author lists share at least one person, comparing
+    normalized last names and initials with partial matches allowed."""
+    names_a = parse_authors_any(authors_a or "")
+    names_b = parse_authors_any(authors_b or "")
+    if not names_a or not names_b:
+        return False
+    sigs_a_by_last: dict[str, list[dict[str, Any]]] = {}
+    for nm in names_a:
+        sig = name_signature(nm)
+        if sig and sig.get("last"):
+            sigs_a_by_last.setdefault(sig["last"], []).append(sig)
+    if not sigs_a_by_last:
+        return False
+    for nm in names_b:
+        sb = name_signature(nm)
+        if not sb or not sb.get("last"):
+            continue
+        matching_sigs = sigs_a_by_last.get(sb["last"])
+        if not matching_sigs:
+            continue
+        for sa in matching_sigs:
+            ia = sa.get("initials", "")
+            ib = sb.get("initials", "")
+            if not ia or not ib or ia == ib or ia.startswith(ib) or ib.startswith(ia):
+                return True
+    return False
+
+
+def author_overlap_ratio(authors_a: str | None, authors_b: str | None) -> float:
+    """Jaccard coefficient on compatible normalized author signatures."""
+    names_a = parse_authors_any(authors_a or "")
+    names_b = parse_authors_any(authors_b or "")
+    if not names_a or not names_b:
+        return 0.0
+    sigs_a_raw = [sig for nm in names_a if (sig := name_signature(nm)) and sig.get("last")]
+    sigs_b_raw = [sig for nm in names_b if (sig := name_signature(nm)) and sig.get("last")]
+    if not sigs_a_raw or not sigs_b_raw:
+        return 0.0
+    sigs_a = {(str(sig["last"]), str(sig.get("initials") or "")) for sig in sigs_a_raw}
+    unmatched_b = {(str(sig["last"]), str(sig.get("initials") or "")) for sig in sigs_b_raw}
+    b_count = len(unmatched_b)
+    matches = 0
+    # Match the most specific signatures first and prefer exact initials. This
+    # produces a maximal one-to-one match when the same surname occurs more
+    # than once and one source abbreviates a given name to a prefix.
+    ordered_a = sorted(sigs_a, key=lambda item: (bool(item[1]), len(item[1]), item), reverse=True)
+    for last_a, initials_a in ordered_a:
+        candidates = [
+            candidate
+            for candidate in unmatched_b
+            if candidate[0] == last_a
+            and (
+                not initials_a
+                or not candidate[1]
+                or initials_a == candidate[1]
+                or initials_a.startswith(candidate[1])
+                or candidate[1].startswith(initials_a)
+            )
+        ]
+        compatible = min(
+            candidates,
+            key=lambda candidate: (
+                candidate[1] != initials_a,
+                not candidate[1],
+                -len(candidate[1]),
+                candidate,
+            ),
+            default=None,
+        )
+        if compatible is not None:
+            unmatched_b.remove(compatible)
+            matches += 1
+    union = len(sigs_a) + b_count - matches
+    return matches / union if union > 0 else 0.0
+
+
+def venue_similarity(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> float:
+    """Compute string similarity between two venue names (journal/booktitle/howpublished).
+
+    Pure venue-string similarity only. The preprint-vs-published (XOR) split is NOT
+    encoded here: it is a single explicit signal in ``compute_dedup_score`` (Signal 6),
+    so rewarding it here too would double-count the same piece of evidence and can tip
+    two distinct works over the duplicate threshold.
+    """
+    a_venue = (fields_a.get("journal") or fields_a.get("booktitle") or fields_a.get("howpublished") or "").strip()
+    b_venue = (fields_b.get("journal") or fields_b.get("booktitle") or fields_b.get("howpublished") or "").strip()
+    if not a_venue or not b_venue:
+        return 0.0
+    return _normalized_fuzz(a_venue, b_venue)
+
+
+def _is_preprint_fields(fields: dict[str, Any]) -> bool:
+    """Check if fields look like a preprint based on DOI prefix or journal name.
+
+    Canonical fields-level predicate. Not interchangeable with the DOI-level
+    predicate ``id_utils.is_secondary_doi`` (used by ``merge_utils._is_preprint_doi``):
+    that one also matches ``DATA_DOI_PREFIXES`` (Zenodo, Figshare), while this
+    one keys on ``PREPRINT_DOI_PREFIXES`` only and additionally consults the
+    journal name.
+    """
+    doi = str(fields.get("doi") or "").lower()
+    if any(doi.startswith(p) for p in PREPRINT_DOI_PREFIXES):
+        return True
+    journal = str(fields.get("journal") or "").lower()
+    return any(ps in journal for ps in PREPRINT_SERVERS)
+
+
+def compute_dedup_score(fields_a: dict[str, Any], fields_b: dict[str, Any], count_preprint_xor: bool = True) -> float:
+    """Additive composite score from up to 6 signals for multi-signal deduplication.
+
+    ``count_preprint_xor`` controls the preprint-vs-published split (Signal 6). Callers
+    that reach this composite only after already establishing the XOR split as a
+    precondition pass ``count_preprint_xor=False`` so the same evidence is not counted
+    twice (the split contributes here exactly once, and never via ``venue_similarity``).
+    """
+    score = 0.0
+
+    # Signal 1: Title similarity (weight 0.40)
+    title_sim = title_similarity(str(fields_a.get("title") or ""), str(fields_b.get("title") or ""))
+    score += 0.40 * title_sim
+
+    # Signal 2: Author overlap ratio (weight 0.25)
+    overlap = author_overlap_ratio(fields_a.get("author"), fields_b.get("author"))
+    score += 0.25 * overlap
+
+    # Signal 3: Year match (0.10 exact, 0.05 for ±1)
+    a_year = extract_year_from_any(fields_a.get("year"), fallback=None)
+    b_year = extract_year_from_any(fields_b.get("year"), fallback=None)
+    if a_year and b_year:
+        diff = abs(a_year - b_year)
+        if diff == 0:
+            score += 0.10
+        elif diff == 1:
+            score += 0.05
+
+    # Signal 4: Venue similarity (weight 0.15)
+    score += 0.15 * venue_similarity(fields_a, fields_b)
+
+    # Signal 5: External ID match (0.15)
+    if external_ids_match(fields_a, fields_b):
+        score += 0.15
+
+    # Signal 6: Preprint-vs-published split (0.10) -- the single place the XOR is counted.
+    if count_preprint_xor and (_is_preprint_fields(fields_a) ^ _is_preprint_fields(fields_b)):
+        score += 0.10
+
+    return score
+
+
+def author_name_matches(target_author: str | None, authors: Any) -> bool:
+    """Check whether a specific author appears in a candidate author list,
+    preferring last name plus initials with substring fallbacks."""
+    if not target_author:
+        return False
+    target_sig = name_signature(target_author)
+    if not target_sig or not target_sig.get("last"):
+        return False
+    cand_names = parse_authors_any(authors)
+    if not cand_names:
+        return False
+    for nm in cand_names:
+        sig = name_signature(nm)
+        if not sig:
+            continue
+        if sig["last"] != target_sig["last"]:
+            continue
+        ti = target_sig.get("initials", "")
+        ci = sig.get("initials", "")
+        if not ti or not ci:
+            return True
+        if ti == ci or ti.startswith(ci) or ci.startswith(ti):
+            return True
+        # Handle middle initials: "CH" matches "CRH" when first initials
+        # agree and the shorter is a subsequence of the longer
+        if ti[0] == ci[0]:
+            short, long = (ti, ci) if len(ti) <= len(ci) else (ci, ti)
+            j = 0
+            for ch in long:
+                if j < len(short) and ch == short[j]:
+                    j += 1
+            if j == len(short):
+                return True
+        tnorm = normalize_person_name(target_author)
+        cnorm = normalize_person_name(nm)
+        if tnorm in cnorm or cnorm in tnorm:
+            return True
+    # Fallback: try reversed-word matching for "Lastname Firstname" format
+    # (CSL and some APIs return names without comma: "Rudzicz Frank" instead of "Rudzicz, Frank")
+    target_last = target_sig["last"]
+    for nm in cand_names:
+        tokens = nm.strip().split()
+        if len(tokens) >= 2 and tokens[0].lower().rstrip(",") == target_last:
+            return True
+    return False
+
+
+def author_in_text(target_author: str | None, text: Any) -> bool:
+    """Check whether an author's normalized last name appears as a whole word
+    in a block of text."""
+    if not target_author or not text:
+        return False
+    sig = name_signature(target_author)
+    last_tok = (sig or {}).get("last", "")
+    if not last_tok:
+        return False
+    txt = normalize_person_name(to_text(text))
+    return re.search(rf"\b{re.escape(last_tok)}\b", txt) is not None
+
+
+_YEAR_RE = re.compile(r"(19|20)\d{2}")
+
+
+def extract_year_from_any(obj: Any, field_names: list[str] | None = None, fallback: int | None = None) -> int | None:
+    """Recover a four-digit publication year from integers, free text, date
+    dicts, Crossref-style date parts, or Unix timestamps, returning *fallback*
+    when no plausible year is found."""
+    if isinstance(obj, int):
+        return obj if VALID_YEAR_MIN <= obj <= VALID_YEAR_MAX else fallback
+
+    if isinstance(obj, str):
+        m = _YEAR_RE.search(obj)
+        if m:
+            try:
+                year = int(m.group(0))
+                if VALID_YEAR_MIN <= year <= VALID_YEAR_MAX:
+                    return year
+            except PARSE_ERRORS:
+                pass
+        return fallback
+
+    if isinstance(obj, dict):
+        _default_year_fields = ["year", "publication_year", "pub_year", "date", "published"]
+        _search_fields = list(field_names) + _default_year_fields if field_names else _default_year_fields
+        for fname in _search_fields:
+            val = obj.get(fname)
+            if val is not None:
+                result = extract_year_from_any(val, field_names=None, fallback=None)
+                if result:
+                    return result
+
+        for fname in ["issued", "published-print", "published-online"]:
+            issued = obj.get(fname)
+            if isinstance(issued, dict):
+                parts = issued.get("date-parts")
+                if (
+                    isinstance(parts, list)
+                    and parts
+                    and isinstance(parts[0], list)
+                    and parts[0]
+                    and isinstance(parts[0][0], int)
+                ):
+                    year = parts[0][0]
+                    if VALID_YEAR_MIN <= year <= VALID_YEAR_MAX:
+                        return year
+
+        for fname in ["cdate", "tcdate", "timestamp"]:
+            ms = obj.get(fname)
+            if isinstance(ms, (int, float)):
+                try:
+                    year = datetime.fromtimestamp(float(ms) / 1000.0, timezone.utc).year
+                    if VALID_YEAR_MIN <= year <= VALID_YEAR_MAX:
+                        return year
+                except (*NUMERIC_ERRORS, OSError):
+                    pass
+
+    if isinstance(obj, list) and obj:
+        return extract_year_from_any(obj[0], field_names=field_names, fallback=fallback)
+
+    return fallback
+
+
+def _join_given_family(d: dict[str, Any], given_key: str, family_key: str) -> str:
+    """Join explicit given/family fields into "Given Family", or ""."""
+    given = (d.get(given_key) or "").strip()
+    family = (d.get(family_key) or "").strip()
+    return f"{given} {family}".strip() if (given or family) else ""
+
+
+def extract_authors_from_any(
+    obj: Any,
+    field_names: list[str] | None = None,
+    sanitize_dblp: bool = False,
+    name_key: str = "name",
+    given_key: str | None = None,
+    family_key: str | None = None,
+) -> list[str]:
+    """Extract author names from flexible metadata structures (lists, dicts,
+    formatted strings), optionally cleaning DBLP-specific name artifacts."""
+    authors: list[str] = []
+
+    if obj is None:
+        return authors
+
+    # Lazy import to avoid circular dependency; cached after first call
+    if sanitize_dblp:
+        from .clients.helpers import _sanitize_dblp_author
+
+        _sanitize: Any = _sanitize_dblp_author
+    else:
+        _sanitize = None
+
+    if isinstance(obj, dict):
+        _default_fields = ["authors", "author", "authorids", "creators", "contributors"]
+        _search_fields = list(field_names) + _default_fields if field_names else _default_fields
+        for fname in _search_fields:
+            val = obj.get(fname)
+            if val is not None:
+                authors = extract_authors_from_any(
+                    val,
+                    field_names=None,
+                    sanitize_dblp=sanitize_dblp,
+                    name_key=name_key,
+                    given_key=given_key,
+                    family_key=family_key,
+                )
+                if authors:
+                    return authors
+
+        nm = _join_given_family(obj, given_key, family_key) if given_key and family_key else _name_from_dict(obj)
+
+        if nm:
+            nm = _sanitize(nm) if _sanitize else nm
+            if nm:
+                authors.append(nm)
+        return authors
+
+    if isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, str):
+                nm = item.strip()
+                if nm:
+                    nm = _sanitize(nm) if _sanitize else nm
+                    if nm:
+                        authors.append(nm)
+            elif isinstance(item, dict):
+                if given_key and family_key:
+                    nm = _join_given_family(item, given_key, family_key)
+                else:
+                    nm = (item.get(name_key) or "").strip()
+                    if not nm:
+                        given = (item.get("given") or item.get("first") or "").strip()
+                        family = (item.get("family") or item.get("last") or "").strip()
+                        nm = f"{given} {family}".strip() if (given or family) else ""
+
+                if nm:
+                    nm = _sanitize(nm) if _sanitize else nm
+                    if nm:
+                        authors.append(nm)
+            else:
+                nm = str(item).strip()
+                if nm:
+                    authors.append(nm)
+        return authors
+
+    if isinstance(obj, str):
+        obj_str = obj.strip()
+        if not obj_str:
+            return authors
+
+        if " and " in obj_str:
+            parts = [p.strip() for p in obj_str.split(" and ")]
+            authors = [p for p in parts if p]
+        elif " et al." in obj_str or " et al" in obj_str:
+            clean_str = obj_str.replace(" et al.", "").replace(" et al", "")
+            # If there are commas, split by comma
+            if "," in clean_str:
+                parts = [p.strip() for p in clean_str.split(",")]
+                authors = [p for p in parts if p]
+                authors.append(_ET_AL)
+            else:
+                authors = [clean_str, _ET_AL]
+        elif ";" in obj_str:
+            parts = [p.strip() for p in obj_str.split(";")]
+            authors = [p for p in parts if p]
+        elif "," in obj_str and " " in obj_str:
+            parts = [p.strip() for p in obj_str.split(",")]
+            if obj_str.count(",") > 1:
+                authors = [p for p in parts if p]
+            elif len(parts) == 2 and (
+                all(_ABBREVIATED_AUTHOR_PATTERN.match(p) for p in parts) or all(" " in p.strip() for p in parts)
+            ):
+                authors = parts
+            else:
+                authors = [obj_str]
+        else:
+            authors = [obj_str]
+
+        return authors
+
+    s = str(obj).strip()
+    if s:
+        authors.append(s)
+
+    return authors
+
+
+def extract_valid_title(obj: Any, field_names: list[str] | None = None, check_placeholder: bool = True) -> str | None:
+    """Pull a title from an object by common field names, discard
+    placeholder-like values, and return a trimmed version or None."""
+    title = None
+
+    if isinstance(obj, dict):
+        names = field_names or ["title"]
+        for fname in names:
+            val = obj.get(fname)
+            if val:
+                if isinstance(val, dict):
+                    title = extract_valid_title(val, field_names=field_names, check_placeholder=check_placeholder)
+                else:
+                    title = str(val).strip()
+                if title:
+                    break
+    else:
+        title = str(obj).strip()
+
+    if not title:
+        return None
+
+    if check_placeholder and has_placeholder(title):
+        return None
+
+    return trim_title_default(title)
+
+
+def safe_get_field(
+    obj: dict[str, Any],
+    field: str,
+    *,
+    default: str = "",
+    strip: bool = True,
+    required: bool = False,
+    check_placeholder: bool = False,
+) -> str | None:
+    """Extract and validate a string field from a dict, handling None values,
+    lists, whitespace, and optional placeholder checks."""
+    value = obj.get(field)
+
+    if value is None:
+        return None if required else default
+
+    if isinstance(value, list):
+        if not value:
+            return None if required else default
+        value = value[0]
+
+    value = str(value)
+
+    if strip:
+        value = value.strip()
+
+    if not value:
+        return None if required else default
+
+    if check_placeholder and has_placeholder(value):
+        return None if required else default
+
+    return value
+
+
+def safe_get_nested(obj: Any, *keys: str, default: Any = None) -> Any:
+    """Traverse nested dict keys null-safely, returning *default* if any key
+    is missing."""
+    current = obj
+    for key in keys:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key)
+        if current is None:
+            return default
+    return current
+
+
+def extract_author_names(
+    authors_field: Any, *, name_key: str = "name", given_key: str | None = None, family_key: str | None = None
+) -> list[str]:
+    """Extract author names from lists of dicts or strings, comma-separated
+    strings, and single dicts or strings. Keyword wrapper around
+    extract_authors_from_any."""
+    return extract_authors_from_any(authors_field, name_key=name_key, given_key=given_key, family_key=family_key)

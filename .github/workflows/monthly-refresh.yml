@@ -1,0 +1,404 @@
+# The monthly refresh runs the LEGACY pipeline, not the durable engine.
+#
+# That is deliberate, and the blocker is stronger than a missing shadow run.
+# An earlier revision of this file cut over and gated publication on
+# `status == complete`. RunStatus.COMPLETE requires Ledger.all_required_satisfied(),
+# which requires generations.discovery_closed = 1, and the ledger schema forbids
+# that: two triggers abort any statement setting it, an invariant re-checks it on
+# every status read, manifest read and reopen, and the schema fingerprint rejects
+# a database whose triggers were dropped. Discovery authority is the claim that an
+# author's publication list is complete, and Task 5A is not entitled to make it.
+# The result was a workflow that could run forever and publish nothing, which is
+# the exact failure this redesign exists to remove.
+#
+# So cutover is blocked on a design decision about who may declare a corpus
+# complete, not on evidence that is merely pending. The durable engine runs in
+# refresh-shadow.yml, which can evidence live provider authentication, schemas and
+# attempt counts without being able to publish, and that is all a shadow run can
+# settle. Lifting the authority invariant is a separate, deliberate change; the
+# fence is not removed to make a gate pass. See
+# tests/test_workflow_contracts.py::test_the_ledger_refuses_to_close_discovery.
+#
+# The encrypted response-cache branch is gone. Cold runs cost more provider calls;
+# article-level parallelism is what pays for them.
+
+name: Monthly Pipeline Refresh
+
+on:
+  schedule:
+    - cron: '0 4 1 * *'  # 4 AM UTC on the 1st of each month (midnight AST)
+  workflow_dispatch:
+
+# Declared per job below, not blanket at the top. The refresh job needs to read
+# the checkout and nothing else; publication happens with the App token, and the
+# verify job is the only thing that needs to dispatch a workflow.
+permissions:
+  contents: read
+
+# One refresh at a time. Two overlapping runs race on the same output tree and
+# the same publication branch, and the loser force-pushes over the winner.
+# Never cancel in flight: a cancelled run loses its corpus progress.
+concurrency:
+  group: citeforge-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      converged: ${{ steps.loop.outputs.converged }}
+      runs_completed: ${{ steps.loop.outputs.runs_completed }}
+      last_api_calls: ${{ steps.loop.outputs.last_api_calls }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # The stored credential is dropped, as it is in every other workflow
+          # here. Left in place, checkout writes an http.extraheader carrying
+          # the GITHUB_TOKEN, and git applies that header ahead of the
+          # userinfo in a push URL. The publish step below authenticates with
+          # an App token embedded in its URL, so the header silently replaced
+          # it and the push went out as github-actions[bot], which holds
+          # contents: read. Every refresh from 2026-08-01 onward died on a 403
+          # against its own data branch, and the retry loop could not help
+          # because the failure is an identity, not an incident.
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          pip install --require-hashes -r requirements-build.lock -r requirements.lock
+          pip install --no-build-isolation --no-deps -e .
+
+      - name: Write API keys from secrets
+        env:
+          S2_KEY: ${{ secrets.SEMANTICSCHOLAR }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI }}
+          SERPLY_KEY: ${{ secrets.SERPLY }}
+          GEMINI_KEY: ${{ secrets.GEMINI }}
+          OPENREVIEW_KEY: ${{ secrets.OPENREVIEW }}
+        run: |
+          mkdir -p keys
+          echo "$S2_KEY"        > keys/Semantic.key
+          echo "$SERPAPI_KEY"   > keys/SerpAPI.key
+          echo "$SERPLY_KEY"    > keys/Serply.key
+          echo "$GEMINI_KEY"    > keys/Gemini.key
+          echo "$OPENREVIEW_KEY" > keys/OpenReview.key
+
+      - name: Run pipeline loop
+        id: loop
+        env:
+          CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
+          CITEFORGE_MAX_WORKERS: "16"
+          CITEFORGE_CONCURRENCY: "20"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # -u is what would have caught the broken block below: an unset digest
+          # silently compared equal to an unset prev_digest and faked convergence.
+          set -uo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # A digest-based convergence test needs at most one confirming sweep
+          # after the corpus stops moving, so the 50-pass ceiling that the
+          # API-delta test needed is gone. Ten is a runaway guard, not a target.
+          max_runs=10
+          converged=false
+          prev_digest=""
+          last_total=-1
+          # 300 of the job's 360 minutes, leaving the commit, the branch push
+          # and the pull request outside the loop's budget.
+          LOOP_BUDGET_SECONDS=18000
+          loop_started=$(date +%s)
+
+          for i in $(seq 1 $max_runs); do
+            echo "::group::Pipeline run $i/$max_runs"
+            rc=0
+            python3 main.py || rc=$?
+            echo "::endgroup::"
+
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::Pipeline run $i failed with exit code $rc"
+              echo "converged=false" >> "$GITHUB_OUTPUT"
+              echo "runs_completed=$i" >> "$GITHUB_OUTPUT"
+              echo "last_api_calls=-1" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+
+            # Reported for observability only. This counter is logical, not
+            # physical: it counts operations, not sends, so a retry storm is
+            # invisible to it. It must not gate anything.
+            total=$(grep -aoP 'Total API calls: \K\d+' output/run.log 2>/dev/null || echo "-1")
+            last_total=$total
+
+            # Convergence is "this iteration changed nothing that gets
+            # published", read off the corpus itself rather than off API-call
+            # counts: a call-count delta never settles inside the job's
+            # six-hour ceiling, and it measures traffic rather than output.
+            # NUL-delimited throughout: author directories are named
+            # "Surname (ScholarID)" and the space splits under plain xargs,
+            # which leaves sha256sum reading a subset and reporting a digest
+            # that is stable from the first iteration. That reads as instant
+            # convergence and would publish an unfinished corpus.
+            digest=$(find output -type f \( -name '*.bib' -o -name 'summary.csv' -o -name 'baseline.json' \) -print0 \
+              | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1)
+            echo "Run $i — corpus digest ${digest:0:12} — API calls: $total"
+
+            # A first iteration has nothing to compare against, so an empty
+            # prev_digest must never satisfy the test below. It did: the digest
+            # was computed inside the failure branch above and both sides read
+            # empty on a successful run, so every run declared convergence after
+            # one pass and published a corpus no second pass had confirmed.
+            if [ -n "$digest" ] && [ "$digest" = "$prev_digest" ]; then
+              echo "Corpus unchanged across two consecutive runs — converged"
+              converged=true
+              break
+            fi
+            prev_digest=$digest
+
+            # Stop leasing new work with room left for the commit and the pull
+            # request, rather than being cancelled mid-iteration at the ceiling.
+            elapsed=$(( $(date +%s) - loop_started ))
+            if [ "$elapsed" -ge "$LOOP_BUDGET_SECONDS" ]; then
+              echo "::notice::Wall budget reached after $i run(s); exiting to publish what is complete"
+              break
+            fi
+
+            if [ "$i" -eq "$max_runs" ]; then
+              echo "Reached $max_runs runs without full convergence"
+            fi
+          done
+
+          echo "converged=$converged" >> "$GITHUB_OUTPUT"
+          echo "runs_completed=$i" >> "$GITHUB_OUTPUT"
+          echo "last_api_calls=$last_total" >> "$GITHUB_OUTPUT"
+
+      # Fresh token minted here (not at checkout): the pipeline loop can run for
+      # hours and an app token lives only 1h, so mint it immediately before the push.
+      # Deliberately NOT output/run.log. That log records request URLs, and the
+      # query-string providers key on them, so uploading it publishes secrets to
+      # anyone who can read the run. This manifest is assembled from counts and
+      # digests only and carries no URL, no key and no provider payload.
+      - name: Build the run manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/refresh-manifest
+          enabled_authors="$(python -c 'import csv; f=open("data/input.csv", encoding="utf-8", newline=""); print(sum(row["Enabled"].strip().lower() == "true" for row in csv.DictReader(f)))')"
+          authors_with_bib="$(find output -mindepth 2 -maxdepth 2 -type f -name '*.bib' ! -path 'output/a2i2/*' -print0 \
+            | xargs -0 -r -n1 dirname | LC_ALL=C sort -u | wc -l)"
+          {
+            echo "run_id=${{ github.run_id }}"
+            echo "converged=${{ steps.loop.outputs.converged }}"
+            echo "runs_completed=${{ steps.loop.outputs.runs_completed }}"
+            echo "bib_files=$(find output -type f -name '*.bib' | wc -l)"
+            echo "enabled_authors=${enabled_authors}"
+            echo "authors_with_bib=${authors_with_bib}"
+            echo "corpus_digest=$(find output -type f \( -name '*.bib' -o -name 'summary.csv' \
+              -o -name 'baseline.json' \) -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum \
+              | sha256sum | cut -d' ' -f1)"
+          } > /tmp/refresh-manifest/manifest.txt
+          cat /tmp/refresh-manifest/manifest.txt
+
+      - name: Upload the run manifest
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: refresh-manifest
+          path: /tmp/refresh-manifest/manifest.txt
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Generate push token
+        id: push_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CI_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # Publication goes through a pull request, never a direct push: ruleset
+      # 10020080 rejects a direct push to main.
+      #
+      # The rules are split so this can run unattended without weakening CI.
+      # Ruleset 20801390 "Required CI on default branch" carries the strict
+      # required_status_checks rule and has no bypass actors at all, so nothing
+      # merges without a green "Required CI". Ruleset 10020080 keeps deletion,
+      # non_fast_forward and pull_request, and grants maps-lab-ci-bot
+      # (Integration 4222409) a pull_request-mode bypass, so the App may merge
+      # its own refresh pull request without the code-owner review and still
+      # cannot force-push or delete the branch.
+      # Publication is retried, because the corpus it publishes costs an hour of
+      # provider quota to rebuild and the operations here fail for reasons that
+      # have nothing to do with the data. A GitHub incident returned 403 on the
+      # push after a converged run, and the whole run was discarded.
+      - name: Open or update the refresh pull request
+        id: publish
+        env:
+          GH_TOKEN: ${{ steps.push_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          MONTH="$(date +%Y-%m)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add output/
+          if git diff --cached --quiet; then
+            echo "::notice::No output changes to publish"
+            exit 0
+          fi
+
+          # Six attempts over ~8 minutes. Long enough to outlast the API error
+          # rate of a platform incident, short enough to stay inside the job.
+          # Diagnostics go to stderr: one call below is inside a command
+          # substitution, and anything on stdout would be captured as its value.
+          retry() {
+            local attempt=1 delay=15
+            until "$@"; do
+              if [ "$attempt" -ge 6 ]; then
+                echo "giving up after ${attempt} attempts: $*" >&2
+                return 1
+              fi
+              echo "attempt ${attempt} failed, retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+
+          branch="data/refresh-${MONTH}"
+          git commit -m "data: monthly pipeline refresh ${MONTH}"
+
+          # The push goes to a URL rather than a named remote, so git has no
+          # remote-tracking ref for the branch and a bare --force-with-lease has
+          # nothing to build a lease from. That form succeeds while the branch
+          # does not exist and is rejected with "stale info" forever after, which
+          # is why the first run of a month published and every re-trigger did
+          # not. The lease is therefore stated explicitly against the sha read
+          # from the remote here; an empty value asserts the branch is absent.
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          expected="$(retry git ls-remote "${remote}" "refs/heads/${branch}" | cut -f1)"
+          retry git push "--force-with-lease=refs/heads/${branch}:${expected}" \
+            "${remote}" "HEAD:refs/heads/${branch}"
+
+          # The branch now carries the corpus, so the data is safe even if the
+          # calls below fail; a pull request can be opened by hand against it.
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+          pr_number="$(retry gh api \
+            "repos/${{ github.repository }}/pulls?state=open&head=${{ github.repository_owner }}:${branch}" \
+            --jq '.[0].number // empty')"
+          if [ -z "${pr_number}" ]; then
+            pr_number="$(retry gh api --method POST "repos/${{ github.repository }}/pulls" \
+              -f head="${branch}" \
+              -f base=main \
+              -f title="data: monthly pipeline refresh ${MONTH}" \
+              -f body="Automated corpus refresh for ${MONTH}. Required CI checks code and structure. A monthly citation audit must verify the manifest, semantic data delta, and downstream website effect before merge." \
+              --jq '.number')"
+            echo "::notice::Opened pull request #${pr_number} through the REST API"
+          else
+            echo "::notice::Pull request #${pr_number} for ${branch} already open, updated in place"
+          fi
+
+          echo "::notice::Pull request #${pr_number} requires the monthly citation audit before merge"
+
+      # The corpus survives the runner. Without this a failed publish destroyed
+      # an hour of provider calls, because output/ lives only on the runner and
+      # the manifest carries digests rather than data.
+      - name: Preserve the corpus when publication fails
+        if: failure() && steps.publish.outputs.pushed != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unpublished-corpus
+          path: output/
+          retention-days: 14
+          if-no-files-found: error
+
+  verify:
+    permissions:
+      contents: read
+      actions: write
+    needs: refresh
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Report status
+        run: |
+          echo "## Pipeline Results"
+          echo "Converged: ${{ needs.refresh.outputs.converged }}"
+          echo "Runs completed: ${{ needs.refresh.outputs.runs_completed }}"
+          echo "Last API calls: ${{ needs.refresh.outputs.last_api_calls }}"
+          echo "Job result: ${{ needs.refresh.result }}"
+
+      # A converged run whose publication failed used to end here: the
+      # re-trigger below required result == success, and the failure branch
+      # below merely exited 1. Neither retried, so the corpus was discarded and
+      # nothing published. Publication failure is transient by nature, so it
+      # re-triggers on the same terms as non-convergence.
+      - name: Re-trigger if not converged, or if publication failed
+        if: >-
+          (needs.refresh.result == 'success' || needs.refresh.result == 'cancelled')
+          && needs.refresh.outputs.converged != 'true'
+          || (needs.refresh.result == 'failure' && needs.refresh.outputs.converged == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Skip re-trigger only if a DIFFERENT run is already in progress
+          # (prevents cascade). Exclude the current run: while this verify job
+          # executes, its own run is still 'in_progress', so counting it would
+          # make a timed-out run always self-skip and stall the chain.
+          running=$(gh run list --workflow="Monthly Pipeline Refresh" --status=in_progress --json databaseId --jq "[.[] | select(.databaseId != ${{ github.run_id }})] | length" --repo "${{ github.repository }}")
+          if [ "$running" -gt 0 ]; then
+            echo "::notice::Another run is already in progress — skipping re-trigger"
+            exit 0
+          fi
+          # Runaway guard: cap total runs per calendar month so a never-converging
+          # month cannot cascade into unbounded Actions minutes / API-quota burn.
+          MAX_MONTHLY_RUNS=12
+          month_start=$(date +%Y-%m-01)
+          month_count=$(gh run list --workflow="Monthly Pipeline Refresh" --created ">=${month_start}" --json databaseId --jq 'length' --repo "${{ github.repository }}")
+          if [ "$month_count" -ge "$MAX_MONTHLY_RUNS" ]; then
+            echo "::warning::Reached ${MAX_MONTHLY_RUNS} runs this month (${month_count}) — not re-triggering to avoid runaway; investigate convergence."
+            exit 0
+          fi
+          echo "Pipeline did not converge — re-triggering; any cache will be reused if persistence succeeded"
+          gh workflow run "Monthly Pipeline Refresh" --repo "${{ github.repository }}"
+          echo "::notice::Re-triggered workflow. The next run will reuse any cache that was successfully persisted."
+
+      # Only a pipeline that never converged is a real failure. A converged run
+      # that could not publish has its corpus on the refresh branch or in the
+      # unpublished-corpus artifact, and the step above has re-triggered it, so
+      # failing the run here would report data loss that did not happen.
+      - name: Fail if the pipeline errored
+        if: needs.refresh.result == 'failure' && needs.refresh.outputs.converged != 'true'
+        run: |
+          echo "::error::Pipeline failed before converging. Check the refresh job logs."
+          echo "Any cache that was persisted is reused by the next run."
+          exit 1
+
+      - name: Report a publication failure without discarding the run
+        if: needs.refresh.result == 'failure' && needs.refresh.outputs.converged == 'true'
+        run: |
+          echo "::warning::The corpus converged but publication failed. The corpus is preserved \
+          (refresh branch if the push landed, otherwise the unpublished-corpus artifact) and a \
+          re-trigger has been requested."
+
+  # The website sync moved to citeforge-refresh-merged.yml. Dispatching from
+  # here fired on a converged generation, which is upstream of the data
+  # actually reaching main: the refresh can converge and its pull request can
+  # then sit unreviewed or be closed. The website now syncs from the merge
+  # event, which is the only point at which main really carries the new corpus.

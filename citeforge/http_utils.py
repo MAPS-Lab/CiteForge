@@ -1,0 +1,643 @@
+"""HTTP infrastructure shared by every API client.
+
+Provides rate-limited, retrying, concurrency-gated requests with per-thread
+session rotation and header randomization, plus JSON and text helpers. Secret
+query-string values are scrubbed from every URL and exception string before it
+can reach a log record.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+import logging
+import random
+import re
+import socket
+import threading
+import time
+from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from functools import wraps
+from http.cookies import SimpleCookie
+from typing import Any, TypeVar
+from urllib.parse import urlsplit
+
+import requests
+from requests.adapters import HTTPAdapter
+from tenacity import RetryCallState, Retrying, retry_if_exception_type, retry_if_result, stop_after_attempt
+
+from .config import (
+    GLOBAL_CONCURRENCY_LIMIT,
+    HTTP_BACKOFF_INITIAL,
+    HTTP_BACKOFF_MAX,
+    HTTP_MAX_RETRIES,
+    HTTP_RETRY_STATUS_CODES,
+    HTTP_TIMEOUT_FAST,
+    RATE_LIMITS,
+    REDACT_QUERY_PARAM_NAMES,
+    SESSION_ROTATION_THRESHOLD,
+)
+from .exceptions import ALL_API_ERRORS, DECODE_ERRORS, NUMERIC_ERRORS, DecodeError
+
+T = TypeVar("T")
+
+# Standard HTTP headers for API requests
+DEFAULT_JSON_HEADERS = {"User-Agent": "Mozilla/5.0 (CiteForge Client)", "Accept": "application/json"}
+
+# Redact secret query-string values (API keys/tokens) before any URL or
+# exception text reaches a log record or exception message. Built from the
+# config-defined parameter names so the policy stays centralized.
+_SECRET_QS_RE = re.compile(
+    r"(?i)([?&](?:" + "|".join(re.escape(n) for n in REDACT_QUERY_PARAM_NAMES) + r")=)[^&#\s'\"\\)]+"
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Return *text* with secret query-string values replaced by ``REDACTED``.
+
+    Applied to URLs and exception strings before logging so credentials passed
+    as query parameters (e.g. ``?key=...``, ``&api_key=...``) never reach the
+    committed run logs.
+    """
+    return _SECRET_QS_RE.sub(r"\1REDACTED", text)
+
+
+def _cookie_header(set_cookie: str) -> str | None:
+    """Convert a Set-Cookie value to pairs suitable for a Cookie request header."""
+    jar = SimpleCookie()
+    jar.load(set_cookie)
+    pairs = [f"{name}={morsel.value}" for name, morsel in jar.items()]
+    return "; ".join(pairs) or None
+
+
+def _generate_user_agent_pool() -> list[str]:
+    """Build a diverse pool of realistic User-Agent strings.
+
+    Uses current browser versions across multiple platforms to avoid
+    fingerprinting through stale version numbers.
+    """
+    chrome_versions = ["131.0.6778", "132.0.6834", "133.0.6917", "134.0.6998"]
+    firefox_versions = ["132.0", "133.0", "134.0"]
+    safari_version = "17.6"
+
+    chrome_platforms = [
+        "Windows NT 10.0; Win64; x64",
+        "Macintosh; Intel Mac OS X 10_15_7",
+        "X11; Linux x86_64",
+    ]
+
+    agents: list[str] = [
+        f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{cv} Safari/537.36"
+        for platform in chrome_platforms
+        for cv in chrome_versions
+    ]
+    # Firefox on Windows and Linux
+    firefox_platforms = [
+        "Windows NT 10.0; Win64; x64",
+        "X11; Linux x86_64",
+    ]
+    agents.extend(
+        f"Mozilla/5.0 ({fp}; rv:{fv}) Gecko/20100101 Firefox/{fv}"
+        for fp in firefox_platforms
+        for fv in firefox_versions
+    )
+    # Safari on macOS
+    agents.append(
+        f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+        f"(KHTML, like Gecko) Version/{safari_version} Safari/605.1.15"
+    )
+    # Edge on Windows
+    agents.append(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/133.0.6917 Safari/537.36 Edg/133.0.6917"
+    )
+
+    return agents
+
+
+_USER_AGENT_POOL = _generate_user_agent_pool()
+
+_ACCEPT_LANGUAGE_POOL = [
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.9",
+    "en-US,en;q=0.9,fr;q=0.8",
+    "en-US,en;q=0.8",
+    "en;q=0.9",
+]
+
+DEFAULT_BROWSER_HEADERS = {
+    "User-Agent": random.choice(_USER_AGENT_POOL),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+class _PinnedHTTPSAdapter(HTTPAdapter):
+    """Connect to one resolved address while retaining hostname TLS validation."""
+
+    def __init__(self, hostname: str) -> None:
+        self._hostname = hostname
+        super().__init__(max_retries=0)
+
+    def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any) -> None:
+        pool_kwargs.update(assert_hostname=self._hostname, server_hostname=self._hostname)
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+
+def _public_https_target(url: str) -> tuple[str, str]:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise requests.exceptions.InvalidURL("web probe target is not canonical public HTTPS")
+    try:
+        addresses = {
+            ipaddress.ip_address(item[4][0])
+            for item in socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        }
+    except (OSError, ValueError) as exc:
+        raise requests.ConnectionError("web probe DNS resolution failed") from exc
+    if not addresses or any(not address.is_global for address in addresses):
+        raise requests.ConnectionError("web probe DNS authority includes a non-public address")
+    selected = min(addresses, key=lambda address: (address.version, address.packed))
+    host = f"[{selected.compressed}]" if selected.version == 6 else selected.compressed
+    return parsed.hostname, parsed._replace(netloc=host).geturl()
+
+
+def send_public_https_once(url: str, headers: dict[str, str], timeout: float) -> requests.Response:
+    """Send one fixed-header, environment-isolated, DNS-pinned public HTTPS GET."""
+    hostname, pinned_url = _public_https_target(url)
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.clear()
+    session.mount("https://", _PinnedHTTPSAdapter(hostname))
+    wire_headers = dict(headers)
+    wire_headers["Host"] = hostname
+    try:
+        response = session.get(
+            pinned_url,
+            headers=wire_headers,
+            timeout=(min(timeout, 10.0), timeout),
+            stream=True,
+            allow_redirects=False,
+        )
+    except Exception:
+        session.close()
+        raise
+    response.url = url
+    original_close = response.close
+
+    def close_with_session() -> None:
+        try:
+            original_close()
+        finally:
+            session.close()
+
+    response.close = close_with_session  # type: ignore[method-assign]
+    return response
+
+
+def _randomize_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Apply subtle header randomization to reduce request fingerprinting."""
+    h = dict(headers)
+    h["User-Agent"] = random.choice(_USER_AGENT_POOL)
+    # Randomly include Accept-Language if not already set by caller.
+    # Accept-Encoding is intentionally left to urllib3 which adds gzip
+    # internally and handles decompression automatically.
+    if "Accept-Language" not in h and random.random() < 0.7:
+        h["Accept-Language"] = random.choice(_ACCEPT_LANGUAGE_POOL)
+    return h
+
+
+_API_CALL_COUNTS: dict[str, int] = {}
+_CALL_COUNT_LOCK = threading.Lock()
+
+_URL_NAMESPACE_MAP = {
+    "api.semanticscholar.org": "s2",
+    "api.crossref.org": "crossref",
+    "export.arxiv.org": "arxiv",
+    "api.openreview.net": "openreview",
+    "api.openalex.org": "openalex",
+    "eutils.ncbi.nlm.nih.gov": "pubmed",
+    "www.ebi.ac.uk/europepmc": "europepmc",
+    "doi.org": "doi",
+    "generativelanguage.googleapis.com": "gemini",
+    "dblp.org": "dblp",
+    "api.serply.io": "serply",
+    "serpapi.com": "serpapi",
+}
+
+
+def _classify_url(url: str) -> str:
+    for prefix, namespace in _URL_NAMESPACE_MAP.items():
+        if prefix in url:
+            return namespace
+    return "other"
+
+
+def track_api_call(namespace: str) -> None:
+    with _CALL_COUNT_LOCK:
+        _API_CALL_COUNTS[namespace] = _API_CALL_COUNTS.get(namespace, 0) + 1
+
+
+def get_api_call_counts() -> dict[str, int]:
+    with _CALL_COUNT_LOCK:
+        return dict(_API_CALL_COUNTS)
+
+
+def reset_api_call_counts() -> None:
+    with _CALL_COUNT_LOCK:
+        _API_CALL_COUNTS.clear()
+
+
+_THREAD_LOCAL = threading.local()
+
+_GLOBAL_SEMAPHORE = threading.Semaphore(GLOBAL_CONCURRENCY_LIMIT)
+
+
+# Per-API token bucket rate limiter
+
+
+class TokenBucketRateLimiter:
+    """Thread-safe token bucket rate limiter.
+
+    Each API gets its own bucket with a configured rate (tokens/sec) and
+    burst size.  ``acquire()`` blocks until a token is available.
+    """
+
+    def __init__(self, rate: float, burst: int = 1) -> None:
+        self._rate = rate
+        self._burst = burst
+        self._tokens = float(burst)
+        self._last_refill = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        """Block until a token is available, with jitter to avoid thundering herd."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last_refill
+                self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+                self._last_refill = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                # How long until a token is available?
+                wait = (1.0 - self._tokens) / self._rate
+            # Add jitter (up to 30% extra) to prevent thundering herd
+            time.sleep(wait + random.uniform(0, wait * 0.3))
+
+
+_RATE_LIMITER_REGISTRY: dict[str, TokenBucketRateLimiter] = {}
+_RATE_LIMITER_LOCK = threading.Lock()
+
+
+def _get_rate_limiter(namespace: str) -> TokenBucketRateLimiter | None:
+    """Return the rate limiter for *namespace*, creating it on first access."""
+    config = RATE_LIMITS.get(namespace)
+    if config is None:
+        return None
+    limiter = _RATE_LIMITER_REGISTRY.get(namespace)
+    if limiter is not None:
+        return limiter
+    with _RATE_LIMITER_LOCK:
+        # Double-check after acquiring lock
+        if namespace in _RATE_LIMITER_REGISTRY:
+            return _RATE_LIMITER_REGISTRY[namespace]
+        rate, burst = config
+        limiter = TokenBucketRateLimiter(rate, burst)
+        _RATE_LIMITER_REGISTRY[namespace] = limiter
+        return limiter
+
+
+def _new_session() -> requests.Session:
+    """Create a fresh requests.Session with retry/adapter config."""
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=0)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _get_session() -> requests.Session:
+    """Return a per-thread requests.Session with retry/adapter config.
+
+    Rotates the session after ``SESSION_ROTATION_THRESHOLD`` requests to
+    prevent long-lived connection correlation.
+    """
+    session: requests.Session | None = getattr(_THREAD_LOCAL, "session", None)
+    count: int = getattr(_THREAD_LOCAL, "session_request_count", 0)
+    if session is not None:
+        if count < SESSION_ROTATION_THRESHOLD:
+            return session
+        session.close()
+    new_session = _new_session()
+    _THREAD_LOCAL.session = new_session
+    _THREAD_LOCAL.session_request_count = 0
+    return new_session
+
+
+def handle_api_errors(default_return: Any = None) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator that returns *default_return* when the wrapped call raises an API error."""
+
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return func(*args, **kwargs)
+            except ALL_API_ERRORS as e:
+                logging.getLogger("CiteForge.http").debug(
+                    "API error in %s: %s", func.__qualname__, _scrub_secrets(str(e))
+                )
+                return default_return
+
+        return wrapper
+
+    return decorator
+
+
+def _parse_retry_after(ra: str | None) -> float:
+    """
+    Interpret a Retry-After header value and return how many seconds to wait,
+    handling both numeric delays and HTTP date formats.
+    """
+    if not ra:
+        return 0.0
+    try:
+        return float(ra)
+    except NUMERIC_ERRORS:
+        try:
+            dt = parsedate_to_datetime(ra)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+        except NUMERIC_ERRORS:
+            return 0.0
+
+
+_TRANSIENT_GET_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _retry_wait(retry_state: RetryCallState) -> float:
+    """Return the capped Retry-After or exponential delay for one retry."""
+    if retry_state.outcome is not None and not retry_state.outcome.failed:
+        response: requests.Response = retry_state.outcome.result()
+        if response.status_code in (429, 503):
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            if retry_after > 0:
+                return min(retry_after, HTTP_BACKOFF_MAX)
+    delay = HTTP_BACKOFF_INITIAL * (2 ** (retry_state.attempt_number - 1))
+    return float(min(delay, HTTP_BACKOFF_MAX))
+
+
+def _send_once(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout: tuple[float, float],
+    json_payload: dict[str, Any] | None,
+    *,
+    stream: bool = False,
+    allow_redirects: bool = True,
+    isolated_session: bool = False,
+) -> requests.Response:
+    """Send one physical attempt through rate, pool, and concurrency controls."""
+    session = requests.Session() if isolated_session else _get_session()
+    if not isolated_session:
+        _THREAD_LOCAL.session_request_count += 1
+    _GLOBAL_SEMAPHORE.acquire()
+    try:
+        if method == "POST":
+            response = session.post(
+                url, json=json_payload, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+        elif method == "HEAD":
+            response = session.head(
+                url, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+        else:
+            response = session.get(
+                url, headers=headers, timeout=timeout, stream=stream, allow_redirects=allow_redirects
+            )
+    except Exception:
+        if isolated_session:
+            session.close()
+        _GLOBAL_SEMAPHORE.release()
+        raise
+    if not stream:
+        if isolated_session:
+            session.close()
+        _GLOBAL_SEMAPHORE.release()
+        return response
+    original_close = getattr(response, "close", lambda: None)
+    released = False
+
+    def close_and_release() -> None:
+        nonlocal released
+        try:
+            original_close()
+        finally:
+            if isolated_session:
+                session.close()
+            if not released:
+                released = True
+                _GLOBAL_SEMAPHORE.release()
+
+    response.close = close_and_release  # type: ignore[method-assign]
+    return response
+
+
+def send_http_once(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    json_payload: dict[str, Any] | None = None,
+    *,
+    stream: bool = False,
+    allow_redirects: bool = True,
+    isolated_session: bool = False,
+) -> requests.Response:
+    """Send exactly one physical HTTP attempt for the durable refresh transport."""
+    method = method.upper()
+    if method not in {"GET", "HEAD", "POST"}:
+        raise ValueError("unsupported HTTP method")
+    namespace = _classify_url(url)
+    track_api_call(namespace)
+    limiter = _get_rate_limiter(namespace)
+    if limiter is not None:
+        limiter.acquire()
+    return _send_once(
+        method,
+        url,
+        _randomize_headers(headers),
+        (min(timeout, 10.0), timeout),
+        json_payload,
+        stream=stream,
+        allow_redirects=allow_redirects,
+        isolated_session=isolated_session,
+    )
+
+
+def _http_request(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    json_payload: dict[str, Any] | None = None,
+) -> bytes:
+    """Execute an HTTP request through the shared client infrastructure.
+
+    Applies namespace classification, API call tracking, per-API rate
+    limiting, header randomization, global concurrency gating, session
+    management with rotation, Retry-After back-off, and exponential retry
+    on transient errors, in that order.
+
+    Args:
+        method: HTTP method, ``"GET"`` or ``"POST"``.
+        url: Target URL.
+        headers: Base headers (will be copied and randomized).
+        timeout: Read timeout in seconds; connect timeout is capped at 10 s.
+        json_payload: JSON body for POST requests (ignored for GET).
+    """
+    namespace = _classify_url(url)
+    track_api_call(namespace)
+
+    limiter = _get_rate_limiter(namespace)
+    if limiter is not None:
+        limiter.acquire()
+
+    headers = _randomize_headers(headers)
+    connect_timeout = min(timeout, 10.0)
+
+    statuses = (429, 503) if method == "POST" else HTTP_RETRY_STATUS_CODES
+    retry = retry_if_result(lambda response: response.status_code in statuses) | retry_if_exception_type(
+        _TRANSIENT_GET_ERRORS if method == "GET" else ()
+    )
+    try:
+        response: requests.Response = Retrying(
+            sleep=time.sleep,
+            stop=stop_after_attempt(HTTP_MAX_RETRIES + 1),
+            wait=_retry_wait,
+            retry=retry,
+            reraise=True,
+            retry_error_callback=lambda state: state.outcome.result() if state.outcome is not None else None,
+        )(_send_once, method, url, headers, (connect_timeout, timeout), json_payload)
+        response.raise_for_status()
+        return bytes(response.content)
+    except requests.exceptions.RequestException as exc:
+        exc.args = tuple(_scrub_secrets(str(arg)) for arg in exc.args)
+        if exc.request is not None and exc.request.url:
+            exc.request.url = _scrub_secrets(str(exc.request.url))
+        raise
+
+
+def http_fetch_bytes(
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+) -> bytes:
+    """Perform an HTTP GET and return the raw response body.
+
+    Delegates to ``_http_request`` for rate limiting, concurrency control,
+    retries, and header randomization.
+    """
+    return _http_request("GET", url, headers, timeout)
+
+
+def decode_json_mapping(raw: bytes, url: str) -> dict[str, Any]:
+    """Decode a UTF-8 JSON object, rejecting valid JSON with another root shape."""
+    try:
+        result: Any = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as ex:
+        # include a preview for debugging (scrub the preview too; an upstream
+        # error body may echo request params carrying a key)
+        preview = _scrub_secrets(raw[:256].decode("utf-8", errors="replace"))
+        safe_url = _scrub_secrets(url)
+        raise DecodeError(f"Invalid JSON from {safe_url!r}: {ex.msg} at pos {ex.pos}; preview={preview!r}") from ex
+    if not isinstance(result, dict):
+        preview = _scrub_secrets(raw[:256].decode("utf-8", errors="replace"))
+        safe_url = _scrub_secrets(url)
+        raise DecodeError(f"Expected JSON object from {safe_url!r}, got {type(result).__name__}; preview={preview!r}")
+    return result
+
+
+def _decode_json_bytes(raw: bytes, url: str) -> dict[str, Any]:
+    """Backward-compatible private alias for :func:`decode_json_mapping`."""
+    return decode_json_mapping(raw, url)
+
+
+def http_get_json(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any]:
+    """
+    Fetch JSON from a URL using a generic User-Agent and JSON Accept header,
+    returning the parsed response as a dictionary.
+    """
+    raw = http_fetch_bytes(url, DEFAULT_JSON_HEADERS.copy(), timeout)
+    return decode_json_mapping(raw, url)
+
+
+def http_post_json(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout: float = HTTP_TIMEOUT_FAST,
+) -> dict[str, Any]:
+    """POST JSON to a URL and return the parsed JSON response.
+
+    Delegates to ``_http_request`` for the full infrastructure pipeline
+    (rate limiting, concurrency, retries, header randomization).
+    """
+    h = (headers or DEFAULT_JSON_HEADERS).copy()
+    h.setdefault("Content-Type", "application/json")
+    raw = _http_request("POST", url, h, timeout, json_payload=payload)
+    return decode_json_mapping(raw, url)
+
+
+def s2_http_get_json(url: str, api_key: str, timeout: float = HTTP_TIMEOUT_FAST) -> dict[str, Any]:
+    """
+    Fetch JSON from the Semantic Scholar API using the provided key, adding the
+    required headers and returning the parsed response.
+    """
+    headers = DEFAULT_JSON_HEADERS.copy()
+    headers["x-api-key"] = api_key
+    raw = http_fetch_bytes(url, headers, timeout)
+    return decode_json_mapping(raw, url)
+
+
+def http_get_text(url: str, timeout: float = HTTP_TIMEOUT_FAST) -> str:
+    """
+    Download an HTML or text page and choose a suitable decoding by inspecting
+    byte order marks, trying UTF-8 first, and falling back to Latin-1 when
+    needed.
+    """
+    raw = http_fetch_bytes(url, DEFAULT_BROWSER_HEADERS.copy(), timeout)
+
+    # Try BOM-indicated encodings first
+    for bom, encoding in (
+        (b"\xef\xbb\xbf", "utf-8-sig"),
+        (b"\xff\xfe", "utf-16le"),
+        (b"\xfe\xff", "utf-16be"),
+    ):
+        if raw.startswith(bom):
+            try:
+                return raw.decode(encoding)
+            except DECODE_ERRORS:
+                pass
+
+    try:
+        return raw.decode("utf-8")
+    except DECODE_ERRORS:
+        return raw.decode("latin-1", errors="replace")
