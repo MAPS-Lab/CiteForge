@@ -1,0 +1,43 @@
+name: Live Tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-test:
+    name: Live scholarly-service tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.13"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install --require-hashes -r requirements-build.lock -r requirements-dev.lock
+        pip install --no-build-isolation --no-deps -e .
+
+    - name: Create available API key files
+      env:
+        SERPAPI_KEY: ${{ secrets.SERPAPI }}
+        SERPLY_KEY: ${{ secrets.SERPLY }}
+        SEMANTIC_KEY: ${{ secrets.SEMANTICSCHOLAR }}
+      run: |
+        mkdir -p keys
+        if [ -n "$SERPAPI_KEY" ]; then printf '%s\n' "$SERPAPI_KEY" > keys/SerpAPI.key; fi
+        if [ -n "$SERPLY_KEY" ]; then printf '%s\n' "$SERPLY_KEY" > keys/Serply.key; fi
+        if [ -n "$SEMANTIC_KEY" ]; then printf '%s\n' "$SEMANTIC_KEY" > keys/Semantic.key; fi
+
+    - name: Run live scholarly-service tests
+      run: pytest -m live --force-enable-socket

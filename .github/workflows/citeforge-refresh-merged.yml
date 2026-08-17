@@ -1,0 +1,50 @@
+name: CiteForge Refresh Merged
+
+# Fires only when a refresh pull request actually lands on main. Convergence is
+# upstream of publication: a generation can converge while its pull request sits
+# unreviewed, is closed, or fails Required CI. main carrying the corpus is the
+# real event.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A closed pull request raises this event once, so the dispatch is one per
+# merge by construction. The group serializes a manual replay against it
+# rather than cancelling, because a cancelled dispatch is not a skipped one.
+concurrency:
+  group: citeforge-website-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-website:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'data/refresh-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger mapslab-website publication sync
+        env:
+          GH_TOKEN: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          # The candidate the website must publish is the merge commit, not the
+          # branch head. merge_commit_sha is null while GitHub is still computing
+          # the merge, and dispatching a null candidate would point the website
+          # at nothing, so the shape is checked before anything is sent.
+          if ! printf '%s' "$MERGE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Refresh ${HEAD_REF} reports no merge commit SHA; not dispatching"
+            exit 1
+          fi
+          echo "::notice::Refresh ${HEAD_REF} merged as ${MERGE_SHA}; dispatching website sync"
+          gh api repos/MAPS-Lab/mapslab-website/dispatches \
+            --method POST \
+            -f event_type=citeforge-refresh \
+            -f "client_payload[merge_sha]=${MERGE_SHA}" \
+            -f "client_payload[head_ref]=${HEAD_REF}"
