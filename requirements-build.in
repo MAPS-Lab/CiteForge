@@ -1,4 +1,4 @@
 # CI build backend input. Keep its minimum aligned with pyproject.toml.
 setuptools>=77.0
 # CI uses this exact compiler to verify all generated locks.
-uv==0.11.15
+uv==0.12.3
