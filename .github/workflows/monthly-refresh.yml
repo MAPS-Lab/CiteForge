@@ -59,6 +59,16 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # The stored credential is dropped, as it is in every other workflow
+          # here. Left in place, checkout writes an http.extraheader carrying
+          # the GITHUB_TOKEN, and git applies that header ahead of the
+          # userinfo in a push URL. The publish step below authenticates with
+          # an App token embedded in its URL, so the header silently replaced
+          # it and the push went out as github-actions[bot], which holds
+          # contents: read. Every refresh from 2026-08-01 onward died on a 403
+          # against its own data branch, and the retry loop could not help
+          # because the failure is an identity, not an incident.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
