@@ -622,6 +622,28 @@ def test_writes_valid_baseline_json(tmp_path: Path, no_a2i2: None) -> None:
     assert baseline["authors"]["Doe (abc123)"] == 2
 
 
+def test_baseline_omits_an_author_directory_holding_no_files(tmp_path: Path, no_a2i2: None) -> None:
+    """An empty author directory is absent from baseline.json, not recorded as zero.
+
+    Git cannot commit an empty directory, so a reader deriving counts from a
+    committed tree never produces a key for such an author. Recording a zero
+    here made the two memberships unequal by construction, and the corpus check
+    rejects that as a stale baseline. The 2026-08 refresh wrote seven of them.
+    """
+    out_dir = tmp_path / "out"
+    author = _author_dir(out_dir)
+    write_bib(author, article(key="K1", title="The Only Kept Paper"), f"Doe{_IN_WINDOW_YEAR}-Kept.bib")
+    (out_dir / "Nobody (zzz999)").mkdir(parents=True)
+
+    report = finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=None)
+
+    baseline = json.loads((out_dir / "baseline.json").read_text(encoding="utf-8"))
+    assert "Nobody (zzz999)" not in baseline["authors"]
+    assert "Nobody (zzz999)" not in report.baseline_authors
+    assert baseline["authors"]["Doe (abc123)"] == 1
+    assert baseline["total"] == 1, "an omitted zero cannot change the total"
+
+
 def test_no_summary_csv_skips_only_the_csv_bound_steps(tmp_path: Path, no_a2i2: None) -> None:
     """Without a summary CSV the orphan pass cannot run (it has nothing to
     compare against), but the year-window cleanup and baseline rewrite do not
