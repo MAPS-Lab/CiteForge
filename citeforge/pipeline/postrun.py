@@ -368,9 +368,17 @@ def finalize_run(
 
     # Write per-author baseline counts (a2i2 included by design; the
     # baseline total must equal the on-disk .bib count)
+    # An author directory holding no BibTeX file is left out rather than
+    # recorded as zero. Git cannot commit an empty directory, so a reader
+    # deriving counts from a committed tree never sees such an author, and a
+    # zero recorded here made the two memberships unequal by construction. The
+    # 2026-08 refresh wrote seven of them and its own corpus check rejected the
+    # result as stale. The total is unaffected, since a zero adds nothing.
     baseline: dict[str, int] = {}
     for entry in iter_output_dirs(out_dir):
-        baseline[entry] = len(iter_author_bibs(os.path.join(out_dir, entry)))
+        count = len(iter_author_bibs(os.path.join(out_dir, entry)))
+        if count:
+            baseline[entry] = count
     baseline_path = os.path.join(out_dir, "baseline.json")
     if not safe_write_json(baseline_path, {"total": sum(baseline.values()), "authors": baseline}):
         raise FinalizationError(f"could not write {baseline_path}")
