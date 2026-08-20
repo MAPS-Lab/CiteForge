@@ -92,4 +92,6 @@ def unicode_to_latex_accents(text: str) -> str:
     form does. ASCII text, including LaTeX-special ASCII characters, passes
     through unchanged.
     """
-    return _UNICODE_TO_LATEX_ENCODER.unicode_to_latex(text)
+    # pylatexenc's own return type is untyped (effectively Any); it is a str
+    # at runtime, same as latex_to_ascii's unidecode() call above.
+    return str(_UNICODE_TO_LATEX_ENCODER.unicode_to_latex(text))
