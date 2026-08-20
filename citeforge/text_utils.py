@@ -392,6 +392,32 @@ def author_list_is_surname_initials(names: Sequence[str]) -> bool:
     return singles >= 2 and clusters / len(finals) >= 0.7
 
 
+def author_list_is_initials_surname(names: Sequence[str]) -> bool:
+    """True when an author list is rendered "Initials Surname" (leading initials).
+
+    Google Scholar and sources that mirror its scrape emit "IV Belizario", "JF
+    Rodrigues-Jr", "LGM Andrade", where the LEADING token is initials rather
+    than a given name. Every other source emits "Given Surname". Read one name
+    at a time the two are indistinguishable, because a short given name has
+    the same shape; the list as a whole does distinguish them, the same way
+    `author_list_is_surname_initials` does for the trailing PubMed form, so
+    this is deliberately a property of the list.
+
+    Two conditions, both required, mirroring the trailing detector. At least
+    two authors must lead with a SINGLE letter, which no given name ever is on
+    its own, and at least 70 percent must lead with an initials cluster. The
+    first condition carries the decision: a genuinely mangled ALL-CAPS
+    surname-first list ("SMITH John") has no single-letter lead, since no
+    surname is one letter, and so is never matched.
+    """
+    leads = [tokens[0] for name in names if "," not in name and len(tokens := name.split()) >= 2]
+    if len(leads) < 2:
+        return False
+    singles = sum(1 for token in leads if len(token) == 1 and token.isalpha())
+    clusters = sum(1 for token in leads if len(token) <= _MAX_INITIALS_CLUSTER and token.isalpha() and token.isupper())
+    return singles >= 2 and clusters / len(leads) >= 0.7
+
+
 def surname_from_initials_form(name: str) -> str:
     """Return the surname of a PubMed-style "Surname Initials" name.
 

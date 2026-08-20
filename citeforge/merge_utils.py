@@ -44,6 +44,8 @@ from .id_utils import (
 from .identity import IdentityContext, evaluate_identity
 from .log_utils import LogCategory, logger
 from .text_utils import (
+    _MAX_INITIALS_CLUSTER,
+    author_list_is_initials_surname,
     author_list_is_surname_initials,
     format_author_dirname,
     has_placeholder,
@@ -103,7 +105,8 @@ _PREPRINT_URL_MARKERS = (
 def _fix_author_casing(author_val: str) -> tuple[str, bool]:
     """Fix author name casing. Capitalizes all-lowercase tokens, converts
     ALL-CAPS tokens (>2 chars) to title case, fixes 2-char ALL-CAPS surnames
-    when preceded by a mixed-case given name, and fixes capital 'And' separators.
+    when preceded by a mixed-case given name, restores leading initials in a
+    Scholar-style "Initials Surname" list, and fixes capital 'And' separators.
 
     Returns (fixed_string, was_modified).
     """
@@ -117,6 +120,7 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
     # "Koller JM" into "Koller Jm", which reads as a surname "Jm" and destroys
     # the one signal that says where the surname actually is.
     initials_last = author_list_is_surname_initials(parts)
+    initials_first = author_list_is_initials_surname(parts)
     fixed_parts: list[str] = []
     any_fixed = False
     for ap in parts:
@@ -126,9 +130,10 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
             has_mixed_case = any(len(t) > 1 and not t.isupper() and t[0].isupper() for t in tokens if t.isalpha())
             for index, t in enumerate(tokens):
                 trailing_initials = initials_last and index == len(tokens) - 1 and len(t) <= 2 and t.isalpha()
+                leading_initials = initials_first and index == 0 and len(t) <= _MAX_INITIALS_CLUSTER and t.isalpha()
                 if not t or not t[0].isalpha():
                     new_tokens.append(t)
-                elif trailing_initials:
+                elif trailing_initials or leading_initials:
                     # Initials stay uppercase; a previous pass may have lowered them.
                     if t != t.upper():
                         any_fixed = True
