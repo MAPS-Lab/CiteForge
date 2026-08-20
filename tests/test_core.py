@@ -311,20 +311,24 @@ def test_bibtex_latex_stripping() -> None:
 
 
 def test_bibtex_unicode_normalization() -> None:
-    """Test Unicode to ASCII normalization in BibTeX output via bibtex_from_dict."""
+    """Genuine accented letters are preserved as LaTeX macros, not folded to
+    ASCII, so a title arriving as real Unicode round-trips losslessly the
+    same way one already given in LaTeX macro form does. Typographic
+    punctuation (curly quotes, dashes, ellipsis, non-breaking space) carries
+    no scholarly meaning worth a macro and still folds to plain ASCII."""
     test_cases = [
-        # Accented characters (via unidecode)
-        ("Café Society", "Cafe Society"),
-        ("Naïve Bayes", "Naive Bayes"),
-        ("José García", "Jose Garcia"),
-        ("Müller and Schröder", "Muller and Schroder"),
-        ("François Dubois", "Francois Dubois"),
-        ("Jørgen Ødegård", "Jorgen Odegard"),
-        ("Łukasz Kowalski", "Lukasz Kowalski"),
+        # Accented characters (encoded to LaTeX macros)
+        ("Café Society", "Caf{\\'e} Society"),
+        ("Naïve Bayes", 'Na{\\"\\i}ve Bayes'),
+        ("José García", "Jos{\\'e} Garc{\\'\\i}a"),
+        ("Müller and Schröder", 'M{\\"u}ller and Schr{\\"o}der'),
+        ("François Dubois", "Fran{\\c{c}}ois Dubois"),
+        ("Jørgen Ødegård", "J{\\o}rgen {\\O}deg{\\r{a}}rd"),
+        ("Łukasz Kowalski", "{\\L}ukasz Kowalski"),
         # Nordic characters
-        ("Søren Kierkegaard", "Soren Kierkegaard"),
-        ("Bjørn Borg", "Bjorn Borg"),
-        ("Ærodynamics", "AErodynamics"),
+        ("Søren Kierkegaard", "S{\\o}ren Kierkegaard"),
+        ("Bjørn Borg", "Bj{\\o}rn Borg"),
+        ("Ærodynamics", "{\\AE}rodynamics"),
         # Unicode quotation marks
         ("It\u2019s a \u201ctest\u201d", 'It\'s a "test"'),
         ("\u2018Single\u2019 quotes", "'Single' quotes"),
@@ -340,7 +344,7 @@ def test_bibtex_unicode_normalization() -> None:
         ("Class of '21", "Class of'21"),
         ("Back in '99", "Back in'99"),
         # Combined Unicode and special chars
-        ("José's café—open 24/7", "Jose's cafe-open 24/7"),
+        ("José's café—open 24/7", "Jos{\\'e}'s caf{\\'e}-open 24/7"),
     ]
 
     for input_val, expected_val in test_cases:
@@ -357,19 +361,23 @@ def test_bibtex_unicode_normalization() -> None:
 
 
 def test_bibtex_latex_and_unicode_combined() -> None:
-    """Test that LaTeX stripping and Unicode normalization work together."""
+    """LaTeX stripping and Unicode-to-macro encoding work together: a
+    formatting macro is decoded away, an accent is preserved as a macro."""
     test_cases = [
         # LaTeX + accents
-        (r"\textit{Café} Culture", "Cafe Culture"),
-        (r"The \emph{naïve} approach", "The naive approach"),
+        (r"\textit{Café} Culture", "Caf{\\'e} Culture"),
+        (r"The \emph{naïve} approach", 'The na{\\"\\i}ve approach'),
         # LaTeX + Unicode quotes
         ("\\textbf{\u201cImportant\u201d} finding", '"Important" finding'),
         # LaTeX + dashes + accents
-        (r"\emph{José}—A \textbf{Survey}", "Jose-A Survey"),
+        (r"\emph{José}—A \textbf{Survey}", "Jos{\\'e}-A Survey"),
         # Special chars + accents
-        (r"50\% of café visitors", "50% of cafe visitors"),
+        (r"50\% of café visitors", "50% of caf{\\'e} visitors"),
         # Full complex case
-        ("\\textit{François}'s \\textbf{café}—50\\% \u201cdiscount\u201d", 'Francois\'s cafe-50% "discount"'),
+        (
+            "\\textit{François}'s \\textbf{café}—50\\% \u201cdiscount\u201d",
+            "Fran{\\c{c}}ois's caf{\\'e}-50% \"discount\"",
+        ),
     ]
 
     for input_title, expected_title in test_cases:

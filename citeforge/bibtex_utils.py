@@ -30,7 +30,12 @@ from .config import (
     VALID_YEAR_MAX,
     VALID_YEAR_MIN,
 )
-from .latex_utils import latex_to_ascii
+from .latex_utils import (
+    _OLD_STYLE_FORMAT_MACROS,
+    _SERIALIZER_FORMAT_MACROS,
+    latex_to_ascii,
+    unicode_to_latex_accents,
+)
 from .log_utils import LogCategory, logger
 from .text_utils import (
     author_list_is_surname_initials,
@@ -320,27 +325,56 @@ _UNICODE_TO_ASCII = {
 }
 
 
-# A braced LaTeX control sequence: `{\"u}`, `{\'e}`, `{\c c}`, `{\circ }`.
-# Matched whole so the accent survives `latex_to_ascii` untouched.
-_LATEX_MACRO_RE = re.compile(r"\{\\[A-Za-z]+\s*[A-Za-z]?\}|\{\\[^A-Za-z\s]\s*[A-Za-z]?\}")
+# Matches a braced LaTeX macro invocation: a named macro with a braced or
+# space-separated argument ({\c{c}}, {\c c}, {\circ }), or a one-symbol
+# accent shorthand with an optional bare trailing letter or a nested macro
+# ({\"u}, {\~a}, {\"\i}). Covers every accent shape a committed .bib file
+# or unicode_to_latex_accents' braces-all protection scheme can produce.
+#
+# The named-macro branch excludes known formatting macro names (\textbf,
+# \uppercase, old-style \it/\bf/...) by name, not by length: \circ (a
+# 4-letter degree-sign macro) is a real accent-adjacent macro that needs
+# protecting, so a length cap would either miss it or, if widened, would
+# start matching \textbf{...} as if it were an accent to shield instead of
+# formatting for latex_to_ascii to decode.
+_FORMATTING_MACRO_NAMES = frozenset(_SERIALIZER_FORMAT_MACROS) | _OLD_STYLE_FORMAT_MACROS | {"LaTeX"}
+_EXCLUDED_MACRO_NAMES_PATTERN = "|".join(sorted(re.escape(name) for name in _FORMATTING_MACRO_NAMES))
+_LATEX_MACRO_RE = re.compile(
+    r"\{\\(?!(?:" + _EXCLUDED_MACRO_NAMES_PATTERN + r")\b)[A-Za-z]+(?:\{[^{}]*\}|\s*[A-Za-z]?)\}"
+    r"|\{\\[^A-Za-z\s](?:\{[^{}]*\}|\\[A-Za-z]+|[A-Za-z])?\}"
+)
+_NON_ASCII_RUN_RE = re.compile(r"[^\x00-\x7F]+")
 _LATEX_MACRO_SENTINEL = "CITEFORGELATEX{}X"
 
 
 def _protect_latex_accents(val: str) -> tuple[str, list[str]]:
-    """Swap every braced LaTeX macro for an alphanumeric sentinel.
+    """Swap every braced LaTeX macro, and every run of literal non-ASCII
+    characters (encoded to its LaTeX macro form first), for an alphanumeric
+    sentinel.
 
-    Returns the rewritten string and the macros in the order they appeared, for
-    `_restore_latex_accents` to put back once ASCII folding has run.
+    Both need the same shielding: a macro already in the input and an accent
+    `unicode_to_latex_accents` just encoded would otherwise be flattened by
+    the unidecode pass inside `latex_to_ascii`. One shared `captured` list
+    keeps sentinel numbering unambiguous for `_restore_latex_accents`, which
+    puts everything back, in order, once ASCII folding has run.
     """
-    if "{\\" not in val:
-        return val, []
     captured: list[str] = []
 
-    def _swap(match: re.Match[str]) -> str:
+    def _swap_macro(match: re.Match[str]) -> str:
         captured.append(match.group(0))
         return _LATEX_MACRO_SENTINEL.format(len(captured) - 1)
 
-    return _LATEX_MACRO_RE.sub(_swap, val), captured
+    if "{\\" in val:
+        val = _LATEX_MACRO_RE.sub(_swap_macro, val)
+
+    def _swap_accent(match: re.Match[str]) -> str:
+        captured.append(unicode_to_latex_accents(match.group(0)))
+        return _LATEX_MACRO_SENTINEL.format(len(captured) - 1)
+
+    if not val.isascii():
+        val = _NON_ASCII_RUN_RE.sub(_swap_accent, val)
+
+    return val, captured
 
 
 def _restore_latex_accents(val: str, captured: list[str]) -> str:
@@ -351,22 +385,34 @@ def _restore_latex_accents(val: str, captured: list[str]) -> str:
 
 
 def _normalize_to_ascii(val: str) -> str:
-    """Normalize Unicode to ASCII for BibTeX compatibility.
+    """Normalize a field value for BibTeX serialization.
 
-    Decodes HTML entities, strips LaTeX formatting, converts accented
-    characters via unidecode, and replaces curly quotes and dashes.
+    Decodes HTML entities, strips LaTeX formatting, replaces curly quotes and
+    dashes with plain ASCII, and encodes remaining accented characters (e.g.
+    "e" -> "\\'e", "c cedilla" -> "\\c{c}") as LaTeX macros rather than
+    stripping them, so a title arriving as genuine Unicode round-trips
+    losslessly the same way one already given in LaTeX macro form does.
     """
     # html.unescape only changes a string containing an '&' entity.
     if "&" in val:
         val = html.unescape(val)
         # pylatexenc treats a bare ampersand as a TeX alignment marker and
         # drops it. Protect decoded HTML ampersands as ordinary text first.
-        val = _BARE_AMP_RE.sub(r"\\&", val)
-    # Accent macros are protected the same way the URL tilde is, because
-    # `latex_to_ascii` flattens `f{\"u}r` to "fur" and deletes `{\circ }`
-    # outright. Both are information the .bib file already carried correctly,
-    # so losing them here made the round trip lossy and silently degraded the
-    # committed corpus on any rewrite.
+        val = _BARE_AMP_RE.sub(r"\&", val)
+    # _UNICODE_TO_ASCII keys are non-ASCII, so this is a no-op on an
+    # already-ASCII string. Typographic punctuation (smart quotes, dashes,
+    # ellipsis) is folded to plain ASCII before accent protection runs,
+    # since it carries no scholarly meaning worth a LaTeX macro.
+    if not val.isascii():
+        for unicode_char, ascii_char in _UNICODE_TO_ASCII.items():
+            val = val.replace(unicode_char, ascii_char)
+    # Accent macros already in the input, and any literal accented
+    # character remaining after the fold above, are protected the same way
+    # the URL tilde is, because latex_to_ascii flattens an accent macro to
+    # plain letters and would unidecode a literal accented character
+    # outright. Both are information the .bib file already carried
+    # correctly, so losing either here made the round trip lossy and
+    # silently degraded the committed corpus on any rewrite.
     val, protected_accents = _protect_latex_accents(val)
     val = _URL_TILDE_RE.sub(_URL_TILDE_SENTINEL, val)
     val = latex_to_ascii(val, math_mode="verbatim")
@@ -376,13 +422,6 @@ def _normalize_to_ascii(val: str) -> str:
     val = val.replace("''", '"')
 
     val = _MULTI_SPACE_RE.sub(" ", val)
-
-    # strip_accents and every _UNICODE_TO_ASCII key are non-ASCII, so both
-    # are no-ops on an already-ASCII string; skip them in that common case.
-    if not val.isascii():
-        val = strip_accents(val)
-        for unicode_char, ascii_char in _UNICODE_TO_ASCII.items():
-            val = val.replace(unicode_char, ascii_char)
 
     # The apostrophe-year fixup requires a literal single quote to match.
     if "'" in val:
