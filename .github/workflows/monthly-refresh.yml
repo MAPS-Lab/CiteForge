@@ -273,9 +273,18 @@ jobs:
 
           branch="data/refresh-${MONTH}"
           git commit -m "data: monthly pipeline refresh ${MONTH}"
-          retry git push --force-with-lease \
-            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
-            "HEAD:refs/heads/${branch}"
+
+          # The push goes to a URL rather than a named remote, so git has no
+          # remote-tracking ref for the branch and a bare --force-with-lease has
+          # nothing to build a lease from. That form succeeds while the branch
+          # does not exist and is rejected with "stale info" forever after, which
+          # is why the first run of a month published and every re-trigger did
+          # not. The lease is therefore stated explicitly against the sha read
+          # from the remote here; an empty value asserts the branch is absent.
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          expected="$(retry git ls-remote "${remote}" "refs/heads/${branch}" | cut -f1)"
+          retry git push "--force-with-lease=refs/heads/${branch}:${expected}" \
+            "${remote}" "HEAD:refs/heads/${branch}"
 
           # The branch now carries the corpus, so the data is safe even if the
           # calls below fail; a pull request can be opened by hand against it.
