@@ -10,6 +10,9 @@ from __future__ import annotations
 import os
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
+# Requested S2 response fields. The search config and the refresh capability
+# builder both pin this exact string, so both read it from here.
+S2_SEARCH_FIELDS = "paperId,title,year,venue,publicationTypes,authors,url,journal,externalIds,publicationDate,abstract"
 CROSSREF_BASE = "https://api.crossref.org/works"
 ARXIV_BASE = "https://export.arxiv.org/api/query"
 OPENREVIEW_BASE = "https://api.openreview.net"

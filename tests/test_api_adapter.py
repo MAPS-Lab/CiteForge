@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from citeforge import api_configs, api_generics
+from citeforge import api_configs, api_generics, bibtex_utils
 from citeforge.api_configs import (
     CROSSREF_VENUE_SEARCH_CONFIG,
     EUROPEPMC_SEARCH_CONFIG,
@@ -590,3 +590,27 @@ def test_crossref_candidate_query_uses_its_author_variant(
     assert unexpected_title_param not in params
     if author_name:
         assert params["query.author"] == [author_name]
+
+
+def test_s2_abstract_is_requested_and_mapped() -> None:
+    """S2 asks for the abstract and carries it into the built entry."""
+    assert "abstract" in api_configs.S2_SEARCH_CONFIG.additional_params["fields"].split(",")
+
+    bibtex = api_generics.build_bibtex_from_response(
+        {
+            "paperId": "abc",
+            "title": "Vessel trajectory prediction",
+            "authors": [{"name": "Ada Lovelace"}],
+            "year": 2026,
+            "venue": "Journal of Tests",
+            "externalIds": {"DOI": "10.1000/xyz"},
+            "abstract": "We predict vessel trajectories.",
+        },
+        "lovelace2026vessel",
+        api_configs.S2_FIELD_MAPPING,
+    )
+
+    assert bibtex is not None
+    entry = bibtex_utils.parse_bibtex_to_dict(bibtex)
+    assert entry is not None
+    assert entry["fields"]["abstract"] == "We predict vessel trajectories."

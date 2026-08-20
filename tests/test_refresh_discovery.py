@@ -402,7 +402,8 @@ def test_broad_identity_binds_every_wire_affecting_value() -> None:
     assert "TITLE%3A%22Title+pub-one%22+AND+AUTH%3A%22Ada+Lovelace%22" in built["europepmc"].url
     assert built["s2"].url.endswith(
         "query=%22Title+pub-one%22+Ada+Lovelace&limit=15&fields="
-        "paperId%2Ctitle%2Cyear%2Cvenue%2CpublicationTypes%2Cauthors%2Curl%2Cjournal%2CexternalIds%2CpublicationDate"
+        "paperId%2Ctitle%2Cyear%2Cvenue%2CpublicationTypes%2Cauthors%2Curl%2Cjournal%2CexternalIds%2C"
+        "publicationDate%2Cabstract"
     )
     assert built["s2"].headers == {"x-api-key": "s2-wire"}
     assert built["serply"].headers == {

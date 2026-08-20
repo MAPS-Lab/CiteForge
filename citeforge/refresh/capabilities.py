@@ -24,6 +24,7 @@ from ..config import (
     OPENREVIEW_BASE,
     PUBMED_BASE,
     S2_BASE,
+    S2_SEARCH_FIELDS,
     SERPAPI_BASE,
     SERPLY_BASE,
 )
@@ -307,9 +308,7 @@ def _builder_callback(capability_id: str, method: str, endpoint: str) -> Callabl
                 {
                     "query": search_text,
                     "limit": frozen.get("limit", 15),
-                    "fields": (
-                        "paperId,title,year,venue,publicationTypes,authors,url,journal,externalIds,publicationDate"
-                    ),
+                    "fields": S2_SEARCH_FIELDS,
                 }
             )
             credential = "header:x-api-key"
