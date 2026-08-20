@@ -1169,7 +1169,6 @@ def process_article(
                     if parsed_pub.pages:
                         merged_fields["pages"] = parsed_pub.pages
                     merged["type"] = "article"
-                    merged_fields["note"] = "Venue from SerpAPI publication string (unverified)"
                     tier2_applied = True
                     logger.info(
                         f"TIER2 | journal={parsed_pub.venue_name} | vol={parsed_pub.volume} | pages={parsed_pub.pages}",
@@ -1180,7 +1179,6 @@ def process_article(
                     if parsed_pub.pages:
                         merged_fields["pages"] = parsed_pub.pages
                     merged["type"] = "inproceedings"
-                    merged_fields["note"] = "Venue from SerpAPI publication string (unverified)"
                     tier2_applied = True
                     logger.info(
                         f"TIER2 | booktitle={parsed_pub.venue_name} | pages={parsed_pub.pages}",
@@ -1207,7 +1205,6 @@ def process_article(
                     )
 
             if not tier2_applied:
-                merged_fields["note"] = "Unenriched: no enrichment sources matched"
                 logger.warn(
                     "Bare stub: no venue, no DOI, no enrichment; annotated with note",
                     category=LogCategory.AUDIT,
