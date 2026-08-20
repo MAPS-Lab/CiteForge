@@ -77,6 +77,7 @@ _ParsedBibtex: TypeAlias = tuple[str, str, tuple[tuple[str, str], ...]]
 _CORPUS_ENTRY_TYPES = frozenset({"article", "book", "incollection", "inproceedings", "misc", "phdthesis"})
 _CORPUS_FIELDS = frozenset(
     {
+        "abstract",
         "archiveprefix",
         "author",
         "booktitle",

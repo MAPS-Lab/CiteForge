@@ -13,7 +13,7 @@ from dataclasses import replace
 from typing import Any
 
 from .api_generics import APIFieldMapping, APISearchConfig
-from .config import CROSSREF_BASE, EUROPEPMC_BASE, OPENALEX_BASE, S2_BASE
+from .config import CROSSREF_BASE, EUROPEPMC_BASE, OPENALEX_BASE, S2_BASE, S2_SEARCH_FIELDS
 
 
 def _year_from_date_parts(source: dict[str, Any]) -> int | None:
@@ -48,7 +48,7 @@ S2_SEARCH_CONFIG = APISearchConfig(
     requires_api_key=True,
     additional_params={
         "limit": 15,
-        "fields": "paperId,title,year,venue,publicationTypes,authors,url,journal,externalIds,publicationDate",
+        "fields": S2_SEARCH_FIELDS,
     },
 )
 
@@ -113,6 +113,7 @@ S2_FIELD_MAPPING = APIFieldMapping(
     custom_author_extractor=lambda paper: [
         a.get("name", "").strip() for a in paper.get("authors") or [] if a.get("name", "").strip()
     ],
+    extra_field_mappings={"abstract": "abstract"},
 )
 
 CROSSREF_FIELD_MAPPING = APIFieldMapping(
