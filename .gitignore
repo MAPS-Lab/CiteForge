@@ -67,3 +67,9 @@ ruff-report.json
 
 # Agent planning and task-report scratch space
 .superpowers/
+
+# Dependency locking here is requirements*.lock (pip-tools via `uv pip
+# compile`, verified current in CI). uv.lock is a different artifact uv
+# auto-generates the moment `uv run`/`uv sync` treats this directory as a
+# uv-native project; nothing here reads it.
+uv.lock
