@@ -132,6 +132,22 @@ class TestWorkflowDocuments:
             assert not _DEFAULT_BRANCH.search(push), push
 
     @pytest.mark.parametrize("path", _WORKFLOW_PATHS, ids=[path.name for path in _WORKFLOW_PATHS])
+    def test_a_forced_push_states_its_lease_explicitly(self, path: Path) -> None:
+        """These pushes name a URL, not a remote, so no remote-tracking ref exists
+        and a bare --force-with-lease has nothing to compare against. It passes
+        while the branch is absent and is rejected as "stale info" once it is
+        not, which silently stopped every re-triggered refresh from publishing.
+        """
+        pushes = [
+            line for line in _shell_statements(_workflow_run_commands(_load_workflow(path))) if "git push" in line
+        ]
+
+        for push in pushes:
+            if "--force" not in push:
+                continue
+            assert "--force-with-lease=" in push, push
+
+    @pytest.mark.parametrize("path", _WORKFLOW_PATHS, ids=[path.name for path in _WORKFLOW_PATHS])
     def test_only_the_publisher_holds_write_privilege(self, path: Path) -> None:
         """The App token can merge its own pull request, so a workflow that runs
         provider code for hours must not be able to reach it."""
