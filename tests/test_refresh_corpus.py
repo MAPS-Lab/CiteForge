@@ -17,6 +17,7 @@ import pytest
 import requests
 
 from citeforge.bibtex_utils import bibtex_from_dict, parse_strict_bibtex_document
+from citeforge.config import A2I2_OUTPUT_DIR
 from citeforge.id_utils import normalize_strict_arxiv_id
 from citeforge.io_utils import build_a2i2_folder
 from citeforge.models import Record
@@ -1136,17 +1137,26 @@ def test_corpus_commit_rejects_cross_source_doi_and_no_doi_split(tmp_path: Path)
 
 
 def test_accepted_committed_corpus_golden_membership() -> None:
+    """The committed corpus agrees with what the refresh engine derives from it.
+
+    Every count here is read from the tree rather than pinned to a snapshot. A
+    monthly refresh legitimately moves all of them, so a hardcoded number turns
+    a correct refresh red and teaches the next reader to edit the number.
+    """
     census = load_census(Path("data/input.csv"))
     base_commit = _git(Path("."), "rev-parse", "HEAD")
     evidence = scan_existing_corpus(Path("."), census, generation_id="golden", base_commit=base_commit)
     parsed = [item for item in evidence.items if item.disposition == "parsed"]
     absent = [item for item in evidence.items if item.disposition == "absent"]
-    assert len(census.enabled_rows) == 64
-    assert len({item.author_key for item in parsed}) == 57
-    assert len(parsed) == len(evidence.publications) == len(evidence.seeds) == 2_575
-    assert len(absent) == 7
-    assert evidence.derived_a2i2_count == 1_094
-    assert evidence.baseline_total == 3_669
+    a2i2_on_disk = len(list(Path("output/a2i2").glob("*.bib")))
+    author_bibs = sum(1 for path in Path("output").glob("*/*.bib") if path.parent.name != A2I2_OUTPUT_DIR)
+    # Every enabled author is either parsed (at least one .bib) or absent (none).
+    assert len({item.author_key for item in parsed}) + len(absent) == len(census.enabled_rows)
+    assert len({item.author_key for item in absent}) == len(absent)
+    assert len(parsed) == len(evidence.publications) == len(evidence.seeds) == author_bibs
+    assert evidence.derived_a2i2_count == a2i2_on_disk
+    # baseline.json counts the a2i2 folder alongside the author directories.
+    assert evidence.baseline_total == author_bibs + a2i2_on_disk
     assert all(not item.publication_keys and not item.normalized_entry for item in absent)
 
 
