@@ -838,3 +838,26 @@ def test_make_bibkey_survives_whitespace_only_author() -> None:
     assert build_minimal_bibtex("Some Title", [" "], 2024, keyhint="x")
     # A real author is still used.
     assert make_bibkey("Some Title", ["Gabriel Spadon"], 2024) == "Spadon2024Some"
+
+
+def test_legacy_diagnostic_note_is_stripped_on_load() -> None:
+    """#38 stopped the emitter but left ~355 notes on disk; a loaded entry
+    re-serializes its note, so the strip has to happen at load."""
+    from citeforge.canonicalize import CanonicalStage, canonicalize
+
+    stages = (CanonicalStage.LOAD_REPAIR, CanonicalStage.COMPLETE_SKIP_FINALIZE)
+    cases = (
+        ("Unenriched: no enrichment sources matched", None),
+        ("Venue from SerpAPI publication string (unverified)", None),
+        # A real note stays: `note` is the patent field too.
+        ("US Patent 18/784,567", "US Patent 18/784,567"),
+    )
+    for stage in stages:
+        for note, expected in cases:
+            entry = {
+                "type": "article",
+                "key": "k",
+                "fields": {"title": "T", "author": "A B", "year": "2026", "journal": "J", "note": note},
+            }
+            canonicalize(entry, stage=stage)
+            assert entry["fields"].get("note") == expected, (stage, note)
