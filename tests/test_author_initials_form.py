@@ -22,7 +22,11 @@ from citeforge.merge_utils import _fix_author_casing
 from citeforge.models import Record
 from citeforge.pipeline import postrun
 from citeforge.pipeline.postrun import _reconcile_author_prefix, finalize_run
-from citeforge.text_utils import author_list_is_surname_initials, surname_from_initials_form
+from citeforge.text_utils import (
+    author_list_is_initials_surname,
+    author_list_is_surname_initials,
+    surname_from_initials_form,
+)
 from tests.factories import article, misc, write_bib
 
 # Real author lists, as the sources emit them.
@@ -30,6 +34,8 @@ _PUBMED = "Jin Y and Guo Y and Koller Jm and Grossen Sc and Uhlmann A and Forde 
 _PUBMED_THREE_INITIALS = "Duke Aee and Crider R and Harri Bi and Anjorin O and Agyapong Vio and Orji R"
 _WESTERN_SHORT_SURNAMES = "Meng He and Qihao Li and Xiaoyan Lv and Hongwei Du"
 _WESTERN = "Gabriel Spadon and Ronald Pelot and Stan Matwin"
+_SCHOLAR_LEADING_INITIALS = "IV Belizario and D Teodoro and LGM Andrade and G Spadon and JF Rodrigues-Jr"
+_SCHOLAR_LEADING_INITIALS_MANGLED = "IV Belizario and D Teodoro and Lgm Andrade and G Spadon and JF Rodrigues-Jr"
 
 
 @pytest.mark.parametrize(
@@ -177,9 +183,7 @@ def test_postrun_renames_and_rekeys_a_stale_file(tmp_path: Path, monkeypatch: py
     assert "Koller JM" in content
 
 
-def test_postrun_keeps_a_stale_name_when_the_target_is_taken(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_postrun_keeps_a_stale_name_when_the_target_is_taken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A rename that would overwrite another entry is refused, not forced."""
     out_dir = tmp_path / "out"
     author = out_dir / "Doe (abc123)"
@@ -212,3 +216,50 @@ def test_postrun_keeps_a_stale_name_when_the_target_is_taken(
     assert stale.exists()
     assert occupied.read_bytes() == occupied_bytes
     assert report.files_renamed == 0
+
+
+@pytest.mark.parametrize(
+    ("authors", "expected"),
+    [
+        (_SCHOLAR_LEADING_INITIALS, True),
+        (_SCHOLAR_LEADING_INITIALS_MANGLED, True),
+        # Two single-letter leads is what carries the decision. One is not a
+        # pattern: a real short given name ("D Teodoro" alone) is common.
+        ("D Teodoro and Gabriel Spadon", False),
+        # A genuinely mangled ALL-CAPS surname-first list has no single-letter
+        # lead, since no surname is one letter.
+        ("SMITH John and DOE Jane", False),
+        (_WESTERN, False),
+        (_PUBMED, False),
+    ],
+    ids=[
+        "scholar-leading-initials",
+        "scholar-leading-initials-already-mangled",
+        "one-stray-single-lead",
+        "mangled-surname-first-not-matched",
+        "western",
+        "pubmed-trailing-not-leading",
+    ],
+)
+def test_leading_initials_detection(authors: str, expected: bool) -> None:
+    names = [part.strip() for part in authors.split(" and ") if part.strip()]
+
+    assert author_list_is_initials_surname(names) is expected
+
+
+def test_leading_initials_are_restored_to_caps() -> None:
+    """A Scholar-style leading-initials list keeps or restores initials caps,
+    even where an earlier pass already lowered one ("Lgm" -> "LGM"), and never
+    touches the trailing surname."""
+    fixed, changed = _fix_author_casing(_SCHOLAR_LEADING_INITIALS_MANGLED)
+
+    assert fixed == _SCHOLAR_LEADING_INITIALS
+    assert changed is True
+    # Idempotent, so the load-repair reaches a fixpoint rather than oscillating.
+    assert _fix_author_casing(fixed) == (_SCHOLAR_LEADING_INITIALS, False)
+
+
+def test_leading_initials_do_not_affect_unrelated_lists() -> None:
+    """Lists with no leading-initials evidence are unaffected by the new rule."""
+    assert _fix_author_casing(_WESTERN) == (_WESTERN, False)
+    assert _fix_author_casing(_PUBMED)[0] == "Jin Y and Guo Y and Koller JM and Grossen SC and Uhlmann A and Forde NJ"
