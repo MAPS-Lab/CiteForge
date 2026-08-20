@@ -106,11 +106,12 @@ def test_serializer_preserves_latex_accent_macros(value: str) -> None:
     assert f"publisher = {{{value}}}" in bibtex_from_dict(entry)
 
 
-def test_serializer_still_folds_raw_unicode_accents() -> None:
-    """Only braced macros are protected. Raw Unicode still folds to ASCII."""
+def test_serializer_encodes_raw_unicode_accents_as_latex_macros() -> None:
+    """Raw Unicode accents are encoded to LaTeX macros, not folded to ASCII,
+    the same as an accent macro already present in the input."""
     entry = {"type": "article", "key": "Raw", "fields": {"title": "T", "publisher": "Zentrum für Informatik"}}
 
-    assert "publisher = {Zentrum fur Informatik}" in bibtex_from_dict(entry)
+    assert 'publisher = {Zentrum f{\\"u}r Informatik}' in bibtex_from_dict(entry)
 
 
 def test_preferred_fields_precede_sorted_tail() -> None:
@@ -151,18 +152,20 @@ def test_serialize_is_idempotent_through_parse() -> None:
     assert bibtex_from_dict(reparsed) == once
 
 
-def test_nonascii_author_folds_to_stable_ascii() -> None:
-    """A non-ASCII author is deterministically folded to ASCII (the serializer
-    strips accents), and the fold is a fixpoint, so a re-save never drifts and
-    never emits mixed encodings."""
+def test_nonascii_author_encodes_to_stable_latex_macros() -> None:
+    """A non-ASCII author is deterministically encoded to LaTeX macros (the
+    serializer preserves accents rather than stripping them), the encoding
+    is still pure ASCII on disk, and it is a fixpoint, so a re-save never
+    drifts and never emits mixed encodings."""
     e = factories.nonascii_author()
     once = bibtex_from_dict(e)
-    # Accents are folded, not preserved, and the result is pure ASCII.
-    assert "Muller, Andre" in once
+    # Accents are preserved as macros, not folded, and the result is still ASCII.
+    assert "M{\\\"u}ller, Andr{\\'e} and S{\\o}rensen, Bj{\\o}rn" in once
     once.encode("ascii")  # raises if any non-ASCII byte survived
     reparsed = parse_bibtex_to_dict(once)
     assert reparsed is not None
     assert bibtex_from_dict(reparsed) == once
+
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
@@ -200,3 +203,25 @@ def test_a_written_entry_round_trips_byte_identically() -> None:
     once = bibtex_from_dict(entry)
 
     assert bibtex_from_dict(parse_strict_bibtex_document(once.encode())) == once
+
+
+def test_portuguese_diacritics_round_trip_through_reload() -> None:
+    """A Portuguese title with cedilla and tilde survives serialization, and
+    a second write after reloading the file does not degrade it further.
+
+    Regression for belizario2026aprendizado: the title lost its cedilla and
+    tilde entirely (Reforco/Alocacao, not even a LaTeX macro), because the
+    pre-fix serializer unidecode-stripped any accent that was not already a
+    braced macro in the input.
+    """
+    title = "Aprendizado por Reforço para Alocação de Rins"
+    entry = {"type": "misc", "key": "Belizario2026", "fields": {"title": title, "author": "A and B", "year": "2026"}}
+
+    once = bibtex_from_dict(entry)
+    assert "Refor{\\c{c}}o" in once
+    assert "Aloca{\\c{c}}{\\~a}o" in once
+
+    reparsed = parse_bibtex_to_dict(once)
+    assert reparsed is not None
+    twice = bibtex_from_dict(reparsed)
+    assert twice == once
