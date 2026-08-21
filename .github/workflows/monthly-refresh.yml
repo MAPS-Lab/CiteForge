@@ -194,12 +194,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/refresh-manifest
+          enabled_authors="$(python -c 'import csv; f=open("data/input.csv", encoding="utf-8", newline=""); print(sum(row["Enabled"].strip().lower() == "true" for row in csv.DictReader(f)))')"
+          authors_with_bib="$(find output -mindepth 2 -maxdepth 2 -type f -name '*.bib' ! -path 'output/a2i2/*' -print0 \
+            | xargs -0 -r -n1 dirname | LC_ALL=C sort -u | wc -l)"
           {
             echo "run_id=${{ github.run_id }}"
             echo "converged=${{ steps.loop.outputs.converged }}"
             echo "runs_completed=${{ steps.loop.outputs.runs_completed }}"
             echo "bib_files=$(find output -type f -name '*.bib' | wc -l)"
-            echo "authors=$(find output -mindepth 1 -maxdepth 1 -type d ! -name a2i2 | wc -l)"
+            echo "enabled_authors=${enabled_authors}"
+            echo "authors_with_bib=${authors_with_bib}"
             echo "corpus_digest=$(find output -type f \( -name '*.bib' -o -name 'summary.csv' \
               -o -name 'baseline.json' \) -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum \
               | sha256sum | cut -d' ' -f1)"
@@ -301,18 +305,14 @@ jobs:
               -f head="${branch}" \
               -f base=main \
               -f title="data: monthly pipeline refresh ${MONTH}" \
-              -f body="Automated corpus refresh for ${MONTH}. Auto-merges once Required CI is green. Required CI lives in its own ruleset with no bypass actors, so this cannot merge red." \
+              -f body="Automated corpus refresh for ${MONTH}. Required CI checks code and structure. A monthly citation audit must verify the manifest, semantic data delta, and downstream website effect before merge." \
               --jq '.number')"
             echo "::notice::Opened pull request #${pr_number} through the REST API"
           else
             echo "::notice::Pull request #${pr_number} for ${branch} already open, updated in place"
           fi
 
-          # Auto-merge is armed rather than merged here, so the merge waits on
-          # Required CI. Arming is best effort: a transient API failure is not
-          # a reason to fail a refresh whose pull request is already open.
-          retry gh pr merge "${pr_number}" --squash --auto || \
-            echo "::warning::Auto-merge not armed; the pull request is open and needs a manual merge"
+          echo "::notice::Pull request #${pr_number} requires the monthly citation audit before merge"
 
       # The corpus survives the runner. Without this a failed publish destroyed
       # an hour of provider calls, because output/ lives only on the runner and

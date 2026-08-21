@@ -39,11 +39,12 @@ from citeforge.config import (
 from citeforge.exceptions import (
     FULL_OPERATION_ERRORS,
 )
-from citeforge.fsscan import iter_author_bibs
+from citeforge.fsscan import iter_author_bibs, iter_parsed_author_bibs
 from citeforge.log_utils import LogCategory, LogSource, logger
 from citeforge.models import Record
 from citeforge.pipeline.article import process_article
 from citeforge.text_utils import (
+    extract_year_from_any,
     format_author_dirname,
     trim_title_default,
 )
@@ -58,6 +59,43 @@ _ARTICLE_POOL = ThreadPoolExecutor(max_workers=ARTICLE_WORKERS, thread_name_pref
 def _author_dirname(rec: Record) -> str:
     """Return the output directory name for *rec*, keyed by its Scholar or DBLP id."""
     return format_author_dirname(rec.name, rec.scholar_id or rec.dblp or "")
+
+
+def _existing_corpus_articles(rec: Record, out_dir: str, min_year: int) -> list[dict[str, Any]]:
+    """Project committed BibTeX into the article planner's provider shape.
+
+    Current Scholar and DBLP inventories can omit a record they returned in an
+    earlier month. Keeping those files only as post-run orphans prevents every
+    enrichment source from ever reconsidering them.
+    """
+    author_dir = os.path.join(out_dir, _author_dirname(rec))
+    if not os.path.isdir(author_dir):
+        return []
+    articles: list[dict[str, Any]] = []
+    for _filename, _path, entry in iter_parsed_author_bibs(author_dir):
+        fields = entry.get("fields") or {}
+        title = str(fields.get("title") or "").strip()
+        year = extract_year_from_any(fields.get("year"), fallback=0) or 0
+        if not title or year < min_year:
+            continue
+        publication = (
+            fields.get("journal") or fields.get("booktitle") or fields.get("howpublished") or fields.get("note")
+        )
+        article: dict[str, Any] = {
+            "title": title,
+            "authors": fields.get("author") or "",
+            "year": year,
+            "source": "existing_corpus",
+            "citation_id": entry.get("key") or title,
+        }
+        if publication:
+            article["publication"] = publication
+        if fields.get("url"):
+            article["link"] = fields["url"]
+        elif fields.get("doi"):
+            article["link"] = f"https://doi.org/{fields['doi']}"
+        articles.append(article)
+    return articles
 
 
 def process_record(
@@ -182,20 +220,26 @@ def process_record(
         else:
             logger.info("Skipped (no ID)", category=LogCategory.SKIP, source=LogSource.DBLP)
 
-        if not scholar_windowed and not dblp_items:
+        existing_items = _existing_corpus_articles(rec, out_dir, min_year)
+
+        if not scholar_windowed and not dblp_items and not existing_items:
             logger.info(f"No articles within year window (>= {min_year})", category=LogCategory.SKIP)
             return 0
 
-        # merge Scholar and DBLP with full deduplication (within and across sources)
-        merged_list = merge_publication_lists(scholar_windowed, dblp_items, target_author=rec.name)
-        dedup_removed = len(scholar_windowed) + len(dblp_items) - len(merged_list)
+        # Merge live inventories first, then add committed records that neither
+        # provider returned this month. A duplicate live item stays first and
+        # still loads the matching committed BibTeX as its enrichment baseline.
+        live_list = merge_publication_lists(scholar_windowed, dblp_items, target_author=rec.name)
+        merged_list = merge_publication_lists(live_list, existing_items, target_author=rec.name)
+        dedup_removed = len(scholar_windowed) + len(dblp_items) + len(existing_items) - len(merged_list)
         logger.debug(
             f"PUB_MERGE | scholar={len(scholar_windowed)} | dblp={len(dblp_items)} "
+            f"existing={len(existing_items)} "
             f"| merged={len(merged_list)} | dedup_removed={dedup_removed}",
             category=LogCategory.AUDIT,
         )
         logger.info(
-            f"Union: Scholar={len(scholar_windowed)}, DBLP={len(dblp_items)} "
+            f"Union: Scholar={len(scholar_windowed)}, DBLP={len(dblp_items)}, Existing={len(existing_items)} "
             f"→ {len(merged_list)} unique publications (threshold={SIM_MERGE_DUPLICATE_THRESHOLD})",
             category=LogCategory.PLAN,
         )
@@ -381,7 +425,6 @@ def run_all(
                 future_to_author[future] = rec
 
             logger.step(f"All {len(records)} authors queued for processing", category=LogCategory.PLAN)
-
 
             try:
                 for future in as_completed(

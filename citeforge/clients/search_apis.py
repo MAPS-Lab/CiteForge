@@ -1002,8 +1002,6 @@ def build_bibtex_from_pubmed(article: dict[str, Any], keyhint: str) -> str | Non
         extra_fields["number"] = str(article["issue"])
     if article.get("pages"):
         extra_fields["pages"] = str(article["pages"])
-    if pmid:
-        extra_fields["note"] = f"PMID: {pmid}"
     return build_bibtex_entry(
         entry_type=entry_type,
         title=title,
@@ -1074,11 +1072,6 @@ def build_bibtex_from_europepmc(article: dict[str, Any], keyhint: str) -> str | 
         extra_fields["number"] = str(article["issue"])
     if article.get("pageInfo"):
         extra_fields["pages"] = str(article["pageInfo"])
-    if pmid:
-        note_parts = [f"PMID: {pmid}"]
-        if pmcid:
-            note_parts.append(f"PMCID: {pmcid}")
-        extra_fields["note"] = ", ".join(note_parts)
     return build_bibtex_entry(
         entry_type=entry_type,
         title=title,

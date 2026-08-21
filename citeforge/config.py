@@ -73,6 +73,7 @@ SKIP_SCHOLAR_FOR_EXISTING_FILES = True
 
 # Trust hierarchy for merging metadata; earlier sources win over later ones.
 TRUST_ORDER = [
+    "curated",  # reviewed authoritative source for provider coverage gaps
     "csl",  # DOI → CSL-JSON (highest trust, structured metadata)
     "doi_bibtex",  # DOI → BibTeX (direct from DOI resolver)
     "pubmed",  # PubMed/NIH (biomedical, highly curated)

@@ -39,6 +39,9 @@ citeforge = "citeforge.cli:main"
 packages = ["citeforge", "citeforge.clients", "citeforge.pipeline", "citeforge.refresh"]
 include-package-data = false
 
+[tool.setuptools.package-data]
+citeforge = ["data/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

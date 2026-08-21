@@ -31,6 +31,7 @@ from citeforge.canonicalize import (
     CanonicalStage,
     canonicalize,
 )
+from citeforge.citation_corrections import authoritative_correction
 from citeforge.clients.helpers import extract_authors_from_article, get_article_year, strip_html_tags
 from citeforge.clients.scholar import (
     build_bibtex_from_scholar_fields,
@@ -75,6 +76,8 @@ from citeforge.log_utils import LogCategory, LogSource, logger
 from citeforge.models import Record
 from citeforge.publication_parser import parse_publication_string
 from citeforge.text_utils import (
+    author_list_is_initials_surname,
+    author_list_is_surname_initials,
     author_name_matches,
     extract_year_from_any,
     format_author_dirname,
@@ -127,6 +130,11 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
         bt_val = (fields.get("booktitle") or "").lower().strip()
         venue_is_generic = bt_val in GENERIC_SERIES_NAMES and not fields.get("journal")
 
+    author_parts = [part.strip() for part in str(author).split(" and ") if part.strip()]
+    author_is_abbreviated = author_list_is_initials_surname(author_parts) or author_list_is_surname_initials(
+        author_parts
+    )
+
     result = (
         has_essentials
         and has_venue
@@ -134,6 +142,7 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
         and not doi_is_preprint
         and not journal_is_preprint
         and not venue_is_generic
+        and not author_is_abbreviated
     )
 
     logger.debug(
@@ -141,6 +150,7 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
         f"| has_author={bool(author)} | has_year={bool(year)} "
         f"| has_venue={has_venue} | has_doi={has_doi} "
         f"| doi_is_preprint={doi_is_preprint} | journal_is_preprint={journal_is_preprint} "
+        f"| author_is_abbreviated={author_is_abbreviated} "
         f"| result={result}",
         category=LogCategory.AUDIT,
     )
@@ -652,6 +662,14 @@ def process_article(
                 return 1
 
     enr_list: list[tuple[str, dict[str, Any]]] = []
+    correction = authoritative_correction(baseline_entry)
+    if correction is not None:
+        enr_list.append(("curated", correction))
+        logger.info(
+            f"Authoritative citation correction matched | source={correction['source']}",
+            category=LogCategory.MATCH,
+            source=LogSource.SYSTEM,
+        )
     # Collect DOIs from ALL Phase 2 candidates (matched or not) for
     # deterministic dedup; when a candidate's DOI already exists on disk the
     # write is skipped even though the match gate rejected the candidate.
@@ -1146,7 +1164,7 @@ def process_article(
         # missing venue, preprint-DOI downgrade) fire here after enrichment.
         canonicalize(merged, stage=CanonicalStage.POST_MERGE)
 
-        # Annotate bare stubs (no enrichers, no DOI, no venue)
+        # Try the provider publication string for bare stubs.
         is_bare_stub = (
             not enr_list
             and not (merged_fields.get("doi") or "").strip()
@@ -1187,7 +1205,7 @@ def process_article(
 
             if parsed_pub and not tier2_applied:
                 if parsed_pub.venue_type == "patent":
-                    merged_fields["note"] = f"US Patent {parsed_pub.patent_number}"
+                    merged_fields["howpublished"] = f"US Patent {parsed_pub.patent_number}"
                     tier2_applied = True
                     logger.info(
                         f"TIER2 | patent={parsed_pub.patent_number}",
@@ -1206,7 +1224,7 @@ def process_article(
 
             if not tier2_applied:
                 logger.warn(
-                    "Bare stub: no venue, no DOI, no enrichment; annotated with note",
+                    "Bare stub: no venue, no DOI, and no enrichment",
                     category=LogCategory.AUDIT,
                 )
 

@@ -108,3 +108,36 @@ def test_every_article_line_reaches_the_author_log(monkeypatch: pytest.MonkeyPat
     log_text = (tmp_path / "Ada (a1)" / "author.log").read_text(encoding="utf-8")
     for article in _ARTICLES:
         assert f"processed {article['title']}" in log_text
+
+
+def test_existing_orphan_is_added_to_the_monthly_article_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A committed record absent from the current provider inventories still
+    re-enters enrichment instead of surviving forever as an untouched orphan."""
+    rec = Record("Ada Lovelace", scholar_id="a1")
+    author_dir = tmp_path / "Lovelace (a1)"
+    author_dir.mkdir(parents=True)
+    (author_dir / "Lovelace2026-Orphan.bib").write_text(
+        "@misc{Lovelace2026:Orphan,\n"
+        "  title = {An Orphaned Publication Record},\n"
+        "  author = {A Lovelace},\n"
+        "  year = {2026}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scheduler, "fetch_author_publications", lambda *_a, **_k: {"articles": []})
+    monkeypatch.setattr(scheduler, "dblp_fetch_for_author", lambda *_a, **_k: [])
+    monkeypatch.setattr(scheduler, "get_min_year", lambda: 2020)
+    monkeypatch.setattr(scheduler.time, "sleep", lambda _seconds: None)
+    seen: list[dict[str, Any]] = []
+
+    def capture(_rec: Record, art: dict[str, Any], *_args: object, **_kwargs: object) -> int:
+        seen.append(art)
+        return 1
+
+    monkeypatch.setattr(scheduler, "process_article", capture)
+
+    saved = scheduler.process_record("key", None, rec, str(tmp_path), max_pubs=None)
+
+    assert saved == 1
+    assert [item["title"] for item in seen] == ["An Orphaned Publication Record"]
+    assert seen[0]["source"] == "existing_corpus"

@@ -130,11 +130,21 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
             has_mixed_case = any(len(t) > 1 and not t.isupper() and t[0].isupper() for t in tokens if t.isalpha())
             for index, t in enumerate(tokens):
                 trailing_initials = initials_last and index == len(tokens) - 1 and len(t) <= 2 and t.isalpha()
-                leading_initials = initials_first and index == 0 and len(t) <= _MAX_INITIALS_CLUSTER and t.isalpha()
+                # Only preserve a cluster the source already marked as
+                # uppercase.  Title-cased three-letter names are ambiguous in
+                # mixed lists ("Wei Haiqi", "Nur Zincir-Heywood") and must
+                # never be guessed into "WEI" or "NUR".
+                leading_initials = (
+                    initials_first
+                    and index == 0
+                    and len(t) <= _MAX_INITIALS_CLUSTER
+                    and t.isalpha()
+                    and t.isupper()
+                )
                 if not t or not t[0].isalpha():
                     new_tokens.append(t)
                 elif trailing_initials or leading_initials:
-                    # Initials stay uppercase; a previous pass may have lowered them.
+                    # Initials already identified by source casing stay uppercase.
                     if t != t.upper():
                         any_fixed = True
                     new_tokens.append(t.upper())
@@ -288,6 +298,20 @@ def _guard_author(
             )
             return False
     if cur_parts and new_parts and len(cur_parts) == len(new_parts):
+        cur_list_is_initials = author_list_is_initials_surname(cur_parts) or author_list_is_surname_initials(cur_parts)
+        new_list_is_initials = author_list_is_initials_surname(new_parts) or author_list_is_surname_initials(new_parts)
+        if cur_list_is_initials and not new_list_is_initials:
+            log.debug(
+                f"AUTHOR_ACCEPT_EXPANDED | src={src} | replacing initials-only author list",
+                category=LogCategory.MERGE,
+            )
+            return True
+        if new_list_is_initials and not cur_list_is_initials:
+            log.debug(
+                f"AUTHOR_KEEP_EXPANDED | src={src} | rejecting initials-only author list",
+                category=LogCategory.MERGE,
+            )
+            return False
         # Count initials-only tokens (e.g. "J." but not "Jr.")
         cur_inits = sum(1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
         new_inits = sum(1 for name in new_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
@@ -523,7 +547,7 @@ def merge_with_policy(
 
     # Only trust DOIs from registration agencies and authoritative databases
     if merged.get("doi") and not has_doi_conflict:
-        trusted_doi_sources = {"csl", "doi_bibtex", "pubmed", "europepmc", "crossref"}
+        trusted_doi_sources = {"curated", "csl", "doi_bibtex", "pubmed", "europepmc", "crossref"}
         merged_doi_norm = _norm_doi(merged["doi"])
         doi_trusted_src = next(
             (
