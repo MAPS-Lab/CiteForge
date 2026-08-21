@@ -130,11 +130,21 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
             has_mixed_case = any(len(t) > 1 and not t.isupper() and t[0].isupper() for t in tokens if t.isalpha())
             for index, t in enumerate(tokens):
                 trailing_initials = initials_last and index == len(tokens) - 1 and len(t) <= 2 and t.isalpha()
-                leading_initials = initials_first and index == 0 and len(t) <= _MAX_INITIALS_CLUSTER and t.isalpha()
+                # Only preserve a cluster the source already marked as
+                # uppercase.  Title-cased three-letter names are ambiguous in
+                # mixed lists ("Wei Haiqi", "Nur Zincir-Heywood") and must
+                # never be guessed into "WEI" or "NUR".
+                leading_initials = (
+                    initials_first
+                    and index == 0
+                    and len(t) <= _MAX_INITIALS_CLUSTER
+                    and t.isalpha()
+                    and t.isupper()
+                )
                 if not t or not t[0].isalpha():
                     new_tokens.append(t)
                 elif trailing_initials or leading_initials:
-                    # Initials stay uppercase; a previous pass may have lowered them.
+                    # Initials already identified by source casing stay uppercase.
                     if t != t.upper():
                         any_fixed = True
                     new_tokens.append(t.upper())

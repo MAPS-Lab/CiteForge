@@ -115,9 +115,26 @@ def test_western_lists_are_unaffected() -> None:
         ("Shu FU and Wen Wu", "Shu Fu and Wen Wu"),
         # Leading initials are left alone.
         ("JI Munro and Meng He", "JI Munro and Meng He"),
+        # A list may mostly use leading initials while one source name is
+        # written in full.  Title-cased given names are not initials.
+        (
+            "Wei Haiqi and TP Grantcharov and B Taati and Y Zhang and F Rudzicz and KL Yang",
+            "Wei Haiqi and TP Grantcharov and B Taati and Y Zhang and F Rudzicz and KL Yang",
+        ),
+        (
+            "M Mellaty and S Sampalli and Nur Zincir-heywood and K DE Snayer",
+            "M Mellaty and S Sampalli and Nur Zincir-heywood and K DE Snayer",
+        ),
         (_WESTERN_SHORT_SURNAMES, _WESTERN_SHORT_SURNAMES),
     ],
-    ids=["restores-initials", "real-short-surname", "leading-initials", "western-untouched"],
+    ids=[
+        "restores-initials",
+        "real-short-surname",
+        "leading-initials",
+        "mixed-list-preserves-wei",
+        "mixed-list-preserves-nur",
+        "western-untouched",
+    ],
 )
 def test_author_casing_respects_the_form(authors: str, expected: str) -> None:
     fixed, _changed = _fix_author_casing(authors)
@@ -247,16 +264,14 @@ def test_leading_initials_detection(authors: str, expected: bool) -> None:
     assert author_list_is_initials_surname(names) is expected
 
 
-def test_leading_initials_are_restored_to_caps() -> None:
-    """A Scholar-style leading-initials list keeps or restores initials caps,
-    even where an earlier pass already lowered one ("Lgm" -> "LGM"), and never
-    touches the trailing surname."""
+def test_leading_initials_preserve_known_caps_without_guessing_title_case() -> None:
+    """Known uppercase initials stay uppercase, while an ambiguous title-cased
+    token is preserved instead of being guessed into an initial cluster."""
     fixed, changed = _fix_author_casing(_SCHOLAR_LEADING_INITIALS_MANGLED)
 
-    assert fixed == _SCHOLAR_LEADING_INITIALS
-    assert changed is True
-    # Idempotent, so the load-repair reaches a fixpoint rather than oscillating.
-    assert _fix_author_casing(fixed) == (_SCHOLAR_LEADING_INITIALS, False)
+    assert fixed == _SCHOLAR_LEADING_INITIALS_MANGLED
+    assert changed is False
+    assert _fix_author_casing(_SCHOLAR_LEADING_INITIALS) == (_SCHOLAR_LEADING_INITIALS, False)
 
 
 def test_leading_initials_do_not_affect_unrelated_lists() -> None:
