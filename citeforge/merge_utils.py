@@ -400,6 +400,24 @@ _FIELD_GUARDS: dict[str, Callable[[Any, Any, str, str, dict[str, int], Any], boo
     "title": _guard_title,
 }
 
+_PUBLISHED_VERSION_FIELDS = frozenset(
+    {
+        "author",
+        "booktitle",
+        "doi",
+        "howpublished",
+        "issn",
+        "journal",
+        "number",
+        "pages",
+        "publisher",
+        "title",
+        "url",
+        "volume",
+        "year",
+    }
+)
+
 
 class _NullMergeLogger:
     def debug(self, *_args: object, **_kwargs: object) -> None:
@@ -466,6 +484,15 @@ def merge_with_policy(
         if not e:
             continue
         efields = e.get("fields") or {}
+        current_doi = _norm_doi(merged.get("doi"))
+        candidate_doi = _norm_doi(efields.get("doi"))
+        published_upgrade = bool(
+            current_doi
+            and candidate_doi
+            and current_doi != candidate_doi
+            and _is_preprint_doi(current_doi)
+            and not _is_preprint_doi(candidate_doi)
+        )
         for k, v in efields.items():
             cur = merged.get(k)
             cur_src = field_sources.get(k, "scholar_min")
@@ -497,11 +524,13 @@ def merge_with_policy(
             # only replace if new source is more trustworthy
             new_rank = type_rank.get(src, 99)
             cur_rank = type_rank.get(cur_src, 99)
-            if new_rank < cur_rank:
+            version_field_upgrade = published_upgrade and k in _PUBLISHED_VERSION_FIELDS
+            if new_rank < cur_rank or version_field_upgrade:
                 if str(cur) != str(v):
+                    reason = "published_version" if version_field_upgrade else "source_rank"
                     logger.debug(
-                        f"FIELD_REPLACE | {k} | src={src} (rank {new_rank}) beats {cur_src} (rank {cur_rank}) "
-                        f"| old={str(cur)[:60]} | new={str(v)[:60]}",
+                        f"FIELD_REPLACE | {k} | reason={reason} | src={src} (rank {new_rank}) "
+                        f"vs {cur_src} (rank {cur_rank}) | old={str(cur)[:60]} | new={str(v)[:60]}",
                         category=LogCategory.MERGE,
                     )
                 merged[k] = v

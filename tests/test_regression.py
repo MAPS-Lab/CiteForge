@@ -1526,6 +1526,63 @@ class TestDoiConflictPreserveUpgrade:
         # The published DOI should win over the preprint DOI
         assert merged["fields"]["doi"] == "10.1145/1234567"
 
+    def test_published_upgrade_keeps_version_metadata_coherent(self) -> None:
+        """A second CSL record for the published version must replace fields
+        retained from the first CSL record for the preprint."""
+        entry = {
+            "type": "misc",
+            "key": "Kafaie2023",
+            "fields": {
+                "title": "Sarand: exploring antimicrobial resistance gene neighbourhoods",
+                "author": "Somayeh Kafaie and Robert G. Beiko and Finlay Maguire",
+                "year": "2023",
+                "doi": "10.1101/2023.10.29.564611",
+                "url": "https://doi.org/10.1101/2023.10.29.564611",
+                "howpublished": "bioRxiv",
+            },
+        }
+        enrichers = [
+            (
+                "csl",
+                {
+                    "type": "misc",
+                    "fields": {
+                        "title": entry["fields"]["title"],
+                        "author": entry["fields"]["author"],
+                        "year": "2023",
+                        "doi": "10.1101/2023.10.29.564611",
+                        "url": "https://doi.org/10.1101/2023.10.29.564611",
+                        "howpublished": "bioRxiv",
+                    },
+                },
+            ),
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "title": entry["fields"]["title"],
+                        "author": (
+                            "Somayeh Kafaie and Shahlla Naseri and David B. J. Mahoney and "
+                            "Travis Gagie and Robert G. Beiko and Finlay Maguire"
+                        ),
+                        "year": "2026",
+                        "journal": "NAR Genomics and Bioinformatics",
+                        "doi": "10.1093/nargab/lqag066",
+                        "url": "https://doi.org/10.1093/nargab/lqag066",
+                    },
+                },
+            ),
+        ]
+
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+
+        assert merged["type"] == "article"
+        assert merged["fields"]["doi"] == "10.1093/nargab/lqag066"
+        assert merged["fields"]["year"] == "2026"
+        assert merged["fields"]["url"] == "https://doi.org/10.1093/nargab/lqag066"
+        assert merged["fields"]["author"].split(" and ") == enrichers[1][1]["fields"]["author"].split(" and ")
+
 
 class TestPhantomArxivJournal:
     """'arXiv e-prints' journal should be cleared when published DOI exists."""
