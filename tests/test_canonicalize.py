@@ -81,10 +81,11 @@ def test_r11_conference_journal_to_inproceedings() -> None:
 
 
 def test_r14_patent_to_misc() -> None:
-    """@article with a US patent number as journal -> @misc (journal -> note)."""
+    """@article with a US patent number becomes @misc with howpublished."""
     result = _canon(_article(journal="US Patent 10,123,456"))
     assert result["type"] == "misc"
-    assert result["fields"]["note"] == "US Patent 10,123,456"
+    assert result["fields"]["howpublished"] == "US Patent 10,123,456"
+    assert "note" not in result["fields"]
     assert "journal" not in result["fields"]
     assert canonicalize(copy.deepcopy(result), stage=CanonicalStage.POST_MERGE) is False
 
@@ -290,10 +291,11 @@ def test_abbreviated_journal_is_expanded_like_a_booktitle(stage_runner: Any) -> 
 
 
 def test_load_repair_patent_to_misc() -> None:
-    """LOAD_REPAIR @article with a US patent number as journal -> @misc (journal -> note)."""
+    """LOAD_REPAIR moves a patent journal value into howpublished."""
     result = _load_repair(_article(journal="US Patent 10,123,456"))
     assert result["type"] == "misc"
-    assert result["fields"]["note"] == "US Patent 10,123,456"
+    assert result["fields"]["howpublished"] == "US Patent 10,123,456"
+    assert "note" not in result["fields"]
     assert "journal" not in result["fields"]
 
 
@@ -840,24 +842,28 @@ def test_make_bibkey_survives_whitespace_only_author() -> None:
     assert make_bibkey("Some Title", ["Gabriel Spadon"], 2024) == "Spadon2024Some"
 
 
-def test_legacy_diagnostic_note_is_stripped_on_load() -> None:
-    """#38 stopped the emitter but left ~355 notes on disk; a loaded entry
-    re-serializes its note, so the strip has to happen at load."""
+def test_note_fields_are_stripped_from_every_output_path() -> None:
+    """Notes are not part of CiteForge's generated citation contract."""
     from citeforge.canonicalize import CanonicalStage, canonicalize
 
-    stages = (CanonicalStage.LOAD_REPAIR, CanonicalStage.COMPLETE_SKIP_FINALIZE)
+    stages = (
+        CanonicalStage.LOAD_REPAIR,
+        CanonicalStage.COMPLETE_SKIP_FINALIZE,
+        CanonicalStage.POST_MERGE,
+        CanonicalStage.POSTRUN_ORPHAN_REPAIR,
+    )
     cases = (
-        ("Unenriched: no enrichment sources matched", None),
-        ("Venue from SerpAPI publication string (unverified)", None),
-        # A real note stays: `note` is the patent field too.
-        ("US Patent 18/784,567", "US Patent 18/784,567"),
+        "Unenriched: no enrichment sources matched",
+        "Venue from SerpAPI publication string (unverified)",
+        "US Patent 18/784,567",
+        "Free-form note",
     )
     for stage in stages:
-        for note, expected in cases:
+        for note in cases:
             entry = {
                 "type": "article",
                 "key": "k",
                 "fields": {"title": "T", "author": "A B", "year": "2026", "journal": "J", "note": note},
             }
             canonicalize(entry, stage=stage)
-            assert entry["fields"].get("note") == expected, (stage, note)
+            assert "note" not in entry["fields"], (stage, note)

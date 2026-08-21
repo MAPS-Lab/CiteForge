@@ -639,12 +639,12 @@ def _rule_strip_ellipsis_venues(entry: dict[str, Any], fields: dict[str, Any]) -
 
 
 def _rule_patent_to_misc(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """@article with a US patent number as journal -> @misc (journal -> note)."""
+    """@article with a US patent number as journal -> @misc."""
     if entry.get("type") == "article" and fields.get("journal"):
         patent_jnl = fields["journal"].strip()
         if _US_PATENT_RE.match(patent_jnl):
             entry["type"] = "misc"
-            fields["note"] = patent_jnl
+            fields["howpublished"] = patent_jnl
             fields.pop("journal", None)
             return True
     return False
@@ -815,22 +815,12 @@ def _rule_strip_preprint_only_publisher(entry: dict[str, Any], fields: dict[str,
     return False
 
 
-# Diagnostic notes past runs wrote into the published `note` field. #38 stopped
-# the emitter, which does not touch files already on disk: a loaded entry keeps
-# the stale note and re-serializes it, so a record the website later discovers
-# still ships one. Matched on the exact strings the emitter used, never on a
-# substring, because `note` legitimately carries patent numbers.
-_LEGACY_DIAGNOSTIC_NOTES = frozenset(
-    {
-        "Unenriched: no enrichment sources matched",
-        "Venue from SerpAPI publication string (unverified)",
-    }
-)
-
-
-def _rule_strip_legacy_diagnostic_note(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
-    """Drop a pipeline diagnostic left in `note` by a run predating #38."""
-    if (fields.get("note") or "").strip().rstrip(",") in _LEGACY_DIAGNOSTIC_NOTES:
+# Notes are not part of the generated-citation contract. Provider provenance
+# and confidence belong in the audit log, while patent identifiers use
+# `howpublished`.
+def _rule_strip_note(entry: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Keep note fields out of generated citation output."""
+    if "note" in fields:
         fields.pop("note", None)
         return True
     return False
@@ -841,6 +831,7 @@ def _rule_strip_legacy_diagnostic_note(entry: dict[str, Any], fields: dict[str, 
 # ---------------------------------------------------------------------------
 # Site A applies the orphan and terminal sweep for _fixup_bib_entry, in order.
 _POSTRUN_ORPHAN_REPAIR_RULES = (
+    _rule_strip_note,
     _rule_strip_ellipsis_venues,
     _rule_procedia_to_inproceedings,
     _rule_pacm_booktitle_to_article,
@@ -883,6 +874,7 @@ _POSTRUN_ORPHAN_REPAIR_RULES = (
 
 # Site C applies the Phase 4 post-merge rules, in order.
 _POST_MERGE_RULES = (
+    _rule_strip_note,
     _rule_article_no_journal_to_misc,
     _rule_inproceedings_no_booktitle_to_misc,
     _rule_preprint_journal_to_misc,
@@ -932,7 +924,7 @@ _POST_MERGE_RULES = (
 # and the bare-ampersand rewrite run in citeforge/pipeline/article.py around the
 # canonicalize() call.
 _LOAD_REPAIR_RULES = (
-    _rule_strip_legacy_diagnostic_note,
+    _rule_strip_note,
     _rule_strip_preprint_journal_load,
     _rule_strip_email_from_author,
     _rule_strip_bracket_j_title,
@@ -987,7 +979,7 @@ _LOAD_REPAIR_RULES = (
 # because _entry_is_complete only admits entries whose DOI is not a preprint.
 _COMPLETE_SKIP_FINALIZE_RULES = (
     _rule_strip_preprint_only_publisher,
-    _rule_strip_legacy_diagnostic_note,
+    _rule_strip_note,
 )
 
 _STAGE_RULES = {

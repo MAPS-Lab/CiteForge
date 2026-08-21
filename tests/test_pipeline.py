@@ -66,6 +66,22 @@ _ARXIV_DOI = "10.48550/arXiv.1706.03762"
 _BERT_DOI = "10.18653/v1/N19-1423"
 
 
+def test_initials_only_author_list_is_not_complete() -> None:
+    entry = {
+        "type": "inproceedings",
+        "key": "Teixeira2026",
+        "fields": {
+            "title": "LOMAD Local Anomaly Detection",
+            "author": "MR Teixeira and G Spadon and CDG Linhares and A Soares",
+            "year": "2026",
+            "booktitle": "IEEE MDM",
+            "doi": "10.1109/mdm71479.2026.00053",
+        },
+    }
+
+    assert article_mod._entry_is_complete(entry) is False
+
+
 @pytest.mark.parametrize(("title", "reaches_baseline"), [("Games", False), ("Good Title", True)])
 def test_process_article_title_word_boundary_stops_before_or_reaches_baseline(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, title: str, reaches_baseline: bool

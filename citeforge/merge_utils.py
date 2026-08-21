@@ -298,6 +298,20 @@ def _guard_author(
             )
             return False
     if cur_parts and new_parts and len(cur_parts) == len(new_parts):
+        cur_list_is_initials = author_list_is_initials_surname(cur_parts) or author_list_is_surname_initials(cur_parts)
+        new_list_is_initials = author_list_is_initials_surname(new_parts) or author_list_is_surname_initials(new_parts)
+        if cur_list_is_initials and not new_list_is_initials:
+            log.debug(
+                f"AUTHOR_ACCEPT_EXPANDED | src={src} | replacing initials-only author list",
+                category=LogCategory.MERGE,
+            )
+            return True
+        if new_list_is_initials and not cur_list_is_initials:
+            log.debug(
+                f"AUTHOR_KEEP_EXPANDED | src={src} | rejecting initials-only author list",
+                category=LogCategory.MERGE,
+            )
+            return False
         # Count initials-only tokens (e.g. "J." but not "Jr.")
         cur_inits = sum(1 for name in cur_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
         new_inits = sum(1 for name in new_parts for tok in name.split() if _AUTHOR_INITIAL_RE.match(tok))
@@ -533,7 +547,7 @@ def merge_with_policy(
 
     # Only trust DOIs from registration agencies and authoritative databases
     if merged.get("doi") and not has_doi_conflict:
-        trusted_doi_sources = {"csl", "doi_bibtex", "pubmed", "europepmc", "crossref"}
+        trusted_doi_sources = {"curated", "csl", "doi_bibtex", "pubmed", "europepmc", "crossref"}
         merged_doi_norm = _norm_doi(merged["doi"])
         doi_trusted_src = next(
             (

@@ -271,6 +271,38 @@ def test_pubmed_singleton_summary_rejects_wrong_member(monkeypatch: pytest.Monke
         search_apis._pubmed_fetch_articles("ocean", 1, 5.0)
 
 
+def test_biomedical_builders_do_not_create_bibtex_note_fields() -> None:
+    pubmed = search_apis.build_bibtex_from_pubmed(
+        {
+            "title": TITLE,
+            "authors": [{"name": AUTHOR}],
+            "pubdate": "2026",
+            "fulljournalname": "Nature",
+            "uid": "123456",
+            "articleids": [{"idtype": "doi", "value": "10.1000/ocean"}],
+        },
+        "Ocean2026",
+    )
+    europepmc = search_apis.build_bibtex_from_europepmc(
+        {
+            "title": TITLE,
+            "authorString": AUTHOR,
+            "pubYear": "2026",
+            "journalTitle": "Nature",
+            "pmid": "123456",
+            "pmcid": "PMC654321",
+            "doi": "10.1000/ocean",
+        },
+        "Ocean2026",
+    )
+
+    for candidate in (pubmed, europepmc):
+        assert candidate is not None
+        parsed = bibtex_utils.parse_bibtex_to_dict(candidate)
+        assert parsed is not None
+        assert "note" not in parsed["fields"]
+
+
 def test_search_api_json_callers_route_without_legacy_http(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(search_apis, "http_fetch_bytes", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
     monkeypatch.setattr(search_apis, "http_get_json", lambda *_a, **_k: pytest.fail("legacy HTTP used"))
