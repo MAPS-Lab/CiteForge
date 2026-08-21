@@ -230,6 +230,7 @@ def test_determine_entry_type_publication_types(pub_types: list[str], expected: 
     [
         ("journal-article", "article"),
         ("proceedings-article", "inproceedings"),
+        ("proceedings", "book"),
         ("book-chapter", "incollection"),
         ("book", "book"),
         ("something-weird", "misc"),

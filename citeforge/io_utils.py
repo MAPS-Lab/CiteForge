@@ -33,11 +33,18 @@ from .config import (
     get_min_year,
 )
 from .exceptions import CSV_ERRORS, FILE_READ_ERRORS
-from .fsscan import iter_author_bibs, iter_output_dirs
+from .fsscan import iter_author_bibs, iter_output_dirs, iter_parsed_author_bibs
 from .id_utils import doi_bases_match, normalize_doi
 from .models import Record
 from .refresh.census import load_census
-from .text_utils import format_author_dirname, normalize_person_name, title_similarity
+from .text_utils import (
+    format_author_dirname,
+    name_signature,
+    normalize_person_name,
+    normalize_title,
+    parse_authors_any,
+    title_similarity,
+)
 
 _SUMMARY_CSV_FIELDNAMES = [
     "file_path",
@@ -58,6 +65,42 @@ _SUMMARY_CSV_FIELDNAMES = [
 _SUMMARY_CSV_FLAG_FIELDS = [f for f in _SUMMARY_CSV_FIELDNAMES if f not in ("file_path", "trust_hits")]
 
 _CSV_LOCK = threading.Lock()
+_CitationCoherenceSignature = tuple[str, str, tuple[tuple[str, str], ...], str]
+
+
+def _citation_coherence_signature(entry: dict[str, Any]) -> _CitationCoherenceSignature:
+    """Return material citation fields that every copy of one DOI must agree on."""
+    fields = entry.get("fields") or {}
+    authors: list[tuple[str, str]] = []
+    for author in parse_authors_any(fields.get("author")):
+        signature = name_signature(author)
+        if signature and signature.get("last"):
+            authors.append((str(signature["last"]), str(signature.get("initials") or "")[:1]))
+    return (
+        str(entry.get("type") or "").casefold(),
+        normalize_title(str(fields.get("title") or "")),
+        tuple(authors),
+        str(fields.get("year") or "").strip(),
+    )
+
+
+def find_incoherent_doi_author_dirs(out_dir: str) -> frozenset[str]:
+    """Return author directories containing materially conflicting copies of one DOI."""
+    grouped: dict[str, list[tuple[str, _CitationCoherenceSignature]]] = {}
+    for dirname in iter_output_dirs(out_dir):
+        if dirname == A2I2_OUTPUT_DIR:
+            continue
+        author_dir = os.path.join(out_dir, dirname)
+        for _filename, _path, entry in iter_parsed_author_bibs(author_dir):
+            doi = normalize_doi((entry.get("fields") or {}).get("doi"))
+            if doi:
+                grouped.setdefault(doi, []).append((dirname, _citation_coherence_signature(entry)))
+
+    affected: set[str] = set()
+    for copies in grouped.values():
+        if len(copies) > 1 and len({signature for _, signature in copies}) > 1:
+            affected.update(dirname for dirname, _ in copies)
+    return frozenset(affected)
 
 
 def _project_root() -> str:
@@ -571,6 +614,10 @@ def build_a2i2_folder(
 
         if matched_key is not None:
             ki = doi_to_idx[matched_key]
+            if _citation_coherence_signature(kept[ki][0]) != _citation_coherence_signature(entry):
+                raise ValueError(
+                    f"conflicting citation metadata for DOI {matched_key}: {kept[ki][1]} and {fpath}"
+                )
             kept[ki] = _pick_richer(kept[ki], (entry, fpath))
         else:
             doi_to_idx[doi] = len(kept)

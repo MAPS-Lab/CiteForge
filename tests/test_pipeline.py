@@ -82,6 +82,23 @@ def test_initials_only_author_list_is_not_complete() -> None:
     assert article_mod._entry_is_complete(entry) is False
 
 
+def test_published_doi_with_preprint_url_is_not_complete() -> None:
+    entry = {
+        "type": "article",
+        "key": "Kafaie2023",
+        "fields": {
+            "title": "Sarand: exploring antimicrobial resistance gene neighbourhoods",
+            "author": "Somayeh Kafaie and Robert G. Beiko and Finlay Maguire",
+            "year": "2023",
+            "journal": "NAR Genomics and Bioinformatics",
+            "doi": "10.1093/nargab/lqag066",
+            "url": "https://doi.org/10.1101/2023.10.29.564611",
+        },
+    }
+
+    assert article_mod._entry_is_complete(entry) is False
+
+
 @pytest.mark.parametrize(("title", "reaches_baseline"), [("Games", False), ("Good Title", True)])
 def test_process_article_title_word_boundary_stops_before_or_reaches_baseline(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, title: str, reaches_baseline: bool
@@ -167,6 +184,58 @@ def test_candidate_version_title_conflict_removes_merged_candidate_doi(
 
     output = "\n".join(path.read_text(encoding="utf-8") for path in author_dir.glob("*.bib"))
     assert "10.20944/preprints202304.0409.v2" not in output
+
+
+def test_rejected_candidate_doi_never_enters_disk_deduplication_net() -> None:
+    """A different preprint with a similar title must remain invisible to disk deduplication."""
+    baseline = {
+        "type": "misc",
+        "key": "Strom2021",
+        "fields": {
+            "title": "Genome-wide association study identifies new locus associated with OCD",
+            "author": "Nora I. Strom and Dongmei Yu and Zachary F. Gerring",
+            "year": "2021",
+            "doi": "10.1101/2021.10.13.21261078",
+        },
+    }
+    candidates = [
+        {
+            "bibtex": dedent("""\
+                @misc{Strom2024,
+                  title = {Genome-wide association study identifies new loci associated with OCD},
+                  author = {Nora I. Strom and Matthew W. Halvorsen and Chao Tian},
+                  year = {2024},
+                  doi = {10.1101/2024.03.06.24303776}
+                }"""),
+        },
+        {
+            "bibtex": dedent("""\
+                @misc{Strom2021,
+                  title = {Genome-wide association study identifies new locus associated with OCD},
+                  author = {Nora I. Strom and Dongmei Yu and Zachary F. Gerring},
+                  year = {2021},
+                  doi = {10.1101/2021.10.13.21261078}
+                }"""),
+        },
+    ]
+    enrichers: list[tuple[str, dict[str, Any]]] = []
+    flags = {"crossref": False}
+    seen_dois: set[str] = set()
+
+    matched, _ = article_mod._try_multiple_candidates(
+        "Crossref",
+        candidates,
+        lambda candidate, **_kwargs: candidate["bibtex"],
+        baseline,
+        "strom",
+        enrichers,
+        flags,
+        "crossref",
+        seen_dois=seen_dois,
+    )
+
+    assert matched is True
+    assert seen_dois == {"10.1101/2021.10.13.21261078"}
 
 
 def test_validate_doi_candidate_both_formats_match() -> None:

@@ -1526,6 +1526,63 @@ class TestDoiConflictPreserveUpgrade:
         # The published DOI should win over the preprint DOI
         assert merged["fields"]["doi"] == "10.1145/1234567"
 
+    def test_published_upgrade_keeps_version_metadata_coherent(self) -> None:
+        """A second CSL record for the published version must replace fields
+        retained from the first CSL record for the preprint."""
+        entry = {
+            "type": "misc",
+            "key": "Kafaie2023",
+            "fields": {
+                "title": "Sarand: exploring antimicrobial resistance gene neighbourhoods",
+                "author": "Somayeh Kafaie and Robert G. Beiko and Finlay Maguire",
+                "year": "2023",
+                "doi": "10.1101/2023.10.29.564611",
+                "url": "https://doi.org/10.1101/2023.10.29.564611",
+                "howpublished": "bioRxiv",
+            },
+        }
+        enrichers = [
+            (
+                "csl",
+                {
+                    "type": "misc",
+                    "fields": {
+                        "title": entry["fields"]["title"],
+                        "author": entry["fields"]["author"],
+                        "year": "2023",
+                        "doi": "10.1101/2023.10.29.564611",
+                        "url": "https://doi.org/10.1101/2023.10.29.564611",
+                        "howpublished": "bioRxiv",
+                    },
+                },
+            ),
+            (
+                "csl",
+                {
+                    "type": "article",
+                    "fields": {
+                        "title": entry["fields"]["title"],
+                        "author": (
+                            "Somayeh Kafaie and Shahlla Naseri and David B. J. Mahoney and "
+                            "Travis Gagie and Robert G. Beiko and Finlay Maguire"
+                        ),
+                        "year": "2026",
+                        "journal": "NAR Genomics and Bioinformatics",
+                        "doi": "10.1093/nargab/lqag066",
+                        "url": "https://doi.org/10.1093/nargab/lqag066",
+                    },
+                },
+            ),
+        ]
+
+        merged = merge_utils.merge_with_policy(entry, enrichers)
+
+        assert merged["type"] == "article"
+        assert merged["fields"]["doi"] == "10.1093/nargab/lqag066"
+        assert merged["fields"]["year"] == "2026"
+        assert merged["fields"]["url"] == "https://doi.org/10.1093/nargab/lqag066"
+        assert merged["fields"]["author"].split(" and ") == enrichers[1][1]["fields"]["author"].split(" and ")
+
 
 class TestPhantomArxivJournal:
     """'arXiv e-prints' journal should be cleared when published DOI exists."""
@@ -1610,6 +1667,49 @@ class TestPhantomArxivJournal:
         ]
         merged = merge_utils.merge_with_policy(entry, enrichers)
         assert merged["fields"].get("journal") == "Sensors"
+
+
+def test_validated_arxiv_doi_drops_unconfirmed_scholar_container() -> None:
+    primary = {
+        "type": "article",
+        "key": "Rodriguez2024",
+        "fields": {
+            "title": "Predicting Individual Depression Symptoms from Acoustic Features During Speech",
+            "author": (
+                "Sebastian Rodriguez and Sri Harsha Dumpala and Katerina Dikaios and "
+                "Sheri Rempel and Rudolf Uher and Sageev Oore"
+            ),
+            "year": "2024",
+            "journal": "Scientific Reports",
+            "publisher": "Springer Science and Business Media LLC",
+            "volume": "13",
+            "number": "1",
+            "pages": "11155",
+            "eprint": "2406.16000",
+            "archiveprefix": "arXiv",
+        },
+    }
+    arxiv = {
+        "type": "misc",
+        "fields": {
+            "title": primary["fields"]["title"],
+            "author": primary["fields"]["author"],
+            "year": "2024",
+            "howpublished": "arXiv",
+            "doi": "10.48550/arxiv.2406.16000",
+            "url": "https://arxiv.org/abs/2406.16000",
+            "eprint": "2406.16000",
+            "archiveprefix": "arXiv",
+        },
+    }
+
+    result = merge_utils.merge_with_policy(primary, [("csl", arxiv)])
+
+    assert result["type"] == "misc"
+    assert result["fields"]["doi"] == "10.48550/arxiv.2406.16000"
+    assert result["fields"]["url"] == "https://arxiv.org/abs/2406.16000"
+    for field in ("journal", "publisher", "volume", "number", "pages"):
+        assert field not in result["fields"]
 
 
 class TestIncollectionPromotionRestricted:

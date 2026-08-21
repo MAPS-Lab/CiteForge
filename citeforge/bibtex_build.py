@@ -29,7 +29,7 @@ _NON_WORD_RE = re.compile(r"\W+")
 _ARTICLE_TYPES = {"journal-article", "journal_article", "article"}
 _CONFERENCE_TYPES = {"proceedings-article", "paper-conference", "inproceedings", "conference"}
 _CHAPTER_TYPES = {"book-chapter", "book_chapter", "incollection"}
-_BOOK_TYPES = {"book", "edited-book", "monograph", "reference-book"}
+_BOOK_TYPES = {"book", "edited-book", "monograph", "proceedings", "reference-book"}
 
 _BOOK_SERIES_KEYWORDS = (
     "lecture notes",
@@ -169,12 +169,12 @@ def _classify_type_string(typ: str) -> str | None:
     match is found."""
     if "journal" in typ or typ in _ARTICLE_TYPES:
         return "article"
+    if typ in _BOOK_TYPES:
+        return "book"
     if "proceed" in typ or typ in _CONFERENCE_TYPES:
         return "inproceedings"
     if "chapter" in typ or typ in _CHAPTER_TYPES:
         return "incollection"
-    if typ in _BOOK_TYPES:
-        return "book"
     return None
 
 

@@ -229,6 +229,60 @@ def _make_records(names_and_ids: list[tuple[str, str]]) -> list[Record]:
     return [Record(name=n, scholar_id=sid) for n, sid in names_and_ids]
 
 
+def test_incoherent_doi_scan_returns_every_affected_author_directory(tmp_path: Path) -> None:
+    out = tmp_path / "output"
+    dir_a = out / "Oore (A1)"
+    dir_b = out / "Trappenberg (B1)"
+    dir_a.mkdir(parents=True)
+    dir_b.mkdir(parents=True)
+    common = {
+        "title": "Logical Activation Functions",
+        "author": "Scott Lowe and Robert Earle and Jason D'Eon and Thomas Trappenberg and Sageev Oore",
+        "doi": "10.52202/068431-2156",
+        "booktitle": "NeurIPS",
+    }
+    _write_bib(dir_a / "Lowe2021.bib", "inproceedings", "Lowe2021", {**common, "year": "2021"})
+    _write_bib(dir_b / "Lowe2022.bib", "inproceedings", "Lowe2022", {**common, "year": "2022"})
+
+    assert io_utils.find_incoherent_doi_author_dirs(str(out)) == frozenset({"Oore (A1)", "Trappenberg (B1)"})
+
+
+def test_incoherent_doi_scan_compares_author_identity_not_only_count(tmp_path: Path) -> None:
+    out = tmp_path / "output"
+    dir_a = out / "Hasan (A1)"
+    dir_b = out / "Haque (B1)"
+    dir_a.mkdir(parents=True)
+    dir_b.mkdir(parents=True)
+    common = {
+        "title": "A Shared Network Study",
+        "year": "2025",
+        "doi": "10.1109/example",
+        "journal": "IEEE Transactions on Machine Learning in Communications and Networking",
+    }
+    _write_bib(dir_a / "Hasan2025.bib", "article", "Hasan2025", {**common, "author": "Tariq Hasan and Evan Frick"})
+    _write_bib(dir_b / "Hasan2025.bib", "article", "Hasan2025", {**common, "author": "Tariq Hasan and Mahdi Haque"})
+
+    assert io_utils.find_incoherent_doi_author_dirs(str(out)) == frozenset({"Hasan (A1)", "Haque (B1)"})
+
+
+def test_incoherent_doi_scan_accepts_equivalent_author_renderings(tmp_path: Path) -> None:
+    out = tmp_path / "output"
+    dir_a = out / "Oore (A1)"
+    dir_b = out / "Rudzicz (B1)"
+    dir_a.mkdir(parents=True)
+    dir_b.mkdir(parents=True)
+    common = {
+        "title": "Measurement of Personal Rhythm From Speech and Movement",
+        "year": "2025",
+        "doi": "10.1016/j.biopsych.2025.02.114",
+        "journal": "Biological Psychiatry",
+    }
+    _write_bib(dir_a / "Oore2025.bib", "article", "Oore2025", {**common, "author": "Sageev Oore and Jason D'eon"})
+    _write_bib(dir_b / "Oore2025.bib", "article", "Oore2025", {**common, "author": "Oore, Sageev and D'eon, Jason"})
+
+    assert io_utils.find_incoherent_doi_author_dirs(str(out)) == frozenset()
+
+
 class TestBuildA2i2Folder:
     """Tests for the automated a2i2 build step."""
 
@@ -338,6 +392,47 @@ class TestBuildA2i2Folder:
         # Verify the richer version was kept (has journal field)
         content = (out / "a2i2" / "Smith2024-SharedPaper.bib").read_text()
         assert "Nature" in content
+
+    def test_conflicting_same_doi_metadata_aborts_before_rebuild(self, tmp_path: Path) -> None:
+        out = tmp_path / "output"
+        dir_a = out / "Smith (A1)"
+        dir_b = out / "Jones (B1)"
+        dir_a.mkdir(parents=True)
+        dir_b.mkdir(parents=True)
+        _write_bib(
+            dir_a / "Lowe2021-LogicalActivation.bib",
+            "inproceedings",
+            "Lowe2021:LogicalActivation",
+            {
+                "title": "Logical Activation Functions",
+                "author": "Scott Lowe and Robert Earle and Jason D'Eon",
+                "year": "2021",
+                "doi": "10.52202/068431-2156",
+            },
+        )
+        _write_bib(
+            dir_b / "Lowe2022-LogicalActivation.bib",
+            "inproceedings",
+            "Lowe2022:LogicalActivation",
+            {
+                "title": "Logical Activation Functions",
+                "author": "Scott Lowe and Robert Earle and Jason D'Eon",
+                "year": "2022",
+                "doi": "10.52202/068431-2156",
+            },
+        )
+        a2i2_dir = out / "a2i2"
+        a2i2_dir.mkdir()
+        stale = a2i2_dir / "Existing2024-Preserved.bib"
+        stale.write_text("@misc{Existing2024, title={Preserved}, year={2024}}\n", encoding="utf-8")
+        csv_path = tmp_path / "a2i2.csv"
+        _make_a2i2_csv(csv_path, ["Alice Smith", "Bob Jones"])
+        records = _make_records([("Alice Smith", "A1"), ("Bob Jones", "B1")])
+
+        with pytest.raises(ValueError, match=r"10\.52202/068431-2156"):
+            io_utils.build_a2i2_folder(str(csv_path), records, str(out))
+
+        assert stale.exists()
 
     def test_dedup_by_title(self, tmp_path: Path) -> None:
         out = tmp_path / "output"

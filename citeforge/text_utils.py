@@ -257,6 +257,7 @@ def normalize_person_name(n: Any | None) -> str:
         return ""
     n_str = to_text(n)
     n2 = strip_accents(n_str).lower()
+    n2 = n2.replace("'", "").replace("\u2019", "").replace("\u02bc", "")
     n2 = _PERSON_PUNCT_RE.sub(" ", n2)
     return " ".join(n2.split())
 
@@ -555,19 +556,8 @@ def authors_overlap(authors_a: str | None, authors_b: str | None) -> bool:
     return False
 
 
-def _author_sig_key(sig: dict[str, Any]) -> str:
-    """Build a set key from a name signature, including initials when available."""
-    last = sig.get("last", "")
-    initials = sig.get("initials", "")
-    return f"{last}_{initials}" if initials else last
-
-
 def author_overlap_ratio(authors_a: str | None, authors_b: str | None) -> float:
-    """Jaccard coefficient on normalized author signatures between two author lists.
-
-    Uses last_name + initials when both sides have initials, falling back to
-    last-name-only matching otherwise.
-    """
+    """Jaccard coefficient on compatible normalized author signatures."""
     names_a = parse_authors_any(authors_a or "")
     names_b = parse_authors_any(authors_b or "")
     if not names_a or not names_b:
@@ -576,18 +566,42 @@ def author_overlap_ratio(authors_a: str | None, authors_b: str | None) -> float:
     sigs_b_raw = [sig for nm in names_b if (sig := name_signature(nm)) and sig.get("last")]
     if not sigs_a_raw or not sigs_b_raw:
         return 0.0
-    a_has_initials = all(s.get("initials") for s in sigs_a_raw)
-    b_has_initials = all(s.get("initials") for s in sigs_b_raw)
-    if a_has_initials and b_has_initials:
-        sigs_a = {_author_sig_key(s) for s in sigs_a_raw}
-        sigs_b = {_author_sig_key(s) for s in sigs_b_raw}
-    else:
-        # Fall back to last-name-only when one side lacks initials
-        sigs_a = {s["last"] for s in sigs_a_raw}
-        sigs_b = {s["last"] for s in sigs_b_raw}
-    intersection = len(sigs_a & sigs_b)
-    union = len(sigs_a | sigs_b)
-    return intersection / union if union > 0 else 0.0
+    sigs_a = {(str(sig["last"]), str(sig.get("initials") or "")) for sig in sigs_a_raw}
+    unmatched_b = {(str(sig["last"]), str(sig.get("initials") or "")) for sig in sigs_b_raw}
+    b_count = len(unmatched_b)
+    matches = 0
+    # Match the most specific signatures first and prefer exact initials. This
+    # produces a maximal one-to-one match when the same surname occurs more
+    # than once and one source abbreviates a given name to a prefix.
+    ordered_a = sorted(sigs_a, key=lambda item: (bool(item[1]), len(item[1]), item), reverse=True)
+    for last_a, initials_a in ordered_a:
+        candidates = [
+            candidate
+            for candidate in unmatched_b
+            if candidate[0] == last_a
+            and (
+                not initials_a
+                or not candidate[1]
+                or initials_a == candidate[1]
+                or initials_a.startswith(candidate[1])
+                or candidate[1].startswith(initials_a)
+            )
+        ]
+        compatible = min(
+            candidates,
+            key=lambda candidate: (
+                candidate[1] != initials_a,
+                not candidate[1],
+                -len(candidate[1]),
+                candidate,
+            ),
+            default=None,
+        )
+        if compatible is not None:
+            unmatched_b.remove(compatible)
+            matches += 1
+    union = len(sigs_a) + b_count - matches
+    return matches / union if union > 0 else 0.0
 
 
 def venue_similarity(fields_a: dict[str, Any], fields_b: dict[str, Any]) -> float:

@@ -117,6 +117,9 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
 
     has_essentials = all(fields.get(k) and not has_placeholder(str(fields.get(k))) for k in ("title", "author", "year"))
     has_doi = bool(doi) and not has_placeholder(str(doi))
+    normalized_doi = idu.normalize_doi(str(doi)) if has_doi else None
+    url_doi = idu.find_doi_in_text(str(fields.get("url") or ""))
+    url_doi_mismatch = bool(normalized_doi and url_doi and normalized_doi != url_doi)
 
     if has_essentials and has_venue and has_doi:
         doi_is_preprint = idu.is_secondary_doi(str(doi))
@@ -143,6 +146,7 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
         and not journal_is_preprint
         and not venue_is_generic
         and not author_is_abbreviated
+        and not url_doi_mismatch
     )
 
     logger.debug(
@@ -150,7 +154,7 @@ def _entry_is_complete(entry: dict[str, Any]) -> bool:
         f"| has_author={bool(author)} | has_year={bool(year)} "
         f"| has_venue={has_venue} | has_doi={has_doi} "
         f"| doi_is_preprint={doi_is_preprint} | journal_is_preprint={journal_is_preprint} "
-        f"| author_is_abbreviated={author_is_abbreviated} "
+        f"| author_is_abbreviated={author_is_abbreviated} | url_doi_mismatch={url_doi_mismatch} "
         f"| result={result}",
         category=LogCategory.AUDIT,
     )
@@ -202,10 +206,8 @@ def _try_multiple_candidates(
 ) -> tuple[bool, Any | None]:
     """Try candidates from an API source in relevance order until one matches the baseline.
 
-    When *seen_dois* is provided, every DOI encountered across all candidates
-    (matched or not) is collected. This enables downstream duplicate detection
-    against files already on disk even when the candidate was rejected by the
-    matching gate.
+    When *seen_dois* is provided, the DOI from an identity-validated candidate
+    is collected for downstream duplicate detection against files on disk.
 
     Returns a (matched, matched_candidate) tuple.
     """
@@ -224,12 +226,6 @@ def _try_multiple_candidates(
             if not candidate_dict:
                 continue
 
-            # Collect DOI from every parsed candidate for dedup
-            if seen_dois is not None:
-                cand_doi = idu.normalize_doi((candidate_dict.get("fields") or {}).get("doi", ""))
-                if cand_doi:
-                    seen_dois.add(cand_doi)
-
             evidence = evaluate_identity(baseline_entry, candidate_dict, context=IdentityContext.ENRICHMENT)
             match = evidence.verdict
             logger.debug(
@@ -237,6 +233,10 @@ def _try_multiple_candidates(
                 category=LogCategory.DEDUP,
             )
             if match:
+                if seen_dois is not None:
+                    cand_doi = idu.normalize_doi((candidate_dict.get("fields") or {}).get("doi", ""))
+                    if cand_doi:
+                        seen_dois.add(cand_doi)
                 enr_list.append((flag_key, candidate_dict))
                 flags[flag_key] = True
                 logger.success(

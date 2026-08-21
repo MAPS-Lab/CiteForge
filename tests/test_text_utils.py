@@ -127,6 +127,21 @@ def test_author_overlap_distinguishes_same_surname_different_initials() -> None:
     assert different < identical
 
 
+def test_author_overlap_accepts_abbreviated_prefix_initials() -> None:
+    abbreviated = "Etienne D and Archambault P and Witteman HO"
+    full = "Doriane Etienne and Patrick M Archambault and Holly O Witteman"
+
+    assert author_overlap_ratio(abbreviated, full) == 1.0
+
+
+def test_author_overlap_uses_maximal_one_to_one_initial_matching() -> None:
+    assert author_overlap_ratio("Smith, P and Smith, P M", "Smith, P M and Smith, P X") == 1.0
+
+
+def test_author_overlap_preserves_apostrophes_inside_surnames() -> None:
+    assert author_overlap_ratio("Sageev Oore and Jason D'eon", "Oore, Sageev and D'eon, Jason") == 1.0
+
+
 def _preprint_side() -> dict[str, str]:
     return {"title": "T", "author": "Smith, John", "year": "2021", "journal": "arXiv"}
 
