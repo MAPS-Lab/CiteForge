@@ -142,6 +142,10 @@ def test_author_overlap_preserves_apostrophes_inside_surnames() -> None:
     assert author_overlap_ratio("Sageev Oore and Jason D'eon", "Oore, Sageev and D'eon, Jason") == 1.0
 
 
+def test_author_overlap_decodes_bibtex_accent_macros() -> None:
+    assert author_overlap_ratio(r"Anne Bergh{\"o}fer", "Anne Berghofer") == 1.0
+
+
 def _preprint_side() -> dict[str, str]:
     return {"title": "T", "author": "Smith, John", "year": "2021", "journal": "arXiv"}
 

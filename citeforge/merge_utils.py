@@ -1400,8 +1400,18 @@ def save_entry_to_file(
                 if prefer_entry:
                     pf_fields = sum(1 for v in prefer_entry.get("fields", {}).values() if v)
                     nf_fields = sum(1 for v in entry.get("fields", {}).values() if v)
-                    pf_doi = (prefer_entry.get("fields", {}).get("doi") or "").strip()
-                    if pf_fields > nf_fields or (pf_fields == nf_fields and pf_doi):
+                    pf_doi = _norm_doi(prefer_entry.get("fields", {}).get("doi")) or ""
+                    same_doi_work = bool(
+                        pf_doi
+                        and new_doi
+                        and pf_doi == new_doi
+                        and evaluate_identity(
+                            prefer_entry,
+                            entry,
+                            context=IdentityContext.DISK_SURVIVOR,
+                        ).verdict
+                    )
+                    if not same_doi_work and (pf_fields > nf_fields or (pf_fields == nf_fields and pf_doi)):
                         logger.debug(
                             f"FILE_CLEANUP_BLOCKED | prefer={os.path.basename(prefer_path)} "
                             f"({pf_fields} fields, doi) > new ({nf_fields} fields) | keeping enriched",

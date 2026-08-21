@@ -405,3 +405,51 @@ def test_year_change_renames_the_file_to_match_the_new_year(tmp_path: Path) -> N
     assert len(survivors) == 1, f"the superseded name must not linger: {survivors}"
     assert "2023" in survivors[0], f"filename must carry the new year: {survivors[0]}"
     assert "2020" not in survivors[0]
+
+
+def test_validated_same_doi_metadata_replaces_equal_field_baseline(tmp_path: Path) -> None:
+    """A DOI-bearing baseline cannot block corrected metadata solely because field counts tie."""
+    author_dir = tmp_path / format_author_dirname("Haque, Israat", "x1")
+    author_dir.mkdir(parents=True)
+    doi = "10.1109/tmlcn.2025.3575368"
+    old_path = factories.write_bib(
+        author_dir,
+        factories.article(
+            key="Hasan2024",
+            title="A Generalized Transformer-based Radio Link Failure Prediction Framework in 5G RANs",
+            author="Kazi Hasan and Thomas Trappenberg and Israat Haque",
+            year="2024",
+            journal="IEEE Transactions on Machine Learning in Communications and Networking",
+            doi=doi,
+            url=f"https://doi.org/{doi}",
+            volume="3",
+            pages="1-12",
+        ),
+        "Hasan2024-GeneralizedTransformer.bib",
+    )
+    incoming = factories.article(
+        key="Hasan2025",
+        title="A Generalized GNN-Transformer-Based Radio Link Failure Prediction Framework in 5G RAN",
+        author="Kazi Hasan and Khaleda Papry and Thomas Trappenberg and Israat Haque",
+        year="2025",
+        journal="IEEE Transactions on Machine Learning in Communications and Networking",
+        doi=doi,
+        url=f"https://doi.org/{doi}",
+        volume="3",
+        pages="1-12",
+    )
+
+    path, written = save_entry_to_file(
+        str(tmp_path),
+        "x1",
+        incoming,
+        prefer_path=str(old_path),
+        author_name="Haque, Israat",
+    )
+
+    assert written is True
+    assert not old_path.exists()
+    assert "2025" in Path(path).name
+    saved = _read(author_dir, Path(path).name)
+    assert "Khaleda Papry" in saved
+    assert "year = {2025}" in saved

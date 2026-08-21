@@ -256,7 +256,7 @@ def normalize_person_name(n: Any | None) -> str:
     if not n:
         return ""
     n_str = to_text(n)
-    n2 = strip_accents(n_str).lower()
+    n2 = latex_to_ascii(n_str, math_mode="remove").lower()
     n2 = n2.replace("'", "").replace("\u2019", "").replace("\u02bc", "")
     n2 = _PERSON_PUNCT_RE.sub(" ", n2)
     return " ".join(n2.split())
