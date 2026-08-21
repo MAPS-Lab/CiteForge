@@ -141,3 +141,41 @@ def test_existing_orphan_is_added_to_the_monthly_article_plan(monkeypatch: pytes
     assert saved == 1
     assert [item["title"] for item in seen] == ["An Orphaned Publication Record"]
     assert seen[0]["source"] == "existing_corpus"
+
+
+def test_run_all_forces_only_authors_with_incoherent_doi_copies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    forced: dict[str, bool] = {}
+
+    def capture_record(
+        _serpapi_key: str,
+        _serply_key: str | None,
+        rec: Record,
+        _out_dir: str,
+        **kwargs: Any,
+    ) -> int:
+        forced[rec.name] = bool(kwargs["force_enrich"])
+        return 0
+
+    monkeypatch.setattr(
+        scheduler,
+        "find_incoherent_doi_author_dirs",
+        lambda _out_dir: frozenset({"Lovelace (a1)"}),
+        raising=False,
+    )
+    monkeypatch.setattr(scheduler, "process_record", capture_record)
+
+    scheduler.run_all(
+        "key",
+        None,
+        None,
+        None,
+        None,
+        [Record("Ada Lovelace", scholar_id="a1"), Record("Grace Hopper", scholar_id="g1")],
+        str(tmp_path),
+        None,
+        False,
+    )
+
+    assert forced == {"Ada Lovelace": True, "Grace Hopper": False}

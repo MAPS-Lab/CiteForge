@@ -1669,6 +1669,49 @@ class TestPhantomArxivJournal:
         assert merged["fields"].get("journal") == "Sensors"
 
 
+def test_validated_arxiv_doi_drops_unconfirmed_scholar_container() -> None:
+    primary = {
+        "type": "article",
+        "key": "Rodriguez2024",
+        "fields": {
+            "title": "Predicting Individual Depression Symptoms from Acoustic Features During Speech",
+            "author": (
+                "Sebastian Rodriguez and Sri Harsha Dumpala and Katerina Dikaios and "
+                "Sheri Rempel and Rudolf Uher and Sageev Oore"
+            ),
+            "year": "2024",
+            "journal": "Scientific Reports",
+            "publisher": "Springer Science and Business Media LLC",
+            "volume": "13",
+            "number": "1",
+            "pages": "11155",
+            "eprint": "2406.16000",
+            "archiveprefix": "arXiv",
+        },
+    }
+    arxiv = {
+        "type": "misc",
+        "fields": {
+            "title": primary["fields"]["title"],
+            "author": primary["fields"]["author"],
+            "year": "2024",
+            "howpublished": "arXiv",
+            "doi": "10.48550/arxiv.2406.16000",
+            "url": "https://arxiv.org/abs/2406.16000",
+            "eprint": "2406.16000",
+            "archiveprefix": "arXiv",
+        },
+    }
+
+    result = merge_utils.merge_with_policy(primary, [("csl", arxiv)])
+
+    assert result["type"] == "misc"
+    assert result["fields"]["doi"] == "10.48550/arxiv.2406.16000"
+    assert result["fields"]["url"] == "https://arxiv.org/abs/2406.16000"
+    for field in ("journal", "publisher", "volume", "number", "pages"):
+        assert field not in result["fields"]
+
+
 class TestIncollectionPromotionRestricted:
     """incollection→inproceedings should only fire for GENERIC_SERIES_NAMES."""
 

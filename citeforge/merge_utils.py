@@ -611,6 +611,29 @@ def merge_with_policy(
     merged = normalize_arxiv_metadata(merged, log=logger)
     _pop_fields(merged, {"keywords", "copyright"}, "unwanted_removed", logger)
 
+    # A Scholar baseline can combine one arXiv work with container metadata
+    # from a different publication by overlapping authors. When the baseline
+    # had no DOI and a validated secondary DOI identifies the record as a
+    # preprint, an unconfirmed Scholar-only journal is not publication
+    # evidence. Keep the validated preprint and discard the foreign container.
+    resolved_doi = _norm_doi(merged.get("doi"))
+    if (
+        resolved_doi
+        and _is_preprint_doi(resolved_doi)
+        and not primary_doi
+        and etype == "article"
+        and merged.get("journal")
+        and field_sources.get("journal") == "scholar_min"
+    ):
+        stale_journal = merged.get("journal")
+        _pop_fields(merged, {"journal", "publisher", "volume", "number", "pages"}, "unconfirmed_container", logger)
+        etype = "misc"
+        logger.debug(
+            f"preprint_container_removed | journal={stale_journal} | doi={resolved_doi} "
+            "| reason=scholar_container_unconfirmed",
+            category=LogCategory.CLEANUP,
+        )
+
     # Strip trailing digit suffixes leaked from Scholar/DBLP author
     # disambiguation markers (e.g., "Das1" becomes "Das").
     author_val = merged.get("author", "")
