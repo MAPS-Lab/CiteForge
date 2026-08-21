@@ -40,6 +40,7 @@ from citeforge.exceptions import (
     FULL_OPERATION_ERRORS,
 )
 from citeforge.fsscan import iter_author_bibs, iter_parsed_author_bibs
+from citeforge.io_utils import find_incoherent_doi_author_dirs
 from citeforge.log_utils import LogCategory, LogSource, logger
 from citeforge.models import Record
 from citeforge.pipeline.article import process_article
@@ -350,6 +351,13 @@ def run_all(
     total_saved = 0
     processed = 0
     accounted: set[Future[int]] = set()
+    incoherent_author_dirs = find_incoherent_doi_author_dirs(out_dir)
+    if incoherent_author_dirs:
+        logger.warn(
+            f"Forcing enrichment for {len(incoherent_author_dirs)} author output directories "
+            "with conflicting copies of the same DOI",
+            category=LogCategory.PLAN,
+        )
 
     def _account_result(future: Future[int], rec: Record) -> None:
         nonlocal processed, total_saved
@@ -420,7 +428,7 @@ def run_all(
                     or_creds=or_creds,
                     gemini_api_key=gemini_api_key,
                     summary_csv_path=summary_csv_path,
-                    force_enrich=force_enrich,
+                    force_enrich=force_enrich or _author_dirname(rec) in incoherent_author_dirs,
                 )
                 future_to_author[future] = rec
 

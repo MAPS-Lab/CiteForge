@@ -751,6 +751,8 @@ def test_unreadable_year_window_candidate_raises(tmp_path: Path, no_a2i2: None) 
     with pytest.raises(FinalizationError, match="year-window check"):
         finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
 
+    assert broken.exists(), "aborting must not have deleted the file it could not read"
+
 
 def test_unreadable_candidate_raises(tmp_path: Path, no_a2i2: None) -> None:
     """A tracked file that cannot be read aborts the run rather than being skipped.
@@ -771,6 +773,39 @@ def test_unreadable_candidate_raises(tmp_path: Path, no_a2i2: None) -> None:
         finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
 
     assert broken.exists(), "aborting must not have deleted the file it could not read"
+
+
+def test_incoherent_a2i2_source_raises_finalization_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_a2i2: None
+) -> None:
+    """Conflicting member citations abort through the public finalization contract."""
+    out_dir = tmp_path / "out"
+    _author_dir(out_dir)
+
+    def reject_conflict(*_args: object, **_kwargs: object) -> int:
+        raise ValueError("conflicting citation metadata for DOI 10.5555/example")
+
+    monkeypatch.setattr(postrun, "build_a2i2_folder", reject_conflict)
+
+    with pytest.raises(FinalizationError, match="a2i2 rebuild"):
+        finalize_run(str(out_dir), _records(), total_saved=0, processed=1, summary_csv_path=None)
+
+
+def test_unresolved_same_doi_conflict_aborts_finalization(tmp_path: Path, no_a2i2: None) -> None:
+    out_dir = tmp_path / "out"
+    first_dir = _author_dir(out_dir, "Doe (abc123)")
+    second_dir = _author_dir(out_dir, "Roe (def456)")
+    common = {
+        "title": "A Shared Network Study",
+        "year": str(_IN_WINDOW_YEAR),
+        "journal": "IEEE Transactions on Machine Learning in Communications and Networking",
+        "doi": "10.1109/example",
+    }
+    write_bib(first_dir, article(key="DoeStudy", author="Jane Doe and Richard Roe", **common), "Doe-Study.bib")
+    write_bib(second_dir, article(key="DoeStudy", author="Jane Doe and Alice Poe", **common), "Doe-Study.bib")
+
+    with pytest.raises(FinalizationError, match="conflicting copies of the same DOI"):
+        finalize_run(str(out_dir), _records(), total_saved=2, processed=1, summary_csv_path=None)
 
 
 def test_failed_baseline_write_raises(tmp_path: Path, no_a2i2: None, monkeypatch: pytest.MonkeyPatch) -> None:

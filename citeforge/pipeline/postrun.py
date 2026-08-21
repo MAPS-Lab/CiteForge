@@ -37,6 +37,7 @@ from citeforge.identity import IdentityContext, evaluate_identity
 from citeforge.io_utils import (
     build_a2i2_folder,
     collect_orphan_files,
+    find_incoherent_doi_author_dirs,
     flush_summary_csv,
     reconcile_summary_csv,
     retarget_summary_csv_paths,
@@ -359,7 +360,15 @@ def finalize_run(
                 category=LogCategory.CLEANUP,
             )
 
-    a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
+    unresolved_doi_conflicts = find_incoherent_doi_author_dirs(out_dir)
+    if unresolved_doi_conflicts:
+        affected = ", ".join(sorted(unresolved_doi_conflicts))
+        raise FinalizationError(f"conflicting copies of the same DOI remain in author directories: {affected}")
+
+    try:
+        a2i2_count = build_a2i2_folder(DEFAULT_A2I2_INPUT, records, out_dir)
+    except ValueError as exc:
+        raise FinalizationError("a2i2 rebuild rejected incoherent citation metadata") from exc
     if a2i2_count:
         logger.info(
             f"Built a2i2 folder: {a2i2_count} deduplicated files",
