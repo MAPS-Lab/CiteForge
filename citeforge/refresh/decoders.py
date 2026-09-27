@@ -12,12 +12,9 @@ from typing import cast
 from urllib.parse import urlsplit
 from xml.etree.ElementTree import Element
 
-import bibtexparser
-from bibtexparser.bibdatabase import UndefinedString
-from bibtexparser.bparser import BibTexParser
 from defusedxml.ElementTree import fromstring as safe_xml_fromstring
 
-from ..bibtex_utils import parse_bibtex_to_dict
+from ..bibtex_utils import load_bibtex_entries, parse_bibtex_to_dict
 from ..id_utils import find_arxiv_in_text, find_doi_in_text, normalize_doi
 from .capabilities import ResponseMediaType
 from .transport import RawProviderResponse, SchemaChangedError
@@ -90,10 +87,7 @@ def _list_decoder(
                 if (
                     not isinstance(item, dict)
                     or any(not item.get(name) for name in required_fields)
-                    or any(
-                        not isinstance(item.get(name), str) or not str(item[name]).strip()
-                        for name in string_fields
-                    )
+                    or any(not isinstance(item.get(name), str) or not str(item[name]).strip() for name in string_fields)
                     or (record_validator is not None and not record_validator(item))
                 ):
                     raise SchemaChangedError("provider record lacks required reducer evidence")
@@ -604,15 +598,12 @@ def _doi_bibtex(raw: RawProviderResponse, context: Mapping[str, object]) -> Deco
         text = raw.body.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("DOI BibTeX is not UTF-8") from exc
-    parser = BibTexParser(common_strings=False)
-    parser.expect_multiple_parse = True
     try:
-        database = bibtexparser.loads(text, parser=parser)
-    except (TypeError, UndefinedString, ValueError) as exc:
+        entries, unconsumed = load_bibtex_entries(text, month_strings=False, strict_fields=False)
+    except (TypeError, ValueError) as exc:
         raise ValueError("DOI BibTeX is malformed") from exc
-    if database.comments or database.preambles or database.strings:
+    if unconsumed:
         raise ValueError("DOI BibTeX contains unparsed text or directives")
-    entries = database.entries
     if len(entries) != 1:
         raise SchemaChangedError("DOI BibTeX must contain exactly one entry")
     normalized = parse_bibtex_to_dict(text)
