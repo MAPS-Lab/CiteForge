@@ -36,8 +36,9 @@ ast-serialize==0.6.0 \
     --hash=sha256:e61580a69faf47e3689795367ed211f2a10fd741478cc0f36a0f128793360aad \
     --hash=sha256:f2ff3baffc3a29c1f15bc9098aa0c09763410262d5e6cef42116f7356c184554
     # via mypy
-bibtexparser==1.4.4 \
-    --hash=sha256:093b6c824f7a71d3a748867c4057b71f77c55b8dbc07efc993b781771520d8fb
+bibtexparser==2.0.0 \
+    --hash=sha256:7f1e1d989282836a0ba39caf88ecc8982dfd924a4f49de58167d7effe99768e8 \
+    --hash=sha256:e5e6df506d53e354874240c7f7fbd98a36db4b725e139f30e175f710a72a68b7
     # via citeforge (pyproject.toml)
 certifi==2026.6.17 \
     --hash=sha256:024c88eeec92ca068db80f02b8b07c9cef7b9fe261d1d535abfd5abd6f6af432 \
@@ -606,11 +607,9 @@ pygments==2.20.0 \
 pylatexenc==2.11 \
     --hash=sha256:305a072a99ce736246049c9da05841b9d718c0f7ea8888f5f596cf15cb621053 \
     --hash=sha256:e78e7391d6c104f1ed150e21cfaa58016cdb50aa54406a2eecb793649ffdfdd0
-    # via citeforge (pyproject.toml)
-pyparsing==3.3.2 \
-    --hash=sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d \
-    --hash=sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc
-    # via bibtexparser
+    # via
+    #   citeforge (pyproject.toml)
+    #   bibtexparser
 pytest==9.1.1 \
     --hash=sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313 \
     --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c

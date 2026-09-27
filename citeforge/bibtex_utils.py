@@ -10,15 +10,13 @@ from __future__ import annotations
 
 import html
 import re
-import threading
 import unicodedata
 from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any, TypeAlias
 
 import bibtexparser
-from bibtexparser.bibdatabase import BibDatabase, UndefinedString
-from bibtexparser.bparser import BibTexParser
+from bibtexparser.model import DuplicateBlockKeyBlock, DuplicateFieldKeyBlock, Entry, ParsingFailedBlock
 
 from .cache import response_cache
 from .config import (
@@ -76,8 +74,6 @@ _CONTROL_CHARS_RE = re.compile(r"[\n\r\t]")
 # round-trips through the strict parser, which collapses it on read.
 _FIELD_WHITESPACE_RE = re.compile(r"[ \r\n\t]+")
 
-_PARSER_LOCAL = threading.local()
-
 _ParsedBibtex: TypeAlias = tuple[str, str, tuple[tuple[str, str], ...]]
 _CORPUS_ENTRY_TYPES = frozenset({"article", "book", "incollection", "inproceedings", "misc", "phdthesis"})
 _CORPUS_FIELDS = frozenset(
@@ -113,32 +109,169 @@ _CORPUS_FIELDS = frozenset(
 )
 
 
-class _StrictCorpusParser(BibTexParser):
-    """Use bibtexparser's grammar while preserving duplicate-field rejection."""
+# The entry types and month macros classic BibTeX predefines. Other entry
+# types are dropped rather than parsed, as the reference BibTeX styles do.
+_STANDARD_ENTRY_TYPES = frozenset(
+    {
+        "article",
+        "book",
+        "booklet",
+        "conference",
+        "inbook",
+        "incollection",
+        "inproceedings",
+        "manual",
+        "mastersthesis",
+        "misc",
+        "phdthesis",
+        "proceedings",
+        "techreport",
+        "unpublished",
+    }
+)
+_MONTH_STRINGS: dict[str, str] = {
+    "jan": "January",
+    "feb": "February",
+    "mar": "March",
+    "apr": "April",
+    "may": "May",
+    "jun": "June",
+    "jul": "July",
+    "aug": "August",
+    "sep": "September",
+    "oct": "October",
+    "nov": "November",
+    "dec": "December",
+}
 
-    def _init_expressions(self) -> None:
-        super()._init_expressions()
 
-        def reject_duplicate_fields(_source: str, _location: int, tokens: Any) -> dict[str, Any]:
-            pairs = list(tokens.get("Fields"))
-            names = [str(name).casefold() for name, _value in pairs]
-            if len(names) != len(set(names)):
-                raise ValueError("committed BibTeX contains a duplicate field")
-            return dict(reversed(pairs))
+# Stands in for a brace-shielded quote while bibtexparser splits the text.
+_SHIELDED_QUOTE = "\ue000"
 
-        seen: set[int] = set()
-        pending = [self._expr.entry]
-        while pending:
-            expression = pending.pop()
-            if id(expression) in seen:
+
+def _shield_braced_quotes(text: str) -> str:
+    """Hide each `"` nested in braces inside a quoted value from the splitter.
+
+    In BibTeX a brace group shields a quote, so `title = "A {"} b"` holds one
+    value. bibtexparser 2 honours only the literal `{"}` and otherwise ends the
+    value at the first quote, so every shielded quote is swapped for
+    `_SHIELDED_QUOTE` before splitting and restored in `_resolve_value`.
+    """
+    if _SHIELDED_QUOTE in text:
+        raise ValueError("BibTeX contains a reserved private-use character")
+    out = list(text)
+    index = 0
+    while (index := text.find("@", index)) >= 0:
+        match = re.match(r"@\s*(\w+)\s*([{(])", text[index:])
+        if match is None or match.group(1).lower() == "comment":
+            index += 1
+            continue
+        closer = "}" if match.group(2) == "{" else ")"
+        depth = 0
+        in_quotes = False
+        quote_depth = 0
+        index += match.end()
+        while index < len(text):
+            char = text[index]
+            if in_quotes:
+                if char == "{":
+                    quote_depth += 1
+                elif char == "}" and quote_depth:
+                    quote_depth -= 1
+                elif char == '"':
+                    if quote_depth:
+                        out[index] = _SHIELDED_QUOTE
+                    else:
+                        in_quotes = False
+            elif char == '"' and depth == 0:
+                in_quotes, quote_depth = True, 0
+            elif char == "{":
+                depth += 1
+            elif char == "}" and depth:
+                depth -= 1
+            elif char == closer and depth == 0:
+                break
+            index += 1
+    return "".join(out)
+
+
+def _resolve_value(raw: str, strings: dict[str, str]) -> str:
+    """Evaluate a raw BibTeX value: braced, quoted, integer or macro parts joined by `#`."""
+    parts: list[str] = []
+    depth = 0
+    in_quotes = False
+    start = 0
+    for index, char in enumerate(raw):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        elif char == '"' and depth == 0:
+            in_quotes = not in_quotes
+        elif char == "#" and depth == 0 and not in_quotes:
+            parts.append(raw[start:index])
+            start = index + 1
+    parts.append(raw[start:])
+    resolved = []
+    for part in (piece.strip() for piece in parts):
+        if len(part) >= 2 and (part[0], part[-1]) in {("{", "}"), ('"', '"')}:
+            resolved.append(part[1:-1])
+        elif part.isdigit():
+            resolved.append(part)
+        elif part.lower() in strings:
+            resolved.append(strings[part.lower()])
+        else:
+            raise ValueError(f"BibTeX value references an undefined string: {part!r}")
+    return "".join(resolved).replace(_SHIELDED_QUOTE, '"')
+
+
+def load_bibtex_entries(text: str, *, month_strings: bool, strict_fields: bool) -> tuple[list[dict[str, str]], bool]:
+    """Parse BibTeX into entry dicts carrying lowercase ``ENTRYTYPE``, ``ID`` and field names.
+
+    Macros and `#` concatenation are resolved, non-standard entry types are
+    dropped, and a repeated field name (compared case-insensitively) keeps its
+    first value, or raises when ``strict_fields`` is set. Returns the entries
+    and whether the text also held comments, preambles, string definitions or
+    other unconsumed text. Raises ``ValueError`` on malformed input.
+    """
+    library = bibtexparser.parse_string(_shield_braced_quotes(text), parse_stack=[])
+    strings = dict(_MONTH_STRINGS) if month_strings else {}
+    for definition in library.strings:
+        strings[definition.key.lower()] = _resolve_value(definition.value, strings)
+    blocks: list[Entry] = []
+    for parsed in library.blocks:
+        # Repeated field names and repeated citation keys are policy decisions
+        # made below, so their entries are recovered; any other failure is not.
+        block = (
+            parsed.ignore_error_block
+            if isinstance(parsed, (DuplicateFieldKeyBlock, DuplicateBlockKeyBlock))
+            else parsed
+        )
+        if isinstance(block, Entry):
+            blocks.append(block)
+        elif isinstance(parsed, ParsingFailedBlock):
+            raise ValueError("BibTeX is malformed")
+    entries: list[dict[str, str]] = []
+    for block in blocks:
+        entry_type = block.entry_type.lower()
+        key = block.key.strip()
+        if not key or any(character.isspace() for character in key):
+            raise ValueError("BibTeX citation key is blank or contains whitespace")
+        if entry_type not in _STANDARD_ENTRY_TYPES:
+            continue
+        entry: dict[str, str] = {}
+        for field in block.fields:
+            name = field.key.lower()
+            if name in entry:
+                if strict_fields:
+                    raise ValueError("committed BibTeX contains a duplicate field")
                 continue
-            seen.add(id(expression))
-            if getattr(expression, "resultsName", None) == "Fields":
-                expression.set_parse_action(reject_duplicate_fields)
-            pending.extend(getattr(expression, "exprs", ()))
-            child = getattr(expression, "expr", None)
-            if child is not None:
-                pending.append(child)
+            entry[name] = _resolve_value(str(field.value), strings)
+        entry["ENTRYTYPE"] = entry_type
+        entry["ID"] = key
+        entries.append(entry)
+    unconsumed = bool(library.comments or library.preambles or library.strings)
+    return entries, unconsumed
 
 
 def make_bibkey(title: str, authors: Sequence[str], year: int, fallback: str = "entry") -> str:
@@ -180,26 +313,12 @@ def build_minimal_bibtex(title: str, authors: list[str], year: int, keyhint: str
     return "\n".join(lines) + "\n"
 
 
-def _parser_for_thread() -> BibTexParser:
-    """Return one prepared parser per worker thread."""
-    parser = getattr(_PARSER_LOCAL, "parser", None)
-    if parser is None:
-        parser = BibTexParser()
-        parser.expect_multiple_parse = True
-        _PARSER_LOCAL.parser = parser
-    return parser
-
-
 @lru_cache(maxsize=BIBTEX_PARSE_CACHE_SIZE)
 def _parse_bibtex_immutable(bibtex: str) -> _ParsedBibtex | None:
     """Parse into an immutable value safe to share through the LRU cache."""
-    parser = _parser_for_thread()
-    parser.bib_database = BibDatabase()
-    if parser.common_strings:
-        parser.bib_database.load_common_strings()
     try:
-        entries = bibtexparser.loads(bibtex, parser=parser).entries
-    except (TypeError, UndefinedString, ValueError):
+        entries, _unconsumed = load_bibtex_entries(bibtex, month_strings=True, strict_fields=False)
+    except (TypeError, ValueError):
         entries = []
     if not entries:
         return None
@@ -234,21 +353,19 @@ def parse_strict_bibtex_document(content: bytes) -> dict[str, Any]:
         raise ValueError("committed BibTeX must not be empty")
     if any(unicodedata.category(character) == "Cc" and character not in "\r\n\t" for character in text):
         raise ValueError("committed BibTeX contains control characters")
-    parser = _StrictCorpusParser(common_strings=False)
-    parser.expect_multiple_parse = True
     try:
-        database = bibtexparser.loads(text, parser=parser)
+        entries, unconsumed = load_bibtex_entries(text, month_strings=False, strict_fields=True)
     except ValueError as exc:
         if "duplicate field" in str(exc):
             raise
         raise ValueError("committed BibTeX is malformed") from exc
-    except (TypeError, UndefinedString) as exc:
+    except TypeError as exc:
         raise ValueError("committed BibTeX is malformed") from exc
-    if database.comments or database.preambles or database.strings:
+    if unconsumed:
         raise ValueError("committed BibTeX contains directives or unconsumed text")
-    if len(database.entries) != 1:
+    if len(entries) != 1:
         raise ValueError("committed BibTeX requires exactly one entry")
-    raw = dict(database.entries[0])
+    raw: dict[str, Any] = dict(entries[0])
     entry_type = raw.pop("ENTRYTYPE", None)
     key = raw.pop("ID", None)
     if not isinstance(entry_type, str) or entry_type.casefold() not in _CORPUS_ENTRY_TYPES:

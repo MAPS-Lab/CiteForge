@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 dependencies = [
-    "bibtexparser==1.4.4",
+    "bibtexparser==2.0.0",
     "pylatexenc==2.11",
     "requests>=2.32.0",
     "rapidfuzz>=3.0.0",
