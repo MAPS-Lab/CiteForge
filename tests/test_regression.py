@@ -1541,7 +1541,7 @@ class TestDoiConflictPreserveUpgrade:
                 "howpublished": "bioRxiv",
             },
         }
-        enrichers = [
+        enrichers: list[tuple[str, dict[str, Any]]] = [
             (
                 "csl",
                 {
