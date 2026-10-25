@@ -374,6 +374,7 @@ def test_composite_boundary_flips_verdict(tmp_path: Path, authors: tuple[str, st
 
     assert len(_bib_files(author_dir)) == expected_files
 
+
 def test_year_change_renames_the_file_to_match_the_new_year(tmp_path: Path) -> None:
     """A record whose year changed must not keep the old year in its filename.
 
@@ -453,3 +454,62 @@ def test_validated_same_doi_metadata_replaces_equal_field_baseline(tmp_path: Pat
     saved = _read(author_dir, Path(path).name)
     assert "Khaleda Papry" in saved
     assert "year = {2025}" in saved
+
+
+# The committed Milios records. VISLA is arXiv 2404.16365 and SugarCrepe++ is
+# arXiv 2406.11171, two works; the published record carries no arXiv id because
+# the merge strips eprint fields once a published DOI is known.
+_VISLA = factories.entry(
+    type="misc",
+    key="Dumpala2024:VislaBenchmark",
+    title="VISLA Benchmark: Evaluating Embedding Sensitivity to Semantic and Lexical Alterations",
+    author="Sri Harsha Dumpala and Aman Jaiswal and Chandramouli Shama Sastry and Evangelos Milios "
+    "and Sageev Oore and Hassan Sajjad",
+    year="2024",
+    howpublished="arXiv:2404.16365",
+    doi="10.48550/arxiv.2404.16365",
+    url="https://arxiv.org/abs/2404.16365",
+    eprint="2404.16365",
+    archiveprefix="arXiv",
+)
+_SUGARCREPE = factories.inproceedings(
+    key="Dumpala2024:SugarcrepeDataset",
+    title="SUGARCREPE++ Dataset: Vision-Language Model Sensitivity to Semantic and Lexical Alterations",
+    author="Sri Dumpala and Aman Jaiswal and Chandramouli Sastry and Evangelos Milios and Sageev Oore "
+    "and Hassan Sajjad",
+    year="2024",
+    booktitle="Advances in Neural Information Processing Systems 37",
+    publisher="Neural Information Processing Systems Foundation, Inc. (NeurIPS)",
+    pages="17972-18018",
+    doi="10.52202/079017-0571",
+    url="https://doi.org/10.52202/079017-0571",
+)
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "incoming"), [(_VISLA, _SUGARCREPE), (_SUGARCREPE, _VISLA)], ids=["published_in", "preprint_in"]
+)
+def test_published_record_never_absorbs_a_distinct_arxiv_preprint(
+    tmp_path: Path, on_disk: dict[str, object], incoming: dict[str, object]
+) -> None:
+    """A 0.71 title score with no linking identifier is two works, so both files stay."""
+    author_dir = _author_dir(tmp_path)
+    factories.write_bib(author_dir, on_disk, "on_disk.bib")
+
+    _, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
+
+    assert was_written is True
+    texts = [_read(author_dir, name).lower() for name in _bib_files(author_dir)]
+    assert len(texts) == 2, texts
+    assert any("10.48550/arxiv.2404.16365" in text for text in texts)
+    assert any("10.52202/079017-0571" in text for text in texts)
+
+
+def test_enrichment_never_adopts_a_distinct_work_as_the_published_version() -> None:
+    """A Crossref candidate carries no arXiv id either, so enrichment must not merge it into VISLA."""
+    from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
+
+    evidence = evaluate_identity(_VISLA, _SUGARCREPE, context=IdentityContext.ENRICHMENT)
+
+    assert evidence.verdict is False
+    assert evidence.reason is IdentityReason.GATE_CLOSED

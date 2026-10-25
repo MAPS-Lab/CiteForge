@@ -191,7 +191,12 @@ def _enrichment_identity(left: _RecordView, right: _RecordView) -> IdentityEvide
         and len(txt.parse_authors_any(left.authors)) >= 2
         and len(txt.parse_authors_any(right.authors)) >= 2
     )
-    if not preprint_pair and not external_ids_match(left.fields, right.fields) and not strong_authors:
+    # A one-sided arXiv id is unknown identity, as in _disk_identity, so it never
+    # opens the composite gate for a candidate from another work.
+    unlinked_arxiv = left.arxiv_id != right.arxiv_id
+    if unlinked_arxiv or (
+        not preprint_pair and not external_ids_match(left.fields, right.fields) and not strong_authors
+    ):
         return _evidence(left, right, False, IdentityReason.GATE_CLOSED, title_score=score)
     composite = txt.compute_dedup_score(left.fields, right.fields, count_preprint_xor=not preprint_pair)
     return _evidence(
@@ -227,6 +232,10 @@ def _candidate_identity(left: _RecordView, right: _RecordView, candidate_doi: st
 
 def _disk_identity(left: _RecordView, right: _RecordView) -> IdentityEvidence:
     score = _title_score(left, right)
+    # The merge strips eprint from every published record, so an arXiv id on one
+    # side only is unknown identity, not agreement. Without equal ids, a relaxed
+    # preprint title score joined VISLA (2404.16365) to SugarCrepe++ (2406.11171).
+    arxiv_compatible = left.arxiv_id == right.arxiv_id or score >= cfg.SIM_FILE_DUPLICATE_THRESHOLD
     if left.doi and right.doi:
         if left.doi == right.doi or doi_bases_match(left.doi, right.doi):
             reason = IdentityReason.DOI_EXACT if left.doi == right.doi else IdentityReason.DOI_VERSION
@@ -240,7 +249,11 @@ def _disk_identity(left: _RecordView, right: _RecordView) -> IdentityEvidence:
             if left.arxiv_id and right.arxiv_id and left.arxiv_id != right.arxiv_id:
                 return _evidence(left, right, False, IdentityReason.ARXIV_CONFLICT, title_score=score)
             composite = txt.compute_dedup_score(left.fields, right.fields, count_preprint_xor=False)
-            verdict = score >= cfg.SIM_PREPRINT_TITLE_THRESHOLD and composite >= cfg.SIM_DEDUP_COMPOSITE_THRESHOLD
+            verdict = (
+                arxiv_compatible
+                and score >= cfg.SIM_PREPRINT_TITLE_THRESHOLD
+                and composite >= cfg.SIM_DEDUP_COMPOSITE_THRESHOLD
+            )
             return _evidence(left, right, verdict, IdentityReason.PREPRINT_PAIR, title_score=score, composite=composite)
         return _evidence(left, right, False, IdentityReason.DOI_CONFLICT, title_score=score)
     if external_ids_match(left.fields, right.fields) and score >= cfg.SIM_PREPRINT_TITLE_THRESHOLD:
@@ -268,7 +281,8 @@ def _disk_identity(left: _RecordView, right: _RecordView) -> IdentityEvidence:
         if txt.authors_overlap(left.authors, right.authors):
             return _evidence(left, right, True, IdentityReason.TRUNCATED_TITLE, title_score=score)
     if (
-        score >= 0.6
+        arxiv_compatible
+        and score >= 0.6
         and len(txt.parse_authors_any(left.authors)) >= 2
         and len(txt.parse_authors_any(right.authors)) >= 2
     ):
@@ -276,7 +290,11 @@ def _disk_identity(left: _RecordView, right: _RecordView) -> IdentityEvidence:
         composite = txt.compute_dedup_score(left.fields, right.fields)
         if overlap >= 0.9 and composite >= cfg.SIM_DEDUP_COMPOSITE_THRESHOLD:
             return _evidence(left, right, True, IdentityReason.COMPOSITE, title_score=score, composite=composite)
-    if score >= cfg.SIM_PREPRINT_TITLE_THRESHOLD and txt.authors_overlap(left.authors, right.authors):
+    if (
+        arxiv_compatible
+        and score >= cfg.SIM_PREPRINT_TITLE_THRESHOLD
+        and txt.authors_overlap(left.authors, right.authors)
+    ):
         left_journal = str(left.fields.get("journal") or "").lower()
         right_journal = str(right.fields.get("journal") or "").lower()
         left_preprint = bool(left.doi and is_secondary_doi(left.doi)) or any(
