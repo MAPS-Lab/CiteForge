@@ -11,6 +11,7 @@ simply not required.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -123,10 +124,24 @@ class TestCompatibilityMatrix:
     """Independent legs run at once, and exactly one of them owns coverage."""
 
     def test_matrix_runs_every_supported_version_concurrently(self) -> None:
-        """Serialized legs cost the sum of their wall time and hide later failures."""
-        strategy = _load_workflow(_TESTS_WORKFLOW)["jobs"]["test"]["strategy"]
+        """Serialized legs cost the sum of their wall time and hide later failures.
 
-        assert strategy["matrix"]["python-version"] == _SUPPORTED_PYTHON_VERSIONS
+        The push to main runs every supported version. A pull request runs a
+        subset, which must still hold the floor, the coverage leg and the
+        newest interpreter, so a dropped leg is one main still tests.
+        """
+        strategy = _load_workflow(_TESTS_WORKFLOW)["jobs"]["test"]["strategy"]
+        selector = re.fullmatch(
+            r"\$\{\{ github\.event_name == 'pull_request' && fromJSON\('(\[[^']*\])'\)"
+            r" \|\| fromJSON\('(\[[^']*\])'\) \}\}",
+            strategy["matrix"]["python-version"],
+        )
+
+        assert selector is not None
+        pull_request, push = (json.loads(group) for group in selector.groups())
+        assert push == _SUPPORTED_PYTHON_VERSIONS
+        assert {_SUPPORTED_PYTHON_VERSIONS[0], _COVERAGE_VERSION, _SUPPORTED_PYTHON_VERSIONS[-1]} <= set(pull_request)
+        assert set(pull_request) <= set(push)
         assert strategy["fail-fast"] is False
         assert "max-parallel" not in strategy
 
