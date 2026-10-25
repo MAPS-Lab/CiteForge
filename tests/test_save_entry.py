@@ -513,3 +513,66 @@ def test_enrichment_never_adopts_a_distinct_work_as_the_published_version() -> N
 
     assert evidence.verdict is False
     assert evidence.reason is IdentityReason.GATE_CLOSED
+
+
+# Committed co-authored pairs that share authors and year but are different
+# papers. Authors and year alone carry 0.30 to 0.35 of the 0.60 composite.
+_LIU_2021 = factories.inproceedings(
+    key="Liu2021:BlockchainPrivacyScalability",
+    title="Blockchain Privacy Scalability and Separation of Concerns Using Multi-modal Modeling",
+    author="C Liu and P Bodorik and D Jutla",
+    year="2021",
+    booktitle="Accepted by Fourth International Conference on Blockchain Technology",
+)
+_LIU_2022 = factories.article(
+    key="Liu2022:SmartContractGeneration",
+    title="Automating Smart Contract Generation on Blockchains Using Multi-modal Modeling",
+    author="Christian Gang Liu and Peter Bodorik and Dawn Jutla",
+    year="2022",
+    journal="Journal of Advances in Information Technology",
+    publisher="Engineering and Technology Publishing",
+    volume="13",
+    number="3",
+    doi="10.12720/jait.13.3.213-223",
+    url="https://doi.org/10.12720/jait.13.3.213-223",
+)
+_FERREIRA_SENSORS = factories.article(
+    key="Ferreira2022:SemiSupervisedGeometricDriven",
+    title="A semi-supervised methodology for fishing activity detection using the geometry behind the "
+    "trajectory of multiple vessels",
+    author="Martha Dais Ferreira and Gabriel Spadon and Amilcar Soares and Stan Matwin",
+    year="2022",
+    journal="Sensors",
+    publisher="MDPI AG",
+    volume="22",
+    number="16",
+    pages="6063",
+    doi="10.3390/s22166063",
+    url="https://doi.org/10.3390/s22166063",
+)
+_FERREIRA_AIS = factories.entry(
+    type="misc",
+    key="Ferreira2022:SemiSupervisedFishingDetection",
+    title="A semi-supervised geometric-driven methodology for supervised fishing activity detection on "
+    "multi-source AIS tracking messages",
+    author="MD Ferreira and G Spadon and A Soares and S Matwin",
+    year="2022",
+)
+_SAME_TEAM_DISTINCT_PAPERS = [(_LIU_2021, _LIU_2022), (_FERREIRA_AIS, _FERREIRA_SENSORS)]
+
+
+@pytest.mark.parametrize(("on_disk", "incoming"), _SAME_TEAM_DISTINCT_PAPERS, ids=["bodorik_liu", "matwin_ferreira"])
+def test_shared_authors_and_year_never_merge_different_titles(
+    tmp_path: Path, on_disk: dict[str, object], incoming: dict[str, object]
+) -> None:
+    """A 0.65 title score with no DOI or other identifier linking the records is two papers."""
+    from citeforge.identity import IdentityContext, evaluate_identity
+
+    author_dir = _author_dir(tmp_path)
+    factories.write_bib(author_dir, on_disk, "on_disk.bib")
+
+    _, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
+
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+    assert evaluate_identity(on_disk, incoming, context=IdentityContext.ENRICHMENT).verdict is False
