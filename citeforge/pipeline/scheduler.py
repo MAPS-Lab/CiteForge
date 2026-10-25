@@ -341,7 +341,51 @@ def run_all(
     summary_csv_path: str | None,
     force_enrich: bool,
 ) -> tuple[int, int]:
-    """Enrich every (already count-sorted) author in parallel worker threads.
+    """Enrich every (already count-sorted) author, forcing those in a same-DOI conflict.
+
+    Forcing re-enriches an author's copy of every DOI it holds, while a
+    co-author's complete copy of the same DOI is skipped, so a forced author
+    can open a conflict the run then has to close. Authors drawn into a conflict
+    by an earlier pass are forced in a further pass, each at most once, which
+    bounds the loop by the number of authors. Returns (total_saved, processed).
+    """
+    forced = find_incoherent_doi_author_dirs(out_dir)
+    if forced:
+        logger.warn(
+            f"Forcing enrichment for {len(forced)} author output directories with conflicting copies of the same DOI",
+            category=LogCategory.PLAN,
+        )
+    args = (serpapi_key, serply_key, s2_api_key, or_creds, gemini_api_key)
+    total_saved, processed = _run_pass(*args, records, out_dir, summary_csv_path, force_enrich, forced)
+    while not force_enrich:
+        reopened = find_incoherent_doi_author_dirs(out_dir) - forced
+        batch = [rec for rec in records if _author_dirname(rec) in reopened]
+        if not batch:
+            break
+        logger.warn(
+            f"Forcing enrichment for {len(batch)} author(s) whose copy of a shared DOI now conflicts "
+            "with a re-enriched co-author",
+            category=LogCategory.PLAN,
+        )
+        forced |= reopened
+        saved, _ = _run_pass(*args, batch, out_dir, summary_csv_path, False, reopened)
+        total_saved += saved
+    return total_saved, processed
+
+
+def _run_pass(
+    serpapi_key: str,
+    serply_key: str | None,
+    s2_api_key: str | None,
+    or_creds: tuple[str, str] | None,
+    gemini_api_key: str | None,
+    records: list[Record],
+    out_dir: str,
+    summary_csv_path: str | None,
+    force_enrich: bool,
+    incoherent_author_dirs: frozenset[str],
+) -> tuple[int, int]:
+    """Enrich *records* in parallel worker threads, forcing those in *incoherent_author_dirs*.
 
     Prioritizes authors without an output directory, installs a thread
     excepthook, and drives a ThreadPoolExecutor over process_record. Expects
@@ -351,13 +395,6 @@ def run_all(
     total_saved = 0
     processed = 0
     accounted: set[Future[int]] = set()
-    incoherent_author_dirs = find_incoherent_doi_author_dirs(out_dir)
-    if incoherent_author_dirs:
-        logger.warn(
-            f"Forcing enrichment for {len(incoherent_author_dirs)} author output directories "
-            "with conflicting copies of the same DOI",
-            category=LogCategory.PLAN,
-        )
 
     def _account_result(future: Future[int], rec: Record) -> None:
         nonlocal processed, total_saved

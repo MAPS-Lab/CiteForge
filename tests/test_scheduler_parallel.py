@@ -179,3 +179,57 @@ def test_run_all_forces_only_authors_with_incoherent_doi_copies(
     )
 
     assert forced == {"Ada Lovelace": True, "Grace Hopper": False}
+
+
+def _write_doi_copy(author_dir: Path, doi: str, author: str, year: int) -> None:
+    author_dir.mkdir(parents=True, exist_ok=True)
+    (author_dir / f"{doi.rsplit('/', 1)[-1]}.bib").write_text(
+        f"@article{{K{year},\n  title = {{Paper {doi}}},\n  author = {{{author}}},\n"
+        f"  year = {{{year}}},\n  doi = {{{doi}}}\n}}\n",
+        encoding="utf-8",
+    )
+
+
+def test_run_all_forces_coauthors_whose_skipped_copy_a_forced_author_rewrote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Re-enriching a forced author rewrites its copy of every DOI it holds.
+
+    The 2026-09 and 2026-10 refreshes forced Oore over a conflict with
+    Trappenberg; Oore's re-enriched SugarCrepe++ record took Crossref's author
+    order while Milios and Sajjad skipped their complete copies, so finalization
+    found a conflict the run itself had opened. Those co-authors must be forced
+    in turn, once each, until no conflict involves an unforced author.
+    """
+    canonical = {"10.1/x": ("A Lowe and S Oore", 2022), "10.1/y": ("A Dumpala and C Sastry and E Milios", 2024)}
+    _write_doi_copy(tmp_path / "Oore (o1)", "10.1/x", "A Lowe and S Oore", 2021)
+    _write_doi_copy(tmp_path / "Trappenberg (t1)", "10.1/x", "A Lowe and S Oore", 2022)
+    for name in ("Oore (o1)", "Milios (m1)"):
+        _write_doi_copy(tmp_path / name, "10.1/y", "A Dumpala and E Milios and C Sastry", 2024)
+    _write_doi_copy(tmp_path / "Hopper (h1)", "10.1/z", "G Hopper", 2024)
+    forced_calls: list[str] = []
+
+    def reenrich_when_forced(
+        _serpapi_key: str, _serply_key: str | None, rec: Record, out_dir: str, **kwargs: Any
+    ) -> int:
+        if not kwargs["force_enrich"]:
+            return 0
+        forced_calls.append(rec.name)
+        author_dir = Path(out_dir) / scheduler._author_dirname(rec)
+        for doi in canonical:
+            if (author_dir / f"{doi.rsplit('/', 1)[-1]}.bib").exists():
+                _write_doi_copy(author_dir, doi, *canonical[doi])
+        return 1
+
+    monkeypatch.setattr(scheduler, "process_record", reenrich_when_forced)
+    records = [
+        Record("Sageev Oore", scholar_id="o1"),
+        Record("Thomas Trappenberg", scholar_id="t1"),
+        Record("Evangelos Milios", scholar_id="m1"),
+        Record("Grace Hopper", scholar_id="h1"),
+    ]
+
+    scheduler.run_all("key", None, None, None, None, records, str(tmp_path), None, False)
+
+    assert scheduler.find_incoherent_doi_author_dirs(str(tmp_path)) == frozenset()
+    assert sorted(forced_calls) == ["Evangelos Milios", "Sageev Oore", "Thomas Trappenberg"]
