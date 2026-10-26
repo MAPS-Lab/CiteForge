@@ -348,8 +348,13 @@ def run_all(
     can open a conflict the run then has to close. Authors drawn into a conflict
     by an earlier pass are forced in a further pass, each at most once, which
     bounds the loop by the number of authors. Returns (total_saved, processed).
+
+    Conflicts are looked for only among the directories of *records*. A co-author
+    outside the run cannot be re-enriched by it, so counting that author's copy
+    would force a pass that can never settle the conflict.
     """
-    forced = find_incoherent_doi_author_dirs(out_dir)
+    in_scope = frozenset(_author_dirname(rec) for rec in records)
+    forced = find_incoherent_doi_author_dirs(out_dir, in_scope)
     if forced:
         logger.warn(
             f"Forcing enrichment for {len(forced)} author output directories with conflicting copies of the same DOI",
@@ -358,7 +363,7 @@ def run_all(
     args = (serpapi_key, serply_key, s2_api_key, or_creds, gemini_api_key)
     total_saved, processed = _run_pass(*args, records, out_dir, summary_csv_path, force_enrich, forced)
     while not force_enrich:
-        reopened = find_incoherent_doi_author_dirs(out_dir) - forced
+        reopened = find_incoherent_doi_author_dirs(out_dir, in_scope) - forced
         batch = [rec for rec in records if _author_dirname(rec) in reopened]
         if not batch:
             break

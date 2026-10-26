@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import os
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,6 +51,7 @@ from citeforge.text_utils import (
     _is_preprint_fields,
     author_list_is_surname_initials,
     extract_year_from_any,
+    format_author_dirname,
 )
 
 # The author prefix of a generated name: "Jin2026-AlteredNeuro.bib" and the
@@ -142,9 +144,15 @@ def finalize_run(
     cleanup, post-run fixup, superseded-preprint removal, the a2i2 build and the
     baseline.json rewrite. Order is load-bearing.
 
+    Every step that deletes, rewrites or renames a ``.bib`` is confined to the
+    directories of *records*, so a run over a subset of the census leaves every
+    other author's committed output untouched. Only the baseline count, which
+    mirrors the whole tree, still reads outside that set.
+
     Raises :class:`FinalizationError` when a step cannot read or write a file it
     is responsible for.
     """
+    in_scope = frozenset(format_author_dirname(rec.name, rec.scholar_id or rec.dblp or "") for rec in records)
     counts = get_api_call_counts()
     logger.step("Run complete", category=LogCategory.PLAN)
     logger.info(f"Records processed: {processed}", category=LogCategory.PLAN)
@@ -172,7 +180,7 @@ def finalize_run(
             logger.info(f"Reconciled summary CSV: removed {phantoms} phantom entries", category=LogCategory.CLEANUP)
 
         # Safe orphan removal (duplicates only)
-        orphans = collect_orphan_files(csv_path, out_dir)
+        orphans = collect_orphan_files(csv_path, out_dir, in_scope)
         if orphans:
             csv_entries = _load_csv_entries(csv_path)
             for orphan in orphans:
@@ -216,7 +224,7 @@ def finalize_run(
     # Remove .bib files outside the contribution window
     window_min = get_min_year()
     window_removed = 0
-    for entry in iter_output_dirs(out_dir):
+    for entry in iter_output_dirs(out_dir, only=in_scope):
         if entry == A2I2_OUTPUT_DIR:
             continue
         d = os.path.join(out_dir, entry)
@@ -266,7 +274,7 @@ def finalize_run(
     renamed_count = 0
     renames_blocked = 0
     applied_renames: dict[str, str] = {}
-    for pr_entry_name in iter_output_dirs(out_dir):
+    for pr_entry_name in iter_output_dirs(out_dir, only=in_scope):
         if pr_entry_name == A2I2_OUTPUT_DIR:
             continue
         pr_dir = os.path.join(out_dir, pr_entry_name)
@@ -338,7 +346,7 @@ def finalize_run(
             category=LogCategory.CLEANUP,
         )
 
-    superseded = _remove_superseded_preprints(out_dir)
+    superseded = _remove_superseded_preprints(out_dir, in_scope)
     if superseded:
         logger.info(
             f"Removed {superseded} superseded preprint .bib files (published twin exists)",
@@ -360,7 +368,7 @@ def finalize_run(
                 category=LogCategory.CLEANUP,
             )
 
-    unresolved_doi_conflicts = find_incoherent_doi_author_dirs(out_dir)
+    unresolved_doi_conflicts = find_incoherent_doi_author_dirs(out_dir, in_scope)
     if unresolved_doi_conflicts:
         affected = ", ".join(sorted(unresolved_doi_conflicts))
         raise FinalizationError(f"conflicting copies of the same DOI remain in author directories: {affected}")
@@ -442,10 +450,10 @@ def _looks_published(entry: dict[str, Any]) -> bool:
     return has_container or (bool(doi) and bool(str(fields.get("publisher") or "").strip()))
 
 
-def _remove_superseded_preprints(out_dir: str) -> int:
+def _remove_superseded_preprints(out_dir: str, author_dirs: Collection[str]) -> int:
     """Delete a preprint ``.bib`` when a published record of the same work exists.
 
-    Within each author directory, a preprint file is removed only when another
+    Within each directory of *author_dirs*, a preprint file is removed only when another
     file in that directory is a genuinely published record (see
     :func:`_looks_published`) whose title matches at or above
     ``SIM_MERGE_DUPLICATE_THRESHOLD``. This generalizes the "published outranks a
@@ -457,7 +465,7 @@ def _remove_superseded_preprints(out_dir: str) -> int:
     Returns the number of preprint files removed.
     """
     removed = 0
-    for entry_name in iter_output_dirs(out_dir):
+    for entry_name in iter_output_dirs(out_dir, only=author_dirs):
         if entry_name == A2I2_OUTPUT_DIR:
             continue
         author_dir = os.path.join(out_dir, entry_name)
