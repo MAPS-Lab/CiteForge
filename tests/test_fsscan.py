@@ -41,16 +41,6 @@ def test_iter_output_dirs_returns_sorted_subdir_names_excluding_files(tmp_path: 
     assert iter_output_dirs(str(tmp_path)) == ["alpha", "zeta"]
 
 
-def test_iter_output_dirs_only_keeps_the_named_directories(tmp_path: pathlib.Path) -> None:
-    for name in ("alpha", "beta", "zeta"):
-        (tmp_path / name).mkdir()
-    (tmp_path / "gamma").write_text("", encoding="utf-8")
-
-    # A name that is absent, or is a file, is not invented.
-    assert iter_output_dirs(str(tmp_path), only={"zeta", "alpha", "gamma", "missing"}) == ["alpha", "zeta"]
-    assert iter_output_dirs(str(tmp_path), only=set()) == []
-
-
 def _write_scan_fixture(tmp_path: pathlib.Path) -> None:
     """Author dir with parseable, unparseable, non-bib, and unreadable entries."""
     (tmp_path / "c.bib").write_text(_BIB_C, encoding="utf-8")

@@ -32,7 +32,6 @@ from pathlib import Path
 
 import pytest
 
-from citeforge import bibtex_utils as bt
 from citeforge.config import get_min_year
 from citeforge.io_utils import append_summary_to_csv, init_summary_csv
 from citeforge.models import Record
@@ -805,9 +804,8 @@ def test_unresolved_same_doi_conflict_aborts_finalization(tmp_path: Path, no_a2i
     write_bib(first_dir, article(key="DoeStudy", author="Jane Doe and Richard Roe", **common), "Doe-Study.bib")
     write_bib(second_dir, article(key="DoeStudy", author="Jane Doe and Alice Poe", **common), "Doe-Study.bib")
 
-    both = [Record(name="Doe, Jane", scholar_id="abc123"), Record(name="Roe, Richard", scholar_id="def456")]
     with pytest.raises(FinalizationError, match="conflicting copies of the same DOI"):
-        finalize_run(str(out_dir), both, total_saved=2, processed=2, summary_csv_path=None)
+        finalize_run(str(out_dir), _records(), total_saved=2, processed=1, summary_csv_path=None)
 
 
 def test_failed_baseline_write_raises(tmp_path: Path, no_a2i2: None, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -825,159 +823,3 @@ def test_failed_baseline_write_raises(tmp_path: Path, no_a2i2: None, monkeypatch
 
     with pytest.raises(FinalizationError, match=r"baseline\.json"):
         finalize_run(str(out_dir), _records(), total_saved=1, processed=1, summary_csv_path=str(csv_path))
-
-
-# --- SUBSET RUN SCOPE -------------------------------------------------------
-#
-# `--input` is operator-settable against the standing output tree, and the
-# monthly refresh now names a one-author census. Every pass in the tail that
-# deletes, rewrites or renames a file must stay inside the directories of the
-# records it was given, or one author's refresh silently edits forty others'.
-
-_OUT_OF_SCOPE = ("Roe (r1)", "Poe (p1)")
-_SHARED_DOI = "10.1000/shared"
-
-
-def _tree_bytes(root: Path, *, skip: frozenset[str]) -> dict[str, bytes]:
-    """Map every file under *root* to its bytes, leaving out the top-level names in *skip*."""
-    return {
-        str(p.relative_to(root)): p.read_bytes()
-        for p in sorted(root.rglob("*"))
-        if p.is_file() and p.relative_to(root).parts[0] not in skip
-    }
-
-
-def _plant_hazards(out_dir: Path) -> list[Path]:
-    """Fill the two out-of-scope author directories with one trap per tail pass.
-
-    Returns the tracked paths. Each trap is something finalize_run deletes,
-    rewrites or refuses to continue past when it can see it, so the byte-equality
-    assertion is not vacuous.
-    """
-    roe, poe = (out_dir / name for name in _OUT_OF_SCOPE)
-    alpha = "Alpha Study of Vessel Tracking Systems"
-    shared_title = "Detecting Ongoing Events Using Contextual Word and Sentence Embeddings"
-    tracked = [
-        write_bib(roe, article(key="RoeAlpha", title=alpha), f"Roe{_IN_WINDOW_YEAR}-Alpha.bib"),
-        # Out of the contribution window, so the year-window pass deletes it.
-        write_bib(
-            roe,
-            article(key="RoeOld", title="An Old Study of Harbour Currents", year=str(get_min_year() - 1)),
-            f"Roe{get_min_year() - 1}-Old.bib",
-        ),
-        # A preprint with a published twin, so the superseded-preprint pass deletes it.
-        write_bib(
-            roe,
-            misc(
-                key="RoePre",
-                title=shared_title,
-                year=str(_IN_WINDOW_YEAR - 2),
-                howpublished="arXiv",
-                doi="10.48550/arxiv.2007.01379",
-            ),
-            f"Roe{_IN_WINDOW_YEAR - 2}-Detecting.bib",
-        ),
-        write_bib(
-            roe,
-            article(
-                key="RoePub",
-                title=shared_title,
-                year=str(_IN_WINDOW_YEAR),
-                journal="Expert Systems with Applications",
-                doi="10.1016/j.eswa.2022.118257",
-            ),
-            f"Roe{_IN_WINDOW_YEAR}-Detecting.bib",
-        ),
-        # Two authors holding the same DOI with different metadata.
-        write_bib(
-            roe,
-            article(key="RoeShared", title="Gamma Study of Reef Acoustics", year=str(_IN_WINDOW_YEAR), doi=_SHARED_DOI),
-            f"Roe{_IN_WINDOW_YEAR}-Gamma.bib",
-        ),
-        write_bib(
-            poe,
-            article(
-                key="PoeShared",
-                title="Gamma Revisited, a Reef Acoustics Survey",
-                year=str(_IN_WINDOW_YEAR + 1),
-                doi=_SHARED_DOI,
-            ),
-            f"Poe{_IN_WINDOW_YEAR + 1}-Gamma.bib",
-        ),
-    ]
-    # Valid BibTeX that is not in the serializer's form, so the fixup pass rewrites it.
-    loose = poe / f"Poe{_IN_WINDOW_YEAR}-Delta.bib"
-    loose.write_text(
-        f"@article{{PoeDelta,\n\ttitle={{Delta Study of Harbour Currents}},   author={{Poe, Peter}},"
-        f"year={{{_IN_WINDOW_YEAR}}},journal={{Ocean Dynamics}}}}\n",
-        encoding="utf-8",
-    )
-    parsed = bt.parse_bibtex_to_dict(loose.read_text(encoding="utf-8"))
-    assert parsed is not None and bt.bibtex_from_dict(parsed) != loose.read_text(encoding="utf-8")
-    tracked.append(loose)
-    # An untracked duplicate of a tracked file, so the orphan sweep deletes it.
-    write_bib(roe, article(key="RoeAlphaCopy", title=alpha), f"Roe{_IN_WINDOW_YEAR}-AlphaCopy.bib")
-    return tracked
-
-
-def test_a_subset_run_leaves_every_other_authors_output_byte_identical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """One author's finalization deletes, rewrites and renames nothing outside its directory.
-
-    The in-scope author holds a duplicate orphan and a DOI that two out-of-scope
-    authors also hold with different metadata. The out-of-scope directories hold
-    one trap per pass. Before the tail was scoped, this run deleted three of their
-    files, rewrote four more, and then raised on the DOI conflict it could not
-    resolve, because those two authors are not in the run to be re-enriched.
-    """
-    out_dir = tmp_path / "out"
-    doe = _author_dir(out_dir)
-    alpha = "Alpha Study of Vessel Tracking Systems"
-    doe_tracked = [
-        write_bib(doe, article(key="DoeAlpha", title=alpha), f"Doe{_IN_WINDOW_YEAR}-Alpha.bib"),
-        write_bib(
-            doe,
-            article(key="DoeShared", title="Gamma and the Reef", year=str(_IN_WINDOW_YEAR), doi=_SHARED_DOI),
-            f"Doe{_IN_WINDOW_YEAR}-Gamma.bib",
-        ),
-    ]
-    doe_orphan = write_bib(doe, article(key="DoeAlphaCopy", title=alpha), f"Doe{_IN_WINDOW_YEAR}-AlphaCopy.bib")
-    tracked = sorted([*doe_tracked, *_plant_hazards(out_dir)], key=str)
-    a2i2_input = tmp_path / "a2i2.csv"
-    a2i2_input.write_text("Name,Scholar Link,DBLP Link\nJane Doe,,\nRichard Roe,,\nPeter Poe,,\n", encoding="utf-8")
-    monkeypatch.setattr(postrun, "DEFAULT_A2I2_INPUT", str(a2i2_input))
-    write_bib(out_dir / "a2i2", article(key="Joint", title="A Joint A2I2 Paper"), f"Joint{_IN_WINDOW_YEAR}-Paper.bib")
-    csv_path = tmp_path / "summary.csv"
-    _track_in_csv(csv_path, tracked)
-    untouchable = frozenset({doe.name, "baseline.json"})
-    before = _tree_bytes(out_dir, skip=untouchable)
-    csv_before = csv_path.read_bytes()
-    records = [Record(name="Jane Doe", scholar_id="abc123")]
-
-    finalize_run(str(out_dir), records, total_saved=1, processed=1, summary_csv_path=str(csv_path))
-
-    assert _tree_bytes(out_dir, skip=untouchable) == before
-    assert csv_path.read_bytes() == csv_before
-    assert not doe_orphan.exists(), "the in-scope author must still be swept"
-    mirror = json.loads((out_dir / "baseline.json").read_text(encoding="utf-8"))["authors"]
-    assert {name: mirror[name] for name in _OUT_OF_SCOPE} == {"Roe (r1)": 6, "Poe (p1)": 2}
-
-
-def test_a_run_over_two_of_three_a2i2_members_does_not_rebuild_the_folder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Dropping a member from the input must not silently drop its papers from a2i2."""
-    out_dir = tmp_path / "out"
-    write_bib(_author_dir(out_dir, "Doe (abc123)"), article(key="D", title="Doe Paper"), f"Doe{_IN_WINDOW_YEAR}-D.bib")
-    write_bib(_author_dir(out_dir, "Roe (r1)"), article(key="R", title="Roe Paper"), f"Roe{_IN_WINDOW_YEAR}-R.bib")
-    joint = write_bib(out_dir / "a2i2", article(key="P", title="Poe Paper"), f"Poe{_IN_WINDOW_YEAR}-P.bib")
-    a2i2_input = tmp_path / "a2i2.csv"
-    a2i2_input.write_text("Name,Scholar Link,DBLP Link\nJane Doe,,\nRichard Roe,,\nPeter Poe,,\n", encoding="utf-8")
-    monkeypatch.setattr(postrun, "DEFAULT_A2I2_INPUT", str(a2i2_input))
-    records = [Record(name="Jane Doe", scholar_id="abc123"), Record(name="Richard Roe", scholar_id="r1")]
-
-    report = finalize_run(str(out_dir), records, total_saved=2, processed=2, summary_csv_path=None)
-
-    assert report.a2i2_files == 0
-    assert [p.name for p in (out_dir / "a2i2").iterdir()] == [joint.name]

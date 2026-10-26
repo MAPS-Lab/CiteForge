@@ -2402,7 +2402,7 @@ class TestCollectOrphanFiles:
             row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
             writer.writerow(row)
 
-        orphans = collect_orphan_files(csv_path, str(out_dir), {"Author (ID)"})
+        orphans = collect_orphan_files(csv_path, str(out_dir))
         assert len(orphans) == 1
         assert os.path.basename(orphans[0]) == "Orphan2023-OldKey.bib"
 
@@ -2426,23 +2426,8 @@ class TestCollectOrphanFiles:
             row.update({k: "0" for k in _SUMMARY_CSV_FIELDNAMES if k not in row})
             writer.writerow(row)
 
-        orphans = collect_orphan_files(csv_path, str(out_dir), {"Author (ID)"})
+        orphans = collect_orphan_files(csv_path, str(out_dir))
         assert len(orphans) == 0
-
-    def test_only_the_named_author_directories_are_scanned(self, tmp_path: Any) -> None:
-        """An untracked file in a directory outside the run is not a deletion candidate."""
-        from citeforge.io_utils import collect_orphan_files, init_summary_csv
-
-        out_dir = tmp_path / "output"
-        for name in ("Author (ID)", "Other (ID2)"):
-            (out_dir / name).mkdir(parents=True)
-            (out_dir / name / "Untracked2024-Paper.bib").write_text("@article{k, title={U}}")
-        csv_path = str(tmp_path / "summary.csv")
-        init_summary_csv(csv_path)
-
-        orphans = collect_orphan_files(csv_path, str(out_dir), {"Author (ID)"})
-
-        assert orphans == [str(out_dir / "Author (ID)" / "Untracked2024-Paper.bib")]
 
 
 class TestIsKnownSummaryPath:

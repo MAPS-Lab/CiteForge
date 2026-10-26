@@ -85,12 +85,6 @@ A scheduled workflow re-runs the pipeline until the corpus digest stops changing
 a pull request. Publication always goes through review and Required CI; nothing is pushed to
 `main` directly, and the website sync only fires once the corpus has actually merged.
 
-It covers the authors in `data/website-authors.csv`, passed with `--input`, rather than all of
-`data/input.csv`: the website imports a single author's directory, and enriching the rest cost
-40 to 100 minutes of provider quota per run. A run over part of the census touches no other author's
-directory, and leaves `output/a2i2/` alone unless every a2i2 member is in its input. Run `citeforge` with the full census to refresh
-the other authors and the joint folder.
-
 ### Refresh engine
 
 `citeforge/refresh/` holds a second, resumable implementation with a durable ledger, reachable

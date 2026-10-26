@@ -15,7 +15,7 @@ import os
 import re
 import tempfile
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
 
@@ -84,15 +84,10 @@ def _citation_coherence_signature(entry: dict[str, Any]) -> _CitationCoherenceSi
     )
 
 
-def find_incoherent_doi_author_dirs(out_dir: str, author_dirs: Collection[str]) -> frozenset[str]:
-    """Return those of *author_dirs* holding materially conflicting copies of one DOI.
-
-    Only the named directories are read, so a copy in a directory outside the run
-    can neither be reported nor drag its owner into a forced re-enrichment the
-    run cannot perform.
-    """
+def find_incoherent_doi_author_dirs(out_dir: str) -> frozenset[str]:
+    """Return author directories containing materially conflicting copies of one DOI."""
     grouped: dict[str, list[tuple[str, _CitationCoherenceSignature]]] = {}
-    for dirname in iter_output_dirs(out_dir, only=author_dirs):
+    for dirname in iter_output_dirs(out_dir):
         if dirname == A2I2_OUTPUT_DIR:
             continue
         author_dir = os.path.join(out_dir, dirname)
@@ -381,8 +376,8 @@ def flush_summary_csv(csv_path: str) -> None:
                 writer.writerow(row)
 
 
-def collect_orphan_files(csv_path: str, output_dir: str, author_dirs: Collection[str]) -> list[str]:
-    """Return absolute paths of .bib files in *author_dirs* that have no entry in the summary CSV.
+def collect_orphan_files(csv_path: str, output_dir: str) -> list[str]:
+    """Return absolute paths of .bib files on disk that have no entry in the summary CSV.
 
     These are stale leftovers from previous runs where the same article
     received a different citation key (e.g. Gemini returned a different
@@ -407,9 +402,7 @@ def collect_orphan_files(csv_path: str, output_dir: str, author_dirs: Collection
         # a2i2 is rebuilt from the author directories every run and is never
         # tracked in the CSV, so its files would all read as orphans and become
         # deletion candidates. The other whole-tree passes skip it too.
-        subdirs = [
-            os.path.join(output_dir, d) for d in iter_output_dirs(output_dir, only=author_dirs) if d != A2I2_OUTPUT_DIR
-        ]
+        subdirs = [os.path.join(output_dir, d) for d in iter_output_dirs(output_dir) if d != A2I2_OUTPUT_DIR]
     except OSError:
         return []
 
@@ -653,14 +646,13 @@ def build_a2i2_folder(
     a2i2_dir = os.path.join(out_dir, A2I2_OUTPUT_DIR)
     os.makedirs(a2i2_dir, exist_ok=True)
     existing = [f for f in sorted(os.listdir(a2i2_dir)) if os.path.isfile(os.path.join(a2i2_dir, f))]
-    # The folder is a joint view over every member, so a populated one is never
-    # rebuilt from a subset. `--input` is operator-settable against the standing
-    # output tree, and a subset CSV would otherwise replace the aggregate with
-    # the unresolved members' papers missing. A majority is no safer than one
-    # author: every unresolved member's contribution is dropped either way.
-    if existing and resolved_members < len(a2i2_names):
-        log.warning(
-            "a2i2 rebuild skipped: only %d of %d members resolved against the input records, "
+    # Never empty a populated folder because the member list mostly failed to
+    # resolve. `--input` is operator-settable against the standing output tree,
+    # so a subset CSV would otherwise wipe the aggregate and report only the
+    # small number it rebuilt.
+    if existing and resolved_members < len(a2i2_names) / 2:
+        log.error(
+            "a2i2 rebuild aborted: only %d of %d members resolved against the input records, "
             "which would delete %d existing file(s). Pass the full author list to rebuild.",
             resolved_members,
             len(a2i2_names),

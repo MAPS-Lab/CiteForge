@@ -13,11 +13,9 @@ from typing import Any
 import pytest
 from ruamel.yaml import YAML
 
-from citeforge.io_utils import read_records
 from citeforge.refresh.census import AuthorCensus, AuthorCensusRow
 from citeforge.refresh.ledger import Ledger
 from citeforge.refresh.types import GenerationSpec, TaskDisposition
-from citeforge.text_utils import format_author_dirname
 
 # Resolved rather than spelled, so the path is absolute on any host.
 _BASH = shutil.which("bash") or "/bin/bash"
@@ -33,12 +31,6 @@ _MERGED_REFRESH_WORKFLOW = _WORKFLOW_DIRECTORY / "citeforge-refresh-merged.yml"
 # itself one, so a sensible rename keeps its contracts instead of silently
 # dropping them.
 _SHADOW_WORKFLOWS = [path for path in _WORKFLOW_PATHS if "shadow" in path.stem]
-
-# The only directory MAPS-Lab/mapslab-website import-publications.yml sparse-checks out
-# of this repository and aggregates. The monthly census exists to refresh exactly it.
-_WEBSITE_AUTHOR_DIRECTORY = "Spadon (bfdGsGUAAAAJ)"
-_WEBSITE_CENSUS = _REPOSITORY_ROOT / "data/website-authors.csv"
-_MONTHLY_CENSUS_VARIABLE = "MONTHLY_CENSUS"
 
 # The one workflow allowed to hold a write token and mint the App credential.
 # An allowlist by name fails loudly on a rename, which is the correct outcome
@@ -199,42 +191,6 @@ class TestMonthlyRefresh:
                     assert result.returncode == 0, (
                         f"{path.name}:{job_id}[{index}] {step.get('name', '')}: {result.stderr.strip()}"
                     )
-
-    def test_every_pipeline_run_and_gate_reads_the_website_census(self) -> None:
-        """The refresh covers the one author the website reads, not data/input.csv.
-
-        Every pipeline invocation must name the census, and no gate may count
-        against another one, or the manifest would compare 1 author's run to 64
-        authors' directories and no audit could trust the ratio.
-        """
-        workflow = _load_workflow(_MONTHLY_REFRESH_WORKFLOW)
-        statements = _shell_statements(_workflow_run_commands(workflow))
-
-        assert workflow["env"] == {_MONTHLY_CENSUS_VARIABLE: "data/website-authors.csv"}
-        runs = [line for line in statements if "main.py" in line]
-        assert runs, "the pipeline invocation is gone"
-        for line in runs:
-            assert f'--input "${_MONTHLY_CENSUS_VARIABLE}"' in line, line
-        assert not any("data/input.csv" in line for line in statements)
-        manifest = next(
-            step["run"] for step in _workflow_steps(workflow) if step.get("name") == "Build the run manifest"
-        )
-        assert f'"${_MONTHLY_CENSUS_VARIABLE}"' in manifest, "the manifest counts against a different census"
-
-    def test_the_website_census_is_the_one_author_the_website_reads(self) -> None:
-        records = read_records(str(_WEBSITE_CENSUS))
-
-        directories = [format_author_dirname(r.name, r.scholar_id or r.dblp or "") for r in records]
-        assert directories == [_WEBSITE_AUTHOR_DIRECTORY]
-
-    def test_the_website_census_row_is_copied_verbatim_from_the_input_census(self) -> None:
-        """Both files name the same person, so a corrected profile link in one cannot rot in the other."""
-        website = _WEBSITE_CENSUS.read_text(encoding="utf-8").splitlines()
-        full = (_REPOSITORY_ROOT / "data/input.csv").read_text(encoding="utf-8").splitlines()
-
-        assert len(website) == 2
-        assert website[0] == full[0]
-        assert website[1] in full[1:]
 
     def test_convergence_requires_a_confirming_pass(self) -> None:
         """An empty digest must never satisfy the convergence test.

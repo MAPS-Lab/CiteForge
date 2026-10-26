@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 import unicodedata
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -273,14 +273,10 @@ def iter_parsed_author_bibs(
         yield filename, path, entry
 
 
-def iter_output_dirs(out_dir: str, *, only: Collection[str] | None = None) -> list[str]:
+def iter_output_dirs(out_dir: str) -> list[str]:
     """Return the immediate subdirectory names of ``out_dir``, sorted.
 
     Directory entry names only (not full paths); plain files are excluded.
-    ``only`` restricts the scan to those names, which is how a run limited to a
-    subset of authors keeps every pass off the directories it does not own.
     ``OSError`` from :func:`os.listdir` is not swallowed here.
     """
-    return sorted(
-        e for e in os.listdir(out_dir) if (only is None or e in only) and os.path.isdir(os.path.join(out_dir, e))
-    )
+    return sorted(e for e in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, e)))
