@@ -1,0 +1,408 @@
+"""Authenticated checkpoints for a refresh generation.
+
+A six-hour Actions segment can end while a generation is still running, so the
+durable state has to survive the runner. This module seals that state into one
+authenticated blob and restores it on the next segment.
+
+Two properties are load-bearing.
+
+Authentication, not just encryption. The blob lands on a branch of a public
+repository. AES-GCM binds the ciphertext to a cleartext manifest through its
+associated data, so an edited manifest, a rotated key, and a truncated payload
+all fail closed with :class:`CheckpointError` rather than restoring partial
+state. The retired cache path used unauthenticated AES-CBC, where a flipped
+byte decrypted to garbage instead of raising.
+
+Never a blank restart. Two sequences are retained. If the newest fails to
+verify, the previous one is used; if both fail, this raises. A checkpoint that
+cannot be read is an error to escalate, never a reason to start the corpus from
+zero, which is what the fifty-pass loop did every month.
+"""
+
+from __future__ import annotations
+
+import gzip
+import hashlib
+import io
+import json
+import os
+import tarfile
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+CHECKPOINT_SCHEMA_VERSION = "2"
+
+# scrypt, not a bare hash. The ciphertext lands on a branch of a PUBLIC
+# repository, so an attacker holds it and can guess the secret offline for as
+# long as they like. Measured on this hardware, a bare sha256 admits 1.74M
+# guesses per second per core; these parameters admit 17. A high-entropy secret
+# does not need the margin, but nothing in the pipeline can verify that the
+# operator supplied one, and the cost of assuming they did is every provider
+# response in the ledger.
+# OWASP's current scrypt guidance, N=2^17. A derivation runs once per seal
+# and once per restore, so the whole cost of the higher setting is 0.43s
+# against a 300 minute segment budget. There is no latency argument for
+# staying low in a threat model where the attacker holds the ciphertext and
+# has unlimited time.
+_KDF_NAME = "scrypt-n131072-r8-p1"
+_KDF_N, _KDF_R, _KDF_P = 1 << 17, 8, 1
+# Explicit, because the default cap rejects the 128 MiB working set N=2^17
+# needs and every seal would raise instead.
+_KDF_MAXMEM = 256 * 1024 * 1024
+_SALT_BYTES = 16
+
+# AES-GCM with a 96-bit nonce, the size NIST recommends and the only one the
+# AESGCM recipe treats as the fast path.
+_NONCE_BYTES = 12
+# A floor, not a guarantee of entropy. It rejects an empty or truncated secret;
+# only the KDF above defends against a guessable one, and no amount of
+# stretching rescues a passphrase a human chose. The operator requirement is
+# therefore documented rather than merely implied: generate the secret with
+# `openssl rand -base64 32` and never type one. Nothing here can verify that
+# was done, which is exactly why it is written down.
+_MIN_SECRET_BYTES = 16
+
+# Current plus previous, so a corrupt newest sequence has somewhere to fall
+# back to. A third adds storage without adding recoverability: two independent
+# failures already mean the branch is not trustworthy.
+_RETAINED_SEQUENCES = 2
+
+_MANIFEST_SUFFIX = ".manifest.json"
+_CIPHERTEXT_SUFFIX = ".bin"
+
+
+class CheckpointError(RuntimeError):
+    """A checkpoint could not be written, verified, or restored."""
+
+
+@dataclass(frozen=True)
+class CheckpointManifest:
+    """Non-secret description of one sealed checkpoint.
+
+    Every field is safe to commit in cleartext. It carries digests and
+    identifiers, never a credential, a provider response, or a key.
+    """
+
+    schema_version: str
+    generation_id: str
+    input_digest: str
+    policy_digest: str
+    sequence: int
+    created_at: datetime
+    ciphertext_digest: str
+    key_id: str
+    # A salt is not secret; publishing it is what lets the restore side derive
+    # the same key. Per checkpoint rather than per store, so two checkpoints
+    # never share a derived key.
+    kdf: str = _KDF_NAME
+    kdf_salt: str = ""
+
+    def canonical_content(self) -> dict[str, Any]:
+        """Deterministic mapping used both as the on-disk manifest and as AAD."""
+        return {
+            "ciphertext_digest": self.ciphertext_digest,
+            "created_at": self.created_at.astimezone(timezone.utc).isoformat(),
+            "generation_id": self.generation_id,
+            "input_digest": self.input_digest,
+            "kdf": self.kdf,
+            "kdf_salt": self.kdf_salt,
+            "key_id": self.key_id,
+            "policy_digest": self.policy_digest,
+            "schema_version": self.schema_version,
+            "sequence": self.sequence,
+        }
+
+    def to_bytes(self) -> bytes:
+        return json.dumps(self.canonical_content(), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+
+    def binding_bytes(self) -> bytes:
+        """The AAD: every manifest field except the digest of the ciphertext.
+
+        ciphertext_digest is excluded because it is derived from the sealed
+        bytes, and the sealed bytes depend on the AAD. Including it would make
+        the manifest unable to authenticate itself. It is still covered, by the
+        explicit digest comparison in the restore path, which also gives a
+        truncated payload its own error rather than a generic auth failure.
+        """
+        binding = {k: v for k, v in self.canonical_content().items() if k != "ciphertext_digest"}
+        return json.dumps(binding, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+
+    @staticmethod
+    def _safe(value: object) -> str:
+        """Flatten an untrusted manifest string before it can reach a log.
+
+        The manifest arrives from a public branch anyone can push to, and its
+        strings reach CheckpointError messages, which the CLI writes to both the
+        durable run log and the Actions log. A newline there lets a crafted
+        manifest forge a second log line, including an Actions workflow command
+        like ::error:: or ::notice::. This module imports nothing from the
+        package by contract, so it cannot reach the shared privacy helpers and
+        does its own flattening.
+        """
+        text = str(value)
+        return "".join(char if char.isprintable() else " " for char in text)[:200]
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> CheckpointManifest:
+        try:
+            content = json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            raise CheckpointError("checkpoint manifest is not valid JSON") from exc
+        if not isinstance(content, dict):
+            raise CheckpointError("checkpoint manifest is not a JSON object")
+        try:
+            return cls(
+                schema_version=cls._safe(content["schema_version"]),
+                generation_id=cls._safe(content["generation_id"]),
+                input_digest=cls._safe(content["input_digest"]),
+                policy_digest=cls._safe(content["policy_digest"]),
+                sequence=int(content["sequence"]),
+                created_at=datetime.fromisoformat(str(content["created_at"])),
+                ciphertext_digest=cls._safe(content["ciphertext_digest"]),
+                key_id=cls._safe(content["key_id"]),
+                kdf=cls._safe(content["kdf"]),
+                kdf_salt=cls._safe(content["kdf_salt"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CheckpointError(f"checkpoint manifest is missing or malformed: {exc}") from exc
+
+
+def _seal_directory(source: Path) -> bytes:
+    """Pack *source* into a deterministic gzip tar.
+
+    Every timestamp, owner, and mode is normalized and entries are sorted, so
+    identical state produces identical plaintext. That is what makes the
+    round-trip assertions in the tests meaningful; the ciphertext still differs
+    per save because the nonce is fresh.
+    """
+    buffer = io.BytesIO()
+    # gzip is applied explicitly with mtime=0. tarfile's own "w:gz" stamps the
+    # gzip header with the wall clock, which would make the plaintext differ
+    # between two saves of identical state.
+    with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0, compresslevel=6) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            for path in sorted(source.rglob("*")):
+                if not path.is_file():
+                    continue
+                info = archive.gettarinfo(str(path), arcname=str(path.relative_to(source)))
+                info.mtime = 0
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                info.mode = 0o600
+                with path.open("rb") as handle:
+                    archive.addfile(info, handle)
+    return buffer.getvalue()
+
+
+def _unseal_directory(payload: bytes, destination: Path) -> None:
+    """Extract a sealed archive into *destination*.
+
+    ``filter="data"`` refuses absolute paths, parent traversal, symlinks, and
+    device nodes. The payload is authenticated by this point, but a checkpoint
+    is still restored into a live checkout, so the extraction stays fenced.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            archive.extractall(path=destination, filter="data")
+    except (tarfile.TarError, OSError, ValueError) as exc:
+        raise CheckpointError(f"checkpoint payload could not be extracted: {exc}") from exc
+
+
+class CheckpointStore:
+    """Reads and writes authenticated checkpoints under one directory."""
+
+    def __init__(self, root: Path, secret: bytes, key_id: str) -> None:
+        if len(secret) < _MIN_SECRET_BYTES:
+            raise CheckpointError(f"checkpoint secret must be at least {_MIN_SECRET_BYTES} bytes")
+        if not key_id or not key_id.strip():
+            raise CheckpointError("checkpoint key identifier must not be empty")
+        self._root = root
+        self._secret = secret
+        self._key_id = key_id.strip()
+
+    def _derive(self, salt: bytes) -> AESGCM:
+        """Stretch the secret into an AES-256 key for one checkpoint."""
+        key = hashlib.scrypt(
+            self._secret, salt=salt, n=_KDF_N, r=_KDF_R, p=_KDF_P, dklen=32, maxmem=_KDF_MAXMEM
+        )
+        return AESGCM(key)
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    def save(
+        self,
+        *,
+        generation_id: str,
+        input_digest: str,
+        policy_digest: str,
+        sequence: int,
+        created_at: datetime,
+        state_dir: Path,
+    ) -> CheckpointManifest:
+        """Seal *state_dir* as checkpoint *sequence* and prune old sequences."""
+        if sequence < 1:
+            raise CheckpointError("checkpoint sequence must be positive")
+        if not state_dir.is_dir():
+            raise CheckpointError(f"checkpoint state directory does not exist: {state_dir}")
+
+        plaintext = _seal_directory(state_dir)
+        nonce = os.urandom(_NONCE_BYTES)
+        salt = os.urandom(_SALT_BYTES)
+        aesgcm = self._derive(salt)
+
+        # Built with an empty digest purely so binding_bytes() can be taken;
+        # binding_bytes() excludes that field, so the value here is never read.
+        binding = CheckpointManifest(
+            schema_version=CHECKPOINT_SCHEMA_VERSION,
+            generation_id=generation_id,
+            input_digest=input_digest,
+            policy_digest=policy_digest,
+            sequence=sequence,
+            created_at=created_at,
+            ciphertext_digest="",
+            key_id=self._key_id,
+            kdf_salt=salt.hex(),
+        )
+        sealed = nonce + aesgcm.encrypt(nonce, plaintext, binding.binding_bytes())
+        manifest = replace(binding, ciphertext_digest=hashlib.sha256(sealed).hexdigest())
+
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._write_atomic(self._ciphertext_path(sequence), sealed)
+        self._write_atomic(self._manifest_path(sequence), manifest.to_bytes())
+        self._prune(keep_through=sequence)
+        return manifest
+
+    def load_latest_valid(
+        self,
+        *,
+        generation_id: str,
+        input_digest: str,
+        policy_digest: str,
+        destination: Path,
+    ) -> CheckpointManifest:
+        """Restore the newest verifiable checkpoint into *destination*.
+
+        Falls back to the previous sequence when the newest fails. Raises when
+        no retained sequence verifies, because silently restarting a generation
+        from zero is the failure this whole mechanism exists to prevent.
+        """
+        sequences = self.available_sequences()
+        if not sequences:
+            raise CheckpointError(f"no checkpoint found under {self._root}")
+
+        failures: list[str] = []
+        for sequence in sequences:
+            try:
+                manifest = self._restore_one(
+                    sequence=sequence,
+                    generation_id=generation_id,
+                    input_digest=input_digest,
+                    policy_digest=policy_digest,
+                    destination=destination,
+                )
+            except CheckpointError as exc:
+                failures.append(f"sequence {sequence}: {exc}")
+                continue
+            return manifest
+
+        raise CheckpointError(
+            "no retained checkpoint verified, refusing to restart the generation from zero: " + "; ".join(failures)
+        )
+
+    def available_sequences(self) -> list[int]:
+        """Retained sequences, newest first."""
+        if not self._root.is_dir():
+            return []
+        found: list[int] = []
+        for path in self._root.glob(f"*{_CIPHERTEXT_SUFFIX}"):
+            try:
+                found.append(int(path.name[: -len(_CIPHERTEXT_SUFFIX)]))
+            except ValueError:
+                continue
+        return sorted(found, reverse=True)
+
+    def _restore_one(
+        self,
+        *,
+        sequence: int,
+        generation_id: str,
+        input_digest: str,
+        policy_digest: str,
+        destination: Path,
+    ) -> CheckpointManifest:
+        manifest_path = self._manifest_path(sequence)
+        ciphertext_path = self._ciphertext_path(sequence)
+        if not manifest_path.is_file() or not ciphertext_path.is_file():
+            raise CheckpointError("manifest or ciphertext missing")
+
+        manifest = CheckpointManifest.from_bytes(manifest_path.read_bytes())
+        sealed = ciphertext_path.read_bytes()
+
+        if manifest.schema_version != CHECKPOINT_SCHEMA_VERSION:
+            raise CheckpointError(f"schema version {manifest.schema_version} is not {CHECKPOINT_SCHEMA_VERSION}")
+        if manifest.sequence != sequence:
+            raise CheckpointError(f"manifest sequence {manifest.sequence} does not match file {sequence}")
+        if manifest.key_id != self._key_id:
+            raise CheckpointError(f"manifest key identifier {manifest.key_id} is not {self._key_id}")
+        # Checked before decrypting so a truncated payload reports as itself
+        # rather than as a generic authentication failure.
+        if hashlib.sha256(sealed).hexdigest() != manifest.ciphertext_digest:
+            raise CheckpointError("ciphertext digest does not match the manifest")
+        if manifest.generation_id != generation_id:
+            raise CheckpointError(f"checkpoint belongs to generation {manifest.generation_id}")
+        if manifest.input_digest != input_digest or manifest.policy_digest != policy_digest:
+            raise CheckpointError("checkpoint was taken under a different input census or policy")
+        if len(sealed) <= _NONCE_BYTES:
+            raise CheckpointError("ciphertext is too short to carry a nonce")
+
+        if manifest.kdf != _KDF_NAME:
+            raise CheckpointError(f"unsupported key derivation {manifest.kdf}")
+        try:
+            salt = bytes.fromhex(manifest.kdf_salt)
+        except ValueError as exc:
+            raise CheckpointError("checkpoint salt is not valid hex") from exc
+        if len(salt) != _SALT_BYTES:
+            raise CheckpointError(f"checkpoint salt must be {_SALT_BYTES} bytes")
+
+        nonce, body = sealed[:_NONCE_BYTES], sealed[_NONCE_BYTES:]
+        try:
+            plaintext = self._derive(salt).decrypt(nonce, body, manifest.binding_bytes())
+        except InvalidTag as exc:
+            raise CheckpointError("checkpoint failed authentication (tampered, or wrong key)") from exc
+
+        _unseal_directory(plaintext, destination)
+        return manifest
+
+    def _manifest_path(self, sequence: int) -> Path:
+        return self._root / f"{sequence:012d}{_MANIFEST_SUFFIX}"
+
+    def _ciphertext_path(self, sequence: int) -> Path:
+        return self._root / f"{sequence:012d}{_CIPHERTEXT_SUFFIX}"
+
+    def _prune(self, *, keep_through: int) -> None:
+        """Drop every sequence older than the retained window."""
+        retained = set(self.available_sequences()[:_RETAINED_SEQUENCES]) | {keep_through}
+        for sequence in self.available_sequences():
+            if sequence in retained:
+                continue
+            self._manifest_path(sequence).unlink(missing_ok=True)
+            self._ciphertext_path(sequence).unlink(missing_ok=True)
+
+    @staticmethod
+    def _write_atomic(path: Path, payload: bytes) -> None:
+        """Write through a sibling temp file so a killed runner cannot half-write."""
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_bytes(payload)
+            os.replace(tmp, path)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            raise CheckpointError(f"could not write {path.name}: {exc}") from exc

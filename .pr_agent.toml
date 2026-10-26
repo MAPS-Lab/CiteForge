@@ -1,0 +1,76 @@
+# Qodo Merge (PR-Agent) repository configuration.
+#
+# Read from the root of the repository's DEFAULT branch, so a change here only
+# takes effect once merged. Only keys that override a default are listed; every
+# key below exists in pr_agent/settings/configuration.toml or
+# pr_agent/settings/ignore.toml upstream.
+#
+# This is advice, not a gate. The single required status check stays
+# `Required CI` in .github/workflows/tests.yml.
+
+[config]
+response_language = "en-US"
+
+# Excluded from analysis: hash-pinned lock files, generated pipeline output, and
+# cached API responses. Each path is either listed in .gitignore or is
+# machine-generated rather than authored. output/ is tracked but written by the
+# monthly refresh job, not by hand.
+[ignore]
+glob = [
+    'requirements.lock',
+    'requirements-dev.lock',
+    'output/**',
+    'data/api_cache/**',
+    '.venv/**',
+    'build/**',
+    'dist/**',
+    '**/*.egg-info/**',
+]
+# No `regex` entry. `.*\.key$` excluded exactly the files a leaked credential
+# would live in, in a PUBLIC repository whose own instructions two sections
+# below say to treat a committed API key as a defect. An earlier commit removed
+# the equivalent glob exclusions from .coderabbit.yaml and greptile.json but
+# missed this one, which is a different key in the same file.
+
+[pr_reviewer]
+require_tests_review = true
+require_security_review = true
+require_estimate_effort_to_review = false
+require_can_be_split_review = false
+require_todo_scan = true
+persistent_comment = true
+num_max_findings = 5
+extra_instructions = """\
+Direct and technical. No praise, no restating the diff. Prose avoids em-dashes, avoids colons inside sentences, and never opens a paragraph with a bolded phrase standing in for a heading.
+
+Do not repeat what CI already reports. ruff lints, mypy typechecks, and a coverage floor of 68 percent is enforced by --cov-fail-under in the test job. Report only defects a maintainer would act on.
+
+This repository is public. Treat anything that could commit an API key, a raw API response, or a contributor's private data as a defect rather than a nit. Keys are read from the gitignored keys/ directory and must never be inlined, logged or written into output.
+
+Python conventions from pyproject.toml: type annotations on every public function and method (mypy runs with disallow_untyped_defs and check_untyped_defs), ruff at line-length 120 with rules E/F/W/I/N/UP/B/C4/SIM/RUF/S. The repository does not run ruff format, so do not propose reformatting.
+
+Invariants a change must not break:
+- Config-driven. Thresholds, API endpoints, trust order, rate limits and compound word dictionaries live in citeforge/config.py and are never hardcoded elsewhere.
+- Determinism. The pipeline produces byte-identical output across consecutive cache-hit runs. Directory and file iteration uses sorted(), and nothing that affects output is randomized.
+- DOI comparison goes through _norm_doi() from citeforge/id_utils.py and is always paired with a title_similarity >= 0.55 check.
+- An orphan .bib file is never deleted without verifying it as a duplicate at title_similarity >= 0.95.
+- FUSED_COMPOUND_WORDS and ABBREVIATED_VENUE_MAP contain no em-dash and no accented characters, because the serializer strips them.
+
+Under citeforge/pipeline/, the Four-Stage Canonicalization Contract is critical. Entry-type and text normalization is single-sourced in citeforge/canonicalize.py through four ordered CanonicalStage rule sets: LOAD_REPAIR before enrichment, COMPLETE_SKIP_FINALIZE before writing a complete entry that skips enrichment, POST_MERGE after the Phase 4 trust-based merge, and POSTRUN_ORPHAN_REPAIR in the post-run fixup through _fixup_bib_entry(). Flag copied caller logic or a rule missing from a stage whose path can emit the affected entry.
+
+Under citeforge/merge_utils.py, merge_with_policy() ranks 13 sources with override rules for DOI, journal, title, pages and booktitle. A change to the ranking or to an override rule changes published bibliographic output and needs a test that pins the new behaviour.
+
+Under tests/, HTTP is mocked with monkeypatch and a unit test never makes a real API call; integration tests that need keys auto-skip when the keys are absent. Flag a test skipped or xfailed instead of fixed, and flag an assertion that cannot fail.
+
+In .github/workflows/, every action is pinned by commit SHA with a trailing version comment and every job carries timeout-minutes. A job added to tests.yml must also be added to the needs list of the CI job named Required CI, or it is not covered by branch protection. This repository stays on GitHub Actions and must not gain a .circleci directory.
+"""
+
+[pr_code_suggestions]
+commitable_code_suggestions = false
+focus_only_on_problems = true
+persistent_comment = true
+extra_instructions = """\
+Suggest a change only when the current code is wrong, unsafe, or breaks a stated invariant. Do not suggest stylistic rewrites, do not suggest adding abstractions for hypothetical future needs, and do not suggest a dependency where a few lines of the standard library would do.
+
+Never suggest adding an automated audit module; issues are fixed in pipeline code or by direct .bib edits. Never suggest hardcoding a threshold, endpoint or trust rank outside citeforge/config.py.
+"""

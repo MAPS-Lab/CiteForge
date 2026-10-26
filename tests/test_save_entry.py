@@ -1,0 +1,578 @@
+"""On-disk survivor-decision contracts for ``merge_utils.save_entry_to_file``.
+
+These tests drive the real save surface (``merge_utils.py`` ~966-1248): they
+write actual ``.bib`` files with :func:`tests.factories.write_bib`, then call
+``save_entry_to_file`` and assert the *real* on-disk outcome (file count, which
+file survived, its bytes, the ``was_written`` flag). No mock stands in for the
+function under test and the decision logic is never re-implemented here; every
+golden verdict was captured by running the live function.
+
+The surface under test had zero coverage before this file. The behaviours
+pinned below are:
+
+* preprint/published survivor selection (published always wins, work stays once);
+* DOI precedence (a DOI-carrying record beats its DOI-less twin either way);
+* orphan safety (same title + distinct DOIs => two files, never collapsed);
+* DOI url-vs-bare normalization dedup via ``_norm_doi``;
+* the ``OSError`` scan branch (an unreadable ``.bib`` never aborts the dedup);
+* the composite-dedup threshold (a single-signal flip across
+  ``SIM_DEDUP_COMPOSITE_THRESHOLD`` toggles merge vs no-merge).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from citeforge.config import SIM_DEDUP_COMPOSITE_THRESHOLD
+from citeforge.merge_utils import save_entry_to_file
+from citeforge.text_utils import compute_dedup_score, format_author_dirname
+from tests import factories
+
+AUTHOR_ID = "TestScholar01"
+
+# Preprint and published DOIs, as ``_is_preprint_doi`` classifies them.
+PREPRINT_DOI = "10.48550/arxiv.2401.00001"
+PUBLISHED_DOI = "10.1145/3580305"
+BOUNDARY_TITLE = "Neural Operators for Turbulent Flow Prediction"
+
+
+def _author_dir(out_dir: Path, author_id: str = AUTHOR_ID) -> Path:
+    """Return the author subdirectory ``save_entry_to_file`` writes into."""
+    return out_dir / format_author_dirname(None, author_id)
+
+
+def _bib_files(author_dir: Path) -> list[str]:
+    """Sorted ``.bib`` *file* names in *author_dir* (directories excluded)."""
+    if not author_dir.exists():
+        return []
+    return sorted(p.name for p in author_dir.iterdir() if p.is_file() and p.suffix == ".bib")
+
+
+def _read(author_dir: Path, name: str) -> str:
+    """Read a single ``.bib`` file's text."""
+    return (author_dir / name).read_text(encoding="utf-8")
+
+
+def _dois_on_disk(author_dir: Path) -> set[str]:
+    """Collect the lowercased DOI substrings present across all ``.bib`` files."""
+    found: set[str] = set()
+    for name in _bib_files(author_dir):
+        text = _read(author_dir, name).lower()
+        for doi in (PREPRINT_DOI, PUBLISHED_DOI):
+            if doi in text:
+                found.add(doi)
+    return found
+
+
+# --- SURVIVOR: preprint vs published of the same work ----------------------
+
+
+def test_published_on_disk_kept_against_incoming_preprint(tmp_path: Path) -> None:
+    """Published record already on disk survives an incoming preprint twin.
+
+    ``was_written`` is False (SKIP_WRITE), exactly one ``.bib`` remains, and it
+    is the published file untouched.
+    """
+    author_dir = _author_dir(tmp_path)
+    preprint, published_enricher = factories.arxiv_published_twin()
+    published = published_enricher[1]
+    factories.write_bib(author_dir, published, "published.bib")
+
+    path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, preprint)
+
+    assert was_written is False
+    assert _bib_files(author_dir) == ["published.bib"]
+    assert Path(path).name == "published.bib"
+    surviving = _read(author_dir, "published.bib").lower()
+    assert "10.1109/cvpr.2016.90" in surviving
+    assert "10.48550/arxiv.1512.03385" not in surviving
+
+
+def test_preprint_on_disk_replaced_by_incoming_published(tmp_path: Path) -> None:
+    """A preprint on disk is removed when its published twin arrives.
+
+    Exactly one ``.bib`` remains, carrying the published DOI (not the preprint
+    arXiv DOI), and ``was_written`` is True.
+    """
+    author_dir = _author_dir(tmp_path)
+    preprint, published_enricher = factories.arxiv_published_twin()
+    published = published_enricher[1]
+    factories.write_bib(author_dir, preprint, "preprint.bib")
+
+    path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, published)
+
+    assert was_written is True
+    remaining = _bib_files(author_dir)
+    assert len(remaining) == 1
+    surviving = _read(author_dir, remaining[0]).lower()
+    assert "10.1109/cvpr.2016.90" in surviving
+    assert "10.48550/arxiv.1512.03385" not in surviving
+    assert Path(path).name == remaining[0]
+
+
+# --- DOI precedence: a DOI-carrying record beats its DOI-less twin ----------
+
+
+def test_existing_doi_beats_incoming_doiless_same_work(tmp_path: Path) -> None:
+    """Existing record with a DOI is kept over a DOI-less incoming twin."""
+    author_dir = _author_dir(tmp_path)
+    with_doi = factories.article(title="Ocean Graph Networks", author="Spadon, Gabriel", doi=PUBLISHED_DOI, key="A")
+    doiless = factories.article(title="Ocean Graph Networks", author="Spadon, Gabriel", key="B")
+    factories.write_bib(author_dir, with_doi, "withdoi.bib")
+
+    path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, doiless)
+
+    assert was_written is False
+    assert _bib_files(author_dir) == ["withdoi.bib"]
+    assert Path(path).name == "withdoi.bib"
+    assert PUBLISHED_DOI in _read(author_dir, "withdoi.bib").lower()
+
+
+def test_incoming_doi_replaces_existing_doiless_same_work(tmp_path: Path) -> None:
+    """Incoming record with a DOI replaces a DOI-less record of the same work."""
+    author_dir = _author_dir(tmp_path)
+    with_doi = factories.article(title="Ocean Graph Networks", author="Spadon, Gabriel", doi=PUBLISHED_DOI, key="A")
+    doiless = factories.article(title="Ocean Graph Networks", author="Spadon, Gabriel", key="B")
+    factories.write_bib(author_dir, doiless, "nodoi.bib")
+
+    path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, with_doi)
+
+    assert was_written is True
+    remaining = _bib_files(author_dir)
+    assert len(remaining) == 1
+    assert PUBLISHED_DOI in _read(author_dir, remaining[0]).lower()
+    assert Path(path).name == remaining[0]
+
+
+# --- ORPHAN SAFETY: distinct works must never collapse ----------------------
+
+
+def test_distinct_works_same_title_kept_as_two_files(tmp_path: Path) -> None:
+    """Same title under two authors with distinct DOIs stays as two files."""
+    author_dir = _author_dir(tmp_path)
+    first, second = factories.duplicate_titles_two_authors()
+    factories.write_bib(author_dir, first, "first.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, second)
+
+    assert was_written is True
+    remaining = _bib_files(author_dir)
+    assert len(remaining) == 2
+    all_text = "".join(_read(author_dir, name).lower() for name in remaining)
+    assert "10.1145/3580305" in all_text
+    assert "10.1038/s41586-024-00001" in all_text
+
+
+# --- DOI url-vs-bare normalization ------------------------------------------
+
+
+def test_same_normalized_doi_unrelated_titles_stay_separate(tmp_path: Path) -> None:
+    """A normalized DOI match cannot override an explicit title conflict."""
+    author_dir = _author_dir(tmp_path)
+    as_url = factories.article(title="Title One", author="Alpha, A", doi="https://doi.org/10.1145/3580305", key="K1")
+    as_bare = factories.article(title="Completely Different Title", author="Alpha, A", doi="10.1145/3580305", key="K2")
+    factories.write_bib(author_dir, as_url, "one.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, as_bare)
+
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+
+
+def test_same_doi_url_and_bare_compatible_titles_deduplicate(tmp_path: Path) -> None:
+    """URL and bare forms of one DOI deduplicate when titles are compatible."""
+    author_dir = _author_dir(tmp_path)
+    as_url = factories.article(
+        title="Graph Learning for Maritime Traffic",
+        author="Alpha, A",
+        doi="https://doi.org/10.1145/3580305",
+        key="K1",
+    )
+    as_bare = factories.article(
+        title="Graph Learning for Maritime Traffic.",
+        author="Alpha, A",
+        doi="10.1145/3580305",
+        key="K2",
+    )
+    factories.write_bib(author_dir, as_url, "one.bib")
+
+    path, _was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, as_bare)
+
+    assert _bib_files(author_dir) == [Path(path).name]
+
+
+def test_doiless_high_title_distinct_authors_stay_separate(tmp_path: Path) -> None:
+    """A DOI-less exact title cannot collapse records with explicit author conflict."""
+    author_dir = _author_dir(tmp_path)
+    first = factories.article(title=BOUNDARY_TITLE, author="Alpha, Alice", year="2024", key="K1")
+    second = factories.article(title=BOUNDARY_TITLE, author="Beta, Bob", year="2024", key="K2")
+    factories.write_bib(author_dir, first, "first.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, second)
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+
+    from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
+
+    evidence = evaluate_identity(first, second, context=IdentityContext.DISK_SURVIVOR)
+    assert evidence.verdict is False
+    assert evidence.reason is IdentityReason.AUTHOR_CONFLICT
+
+
+def test_doiless_high_title_year_gap_four_stays_separate(tmp_path: Path) -> None:
+    """A DOI-less exact title cannot collapse records with a four-year gap."""
+    author_dir = _author_dir(tmp_path)
+    first = factories.article(title=BOUNDARY_TITLE, author="Alpha, Alice", year="2020", key="K1")
+    second = factories.article(title=BOUNDARY_TITLE, author="Alpha, Alice", year="2024", key="K2")
+    factories.write_bib(author_dir, first, "first.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, second)
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+
+    from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
+
+    evidence = evaluate_identity(first, second, context=IdentityContext.DISK_SURVIVOR)
+    assert evidence.verdict is False
+    assert evidence.reason is IdentityReason.YEAR_CONFLICT
+
+
+def test_doiless_truncated_title_year_gap_four_stays_separate(tmp_path: Path) -> None:
+    """A DOI-less truncated title obeys the same explicit year veto."""
+    author_dir = _author_dir(tmp_path)
+    first = factories.article(
+        title="Passive Co-presence for Reliable Maritime Decision Support",
+        author="Alpha, Alice",
+        year="2020",
+        key="K1",
+    )
+    second = factories.article(title="Passive Co-presence", author="Alpha, Alice", year="2024", key="K2")
+    factories.write_bib(author_dir, first, "first.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, second)
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+
+    from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
+
+    evidence = evaluate_identity(first, second, context=IdentityContext.DISK_SURVIVOR)
+    assert evidence.verdict is False
+    assert evidence.reason is IdentityReason.YEAR_CONFLICT
+
+
+# --- OSError scan branch -----------------------------------------------------
+
+
+def test_unreadable_bib_does_not_abort_dedup(tmp_path: Path) -> None:
+    """An unreadable ``.bib`` on disk is skipped; dedup still hits the readable one.
+
+    A directory named ``*.bib`` is enumerated by ``iter_author_bibs`` but raises
+    ``IsADirectoryError`` (an ``OSError``) on ``open()``. The per-file ``except
+    OSError`` must swallow it so the readable true-duplicate is still matched.
+    """
+    author_dir = _author_dir(tmp_path)
+    author_dir.mkdir(parents=True, exist_ok=True)
+    # Sorts before the readable file, so it is scanned first and must not abort.
+    (author_dir / "aaa_unreadable.bib").mkdir()
+    readable = factories.article(title="Deep Sea Mapping", author="Nara, A", doi=PUBLISHED_DOI, key="R")
+    factories.write_bib(author_dir, readable, "zzz_readable.bib")
+    incoming = factories.article(title="Deep Sea Mapping", author="Nara, A", doi=PUBLISHED_DOI, key="R")
+
+    path, _was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
+
+    # Deduped against the readable file (no third file created), no exception.
+    assert Path(path).name == "zzz_readable.bib"
+    assert _bib_files(author_dir) == ["zzz_readable.bib"]
+    assert (author_dir / "aaa_unreadable.bib").is_dir()
+    assert PUBLISHED_DOI in _read(author_dir, "zzz_readable.bib").lower()
+
+
+# --- Composite-dedup threshold boundary -------------------------------------
+#
+# Path exercised: existing=preprint on disk, incoming=published, identical
+# title (title_sim = 1.0, so the preprint-pair composite check is entered).
+# The only variable across the two cases is the author list, which moves
+# compute_dedup_score(count_preprint_xor=False) from ~0.535 (below) to ~0.785
+# (above) the 0.60 threshold. Both sides sit > 0.02 from the threshold.
+
+_BELOW_AUTHORS = ("Smith, John", "Doe, Jane")  # disjoint => author_overlap 0.0
+_ABOVE_AUTHORS = ("Kaiming, He and Zhang, Xiangyu", "Kaiming, He and Zhang, Xiangyu")
+
+
+def _boundary_pair(existing_author: str, incoming_author: str) -> tuple[factories.Entry, factories.Entry]:
+    existing_preprint = factories.article(
+        title=BOUNDARY_TITLE, author=existing_author, year="2023", journal="arXiv", doi=PREPRINT_DOI, key="P"
+    )
+    incoming_published = factories.article(
+        title=BOUNDARY_TITLE,
+        author=incoming_author,
+        year="2023",
+        journal="Nature Communications",
+        doi=PUBLISHED_DOI,
+        key="Q",
+    )
+    return existing_preprint, incoming_published
+
+
+def test_composite_below_threshold_keeps_two_files(tmp_path: Path) -> None:
+    """Composite just below ``SIM_DEDUP_COMPOSITE_THRESHOLD`` => no merge, two files."""
+    author_dir = _author_dir(tmp_path)
+    existing, incoming = _boundary_pair(*_BELOW_AUTHORS)
+    score = compute_dedup_score(existing["fields"], incoming["fields"], count_preprint_xor=False)
+    assert score < SIM_DEDUP_COMPOSITE_THRESHOLD - 0.02  # robustly below, not on the fence
+    factories.write_bib(author_dir, existing, "pre.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
+
+    assert was_written is True
+    remaining = _bib_files(author_dir)
+    assert len(remaining) == 2
+    assert _dois_on_disk(author_dir) == {PREPRINT_DOI, PUBLISHED_DOI}
+
+
+def test_composite_above_threshold_merges_to_one_file(tmp_path: Path) -> None:
+    """Composite just above ``SIM_DEDUP_COMPOSITE_THRESHOLD`` => merge, one file.
+
+    The single flipped signal (author overlap) tips the same preprint/published
+    pair over the threshold; the preprint is replaced by the published record.
+    """
+    author_dir = _author_dir(tmp_path)
+    existing, incoming = _boundary_pair(*_ABOVE_AUTHORS)
+    score = compute_dedup_score(existing["fields"], incoming["fields"], count_preprint_xor=False)
+    assert score > SIM_DEDUP_COMPOSITE_THRESHOLD + 0.02  # robustly above, not on the fence
+    factories.write_bib(author_dir, existing, "pre.bib")
+
+    _path, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
+
+    assert was_written is True
+    remaining = _bib_files(author_dir)
+    assert len(remaining) == 1
+    surviving = _read(author_dir, remaining[0]).lower()
+    assert PUBLISHED_DOI in surviving
+    assert PREPRINT_DOI not in surviving
+
+
+@pytest.mark.parametrize(
+    ("authors", "expected_files"),
+    [(_BELOW_AUTHORS, 2), (_ABOVE_AUTHORS, 1)],
+    ids=["below_threshold_two_files", "above_threshold_one_file"],
+)
+def test_composite_boundary_flips_verdict(tmp_path: Path, authors: tuple[str, str], expected_files: int) -> None:
+    """The merge/no-merge verdict flips across the composite threshold.
+
+    Consolidated parametrized guard: only the author list changes between the
+    two rows, yet the on-disk file count flips 2 <-> 1 as the composite crosses
+    ``SIM_DEDUP_COMPOSITE_THRESHOLD``.
+    """
+    author_dir = _author_dir(tmp_path)
+    existing, incoming = _boundary_pair(*authors)
+    factories.write_bib(author_dir, existing, "pre.bib")
+
+    save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
+
+    assert len(_bib_files(author_dir)) == expected_files
+
+
+def test_year_change_renames_the_file_to_match_the_new_year(tmp_path: Path) -> None:
+    """A record whose year changed must not keep the old year in its filename.
+
+    The dedup branch for this case logged DECISION | USE_NEW_NAME and did
+    nothing else: `filename` had already been overwritten with the duplicate's
+    basename, so the "generated filename" it claimed to keep no longer existed.
+    The record kept the losing file's year permanently, which is why 13
+    committed files are named for a year their contents do not carry
+    (Saha2020-EnergyAware.bib holds a 2023 paper). The filename year is not
+    cosmetic: it is what a reader browsing the corpus sees.
+    """
+    title = "A Study That Changed Its Year On Publication"
+    author_dir = tmp_path / format_author_dirname("Doe, Jane", "x1")
+    author_dir.mkdir(parents=True)
+    factories.write_bib(
+        author_dir,
+        factories.article(key="Old", title=title, year="2020", journal="Some Journal"),
+        "Doe2020-AStudy.bib",
+    )
+    incoming = {
+        "type": "article",
+        "key": "New",
+        "fields": {"title": title, "author": "Doe, Jane", "year": "2023", "journal": "Some Journal"},
+    }
+
+    save_entry_to_file(str(tmp_path), "x1", incoming, author_name="Doe, Jane")
+
+    survivors = sorted(p.name for p in author_dir.glob("*.bib"))
+    assert len(survivors) == 1, f"the superseded name must not linger: {survivors}"
+    assert "2023" in survivors[0], f"filename must carry the new year: {survivors[0]}"
+    assert "2020" not in survivors[0]
+
+
+def test_validated_same_doi_metadata_replaces_equal_field_baseline(tmp_path: Path) -> None:
+    """A DOI-bearing baseline cannot block corrected metadata solely because field counts tie."""
+    author_dir = tmp_path / format_author_dirname("Haque, Israat", "x1")
+    author_dir.mkdir(parents=True)
+    doi = "10.1109/tmlcn.2025.3575368"
+    old_path = factories.write_bib(
+        author_dir,
+        factories.article(
+            key="Hasan2024",
+            title="A Generalized Transformer-based Radio Link Failure Prediction Framework in 5G RANs",
+            author="Kazi Hasan and Thomas Trappenberg and Israat Haque",
+            year="2024",
+            journal="IEEE Transactions on Machine Learning in Communications and Networking",
+            doi=doi,
+            url=f"https://doi.org/{doi}",
+            volume="3",
+            pages="1-12",
+        ),
+        "Hasan2024-GeneralizedTransformer.bib",
+    )
+    incoming = factories.article(
+        key="Hasan2025",
+        title="A Generalized GNN-Transformer-Based Radio Link Failure Prediction Framework in 5G RAN",
+        author="Kazi Hasan and Khaleda Papry and Thomas Trappenberg and Israat Haque",
+        year="2025",
+        journal="IEEE Transactions on Machine Learning in Communications and Networking",
+        doi=doi,
+        url=f"https://doi.org/{doi}",
+        volume="3",
+        pages="1-12",
+    )
+
+    path, written = save_entry_to_file(
+        str(tmp_path),
+        "x1",
+        incoming,
+        prefer_path=str(old_path),
+        author_name="Haque, Israat",
+    )
+
+    assert written is True
+    assert not old_path.exists()
+    assert "2025" in Path(path).name
+    saved = _read(author_dir, Path(path).name)
+    assert "Khaleda Papry" in saved
+    assert "year = {2025}" in saved
+
+
+# The committed Milios records. VISLA is arXiv 2404.16365 and SugarCrepe++ is
+# arXiv 2406.11171, two works; the published record carries no arXiv id because
+# the merge strips eprint fields once a published DOI is known.
+_VISLA = factories.entry(
+    type="misc",
+    key="Dumpala2024:VislaBenchmark",
+    title="VISLA Benchmark: Evaluating Embedding Sensitivity to Semantic and Lexical Alterations",
+    author="Sri Harsha Dumpala and Aman Jaiswal and Chandramouli Shama Sastry and Evangelos Milios "
+    "and Sageev Oore and Hassan Sajjad",
+    year="2024",
+    howpublished="arXiv:2404.16365",
+    doi="10.48550/arxiv.2404.16365",
+    url="https://arxiv.org/abs/2404.16365",
+    eprint="2404.16365",
+    archiveprefix="arXiv",
+)
+_SUGARCREPE = factories.inproceedings(
+    key="Dumpala2024:SugarcrepeDataset",
+    title="SUGARCREPE++ Dataset: Vision-Language Model Sensitivity to Semantic and Lexical Alterations",
+    author="Sri Dumpala and Aman Jaiswal and Chandramouli Sastry and Evangelos Milios and Sageev Oore "
+    "and Hassan Sajjad",
+    year="2024",
+    booktitle="Advances in Neural Information Processing Systems 37",
+    publisher="Neural Information Processing Systems Foundation, Inc. (NeurIPS)",
+    pages="17972-18018",
+    doi="10.52202/079017-0571",
+    url="https://doi.org/10.52202/079017-0571",
+)
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "incoming"), [(_VISLA, _SUGARCREPE), (_SUGARCREPE, _VISLA)], ids=["published_in", "preprint_in"]
+)
+def test_published_record_never_absorbs_a_distinct_arxiv_preprint(
+    tmp_path: Path, on_disk: dict[str, object], incoming: dict[str, object]
+) -> None:
+    """A 0.71 title score with no linking identifier is two works, so both files stay."""
+    author_dir = _author_dir(tmp_path)
+    factories.write_bib(author_dir, on_disk, "on_disk.bib")
+
+    _, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
+
+    assert was_written is True
+    texts = [_read(author_dir, name).lower() for name in _bib_files(author_dir)]
+    assert len(texts) == 2, texts
+    assert any("10.48550/arxiv.2404.16365" in text for text in texts)
+    assert any("10.52202/079017-0571" in text for text in texts)
+
+
+def test_enrichment_never_adopts_a_distinct_work_as_the_published_version() -> None:
+    """A Crossref candidate carries no arXiv id either, so enrichment must not merge it into VISLA."""
+    from citeforge.identity import IdentityContext, IdentityReason, evaluate_identity
+
+    evidence = evaluate_identity(_VISLA, _SUGARCREPE, context=IdentityContext.ENRICHMENT)
+
+    assert evidence.verdict is False
+    assert evidence.reason is IdentityReason.GATE_CLOSED
+
+
+# Committed co-authored pairs that share authors and year but are different
+# papers. Authors and year alone carry 0.30 to 0.35 of the 0.60 composite.
+_LIU_2021 = factories.inproceedings(
+    key="Liu2021:BlockchainPrivacyScalability",
+    title="Blockchain Privacy Scalability and Separation of Concerns Using Multi-modal Modeling",
+    author="C Liu and P Bodorik and D Jutla",
+    year="2021",
+    booktitle="Accepted by Fourth International Conference on Blockchain Technology",
+)
+_LIU_2022 = factories.article(
+    key="Liu2022:SmartContractGeneration",
+    title="Automating Smart Contract Generation on Blockchains Using Multi-modal Modeling",
+    author="Christian Gang Liu and Peter Bodorik and Dawn Jutla",
+    year="2022",
+    journal="Journal of Advances in Information Technology",
+    publisher="Engineering and Technology Publishing",
+    volume="13",
+    number="3",
+    doi="10.12720/jait.13.3.213-223",
+    url="https://doi.org/10.12720/jait.13.3.213-223",
+)
+_FERREIRA_SENSORS = factories.article(
+    key="Ferreira2022:SemiSupervisedGeometricDriven",
+    title="A semi-supervised methodology for fishing activity detection using the geometry behind the "
+    "trajectory of multiple vessels",
+    author="Martha Dais Ferreira and Gabriel Spadon and Amilcar Soares and Stan Matwin",
+    year="2022",
+    journal="Sensors",
+    publisher="MDPI AG",
+    volume="22",
+    number="16",
+    pages="6063",
+    doi="10.3390/s22166063",
+    url="https://doi.org/10.3390/s22166063",
+)
+_FERREIRA_AIS = factories.entry(
+    type="misc",
+    key="Ferreira2022:SemiSupervisedFishingDetection",
+    title="A semi-supervised geometric-driven methodology for supervised fishing activity detection on "
+    "multi-source AIS tracking messages",
+    author="MD Ferreira and G Spadon and A Soares and S Matwin",
+    year="2022",
+)
+_SAME_TEAM_DISTINCT_PAPERS = [(_LIU_2021, _LIU_2022), (_FERREIRA_AIS, _FERREIRA_SENSORS)]
+
+
+@pytest.mark.parametrize(("on_disk", "incoming"), _SAME_TEAM_DISTINCT_PAPERS, ids=["bodorik_liu", "matwin_ferreira"])
+def test_shared_authors_and_year_never_merge_different_titles(
+    tmp_path: Path, on_disk: dict[str, object], incoming: dict[str, object]
+) -> None:
+    """A 0.65 title score with no DOI or other identifier linking the records is two papers."""
+    from citeforge.identity import IdentityContext, evaluate_identity
+
+    author_dir = _author_dir(tmp_path)
+    factories.write_bib(author_dir, on_disk, "on_disk.bib")
+
+    _, was_written = save_entry_to_file(str(tmp_path), AUTHOR_ID, incoming)
+
+    assert was_written is True
+    assert len(_bib_files(author_dir)) == 2
+    assert evaluate_identity(on_disk, incoming, context=IdentityContext.ENRICHMENT).verdict is False

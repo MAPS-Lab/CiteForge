@@ -1,0 +1,75 @@
+# Hidden directories (IDE, venv, cache, local config)
+.*/
+!.git/
+!.github/
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+develop-eggs/
+dist/
+data/api_cache/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Testing
+htmlcov/
+coverage.xml
+.coverage
+dmypy.json
+
+# User data and API keys
+keys/
+*.key
+*.keys
+
+# Editor swap files
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.log
+*.tmp
+temp/
+tmp/
+
+# Pipeline run artifacts (generated logs must never be committed)
+output/run.log
+output/**/*.log
+
+# Build artifacts
+third-party/*
+ruff-report.json
+
+# Agent-isolated implementation worktrees
+.worktrees/
+
+# Agent planning and task-report scratch space
+.superpowers/
+
+# Dependency locking here is requirements*.lock (pip-tools via `uv pip
+# compile`, verified current in CI). uv.lock is a different artifact uv
+# auto-generates the moment `uv run`/`uv sync` treats this directory as a
+# uv-native project; nothing here reads it.
+uv.lock
