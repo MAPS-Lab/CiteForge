@@ -244,7 +244,10 @@ def test_incoherent_doi_scan_returns_every_affected_author_directory(tmp_path: P
     _write_bib(dir_a / "Lowe2021.bib", "inproceedings", "Lowe2021", {**common, "year": "2021"})
     _write_bib(dir_b / "Lowe2022.bib", "inproceedings", "Lowe2022", {**common, "year": "2022"})
 
-    assert io_utils.find_incoherent_doi_author_dirs(str(out)) == frozenset({"Oore (A1)", "Trappenberg (B1)"})
+    both = {"Oore (A1)", "Trappenberg (B1)"}
+    assert io_utils.find_incoherent_doi_author_dirs(str(out), both) == frozenset(both)
+    # A copy outside the named directories is not read, so it can conflict with nothing.
+    assert io_utils.find_incoherent_doi_author_dirs(str(out), {"Oore (A1)"}) == frozenset()
 
 
 def test_incoherent_doi_scan_compares_author_identity_not_only_count(tmp_path: Path) -> None:
@@ -262,7 +265,8 @@ def test_incoherent_doi_scan_compares_author_identity_not_only_count(tmp_path: P
     _write_bib(dir_a / "Hasan2025.bib", "article", "Hasan2025", {**common, "author": "Tariq Hasan and Evan Frick"})
     _write_bib(dir_b / "Hasan2025.bib", "article", "Hasan2025", {**common, "author": "Tariq Hasan and Mahdi Haque"})
 
-    assert io_utils.find_incoherent_doi_author_dirs(str(out)) == frozenset({"Hasan (A1)", "Haque (B1)"})
+    both = {"Hasan (A1)", "Haque (B1)"}
+    assert io_utils.find_incoherent_doi_author_dirs(str(out), both) == frozenset(both)
 
 
 def test_incoherent_doi_scan_accepts_equivalent_author_renderings(tmp_path: Path) -> None:
@@ -280,7 +284,7 @@ def test_incoherent_doi_scan_accepts_equivalent_author_renderings(tmp_path: Path
     _write_bib(dir_a / "Oore2025.bib", "article", "Oore2025", {**common, "author": "Sageev Oore and Jason D'eon"})
     _write_bib(dir_b / "Oore2025.bib", "article", "Oore2025", {**common, "author": "Oore, Sageev and D'eon, Jason"})
 
-    assert io_utils.find_incoherent_doi_author_dirs(str(out)) == frozenset()
+    assert io_utils.find_incoherent_doi_author_dirs(str(out), {"Oore (A1)", "Rudzicz (B1)"}) == frozenset()
 
 
 class TestBuildA2i2Folder:

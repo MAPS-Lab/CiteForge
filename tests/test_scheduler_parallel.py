@@ -161,7 +161,7 @@ def test_run_all_forces_only_authors_with_incoherent_doi_copies(
     monkeypatch.setattr(
         scheduler,
         "find_incoherent_doi_author_dirs",
-        lambda _out_dir: frozenset({"Lovelace (a1)"}),
+        lambda _out_dir, _author_dirs: frozenset({"Lovelace (a1)"}),
         raising=False,
     )
     monkeypatch.setattr(scheduler, "process_record", capture_record)
@@ -231,5 +231,30 @@ def test_run_all_forces_coauthors_whose_skipped_copy_a_forced_author_rewrote(
 
     scheduler.run_all("key", None, None, None, None, records, str(tmp_path), None, False)
 
-    assert scheduler.find_incoherent_doi_author_dirs(str(tmp_path)) == frozenset()
+    assert scheduler.find_incoherent_doi_author_dirs(str(tmp_path), {p.name for p in tmp_path.iterdir()}) == frozenset()
     assert sorted(forced_calls) == ["Evangelos Milios", "Sageev Oore", "Thomas Trappenberg"]
+
+
+def test_run_all_ignores_a_conflict_with_an_author_outside_the_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A co-author the run does not cover cannot be re-enriched by it.
+
+    Forcing the in-scope author over such a conflict would repeat a pass that
+    can never settle it, and every later run would fail the same way.
+    """
+    _write_doi_copy(tmp_path / "Lovelace (a1)", "10.1/x", "A Lowe and S Oore", 2021)
+    _write_doi_copy(tmp_path / "Hopper (h1)", "10.1/x", "A Lowe and S Oore", 2022)
+    forced: dict[str, bool] = {}
+
+    def capture_record(_serpapi_key: str, _serply_key: str | None, rec: Record, _out_dir: str, **kwargs: Any) -> int:
+        forced[rec.name] = bool(kwargs["force_enrich"])
+        return 0
+
+    monkeypatch.setattr(scheduler, "process_record", capture_record)
+
+    scheduler.run_all(
+        "key", None, None, None, None, [Record("Ada Lovelace", scholar_id="a1")], str(tmp_path), None, False
+    )
+
+    assert forced == {"Ada Lovelace": False}

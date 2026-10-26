@@ -35,6 +35,16 @@ on:
 permissions:
   contents: read
 
+# The refresh covers the authors of one census file, not data/input.csv. Its only
+# consumer, MAPS-Lab/mapslab-website import-publications.yml, sparse-checks out
+# `output/Spadon (bfdGsGUAAAAJ)` and aggregates nothing else, so enriching the
+# other authors cost 40 to 100 minutes of provider quota per run for output no
+# one reads. The post-run tail is confined to the census authors' directories
+# (see finalize_run), which leaves every other committed author untouched. Every
+# gate below reads this same file, so the counts compare like with like.
+env:
+  MONTHLY_CENSUS: data/website-authors.csv
+
 # One refresh at a time. Two overlapping runs race on the same output tree and
 # the same publication branch, and the loser force-pushes over the winner.
 # Never cancel in flight: a cancelled run loses its corpus progress.
@@ -124,7 +134,7 @@ jobs:
           for i in $(seq 1 $max_runs); do
             echo "::group::Pipeline run $i/$max_runs"
             rc=0
-            python3 main.py || rc=$?
+            python3 main.py --input "$MONTHLY_CENSUS" || rc=$?
             echo "::endgroup::"
 
             if [ "$rc" -ne 0 ]; then
@@ -194,9 +204,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/refresh-manifest
-          enabled_authors="$(python -c 'import csv; f=open("data/input.csv", encoding="utf-8", newline=""); print(sum(row["Enabled"].strip().lower() == "true" for row in csv.DictReader(f)))')"
-          authors_with_bib="$(find output -mindepth 2 -maxdepth 2 -type f -name '*.bib' ! -path 'output/a2i2/*' -print0 \
-            | xargs -0 -r -n1 dirname | LC_ALL=C sort -u | wc -l)"
+          # Census authors only: the output tree holds every committed author, so
+          # a whole-tree directory count could never be compared with the census.
+          read -r enabled_authors authors_with_bib < <(python -c '
+          import sys
+          from pathlib import Path
+          from citeforge.io_utils import read_records
+          from citeforge.text_utils import format_author_dirname
+          records = read_records(sys.argv[1])
+          dirs = [Path("output", format_author_dirname(r.name, r.scholar_id or r.dblp or "")) for r in records]
+          print(len(records), sum(any(d.glob("*.bib")) for d in dirs))
+          ' "$MONTHLY_CENSUS")
           {
             echo "run_id=${{ github.run_id }}"
             echo "converged=${{ steps.loop.outputs.converged }}"
