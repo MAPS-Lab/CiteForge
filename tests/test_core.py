@@ -829,3 +829,41 @@ def test_no_duplicate_titles_per_author() -> None:
             msg_lines.append(f"    Similarity: {d['similarity']:.1%}")
 
         pytest.fail("\n".join(msg_lines))
+
+
+def _merged_authors(baseline: str, source: str, enricher_authors: str) -> str:
+    primary = {"type": "misc", "key": "Entry", "fields": {"title": "A Title Long Enough", "author": baseline}}
+    enrichers = [(source, {"type": "misc", "fields": {"author": enricher_authors}})]
+    return merge_utils.merge_with_policy(primary, enrichers, emit_logs=False)["fields"]["author"]
+
+
+def test_report_deposit_organisations_do_not_extend_a_personal_byline() -> None:
+    """OSTI's deposit for 10.2172/1991087 lists the laboratory and sponsor beside
+    Stephen Brooks; taking it rekeyed Brooks2023 under the laboratory."""
+    deposit = (
+        "Brookhaven National Laboratory (BNL), Upton, NY (United States) and Stephen Brooks"
+        " and USDOE Office of Science (SC), Nuclear Physics (NP)"
+    )
+
+    author = _merged_authors("Stephen Brooks", "csl", deposit)
+
+    assert author == "Stephen Brooks"
+    assert bt._first_author_lastname(author) == "brooks"
+
+
+def test_consortium_beside_more_people_is_still_accepted() -> None:
+    """A fuller personal list that also names a consortium is not an organisation extension."""
+    fuller = "Ann Lee and Bob Ng and Cy Ho and Psychiatric Genomics Consortium"
+
+    assert _merged_authors("Ann Lee and Bob Ng", "csl", fuller) == fuller
+
+
+@pytest.mark.parametrize("source", ["csl", "scholar_page"])
+def test_middle_initial_survives_whichever_source_drops_it(source: str) -> None:
+    """Lin2026: the MDPI deposit prints Daniel H. Chang; a source dropping the
+    initial must not win, and the deposit must replace a baseline without it."""
+    with_initial = "Michael Pin-Chuan Lin and Daniel H. Chang and G. Michael Bowen"
+    without = "Michael Pin-Chuan Lin and Daniel Chang and G. Michael Bowen"
+
+    assert _merged_authors(without, "csl", with_initial) == with_initial
+    assert _merged_authors(with_initial, source, without) == with_initial

@@ -106,3 +106,42 @@ def test_disk_same_key_exact_title_preserves_legacy_key_title_precedence() -> No
 
     assert evidence.verdict is True
     assert evidence.reason is IdentityReason.KEY_TITLE
+
+
+def _disk(title: str, doi: str, year: str, *, journal: str = "", howpublished: str = "") -> dict[str, Any]:
+    fields = {"title": title, "author": "Jet D Termorshuizen and Helena L Davies and Cynthia M Bulik", "year": year}
+    fields.update({"doi": doi, **({"journal": journal} if journal else {})})
+    if howpublished:
+        fields["howpublished"] = howpublished
+    return {"type": "article" if journal else "misc", "key": f"Termorshuizen{year}", "fields": fields}
+
+
+def test_unlinked_preprint_is_not_the_published_record() -> None:
+    """The November refresh deleted a medRxiv preprint for a journal paper whose title
+    scores 0.91 against it, with no relation between the DOIs. Both must be kept."""
+    preprint = _disk(
+        "Genome-wide association studies of binge-eating behaviour and anorexia nervosa yield insights "
+        "into the unique and shared biology of eating disorder phenotypes",
+        "10.1101/2025.01.31.25321397",
+        "2025",
+        howpublished="medRxiv",
+    )
+    published = _disk(
+        "Genomic meta-analyses of binge-eating behavior and anorexia nervosa yield insights "
+        "into the unique and shared biology of eating disorder phenotypes",
+        "10.1038/s44220-026-00698-2",
+        "2026",
+        journal="Nature Mental Health",
+    )
+
+    assert evaluate_identity(published, preprint, context=IdentityContext.DISK_SURVIVOR).verdict is False
+    assert evaluate_identity(preprint, published, context=IdentityContext.DISK_SURVIVOR).verdict is False
+
+
+def test_preprint_with_the_published_title_is_still_superseded() -> None:
+    """A near-identical title stays a link, so the routine preprint-to-journal case still dedups."""
+    title = "Genomic meta-analyses of binge-eating behavior and anorexia nervosa"
+    preprint = _disk(title, "10.1101/2025.01.31.25321397", "2025", howpublished="medRxiv")
+    published = _disk(title, "10.1038/s44220-026-00698-2", "2026", journal="Nature Mental Health")
+
+    assert evaluate_identity(published, preprint, context=IdentityContext.DISK_SURVIVOR).verdict is True

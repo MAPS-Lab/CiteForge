@@ -67,6 +67,12 @@ _AUTHOR_DIGIT_SUFFIX_RE = re.compile(r"\s+\d{1,4}\s*$")
 _AUTHOR_PAREN_SUFFIX_RE = re.compile(r"\s*\(\d{1,4}\)\s*$")
 _AUTHOR_GLUED_DIGIT_RE = re.compile(r"(?<=[A-Za-z]{2})\d{1,4}$")
 _AUTHOR_INITIAL_RE = re.compile(r"^[A-Z]\.$")
+# Words that mark a corporate author rather than a person.
+_ORG_AUTHOR_RE = re.compile(
+    r"\b(laborator(y|ies)|office|department|ministry|agency|institute|university|consortium|council"
+    r"|committee|foundation|corporation|centre|center|usdoe)\b|\(united states\)",
+    re.IGNORECASE,
+)
 _AND_AND_RE = re.compile(r"\band\s+And\b")
 
 _LEADING_DIGIT_RE = re.compile(r"^\d")
@@ -135,11 +141,7 @@ def _fix_author_casing(author_val: str) -> tuple[str, bool]:
                 # mixed lists ("Wei Haiqi", "Nur Zincir-Heywood") and must
                 # never be guessed into "WEI" or "NUR".
                 leading_initials = (
-                    initials_first
-                    and index == 0
-                    and len(t) <= _MAX_INITIALS_CLUSTER
-                    and t.isalpha()
-                    and t.isupper()
+                    initials_first and index == 0 and len(t) <= _MAX_INITIALS_CLUSTER and t.isalpha() and t.isupper()
                 )
                 if not t or not t[0].isalpha():
                     new_tokens.append(t)
@@ -276,6 +278,27 @@ def _guard_journal(
     return None
 
 
+def _name_tokens(name: str) -> tuple[list[str], list[str]]:
+    """Split a name into (full words, initials), casefolded and without periods."""
+    tokens = [tok.strip(".").casefold() for tok in name.split() if tok.strip(".")]
+    full = [tok for tok in tokens if len(tok.replace("-", "")) > 1]
+    return full, [tok for tok in tokens if len(tok.replace("-", "")) <= 1]
+
+
+def _initials_dropped(fuller: list[str], other: list[str]) -> bool:
+    """True when *other* is *fuller* with only middle initials removed ("Daniel Chang"
+    against "Daniel H. Chang"), name by name, and at least one was removed."""
+    dropped = False
+    for full_name, other_name in zip(fuller, other, strict=True):
+        full_words, full_inits = _name_tokens(full_name)
+        other_words, other_inits = _name_tokens(other_name)
+        remaining = iter(full_inits)
+        if full_words != other_words or not all(init in remaining for init in other_inits):
+            return False
+        dropped = dropped or len(full_inits) > len(other_inits)
+    return dropped
+
+
 def _guard_author(
     cur: Any, v: Any, cur_src: str, src: str, type_rank: dict[str, int], log: Any = logger
 ) -> bool | None:
@@ -288,6 +311,29 @@ def _guard_author(
     """
     cur_parts = parse_authors_any(str(cur))
     new_parts = parse_authors_any(str(v))
+    # A report deposit (OSTI 10.2172/1991087) lists the laboratory and the
+    # sponsor beside the person, and taking it rekeyed Brooks2023 under the lab.
+    new_orgs = sum(1 for name in new_parts if _ORG_AUTHOR_RE.search(name))
+    if (
+        cur_parts
+        and new_orgs
+        and not any(_ORG_AUTHOR_RE.search(name) for name in cur_parts)
+        and len(new_parts) - new_orgs <= len(cur_parts)
+    ):
+        log.debug(
+            f"AUTHOR_KEEP_PERSONAL | organisations={new_orgs} | src={src} | organisations do not extend a byline",
+            category=LogCategory.MERGE,
+        )
+        return False
+    if cur_parts and new_parts and len(cur_parts) == len(new_parts):
+        if _initials_dropped(new_parts, cur_parts):
+            log.debug(f"AUTHOR_ACCEPT_INITIALS | src={src} | keeping middle initials", category=LogCategory.MERGE)
+            return True
+        if _initials_dropped(cur_parts, new_parts):
+            log.debug(
+                f"AUTHOR_KEEP_INITIALS | src={src} | rejecting dropped middle initials", category=LogCategory.MERGE
+            )
+            return False
     if cur_parts and new_parts and len(new_parts) < len(cur_parts):
         trust_diff = type_rank.get(cur_src, 99) - type_rank.get(src, 99)
         if trust_diff < TRUST_DIFF_OVERRIDE_THRESHOLD:
@@ -507,6 +553,11 @@ def merge_with_policy(
                     f"FIELD_ACCEPT | {k} (was empty) | src={src} | val={str(v)[:80]}",
                     category=LogCategory.MERGE,
                 )
+                continue
+
+            # A reviewed correction is final; no guard may trade it for a
+            # provider's spelling (CEUR prints "Makuochi Nkwo").
+            if cur_src == "curated":
                 continue
 
             # Field-specific guards (DOI, pages, journal, author, title,
@@ -770,6 +821,10 @@ def merge_with_policy(
 
     url_val = (merged.get("url") or "").strip()
     allowed = allowlisted_url(url_val)
+    # A reviewed publisher link stays: it is the only identifier of a work with
+    # no DOI or arXiv id (CEUR papers, patents).
+    if url_val and not allowed and field_sources.get("url") == "curated":
+        allowed = url_val
     if url_val and not allowed:
         logger.debug(f"url_rejected | {url_val}", category=LogCategory.CLEANUP)
         merged.pop("url", None)

@@ -240,6 +240,10 @@ def _candidate_identity(left: _RecordView, right: _RecordView, candidate_doi: st
     return _evidence(left, right, True, reason, title_score=score, candidate_doi=candidate)
 
 
+def _is_preprint(view: _RecordView) -> bool:
+    return bool(view.doi and is_secondary_doi(view.doi)) or txt._is_preprint_fields(view.fields)
+
+
 def _disk_identity(left: _RecordView, right: _RecordView) -> IdentityEvidence:
     score = _title_score(left, right)
     # Whether the relaxed paths below may trust a sub-0.95 title. Equal arXiv ids
@@ -253,6 +257,14 @@ def _disk_identity(left: _RecordView, right: _RecordView) -> IdentityEvidence:
         title_linked = score >= cfg.SIM_FILE_DUPLICATE_THRESHOLD
     else:
         title_linked = _titles_agree(left, right, score)
+    # Every caller acts on this verdict by deleting a file, so a preprint is
+    # superseded only when something links it to the published record: a shared
+    # arXiv id, a DOI version (below) or a near-identical title. Close titles and
+    # overlapping authors are no link; medRxiv 10.1101/2025.01.31.25321397 scores
+    # 0.91 against 10.1038/s44220-026-00698-2, and neither the Crossref relations
+    # nor medRxiv's publication lookup relates the two.
+    if _is_preprint(left) != _is_preprint(right) and not (left.arxiv_id and left.arxiv_id == right.arxiv_id):
+        title_linked = score >= cfg.SIM_FILE_DUPLICATE_THRESHOLD
     if left.doi and right.doi:
         if left.doi == right.doi or doi_bases_match(left.doi, right.doi):
             reason = IdentityReason.DOI_EXACT if left.doi == right.doi else IdentityReason.DOI_VERSION

@@ -80,6 +80,91 @@
         "url": "https://doi.org/10.1109/mdm71479.2026.00053"
       },
       "source": "https://doi.org/10.1109/MDM71479.2026.00053"
+    },
+    {
+      "match": {
+        "title": "Preface to the 7th International Workshop on Personalizing Persuasive Technologies (PPT 2024)",
+        "year": 2024
+      },
+      "type": "inproceedings",
+      "fields": {
+        "title": "Preface to the 7th International Workshop on Personalizing Persuasive Technologies (PPT 2024)",
+        "author": "Ifeoma Adaji and Kiemute Oyibo and Rita Orji and Jaap Ham and Alaa Alslaity",
+        "year": "2024",
+        "booktitle": "Persuasive 2024 Adjunct Proceedings: 19th International Conference on Persuasive Technology, Adjunct Proceedings co-located with PERSUASIVE 2024",
+        "publisher": "CEUR-WS.org",
+        "volume": "3728",
+        "pages": "73-76",
+        "url": "https://ceur-ws.org/Vol-3728/preface3.pdf"
+      },
+      "source": "https://ceur-ws.org/Vol-3728/preface3.pdf"
+    },
+    {
+      "match": {
+        "title": "Persuasive 2020 Adjunct Proceedings: 15th International Conference on Persuasive Technology, Adjunct Proceedings (PERSUASIVE 2020)",
+        "year": 2020
+      },
+      "type": "misc",
+      "fields": {
+        "title": "Persuasive 2020 Adjunct Proceedings: 15th International Conference on Persuasive Technology, Adjunct Proceedings (PERSUASIVE 2020)",
+        "author": "Mette Skov and Lykke Brogaard Bertel and Sandra Burri Gram-Hansen and Rita Orji",
+        "year": "2020",
+        "howpublished": "CEUR Workshop Proceedings, Vol. 2629",
+        "publisher": "CEUR-WS.org",
+        "url": "https://ceur-ws.org/Vol-2629/"
+      },
+      "source": "https://ceur-ws.org/Vol-2629/"
+    },
+    {
+      "match": {
+        "title": "Personalized Persuasive Technology for Maternal Healthcare in Nigeria",
+        "year": 2020
+      },
+      "type": "inproceedings",
+      "fields": {
+        "title": "Personalized Persuasive Technology for Maternal Healthcare in Nigeria",
+        "author": "Charity Mbanusi and Makuochi Nkwo and Rita Orji and Virginia Ejiofor",
+        "year": "2020",
+        "booktitle": "Persuasive 2020 Adjunct Proceedings: 15th International Conference on Persuasive Technology, Adjunct Proceedings (PERSUASIVE 2020)",
+        "publisher": "CEUR-WS.org",
+        "volume": "2629",
+        "url": "https://ceur-ws.org/Vol-2629/4_ppt_nkwo.pdf"
+      },
+      "source": "https://ceur-ws.org/Vol-2629/4_ppt_nkwo.pdf"
+    },
+    {
+      "match": {
+        "title": "Socially-oriented Persuasive Strategies and Sustainable Behavior Change: Implications for Designing for Environmental Sustainability",
+        "year": 2020
+      },
+      "type": "inproceedings",
+      "fields": {
+        "title": "Socially-oriented Persuasive Strategies and Sustainable Behavior Change: Implications for Designing for Environmental Sustainability",
+        "author": "Makuochi Nkwo and Banuchitra Suruliraj and Rita Orji and John Ugah",
+        "year": "2020",
+        "booktitle": "Persuasive 2020 Adjunct Proceedings: 15th International Conference on Persuasive Technology, Adjunct Proceedings (PERSUASIVE 2020)",
+        "publisher": "CEUR-WS.org",
+        "volume": "2629",
+        "url": "https://ceur-ws.org/Vol-2629/10_poster_nkwo.pdf"
+      },
+      "source": "https://ceur-ws.org/Vol-2629/10_poster_nkwo.pdf"
+    },
+    {
+      "match": {
+        "title": "Bota: A Personalized Persuasive Mobile App for Sustainable Waste Management",
+        "year": 2020
+      },
+      "type": "inproceedings",
+      "fields": {
+        "title": "Bota: A Personalized Persuasive Mobile App for Sustainable Waste Management",
+        "author": "Banuchitra Suruliraj and Tolulope Olagunju and Makuochi Nkwo and Rita Orji",
+        "year": "2020",
+        "booktitle": "Persuasive 2020 Adjunct Proceedings: 15th International Conference on Persuasive Technology, Adjunct Proceedings (PERSUASIVE 2020)",
+        "publisher": "CEUR-WS.org",
+        "volume": "2629",
+        "url": "https://ceur-ws.org/Vol-2629/6_ppt_suruliraj.pdf"
+      },
+      "source": "https://ceur-ws.org/Vol-2629/6_ppt_suruliraj.pdf"
     }
   ]
 }
