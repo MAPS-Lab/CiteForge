@@ -228,17 +228,10 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      # Publication goes through a pull request, never a direct push: ruleset
-      # 10020080 rejects a direct push to main.
-      #
-      # The rules are split so this can run unattended without weakening CI.
-      # Ruleset 20801390 "Required CI on default branch" carries the strict
-      # required_status_checks rule and has no bypass actors at all, so nothing
-      # merges without a green "Required CI". Ruleset 10020080 keeps deletion,
-      # non_fast_forward and pull_request, and grants maps-lab-ci-bot
-      # (Integration 4222409) a pull_request-mode bypass, so the App may merge
-      # its own refresh pull request without the code-owner review and still
-      # cannot force-push or delete the branch.
+      # Publication goes through a pull request, never a direct push, so the
+      # monthly citation audit reads the corpus before the owner merges it. The
+      # owner's CI App opens it, because a pull request opened with
+      # GITHUB_TOKEN starts no workflow and Required CI would never run on it.
       # Publication is retried, because the corpus it publishes costs an hour of
       # provider quota to rebuild and the operations here fail for reasons that
       # have nothing to do with the data. A GitHub incident returned 403 on the
