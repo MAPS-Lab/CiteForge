@@ -1,6 +1,6 @@
 # CiteForge
 
-[![Tests](https://github.com/MAPS-Lab/CiteForge/actions/workflows/tests.yml/badge.svg)](https://github.com/MAPS-Lab/CiteForge/actions/workflows/tests.yml)
+[![Tests](https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml/badge.svg)](https://github.com/gabrielspadon/CiteForge/actions/workflows/tests.yml)
 
 CiteForge builds clean per-author BibTeX files from scholarly APIs. Point it at a CSV of
 authors and it retrieves each one's publications, enriches every entry against the major
@@ -18,7 +18,7 @@ Built and maintained by the [MAPS Lab](https://mapslab.tech/) at Dalhousie Unive
 Python 3.10 or later.
 
 ```bash
-git clone https://github.com/MAPS-Lab/CiteForge.git && cd CiteForge
+git clone https://github.com/gabrielspadon/CiteForge.git && cd CiteForge
 pip install -e .
 ```
 
@@ -144,7 +144,7 @@ Two conventions matter more than they look:
   year      = {2026},
   version   = {1.0.0},
   publisher = {MAPS Lab, Dalhousie University},
-  url       = {https://github.com/MAPS-Lab/CiteForge},
+  url       = {https://github.com/gabrielspadon/CiteForge},
   license   = {AGPL-3.0-or-later}
 }
 ```
