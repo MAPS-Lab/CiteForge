@@ -40,21 +40,25 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      # A dispatch needs contents:write on the target, so the token is minted
-      # for the website repository alone, never for this one.
-      - name: Generate dispatch token
-        id: dispatch_token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.CI_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
-          owner: gabrielspadon
-          repositories: mapslab-website
-          permission-contents: write
+      # Fails first when the secret is unset or rejected. Prints only the
+      # token's length and the login it authenticates as, never the value.
+      - name: Check CITEFORGE_BOT_TOKEN
+        env:
+          GH_TOKEN: ${{ secrets.CITEFORGE_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "CITEFORGE_BOT_TOKEN length: ${#GH_TOKEN}"
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::CITEFORGE_BOT_TOKEN is empty"
+            exit 1
+          fi
+          echo "CITEFORGE_BOT_TOKEN authenticates as $(gh api user --jq .login)"
 
+      # A dispatch needs contents:write on the target. CITEFORGE_BOT_TOKEN is
+      # the owner's fine-grained token, limited to this repository and the website.
       - name: Trigger mapslab-website publication sync
         env:
-          GH_TOKEN: ${{ steps.dispatch_token.outputs.token }}
+          GH_TOKEN: ${{ secrets.CITEFORGE_BOT_TOKEN }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha || inputs.merge_sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref || 'manual-replay' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}

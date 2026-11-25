@@ -15,7 +15,7 @@ on:
         default: '30'
 
 # Read only, and no job below escalates. This workflow is structurally
-# incapable of publishing, since it mints no App token, runs no git push,
+# incapable of publishing, since it reads no publishing token, runs no git push,
 # opens no pull request, and dispatches nothing to the website. The only thing
 # that leaves the runner is an artifact, so a shadow generation cannot reach main
 # even if it reports itself complete.
