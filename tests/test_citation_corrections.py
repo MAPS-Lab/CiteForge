@@ -6,6 +6,7 @@ import pytest
 
 from citeforge import bibtex_utils
 from citeforge.citation_corrections import authoritative_correction, load_citation_corrections
+from citeforge.merge_utils import merge_with_policy
 from citeforge.models import Record
 from citeforge.pipeline import article as article_mod
 from citeforge.text_utils import format_author_dirname
@@ -143,3 +144,59 @@ def test_pipeline_regenerates_sbbd_record_without_editing_bibtex(
     assert generated["fields"]["doi"] == "10.5753/sbbd.2026.249194"
     assert generated["fields"]["author"].startswith("Ivar V. Belizario and Douglas Teodoro")
     assert "note" not in generated["fields"]
+
+
+_CEUR = [
+    (
+        "Preface to the 7th International Workshop on Personalizing Persuasive Technologies (PPT 2024)",
+        "2024",
+        "https://ceur-ws.org/Vol-3728/preface3.pdf",
+        "Ifeoma Adaji and Kiemute Oyibo and Rita Orji and Jaap Ham and Alaa Alslaity",
+    ),
+    (
+        "Persuasive 2020 Adjunct Proceedings: 15th International Conference on Persuasive Technology,"
+        " Adjunct Proceedings (PERSUASIVE 2020)",
+        "2020",
+        "https://ceur-ws.org/Vol-2629/",
+        "Mette Skov and Lykke Brogaard Bertel and Sandra Burri Gram-Hansen and Rita Orji",
+    ),
+    (
+        "Personalized Persuasive Technology for Maternal Healthcare in Nigeria",
+        "2020",
+        "https://ceur-ws.org/Vol-2629/4_ppt_nkwo.pdf",
+        "Charity Mbanusi and Makuochi Nkwo and Rita Orji and Virginia Ejiofor",
+    ),
+    (
+        "Socially-oriented Persuasive Strategies and Sustainable Behavior Change: Implications for"
+        " Designing for Environmental Sustainability",
+        "2020",
+        "https://ceur-ws.org/Vol-2629/10_poster_nkwo.pdf",
+        "Makuochi Nkwo and Banuchitra Suruliraj and Rita Orji and John Ugah",
+    ),
+    (
+        "Bota: A Personalized Persuasive Mobile App for Sustainable Waste Management",
+        "2020",
+        "https://ceur-ws.org/Vol-2629/6_ppt_suruliraj.pdf",
+        "Banuchitra Suruliraj and Tolulope Olagunju and Makuochi Nkwo and Rita Orji",
+    ),
+]
+
+
+@pytest.mark.parametrize(("title", "year", "url", "byline"), _CEUR)
+def test_ceur_record_keeps_publisher_link_and_byline(title: str, year: str, url: str, byline: str) -> None:
+    """CEUR papers have no DOI or arXiv id, so the reviewed publisher link is the
+    identifier, and the CEUR byline beats a provider's expanded name."""
+    baseline = {"type": "inproceedings", "key": "x", "fields": {"title": title, "author": "R Orji", "year": year}}
+    correction = authoritative_correction(baseline)
+    assert correction is not None
+    assert correction["source"] == url
+
+    expanded = byline.replace("Makuochi Nkwo", "Makuochi Samuel Nkwo").replace(
+        "Virginia Ejiofor", "Virginia E. Ejiofor"
+    )
+    provider = {"type": "inproceedings", "fields": {"author": expanded, "title": title}}
+    merged = merge_with_policy(baseline, [("curated", correction), ("csl", provider)], emit_logs=False)
+
+    assert merged["fields"]["url"] == url
+    assert merged["fields"]["author"] == byline
+    assert "doi" not in merged["fields"]

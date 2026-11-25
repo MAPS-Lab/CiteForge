@@ -30,7 +30,7 @@ on:
   workflow_dispatch:
 
 # Declared per job below, not blanket at the top. The refresh job needs to read
-# the checkout and nothing else; publication happens with the App token, and the
+# the checkout and nothing else; publication happens with CITEFORGE_BOT_TOKEN, and the
 # verify job is the only thing that needs to dispatch a workflow.
 permissions:
   contents: read
@@ -63,7 +63,7 @@ jobs:
           # here. Left in place, checkout writes an http.extraheader carrying
           # the GITHUB_TOKEN, and git applies that header ahead of the
           # userinfo in a push URL. The publish step below authenticates with
-          # an App token embedded in its URL, so the header silently replaced
+          # CITEFORGE_BOT_TOKEN embedded in its URL, so the header silently replaced
           # it and the push went out as github-actions[bot], which holds
           # contents: read. Every refresh from 2026-08-01 onward died on a 403
           # against its own data branch, and the retry loop could not help
@@ -183,8 +183,6 @@ jobs:
           echo "runs_completed=$i" >> "$GITHUB_OUTPUT"
           echo "last_api_calls=$last_total" >> "$GITHUB_OUTPUT"
 
-      # Fresh token minted here (not at checkout): the pipeline loop can run for
-      # hours and an app token lives only 1h, so mint it immediately before the push.
       # Deliberately NOT output/run.log. That log records request URLs, and the
       # query-string providers key on them, so uploading it publishes secrets to
       # anyone who can read the run. This manifest is assembled from counts and
@@ -219,26 +217,10 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-      - name: Generate push token
-        id: push_token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: ${{ vars.CI_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.CI_BOT_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-
-      # Publication goes through a pull request, never a direct push: ruleset
-      # 10020080 rejects a direct push to main.
-      #
-      # The rules are split so this can run unattended without weakening CI.
-      # Ruleset 20801390 "Required CI on default branch" carries the strict
-      # required_status_checks rule and has no bypass actors at all, so nothing
-      # merges without a green "Required CI". Ruleset 10020080 keeps deletion,
-      # non_fast_forward and pull_request, and grants maps-lab-ci-bot
-      # (Integration 4222409) a pull_request-mode bypass, so the App may merge
-      # its own refresh pull request without the code-owner review and still
-      # cannot force-push or delete the branch.
+      # Publication goes through a pull request, never a direct push, so the
+      # monthly citation audit reads the corpus before the owner merges it. The
+      # owner's token (CITEFORGE_BOT_TOKEN) opens it, because a pull request opened with
+      # GITHUB_TOKEN starts no workflow and Required CI would never run on it.
       # Publication is retried, because the corpus it publishes costs an hour of
       # provider quota to rebuild and the operations here fail for reasons that
       # have nothing to do with the data. A GitHub incident returned 403 on the
@@ -246,7 +228,7 @@ jobs:
       - name: Open or update the refresh pull request
         id: publish
         env:
-          GH_TOKEN: ${{ steps.push_token.outputs.token }}
+          GH_TOKEN: ${{ secrets.CITEFORGE_BOT_TOKEN }}
         run: |
           set -euo pipefail
           MONTH="$(date +%Y-%m)"

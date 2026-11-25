@@ -287,7 +287,7 @@ def _lines(path: Path) -> list[str]:
 class TestGitHubPublisher:
     def test_it_satisfies_the_port_protocol(self, tmp_path: Path) -> None:
         port: PublicationPort = GitHubPublisher(
-            website_repository="MAPS-Lab/mapslab-website", dispatch_record=tmp_path / "dispatched"
+            website_repository="gabrielspadon/mapslab-website", dispatch_record=tmp_path / "dispatched"
         )
         assert port is not None
 
@@ -297,7 +297,7 @@ class TestGitHubPublisher:
         work = _worktree(tmp_path)
         record = _fake_tools(tmp_path, monkeypatch)
         publisher = GitHubPublisher(
-            website_repository="MAPS-Lab/mapslab-website", dispatch_record=tmp_path / "dispatched"
+            website_repository="gabrielspadon/mapslab-website", dispatch_record=tmp_path / "dispatched"
         )
 
         offer = publisher.offer_candidate(_request(work))
@@ -314,7 +314,7 @@ class TestGitHubPublisher:
         work = _worktree(tmp_path)
         _fake_tools(tmp_path, monkeypatch)
         publisher = GitHubPublisher(
-            website_repository="MAPS-Lab/mapslab-website", dispatch_record=tmp_path / "dispatched"
+            website_repository="gabrielspadon/mapslab-website", dispatch_record=tmp_path / "dispatched"
         )
 
         offer = publisher.offer_candidate(_request(work))
@@ -335,7 +335,7 @@ class TestGitHubPublisher:
         work = _worktree(tmp_path)
         record = _fake_tools(tmp_path, monkeypatch)
         publisher = GitHubPublisher(
-            website_repository="MAPS-Lab/mapslab-website", dispatch_record=tmp_path / "dispatched"
+            website_repository="gabrielspadon/mapslab-website", dispatch_record=tmp_path / "dispatched"
         )
 
         first = publisher.offer_candidate(_request(work))
@@ -360,7 +360,7 @@ class TestGitHubPublisher:
         work = _worktree(tmp_path)
         record = _fake_tools(tmp_path, monkeypatch)
         publisher = GitHubPublisher(
-            website_repository="MAPS-Lab/mapslab-website", dispatch_record=tmp_path / "dispatched"
+            website_repository="gabrielspadon/mapslab-website", dispatch_record=tmp_path / "dispatched"
         )
 
         assert publisher.offer_candidate(_request(work, **kwargs)) is None  # type: ignore[arg-type]
@@ -382,7 +382,7 @@ class TestGitHubPublisher:
     ) -> None:
         record = _fake_tools(tmp_path, monkeypatch)
         dispatched = tmp_path / "dispatched"
-        publisher = GitHubPublisher(website_repository="MAPS-Lab/mapslab-website", dispatch_record=dispatched)
+        publisher = GitHubPublisher(website_repository="gabrielspadon/mapslab-website", dispatch_record=dispatched)
 
         assert publisher.dispatch_website(_offer(tmp_path), observation) is None
         assert _lines(record / "dispatch") == []
@@ -398,7 +398,7 @@ class TestGitHubPublisher:
         offer, observation = _offer(work), _observation()
 
         for _ in range(3):
-            publisher = GitHubPublisher(website_repository="MAPS-Lab/mapslab-website", dispatch_record=dispatched)
+            publisher = GitHubPublisher(website_repository="gabrielspadon/mapslab-website", dispatch_record=dispatched)
             assert publisher.dispatch_website(offer, observation) == _MERGE
 
         assert len(_lines(record / "dispatch")) == 1
@@ -409,7 +409,7 @@ class TestGitHubPublisher:
         work = _worktree(tmp_path)
         record = _fake_tools(tmp_path, monkeypatch)
         dispatched = tmp_path / "dispatched"
-        publisher = GitHubPublisher(website_repository="MAPS-Lab/mapslab-website", dispatch_record=dispatched)
+        publisher = GitHubPublisher(website_repository="gabrielspadon/mapslab-website", dispatch_record=dispatched)
 
         publisher.dispatch_website(_offer(work), _observation())
         publisher.dispatch_website(_offer(work), _observation(merge_sha="3" * 40))
@@ -419,7 +419,7 @@ class TestGitHubPublisher:
     def test_a_missing_executable_fails_closed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("PATH", str(tmp_path / "empty"))
         publisher = GitHubPublisher(
-            website_repository="MAPS-Lab/mapslab-website", dispatch_record=tmp_path / "dispatched"
+            website_repository="gabrielspadon/mapslab-website", dispatch_record=tmp_path / "dispatched"
         )
 
         with pytest.raises(PublicationError, match="git is not on PATH"):

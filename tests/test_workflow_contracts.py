@@ -35,7 +35,7 @@ _SHADOW_WORKFLOWS = [path for path in _WORKFLOW_PATHS if "shadow" in path.stem]
 # The one workflow allowed to hold a write token and mint the App credential.
 # An allowlist by name fails loudly on a rename, which is the correct outcome
 # for a privilege grant.
-_PUBLISHING_WORKFLOWS = {_MONTHLY_REFRESH_WORKFLOW.name}
+_PUBLISHING_WORKFLOWS = {_MONTHLY_REFRESH_WORKFLOW.name, _MERGED_REFRESH_WORKFLOW.name}
 
 # What marks the one step that leases a generation segment. The invocation is
 # built as an argument array in one workflow and written out in another, so the
@@ -389,7 +389,16 @@ class TestMergedRefresh:
 
         assert "[0-9a-f]{40}" in commands
         assert "client_payload[merge_sha]=${MERGE_SHA}" in commands
-        assert "repos/MAPS-Lab/mapslab-website/dispatches" in commands
+        assert "repos/gabrielspadon/mapslab-website/dispatches" in commands
+
+    def test_a_manual_replay_is_dry_unless_asked(self) -> None:
+        """Every website push to main deploys mapslab.tech, so a replay proves
+        the chain on a dry-run branch unless the operator turns that off."""
+        workflow = _load_workflow(_MERGED_REFRESH_WORKFLOW)
+        commands = "\n".join(_workflow_run_commands(workflow))
+
+        assert workflow["on"]["workflow_dispatch"]["inputs"]["dry_run"]["default"] is True
+        assert "client_payload[dry_run]=${DRY_RUN}" in commands
 
     def test_the_dispatcher_neither_writes_nor_pushes(self) -> None:
         workflow = _load_workflow(_MERGED_REFRESH_WORKFLOW)
