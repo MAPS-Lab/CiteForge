@@ -176,8 +176,7 @@ class Work:
     status: Status
     year: int | None
     excluded: str | None
-    provenance: tuple[tuple[str, Source], ...]
-    overrides: tuple[tuple[str, str], ...] = ()
+    provenance: tuple[tuple[str, Source], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
