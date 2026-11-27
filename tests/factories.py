@@ -1,9 +1,11 @@
+from typing import Any
+
 from citeforge.model import Author, Kind, Member, Record, Source, Status, Work
 
 
-def author(name: str, **kw: object) -> Author:
+def author(name: str, **kw: Any) -> Author:
     given, _, family = name.rpartition(" ")
-    return Author(given, family, **kw)  # type: ignore[arg-type]
+    return Author(given, family, **kw)
 
 
 def record(
@@ -13,18 +15,18 @@ def record(
     source: Source = Source.CROSSREF,
     kind: Kind = Kind.ARTICLE,
     year: int | None = 2023,
-    **kw: object,
+    **kw: Any,
 ) -> Record:
     return Record(
         source=source,
         ids=frozenset(ids),
         kind=kind,
-        source_type=kw.pop("source_type", "journal-article"),  # type: ignore[arg-type]
+        source_type=kw.pop("source_type", "journal-article"),
         title=title,
         authors=authors or (author("Gabriel Spadon"), author("Stan Matwin")),
         year=year,
         dates=(year,) if year else (),
-        **kw,  # type: ignore[arg-type]
+        **kw,
     )
 
 
@@ -42,7 +44,7 @@ def work(r: Record, *, eprint: Record | None = None, key: str | None = None, exc
     )
 
 
-def member(name: str = "Gabriel Spadon", dirname: str = "Spadon (bfdGsGUAAAAJ)", **kw: object) -> Member:
-    fields: dict[str, object] = {"row": 41, "scholar": "bfdGsGUAAAAJ", "dblp": "192/1659", "orcids": (), "openalex": ()}
+def member(name: str = "Gabriel Spadon", dirname: str = "Spadon (bfdGsGUAAAAJ)", **kw: Any) -> Member:
+    fields: dict[str, Any] = {"row": 41, "scholar": "bfdGsGUAAAAJ", "dblp": "192/1659", "orcids": (), "openalex": ()}
     fields.update(kw)
-    return Member(name=name, dirname=dirname, **fields)  # type: ignore[arg-type]
+    return Member(name=name, dirname=dirname, **fields)

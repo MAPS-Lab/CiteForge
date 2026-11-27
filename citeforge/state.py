@@ -69,6 +69,8 @@ def _work(d: Mapping[str, Any]) -> Work:
         year=d["year"],
         excluded=d["excluded"],
         provenance=tuple((f, Source(s)) for f, s in d["provenance"]),
+        aliases=frozenset(d["aliases"]),
+        sources=frozenset(map(Source, d["sources"])),
     )
 
 

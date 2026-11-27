@@ -177,6 +177,8 @@ class Work:
     year: int | None
     excluded: str | None
     provenance: tuple[tuple[str, Source], ...] = ()
+    aliases: frozenset[str] = frozenset()
+    sources: frozenset[Source] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,3 +207,4 @@ class Registries:
     found: Mapping[str, Record] = field(default_factory=dict)
     dead: frozenset[str] = frozenset()
     failed: frozenset[str] = frozenset()
+    openalex: Mapping[str, Record] = field(default_factory=dict)

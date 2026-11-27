@@ -1,0 +1,408 @@
+import dataclasses
+import re
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any, Literal
+
+from citeforge.curated import Curated
+from citeforge.ids import is_preprint_id, split_id, work_key
+from citeforge.model import REGISTRIES, Author, Event, Group, Identity, Kind, Record, Rel, Source, Status, Work
+from citeforge.tables import (
+    ACM_JOURNAL_PROCEEDINGS,
+    CONFERENCE_AS_JOURNAL,
+    GENERIC_SERIES_NAMES,
+    INSTITUTIONAL_REPOSITORIES,
+    JOURNALS_NAMED_PROCEEDINGS,
+    PROCEEDINGS_SERIES_AS_JOURNAL,
+    REPOSITORY_AS_JOURNAL,
+)
+from citeforge.text import clean, family_keys, fold, is_affiliation, name_matches, ratio, token_set, word_prefix
+
+EXCLUDED_KINDS = frozenset(
+    {Kind.PROCEEDINGS, Kind.DATASET, Kind.SOFTWARE, Kind.PATENT, Kind.EDITORIAL, Kind.FRONT_MATTER, Kind.ABSTRACT,
+     Kind.NOTICE, Kind.PEER_REVIEW, Kind.COMPONENT, Kind.OTHER}
+)  # fmt: skip
+VERSION_RELS = frozenset({Rel.HAS_PREPRINT, Rel.PREPRINT_OF, Rel.VERSION_OF, Rel.PUBLISHED_AS})
+CROSSREF_KINDS: Mapping[str, Kind] = {
+    "journal-article": Kind.ARTICLE,
+    "proceedings-article": Kind.INPROCEEDINGS,
+    "book-chapter": Kind.INCOLLECTION,
+    "book-part": Kind.INCOLLECTION,
+    "book-section": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "monograph": Kind.BOOK,
+    "reference-book": Kind.BOOK,
+    "edited-book": Kind.PROCEEDINGS,
+    "proceedings": Kind.PROCEEDINGS,
+    "journal-issue": Kind.PROCEEDINGS,
+    "journal": Kind.PROCEEDINGS,
+    "report": Kind.TECHREPORT,
+    "dissertation": Kind.PHDTHESIS,
+    "posted-content": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "component": Kind.COMPONENT,
+    "peer-review": Kind.PEER_REVIEW,
+    "editorial": Kind.EDITORIAL,
+}
+DATACITE_KINDS: Mapping[str, Kind] = {
+    "journalarticle": Kind.ARTICLE,
+    "conferencepaper": Kind.INPROCEEDINGS,
+    "bookchapter": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "conferenceproceeding": Kind.PROCEEDINGS,
+    "report": Kind.TECHREPORT,
+    "dissertation": Kind.PHDTHESIS,
+    "preprint": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "software": Kind.SOFTWARE,
+    "component": Kind.COMPONENT,
+    "peerreview": Kind.PEER_REVIEW,
+    "text": Kind.OTHER,
+    "other": Kind.OTHER,
+}
+CSL_KINDS: Mapping[str, Kind] = {
+    "article-journal": Kind.ARTICLE,
+    "article": Kind.ARTICLE,
+    "paper-conference": Kind.INPROCEEDINGS,
+    "chapter": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "report": Kind.TECHREPORT,
+    "thesis": Kind.PHDTHESIS,
+    "posted-content": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "software": Kind.SOFTWARE,
+    "patent": Kind.PATENT,
+    "review": Kind.PEER_REVIEW,
+}
+_EDITORIAL = re.compile(r"^(guest )?editorial\b", re.IGNORECASE)
+_FRONT = re.compile(
+    r"^(preface\b|foreword\b|front matter\b|message from\b|welcome(?![-\w])|table of contents\b"
+    r"|conclusions?( and future works?)?$|dear )",
+    re.IGNORECASE,
+)
+_NOTICE = re.compile(r"^(corrections? to|correction:|erratum|corrigendum|retraction|expression of concern)\b", re.I)
+_ABSTRACT = re.compile(r"^[A-Z]{0,2}\d{1,4}\.\s")
+_CONFERENCE_SUFFIX = re.compile(r"conference|workshop|symposium")
+_CONFERENCE_JOURNAL = re.compile(r"^(proceedings of|proc\.|conference|international conference|workshop)\b")
+_PRIMARY_KIND_RANK = (
+    Kind.ARTICLE, Kind.INPROCEEDINGS, Kind.INCOLLECTION, Kind.BOOK, Kind.TECHREPORT, Kind.PHDTHESIS,
+    Kind.MASTERSTHESIS,
+)  # fmt: skip
+_FILL_ORDER = (Source.CROSSREF, Source.DATACITE, Source.CSL, Source.DBLP, Source.ARXIV, Source.OPENALEX)
+_FILL_FIELDS = (
+    "container", "event", "publisher", "volume", "number", "pages", "article_number", "url", "language", "school",
+    "institution", "editors", "primary_class", "degree",
+)  # fmt: skip
+_YEAR_ORDER = (Source.CROSSREF, Source.DATACITE, Source.CSL, Source.ARXIV, Source.DBLP, Source.OPENALEX, Source.CURATED)
+_OVERRIDE_ATTR = {"journal": "container", "booktitle": "container"}
+
+
+def _starts(value: str, prefixes: Iterable[str]) -> bool:
+    return any(value.startswith(p) for p in prefixes)
+
+
+def _named_proceedings(value: str) -> bool:
+    for name in JOURNALS_NAMED_PROCEEDINGS:
+        if value.startswith(name):
+            return not _CONFERENCE_SUFFIX.search(value[len(name) :])
+    return False
+
+
+VENUE_RULES: tuple[tuple[frozenset[Kind], Callable[[str], bool], Kind], ...] = (
+    (frozenset({Kind.ARTICLE}), lambda v: _starts(v, PROCEEDINGS_SERIES_AS_JOURNAL), Kind.INPROCEEDINGS),
+    (frozenset({Kind.INPROCEEDINGS}), lambda v: _starts(v, ACM_JOURNAL_PROCEEDINGS), Kind.ARTICLE),
+    (frozenset({Kind.INPROCEEDINGS}), _named_proceedings, Kind.ARTICLE),
+    (frozenset({Kind.INPROCEEDINGS}), lambda v: any(r in v for r in INSTITUTIONAL_REPOSITORIES), Kind.PHDTHESIS),
+    (
+        frozenset({Kind.ARTICLE, Kind.INPROCEEDINGS}),
+        lambda v: any(r in v for r in REPOSITORY_AS_JOURNAL),
+        Kind.PREPRINT,
+    ),
+    (frozenset({Kind.ARTICLE}), lambda v: v in CONFERENCE_AS_JOURNAL, Kind.INPROCEEDINGS),
+    (
+        frozenset({Kind.ARTICLE}),
+        lambda v: (
+            bool(_CONFERENCE_JOURNAL.match(v)) and not _named_proceedings(v) and not _starts(v, ACM_JOURNAL_PROCEEDINGS)
+        ),
+        Kind.INPROCEEDINGS,
+    ),
+)
+
+
+def _base_kind(r: Record) -> Kind:
+    source_type = r.source_type.strip().lower()
+    match r.source:
+        case Source.CROSSREF:
+            kind = CROSSREF_KINDS.get(source_type, Kind.OTHER)
+            if source_type == "book-chapter" and (
+                r.event or any(c.strip().lower() in GENERIC_SERIES_NAMES for c in r.container)
+            ):
+                return Kind.INPROCEEDINGS
+        case Source.DATACITE:
+            kind = DATACITE_KINDS.get(source_type.replace(" ", ""), Kind.OTHER)
+        case Source.CSL:
+            kind = CSL_KINDS.get(source_type, Kind.OTHER)
+        case _:
+            kind = r.kind
+    if kind is Kind.PHDTHESIS and r.degree and "master" in r.degree.lower():
+        return Kind.MASTERSTHESIS
+    return kind
+
+
+def classify(r: Record) -> Kind:
+    kind = _base_kind(r)
+    title = clean(r.title)
+    if _EDITORIAL.match(title):
+        return Kind.EDITORIAL
+    if _FRONT.match(title):
+        return Kind.FRONT_MATTER
+    if _NOTICE.match(title) or any(rel in (Rel.CORRECTS, Rel.RETRACTS, Rel.WITHDRAWS) for rel, _ in r.relations):
+        return Kind.NOTICE
+    supplement = bool(r.pages and re.match(r"^S\d+", r.pages)) or "suppl" in (r.number or "").lower()
+    if _ABSTRACT.match(title) and supplement:
+        return Kind.ABSTRACT
+    venue = (r.container[0] if r.container else "").strip().lower()
+    if venue:
+        for kinds, test, target in VENUE_RULES:
+            if kind in kinds and test(venue):
+                return target
+    return kind
+
+
+def year_of(records: Sequence[Record]) -> int | None:
+    for source in _YEAR_ORDER:
+        for r in sorted(records, key=_record_order):
+            if r.source is source and r.year is not None:
+                return r.year
+    return None
+
+
+def doi_agrees(claim_title: str, member: Identity, reg: Record) -> Literal["ok", "review", "detach"]:
+    title_score = token_set(claim_title, reg.title)
+    title_ok = title_score >= 0.90 or ratio(claim_title, reg.title) >= 0.85 or word_prefix(claim_title, reg.title)
+    people = [a for a in reg.authors if a.family or a.literal]
+    named = any((a.orcid and a.orcid in member.orcids) or name_matches(member.names, a) for a in people)
+    if title_score < 0.60 or (people and not named):
+        return "detach"
+    return "ok" if title_ok else "review"
+
+
+def _record_order(r: Record) -> tuple[str, str]:
+    return r.source.value, min(r.ids, default="")
+
+
+def _doi(r: Record) -> str | None:
+    dois = sorted(i for i in r.ids if split_id(i)[0] == "doi")
+    return dois[0] if dois else None
+
+
+def _primary(records: Sequence[Record]) -> Record:
+    def rank(r: Record) -> tuple[int, int, int, str]:
+        kind = classify(r)
+        kind_rank = _PRIMARY_KIND_RANK.index(kind) if kind in _PRIMARY_KIND_RANK else len(_PRIMARY_KIND_RANK)
+        preprint = kind is Kind.PREPRINT
+        if r.source in REGISTRIES and not preprint:
+            tier = 0
+        elif r.source is Source.CURATED:
+            tier = 1
+        elif r.source is Source.DBLP and not preprint:
+            tier = 2
+        elif r.source in REGISTRIES:
+            tier = 3
+        elif r.source is Source.ARXIV:
+            tier = 4
+        elif r.source is Source.DBLP:
+            tier = 5
+        else:
+            tier = 6
+        return tier, kind_rank, r.year if r.year is not None else 9999, min(r.ids, default="")
+
+    return min(records, key=rank)
+
+
+def _merge_author_ids(primary: tuple[Author, ...], donor: tuple[Author, ...]) -> tuple[Author, ...] | None:
+    if len(primary) != len(donor) or not primary:
+        return None
+    out = []
+    for a, d in zip(primary, donor, strict=True):
+        if a.family and d.family and not family_keys(a.family) & family_keys(d.family):
+            return None
+        out.append(
+            dataclasses.replace(
+                a,
+                orcid=a.orcid or d.orcid,
+                openalex=a.openalex or d.openalex,
+                rors=a.rors or d.rors,
+                affiliations=a.affiliations or d.affiliations,
+            )
+        )
+    return tuple(out)
+
+
+def _is_sorted_byline(authors: tuple[Author, ...]) -> bool:
+    families = [fold(a.family) for a in authors]
+    return len(families) >= 3 and all(families) and families == sorted(families)
+
+
+def _repair_order(primary: Record, candidates: Sequence[Record]) -> tuple[tuple[Author, ...], Source] | None:
+    if primary.source is not Source.CROSSREF or not _is_sorted_byline(primary.authors):
+        return None
+    current = [fold(a.family) for a in primary.authors]
+    for d in candidates:
+        order = [fold(a.family) for a in d.authors]
+        if d.source not in (Source.ARXIV, Source.DBLP) or sorted(order) != sorted(current) or order == current:
+            continue
+        pool = list(primary.authors)
+        ordered = []
+        for family in order:
+            match = next(p for p in pool if fold(p.family) == family)
+            pool.remove(match)
+            ordered.append(match)
+        return tuple(ordered), d.source
+    return None
+
+
+def clean_byline(authors: tuple[Author, ...]) -> tuple[tuple[Author, ...], list[str]]:
+    persons = any(a.family for a in authors)
+    seen: set[tuple[str, str, str | None, tuple[str, ...]]] = set()
+    out, dropped = [], []
+    for a in authors:
+        if a.literal and not a.family and persons and is_affiliation(a.literal):
+            dropped.append(f"author_affiliation_dropped:{a.literal}")
+            continue
+        key = (fold(a.given), fold(a.family or a.literal or ""), a.orcid, a.rors)
+        if key in seen and (a.orcid or len(authors) >= 50):
+            dropped.append(f"author_repeat_dropped:{a.given} {a.family}".strip())
+            continue
+        seen.add(key)
+        out.append(a)
+    return tuple(out), dropped
+
+
+def _apply_override(r: Record, name: str, value: str) -> Record:
+    if name == "year":
+        return dataclasses.replace(r, year=int(value), dates=(int(value),))
+    attr = _OVERRIDE_ATTR.get(name, name)
+    change: dict[str, Any] = {attr: (value,) if attr == "container" else value}
+    return dataclasses.replace(r, **change)
+
+
+def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
+    records = sorted(g.records, key=_record_order)
+    if not records:
+        claim = min((c for _, c in g.claims), key=lambda c: (c.source.value, sorted(c.ids)))
+        records = [Record(claim.source, claim.ids, Kind.OTHER, "claim", claim.title, year=claim.year)]
+    primary = _primary(records)
+    provenance: dict[str, Source] = {"title": primary.source, "authors": primary.source}
+    doi = _doi(primary)
+    donors = sorted(
+        (r for r in records if r is not primary and doi and doi in r.ids),
+        key=lambda r: (_FILL_ORDER.index(r.source) if r.source in _FILL_ORDER else 99, _record_order(r)),
+    )
+    updates: dict[str, Any] = {}
+    for name in _FILL_FIELDS:
+        if getattr(primary, name):
+            provenance[name] = primary.source
+            continue
+        donor = next((d for d in donors if getattr(d, name)), None)
+        if donor is not None:
+            updates[name] = getattr(donor, name)
+            provenance[name] = donor.source
+    people = [a for a in primary.authors if a.family]
+    if not people:
+        donor = next((d for d in donors if any(a.family for a in d.authors)), None)
+        if donor is not None:
+            updates["authors"] = donor.authors
+            provenance["authors"] = donor.source
+    authors = updates.get("authors", primary.authors)
+    assert isinstance(authors, tuple)
+    authors, dropped = clean_byline(authors)
+    if dropped:
+        updates["authors"] = authors
+    if (repair := _repair_order(dataclasses.replace(primary, authors=authors), records)) is not None:
+        authors, provenance["author_order"] = repair
+        updates["authors"] = authors
+    for d in donors:
+        if (merged := _merge_author_ids(authors, d.authors)) is not None and merged != authors:
+            authors = updates["authors"] = merged
+            provenance.setdefault("author_ids", d.source)
+    primary = dataclasses.replace(primary, **updates)
+    same_version = [primary, *(r for r in records if doi and doi in r.ids and r is not primary)]
+    year = year_of(same_version) if primary.source is not Source.ARXIV else primary.year
+    if year is not None:
+        provenance["year"] = next(r.source for r in same_version if r.year == year)
+    for work_id in sorted(g.ids):
+        for name, value in curated.overrides.get(work_id, ()):
+            primary = _apply_override(primary, name, value)
+            provenance[name] = Source.CURATED
+            if name == "year":
+                year = int(value)
+    eprint = None
+    if not g.fuzzy and not any(split_id(i)[0] == "arxiv" for i in primary.ids):
+        arxiv = [r for r in records if r is not primary and any(split_id(i)[0] == "arxiv" for i in r.ids)]
+        arxiv.sort(key=lambda r: (r.source is not Source.ARXIV, _record_order(r)))
+        eprint = arxiv[0] if arxiv else None
+    kind = classify(primary)
+    status = primary.status
+    excluded = None
+    if kind in EXCLUDED_KINDS:
+        excluded = f"kind:{kind.value}"
+    elif status is not Status.OK:
+        excluded = f"status:{status.value}"
+    if reason := curated.excluded(g.ids):
+        excluded = reason
+    work = Work(
+        key=work_key(i for i in primary.ids if split_id(i)[0] != "openalex") if _keyable(primary) else g.key,
+        primary=primary,
+        eprint=eprint,
+        linked=frozenset(),
+        kind=kind,
+        status=status,
+        year=year,
+        excluded=excluded,
+        provenance=tuple(sorted(provenance.items())),
+        aliases=g.ids,
+        sources=frozenset(r.source for r in records) | frozenset(c.source for _, c in g.claims),
+    )
+    return work, tuple(Event(d.partition(":")[0], None, work.key, d.partition(":")[2]) for d in dropped)
+
+
+def _keyable(r: Record) -> bool:
+    return any(split_id(i)[0] != "openalex" for i in r.ids)
+
+
+def apply_links(works: Sequence[Work]) -> list[Work]:
+    by_alias = {alias: w.key for w in works for alias in w.aliases}
+    linked: dict[str, set[str]] = {}
+    status: dict[str, Status] = {}
+    excluded: dict[str, str] = {}
+    for w in works:
+        for rel, target in sorted(w.primary.relations):
+            target_key = by_alias.get(target)
+            if target_key is None or target_key == w.key:
+                continue
+            if rel in (Rel.CORRECTS, Rel.RETRACTS, Rel.WITHDRAWS):
+                linked.setdefault(target_key, set()).add(w.key)
+                if rel is Rel.RETRACTS:
+                    status[target_key] = Status.RETRACTED
+                elif rel is Rel.WITHDRAWS:
+                    status[target_key] = Status.WITHDRAWN
+            elif rel is Rel.TRANSLATION_OF:
+                linked.setdefault(target_key, set()).add(w.key)
+                excluded.setdefault(w.key, f"translation_of:{target_key}")
+    out = []
+    for w in works:
+        new_status = status.get(w.key, w.status)
+        reason = w.excluded or excluded.get(w.key)
+        if new_status is not Status.OK and (reason is None or reason.startswith("translation_of")):
+            reason = f"status:{new_status.value}"
+        out.append(
+            dataclasses.replace(
+                w, linked=w.linked | frozenset(linked.get(w.key, ())), status=new_status, excluded=reason
+            )
+        )
+    return out
+
+
+def is_preprint_group(ids: Iterable[str]) -> bool:
+    version_ids = [i for i in ids if split_id(i)[0] in ("doi", "arxiv")]
+    return bool(version_ids) and all(is_preprint_id(i) for i in version_ids)

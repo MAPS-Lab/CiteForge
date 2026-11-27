@@ -1,0 +1,233 @@
+import dataclasses
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
+from citeforge.curated import Curated
+from citeforge.model import Author, Group, Kind, Record, Rel, Source, Status
+from citeforge.text import name_key
+from citeforge.works import apply_links, build, classify, clean_byline, doi_agrees, year_of
+from tests.factories import author, record
+from tests.unit.test_authorship import identity
+
+
+@pytest.mark.parametrize(
+    ("source", "source_type", "extra", "kind"),
+    [
+        (Source.CROSSREF, "journal-article", {}, Kind.ARTICLE),
+        (Source.CROSSREF, "proceedings-article", {}, Kind.INPROCEEDINGS),
+        (Source.CROSSREF, "book-chapter", {"container": ("Lecture Notes in Computer Science",)}, Kind.INPROCEEDINGS),
+        (Source.CROSSREF, "book-chapter", {"event": "KDD 2023"}, Kind.INPROCEEDINGS),
+        (Source.CROSSREF, "book-chapter", {"container": ("Handbook of Things",)}, Kind.INCOLLECTION),
+        (Source.CROSSREF, "monograph", {}, Kind.BOOK),
+        (Source.CROSSREF, "edited-book", {}, Kind.PROCEEDINGS),
+        (Source.CROSSREF, "report", {}, Kind.TECHREPORT),
+        (Source.CROSSREF, "dissertation", {"degree": "Master of Science"}, Kind.MASTERSTHESIS),
+        (Source.CROSSREF, "dissertation", {}, Kind.PHDTHESIS),
+        (Source.CROSSREF, "posted-content", {}, Kind.PREPRINT),
+        (Source.CROSSREF, "peer-review", {}, Kind.PEER_REVIEW),
+        (Source.CROSSREF, "weird-new-type", {}, Kind.OTHER),
+        (Source.DATACITE, "Dataset", {}, Kind.DATASET),
+        (Source.DATACITE, "ConferencePaper", {}, Kind.INPROCEEDINGS),
+        (Source.CSL, "paper-conference", {}, Kind.INPROCEEDINGS),
+        (Source.CROSSREF, "journal-article", {"container": ("Procedia Computer Science",)}, Kind.INPROCEEDINGS),
+        (Source.CROSSREF, "journal-article", {"container": ("Proceedings of the IEEE",)}, Kind.ARTICLE),
+        (Source.CROSSREF, "journal-article", {"container": ("Proceedings of the 5th Conference",)}, Kind.INPROCEEDINGS),
+        (
+            Source.CROSSREF,
+            "proceedings-article",
+            {"container": ("Proceedings of the ACM on Human-Computer Interaction",)},
+            Kind.ARTICLE,
+        ),
+        (Source.CROSSREF, "journal-article", {"container": ("eScholarship",)}, Kind.PREPRINT),
+        (Source.CROSSREF, "proceedings-article", {"container": ("UWSpace",)}, Kind.PHDTHESIS),
+    ],
+)
+def test_kind_map(source: Source, source_type: str, extra: dict, kind: Kind) -> None:
+    assert classify(record("doi:10.1234/k", source=source, source_type=source_type, **extra)) is kind
+
+
+@pytest.mark.parametrize(
+    ("title", "kind"),
+    [
+        ("Guest Editorial: Maritime AI", Kind.EDITORIAL),
+        ("Preface", Kind.FRONT_MATTER),
+        ("Message from the General Chairs", Kind.FRONT_MATTER),
+        ("Conclusions and future work", Kind.FRONT_MATTER),
+        ("Correction to: Vessel tracks", Kind.NOTICE),
+        ("Erratum", Kind.NOTICE),
+        ("Welcome-based routing", Kind.ARTICLE),
+    ],
+)
+def test_title_patterns(title: str, kind: Kind) -> None:
+    assert classify(record("doi:10.1234/t", title=title)) is kind
+
+
+def test_abstract_pattern_needs_supplement() -> None:
+    assert classify(record("doi:10.1234/a", title="P12. A poster", pages="S45")) is Kind.ABSTRACT
+    assert classify(record("doi:10.1234/a", title="P12. A poster", pages="45")) is Kind.ARTICLE
+
+
+@given(
+    st.sampled_from(list(Kind)),
+    st.sampled_from(
+        [
+            "",
+            "Procedia CIRP",
+            "Proceedings of the IEEE",
+            "UWSpace",
+            "Proceedings of the ACM on Networking",
+            "Software Engineering",
+        ]
+    ),
+)
+def test_classify_is_a_fixpoint(kind: Kind, venue: str) -> None:
+    r = record("dblp:conf/x/Y", source=Source.DBLP, kind=kind, container=(venue,) if venue else ())
+    once = classify(r)
+    assert classify(dataclasses.replace(r, kind=once)) is once
+
+
+def test_year_rule_order() -> None:
+    cr = record("doi:10.1093/nar/gkz935", year=2019)
+    oa = record("doi:10.1093/nar/gkz935", source=Source.OPENALEX, year=2020)
+    ax = record("arxiv:2101.00001", source=Source.ARXIV, year=2018)
+    dblp = record("dblp:x/y", source=Source.DBLP, year=2021)
+    assert year_of([oa, cr]) == 2019
+    assert year_of([oa, dblp, ax]) == 2018
+    assert year_of([oa]) == 2020
+    assert year_of([record("doi:10.1234/n", year=None)]) is None
+
+
+def test_doi_agrees_bands() -> None:
+    me = identity()
+    reg = record("doi:10.1234/r", title="Graph neural networks for vessel trajectory forecasting")
+    assert doi_agrees("Graph Neural Networks for Vessel Trajectory Forecasting", me, reg) == "ok"
+    assert doi_agrees("Graph neural networks for vessel trajectory forecasting in the Arctic sea ice", me, reg) == "ok"
+    assert doi_agrees("Graph networks for ship trajectory forecasts at sea", me, reg) == "review"
+    assert doi_agrees("Protein folding with diffusion", me, reg) == "detach"
+    stranger = dataclasses.replace(reg, authors=(author("Ana Lima"),))
+    assert doi_agrees(reg.title, me, stranger) == "detach"
+
+
+def _group(*records: Record, fuzzy: bool = False) -> Group:
+    ids = frozenset(i for r in records for i in r.ids)
+    return Group(min(ids), ids, records, (), fuzzy)
+
+
+def test_build_prefers_registry_and_fills_only_from_same_doi() -> None:
+    doi = "doi:10.1016/j.oceaneng.2024.117234"
+    cr = record(doi, container=("Ocean Engineering",), pages=None, publisher="Elsevier BV")
+    oa = record(
+        doi,
+        "openalex:W1",
+        source=Source.OPENALEX,
+        pages="117234",
+        volume="300",
+        authors=(
+            author("Gabriel Spadon", orcid="0000-0002-1825-0097", rors=("https://ror.org/01e6qks80",)),
+            author("Stan Matwin"),
+        ),
+    )
+    ax = record(
+        "arxiv:2310.18948", source=Source.ARXIV, kind=Kind.PREPRINT, volume="99", primary_class="cs.LG", year=2023
+    )
+    w, events = build(_group(oa, ax, cr), Curated())
+    assert w.primary.source is Source.CROSSREF
+    assert w.key == doi
+    assert w.primary.pages == "117234" and w.primary.volume == "300"
+    assert w.primary.authors[0].orcid == "0000-0002-1825-0097"
+    assert w.eprint is ax
+    assert w.primary.primary_class is None
+    assert dict(w.provenance)["pages"] is Source.OPENALEX
+    assert all(source is not Source.ARXIV for _, source in w.provenance)
+    assert w.sources == {Source.CROSSREF, Source.OPENALEX, Source.ARXIV}
+    assert events == ()
+    fuzzy, _ = build(_group(cr, ax, fuzzy=True), Curated())
+    assert fuzzy.eprint is None
+
+
+def test_build_version_of_record_fallbacks() -> None:
+    dblp = record("dblp:conf/x/S23", source=Source.DBLP, kind=Kind.INPROCEEDINGS)
+    ax = record("arxiv:2101.00001", source=Source.ARXIV, kind=Kind.PREPRINT)
+    assert build(_group(ax, dblp), Curated())[0].primary.ids == dblp.ids
+    corr = dataclasses.replace(dblp, kind=Kind.PREPRINT, ids=frozenset({"dblp:journals/corr/abs-1"}))
+    assert build(_group(corr, ax), Curated())[0].primary.ids == ax.ids
+    oa = record("openalex:W9", source=Source.OPENALEX)
+    only, _ = build(_group(oa), Curated())
+    assert only.primary == oa and only.key == "openalex:W9"
+
+
+def test_build_exclusions_and_overrides() -> None:
+    editorial = record("doi:10.1234/e", title="Editorial")
+    assert build(_group(editorial), Curated())[0].excluded == "kind:editorial"
+    retracted = record("doi:10.1234/r", status=Status.RETRACTED)
+    assert build(_group(retracted), Curated())[0].excluded == "status:retracted"
+    cur = Curated(
+        reject={("*", "doi:10.1234/c"): "namesake"},
+        overrides={"doi:10.1234/c": (("booktitle", "KDD"), ("year", "2024"))},
+    )
+    w, _ = build(_group(record("doi:10.1234/c", kind=Kind.INPROCEEDINGS, source_type="proceedings-article")), cur)
+    assert w.excluded == "curated:namesake"
+    assert w.primary.container == ("KDD",) and w.year == 2024
+    assert dict(w.provenance)["year"] is Source.CURATED
+
+
+def test_byline_rules() -> None:
+    orcid = "0000-0002-1825-0097"
+    dup = (author("Ana Lima", orcid=orcid), author("Bo Kim"), author("Ana Lima", orcid=orcid))
+    assert len(clean_byline(dup)[0]) == 2
+    no_orcid = (author("Ana Lima"), author("Ana Lima"))
+    assert len(clean_byline(no_orcid)[0]) == 2
+    big = tuple(author(f"Per Son{i % 40}") for i in range(60))
+    assert len(clean_byline(big)[0]) == 40
+    org = (author("Ana Lima"), Author("", "", literal="Dalhousie University"), Author("", "", literal="ATLAS Team"))
+    kept, dropped = clean_byline(org)
+    assert [a.literal for a in kept] == [None, "ATLAS Team"]
+    assert dropped == ["author_affiliation_dropped:Dalhousie University"]
+
+
+def test_org_only_byline_takes_person_byline_and_sorted_byline_repair() -> None:
+    doi = "doi:10.52202/079017-1"
+    org = record(doi, authors=(Author("", "", literal="Some Consortium"),))
+    persons = record(doi, source=Source.DBLP, authors=(author("Zoe Zed"), author("Al Alpha")))
+    assert [a.family for a in build(_group(org, persons), Curated())[0].primary.authors] == ["Zed", "Alpha"]
+    sorted_cr = record(doi, authors=(author("Al Alpha"), author("Bo Beta"), author("Cy Gamma")))
+    ax = record(
+        "arxiv:2401.00001",
+        source=Source.ARXIV,
+        kind=Kind.PREPRINT,
+        authors=(author("Cy Gamma"), author("Al Alpha"), author("Bo Beta")),
+    )
+    w, _ = build(_group(sorted_cr, ax), Curated())
+    assert [a.family for a in w.primary.authors] == ["Gamma", "Alpha", "Beta"]
+    assert dict(w.provenance)["author_order"] is Source.ARXIV
+
+
+def test_apply_links_notices_retractions_translations() -> None:
+    target = build(_group(record("doi:10.1234/t")), Curated())[0]
+    notice = build(
+        _group(
+            record("doi:10.1234/n", title="Correction to: X", relations=frozenset({(Rel.CORRECTS, "doi:10.1234/t")}))
+        ),
+        Curated(),
+    )[0]
+    retraction = build(
+        _group(
+            record("doi:10.1234/x", title="Retraction note", relations=frozenset({(Rel.RETRACTS, "doi:10.1234/t")}))
+        ),
+        Curated(),
+    )[0]
+    translation = build(
+        _group(record("doi:10.1234/pt", relations=frozenset({(Rel.TRANSLATION_OF, "doi:10.1234/t")}))), Curated()
+    )[0]
+    out = {w.key: w for w in apply_links([target, notice, retraction, translation])}
+    t = out["doi:10.1234/t"]
+    assert t.linked == {"doi:10.1234/n", "doi:10.1234/x", "doi:10.1234/pt"}
+    assert t.status is Status.RETRACTED and t.excluded == "status:retracted"
+    assert out["doi:10.1234/n"].excluded == "kind:notice"
+    assert out["doi:10.1234/pt"].excluded == "translation_of:doi:10.1234/t"
+
+
+def test_name_key_reexport_sanity() -> None:
+    assert name_key("Gabriel", "Spadon").initials == "g"
