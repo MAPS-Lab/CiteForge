@@ -2,7 +2,7 @@ from collections.abc import Iterable, Mapping
 
 from citeforge.http import Http
 from citeforge.ids import split_id
-from citeforge.model import Fetch, Record, Registries
+from citeforge.model import VERSION_RELS, Fetch, Record, Registries
 from citeforge.sources import arxiv, crossref, datacite, doiorg, openalex
 
 REGISTERED = frozenset({"crossref", "datacite"})
@@ -41,6 +41,10 @@ def fetch(ids: Iterable[str], http: Http, have: Mapping[str, Record]) -> Registr
                         dead.add(work_id)
                     else:
                         failed.add(work_id)
+    arxivs = sorted(
+        set(arxivs)
+        | {t for r in found.values() for rel, t in r.relations if rel in VERSION_RELS and split_id(t)[0] == "arxiv"}
+    )
     ax = arxiv.by_id(http, arxivs)
     found |= ax.found
     dead |= ax.missing

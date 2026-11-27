@@ -115,9 +115,8 @@ def atomic_write(path: Path, text: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
         os.replace(tmp, path)
-    except BaseException:
+    finally:
         Path(tmp).unlink(missing_ok=True)
-        raise
 
 
 def save(directory: Path, state: State) -> None:

@@ -5,7 +5,19 @@ from typing import Any, Literal
 
 from citeforge.curated import Curated
 from citeforge.ids import is_preprint_id, split_id, work_key
-from citeforge.model import REGISTRIES, Author, Event, Group, Identity, Kind, Record, Rel, Source, Status, Work
+from citeforge.model import (
+    REGISTRIES,
+    Author,
+    Event,
+    Group,
+    Identity,
+    Kind,
+    Record,
+    Rel,
+    Source,
+    Status,
+    Work,
+)
 from citeforge.tables import (
     ACM_JOURNAL_PROCEEDINGS,
     CONFERENCE_AS_JOURNAL,
@@ -21,7 +33,6 @@ EXCLUDED_KINDS = frozenset(
     {Kind.PROCEEDINGS, Kind.DATASET, Kind.SOFTWARE, Kind.PATENT, Kind.EDITORIAL, Kind.FRONT_MATTER, Kind.ABSTRACT,
      Kind.NOTICE, Kind.PEER_REVIEW, Kind.COMPONENT, Kind.OTHER}
 )  # fmt: skip
-VERSION_RELS = frozenset({Rel.HAS_PREPRINT, Rel.PREPRINT_OF, Rel.VERSION_OF, Rel.PUBLISHED_AS})
 CROSSREF_KINDS: Mapping[str, Kind] = {
     "journal-article": Kind.ARTICLE,
     "proceedings-article": Kind.INPROCEEDINGS,

@@ -165,12 +165,13 @@ def _rows(path: Path, required: Sequence[str]) -> list[tuple[int, dict[str, str]
         return rows
 
 
-def load(path: Path) -> tuple[Member, ...]:
+def load(path: Path, strict: bool = True) -> tuple[Member, ...]:
     members: list[Member] = []
     seen_identity: dict[tuple[str, str, str], int] = {}
     seen_ids: dict[tuple[str, str], int] = {}
     seen_dirs: dict[str, int] = {}
-    for row, raw in _rows(path, COLUMNS):
+    required = COLUMNS if strict else tuple(c for c in COLUMNS if c not in ("ORCID", "OpenAlex"))
+    for row, raw in _rows(path, required):
         name = raw["Name"].strip()
         normalized = normalize_name(name)
         if not normalized:
@@ -179,11 +180,11 @@ def load(path: Path) -> tuple[Member, ...]:
             raise RosterError(f"row {row}: Name must not contain contact data or control characters")
         scholar = scholar_id(raw["Scholar Link"].strip(), row)
         dblp = dblp_id(raw["DBLP Link"].strip(), row)
-        orcids = _id_list(raw["ORCID"], row, "ORCID")
-        openalex = _id_list(raw["OpenAlex"], row, "OpenAlex")
+        orcids = _id_list(raw.get("ORCID", ""), row, "ORCID")
+        openalex = _id_list(raw.get("OpenAlex", ""), row, "OpenAlex")
         enabled = _enabled(raw["Enabled"], row)
         reason = raw["Exclusion Reason"].strip()
-        if enabled and not (orcids or dblp):
+        if strict and enabled and not (orcids or dblp):
             raise RosterError(f"row {row}: enabled author needs an ORCID or a DBLP pid")
         if not enabled and not reason:
             raise RosterError(f"row {row}: disabled author requires an Exclusion Reason")

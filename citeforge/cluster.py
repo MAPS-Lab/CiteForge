@@ -6,10 +6,10 @@ from rapidfuzz import fuzz
 from citeforge.curated import Curated
 from citeforge.http import Http
 from citeforge.ids import is_preprint_id, split_id, work_key
-from citeforge.model import REGISTRIES, Claim, Event, Fetch, Group, Identity, Record, Registries, Source
+from citeforge.model import REGISTRIES, VERSION_RELS, Claim, Event, Fetch, Group, Identity, Record, Registries, Source
 from citeforge.sources import crossref
 from citeforge.text import family_keys, fold, name_matches, ratio, title_key
-from citeforge.works import VERSION_RELS, doi_agrees, is_preprint_group
+from citeforge.works import doi_agrees, is_preprint_group
 
 CROSSWALK_MIN = 0.90
 FUZZY_LINK = 0.92

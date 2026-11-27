@@ -57,6 +57,9 @@ class Rel(StrEnum):
     WITHDRAWS = "withdraws"
 
 
+VERSION_RELS = frozenset({Rel.HAS_PREPRINT, Rel.PREPRINT_OF, Rel.VERSION_OF, Rel.PUBLISHED_AS})
+
+
 class Fetch(StrEnum):
     OK = "ok"
     NOT_FOUND = "not_found"

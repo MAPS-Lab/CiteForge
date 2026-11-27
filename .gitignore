@@ -62,3 +62,6 @@ output/**/*.log
 third-party/*
 ruff-report.json
 
+
+# Run artifacts
+run/
