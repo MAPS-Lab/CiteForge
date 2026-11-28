@@ -637,6 +637,42 @@ def test_orcid_work_without_an_identifier_is_searched_and_counted(
     assert world.calls["crossref.search"] == 3  # the DOI-less KDD listing and both ORCID works
 
 
+def test_a_title_only_orcid_work_found_by_search_joins_the_openalex_doi_and_ships(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = default_world()
+    doi, title = "doi:10.1093/ofid/ofac564", "Comparison of viral loads in the nasal mucosa of vessel crews"
+    found = cr(doi, title, (person("Gabriel Spadon"), MW), year=2023, container=("Open Forum Infectious Diseases",))
+    world.crossref[doi] = found
+    oa_author = person("Gabriel Spadon", openalex="A5023888391")
+    oa = record(doi, "openalex:W9", title=title, authors=(oa_author, MW), source=Source.OPENALEX, year=2023)
+    world.openalex_claims.append(Claim(Source.OPENALEX, oa.ids, title, 2023, record=oa))
+    world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset({f"orcidwork:{SPADON_ORCID}/7"}), title, 2023))
+    install(monkeypatch, world)
+    monkeypatch.setattr(crossref, "search", lambda http, t, f, y: Result(Fetch.OK, (found,) if t == title else ()))
+    assert cli.main([]) == 0
+    rows = {r["work"]["key"]: r for r in map(json.loads, (workdir / "state/works.jsonl").read_text().splitlines())}
+    assert rows[doi]["members"][SPADON]["rule"] == "orcid_claim"
+    assert f"orcidwork:{SPADON_ORCID}/7" in rows[doi]["work"]["aliases"]
+    assert any(doi.removeprefix("doi:") in p.read_text() for p in (workdir / "output" / SPADON).glob("*.bib"))
+    coverage = json.loads((workdir / "state/report.json").read_text())["coverage"]
+    assert not [i for i in coverage["items"] if i["title"] == title]
+
+
+def test_a_search_outage_on_a_title_only_orcid_work_is_unexplained_and_partial(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = default_world()
+    title = "Soft-sensing approach for predicting bovine respiratory disease"
+    world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset({f"orcidwork:{SPADON_ORCID}/8"}), title, 2024))
+    install(monkeypatch, world)
+    monkeypatch.setattr(crossref, "search", lambda *a: Result(Fetch.FAILED, None, "http_503"))
+    assert cli.main([]) == 3
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert report["members"][SPADON]["status"] == "partial:crossref"
+    assert {"member": SPADON, "id": "", "title": title, "reason": "unmatched"} in report["coverage"]["items"]
+
+
 def test_a_search_that_linked_nothing_is_not_repeated_next_run(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     world = default_world()
     install(monkeypatch, world)
