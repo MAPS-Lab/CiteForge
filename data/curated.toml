@@ -1,2 +1,15 @@
 [lab]
 ror = ["https://ror.org/01e6qks80"]
+
+# DBLP files this German competition-law article by another Alexander Brandt under pid 212/2325;
+# nothing on the byline (no ORCID, no affiliation) tells the two apart
+[[reject]]
+member = "Brandt (OMA_KjcAAAAJ)"
+id = "doi:10.9785/cr-2025-410506"
+reason = "namesake"
+
+# IEEE carries the ORCID of a Richard Evans at Wolverhampton on this Nova Scotia paper, and no listing
+# of the member returns it
+[[accept]]
+member = "Evans (NqlOPkMAAAAJ)"
+id = "doi:10.1109/temsconglobal64363.2025.11238339"
