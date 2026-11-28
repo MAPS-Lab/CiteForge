@@ -6,7 +6,7 @@ from rapidfuzz import fuzz
 
 from citeforge.curated import Curated
 from citeforge.http import Http
-from citeforge.ids import is_copy_id, split_id, work_key
+from citeforge.ids import is_copy, is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     SAME_OBJECT_RELS,
@@ -99,15 +99,16 @@ def verify(
 
 
 class _Forest:
-    def __init__(self) -> None:
+    def __init__(self, copies: frozenset[str]) -> None:
         self.parent: dict[str, str] = {}
         self.dois: dict[str, frozenset[str]] = {}
+        self.copies = copies
 
     def add(self, x: str) -> None:
         if x not in self.parent:
             self.parent[x] = x
             kind, value = split_id(x)
-            published = kind == "doi" and not is_copy_id(x)
+            published = kind == "doi" and not is_copy_id(x) and x not in self.copies
             self.dois[x] = frozenset({value}) if published else frozenset()
 
     def find(self, x: str) -> str:
@@ -148,7 +149,7 @@ def _profile(records: Sequence[Record], claims: Sequence[Pair]) -> _Profile | No
         key=lambda r: (
             r.source not in REGISTRIES,
             r.source is not Source.ARXIV,
-            r.kind is Kind.PREPRINT or any(map(is_copy_id, r.ids)),
+            r.kind is Kind.PREPRINT or any(map(is_copy_id, r.ids)) or is_copy(r),
             min(r.ids),
         ),
     )
@@ -185,7 +186,6 @@ def _fuzzy_ok(pre: _Profile, pub: _Profile) -> bool:
 def cluster(
     claims: Sequence[Pair], reg: Registries, curated: Curated, search: Search | None = None
 ) -> tuple[list[Group], list[Event]]:
-    forest = _Forest()
     events: list[Event] = []
     records: dict[tuple[Source, frozenset[str]], Record] = {}
     for r in (*reg.found.values(), *reg.openalex.values(), *curated.records):
@@ -193,6 +193,8 @@ def cluster(
     for _, c in claims:
         if c.record is not None:
             records.setdefault((c.record.source, c.record.ids), c.record)
+    copies = frozenset(i for r in records.values() if is_copy(r) for i in r.ids if split_id(i)[0] == "doi")
+    forest = _Forest(copies)
     strong: set[tuple[str, str]] = set()
     identical: set[tuple[str, str]] = set()
     crosswalk: set[tuple[str, str, str]] = set()
@@ -231,7 +233,7 @@ def cluster(
                 if not forest.union(key, x):
                     events.append(Event(EventKind.LINK_REFUSED, None, key, x))
         groups = _groups(forest, records, claims)
-    fuzzy = _fuzzy_links(groups, events, curated)
+    fuzzy = _fuzzy_links(groups, events, curated, copies)
     for a, b in fuzzy:
         forest.union(a, b, guard=False)
     if fuzzy:
@@ -282,18 +284,18 @@ def _groups(
     return sorted(out, key=lambda g: g.key)
 
 
-def _copy_group(ids: frozenset[str]) -> bool:
+def _copy_group(ids: frozenset[str], copies: frozenset[str]) -> bool:
     version = _version_ids(ids)
-    return bool(version) and all(map(is_copy_id, version))
+    return bool(version) and all(is_copy_id(i) or i in copies for i in version)
 
 
 def _listed_version(g: Group) -> bool:
     return any(r.source in (Source.DBLP, Source.CURATED) and r.kind is not Kind.PREPRINT for r in g.records)
 
 
-def _published_group(g: Group) -> bool:
+def _published_group(g: Group, copies: frozenset[str]) -> bool:
     version = _version_ids(g.ids)
-    if any(split_id(i)[0] == "doi" and not is_copy_id(i) for i in version):
+    if any(split_id(i)[0] == "doi" and not is_copy_id(i) and i not in copies for i in version):
         return True
     return not any(split_id(i)[0] == "doi" for i in version) and _listed_version(g)
 
@@ -311,12 +313,16 @@ def _distinct_titles(a: str, b: str) -> bool:
     return len(x) == len(y) and x[:4] != y[:4]
 
 
-def _fuzzy_links(groups: Sequence[Group], events: list[Event], curated: Curated) -> list[tuple[str, str]]:
+def _fuzzy_links(
+    groups: Sequence[Group], events: list[Event], curated: Curated, copies: frozenset[str]
+) -> list[tuple[str, str]]:
     profiles = {g.key: _profile(g.records, g.claims) for g in groups}
-    pre = [g for g in groups if _copy_group(g.ids) and profiles[g.key]]
+    pre = [g for g in groups if _copy_group(g.ids, copies) and profiles[g.key]]
     # a notice, an abstract or front matter never absorbs a preprint, however close its title
     pub = [
-        g for g in groups if _published_group(g) and profiles[g.key] and build(g, curated)[0].kind not in EXCLUDED_KINDS
+        g
+        for g in groups
+        if _published_group(g, copies) and profiles[g.key] and build(g, curated)[0].kind not in EXCLUDED_KINDS
     ]
     links = []
     for p in pre:

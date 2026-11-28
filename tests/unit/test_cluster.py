@@ -96,6 +96,29 @@ def test_repository_copy_joins_the_publisher_doi_and_never_leads() -> None:
     assert work.primary.ids == {"doi:10.3390/s1"} and work.key == "doi:10.3390/s1"
 
 
+@pytest.mark.parametrize("deposit", ["doi:10.3929/ethz-b-000495308", "doi:10.18452/26278"])
+def test_a_university_repository_deposit_joins_its_article_and_never_leads(deposit: str) -> None:
+    title = "Give more data, awareness and control to individual citizens"
+    authors = (author("Mirco Nanni"), author("Stan Matwin"))
+    pub = record(
+        "doi:10.1007/s10676-020-09572-w", title=title, authors=authors, year=2021, container=("Ethics Inf Technol",)
+    )
+    copy = record(deposit, title=title, authors=authors, year=2021, source=Source.DATACITE,
+                  source_type="JournalArticle", publisher="ETH Zurich")  # fmt: skip
+    claims = [(ME, claim(deposit, title=title)), (ME, claim("doi:10.1007/s10676-020-09572-w", title=title))]
+    (g,) = cl.cluster(claims, reg(pub, copy), Curated())[0]
+    assert g.ids == {deposit, "doi:10.1007/s10676-020-09572-w"}
+    work, _ = build(g, Curated())
+    assert work.key == "doi:10.1007/s10676-020-09572-w" and work.primary.source is Source.CROSSREF
+
+
+def test_a_datacite_paper_inside_a_journal_stays_a_version_of_record() -> None:
+    authors = (author("Gabriel Spadon"), author("Stan Matwin"))
+    a = record("doi:10.1234/p", authors=authors, year=2023)
+    b = record("doi:10.5194/x", authors=authors, year=2023, source=Source.DATACITE, container=("Ocean Science",))
+    assert len(cl.cluster([], reg(a, b), Curated())[0]) == 2
+
+
 def test_crosswalk_needs_matching_registry_titles() -> None:
     pub = record("doi:10.1234/p")
     ax_same = record("arxiv:2101.00001", source=Source.ARXIV, kind=Kind.PREPRINT)

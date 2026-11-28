@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from citeforge.authorship import is_own
 from citeforge.curated import Curated
-from citeforge.ids import is_copy_id, split_id, work_key
+from citeforge.ids import is_copy, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     Author,
@@ -184,12 +184,8 @@ def _primary(records: Sequence[Record]) -> Record:
     def rank(r: Record) -> tuple[int, int, int, str]:
         kind = classify(r)
         kind_rank = _PRIMARY_KIND_RANK.index(kind) if kind in _PRIMARY_KIND_RANK else len(_PRIMARY_KIND_RANK)
-        # a DBLP listing carries the arXiv id of its paper, so only a copy DOI or a variant relation marks a copy
-        secondary = (
-            kind is Kind.PREPRINT
-            or any(is_copy_id(i) for i in r.ids if split_id(i)[0] == "doi")
-            or any(rel is Rel.VARIANT_OF for rel, _ in r.relations)
-        )
+        # a DBLP listing carries the arXiv id of its paper, so only a copy record or a variant relation marks a copy
+        secondary = kind is Kind.PREPRINT or is_copy(r) or any(rel is Rel.VARIANT_OF for rel, _ in r.relations)
         if r.source in REGISTRIES and not secondary:
             tier = 0
         elif r.source is Source.CURATED:
