@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import re
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
@@ -75,16 +76,10 @@ def plan(
 
 def _balanced(value: str) -> bool:
     depth = 0
-    i = 0
-    while i < len(value):
-        c = value[i]
-        if c == "\\":
-            i += 2
-            continue
+    for c in re.sub(r"\\.", "", value, flags=re.DOTALL):  # an escaped brace is text
         depth += {"{": 1, "}": -1}.get(c, 0)
         if depth < 0:
             return False
-        i += 1
     return depth == 0
 
 

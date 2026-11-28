@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from itertools import batched
 from typing import Any
 
-from citeforge.http import HOSTS, Batch, Http, ParseError, Reply, Result, parsed
+from citeforge.http import HOSTS, Batch, Http, ParseError, Result, parsed
 from citeforge.ids import is_preprint_doi, norm_openalex, norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Claim, Fetch, Kind, Record, Source, Status
 from citeforge.tables import OPENALEX_KINDS
@@ -19,10 +19,6 @@ WORK_FIELDS = (
     "language,is_retracted"
 )
 _PMID = re.compile(r"(\d+)/?$")
-
-
-def _fail[T](reply: Reply) -> Result[T]:
-    return Result(reply.fetch, None, reply.reason)
 
 
 def _object(value: object, what: str) -> Mapping[str, Any]:
@@ -171,13 +167,10 @@ def _pages(http: Http, path: str, params: Mapping[str, str]) -> Result[list[Mapp
         if cursor in seen:
             return Result(Fetch.FAILED, None, "parse_error")
         seen.add(cursor)
-        reply = http.get(HOST, path, {**params, "per_page": PER_PAGE, "cursor": cursor})
-        if reply.fetch is not Fetch.OK:
-            return _fail(reply)
-        try:
-            page, cursor = parse_page(reply.body)
-        except ParseError:
-            return Result(Fetch.FAILED, None, "parse_error")
+        res = parsed(http.get(HOST, path, {**params, "per_page": PER_PAGE, "cursor": cursor}), parse_page)
+        if res.value is None:
+            return Result(res.fetch, None, res.reason)
+        page, cursor = res.value
         if not page:
             break
         items += page

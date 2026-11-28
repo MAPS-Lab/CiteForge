@@ -5,7 +5,7 @@ from itertools import batched
 from typing import Any
 from urllib.parse import quote
 
-from citeforge.http import HOSTS, Batch, Http, ParseError, Result
+from citeforge.http import HOSTS, Batch, Http, ParseError, Result, parsed
 from citeforge.ids import norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Rel, Source, Status
 from citeforge.tables import CROSSREF_KINDS, CROSSREF_RELATIONS, CROSSREF_UPDATES, GENERIC_SERIES_NAMES
@@ -65,15 +65,11 @@ def search(http: Http, title: str, family: str, year: int | None) -> Result[tupl
         params["query.author"] = family.strip()
     if year is not None:
         params["filter"] = f"from-pub-date:{year - 1},until-pub-date:{year + 1}"
-    reply = http.get(HOST, "/works", params)
-    if reply.fetch is not Fetch.OK:
-        return Result(reply.fetch, None, reply.reason)
-    try:
-        items, _ = _items(reply.body)
-    except ParseError:
-        return Result(Fetch.FAILED, None, "parse_error")
+    res = parsed(http.get(HOST, "/works", params), lambda body: _items(body)[0])
+    if res.value is None:
+        return Result(res.fetch, None, res.reason)
     records = []
-    for item in items:
+    for item in res.value:
         try:
             records.append(parse_work(item))
         except ParseError:
@@ -181,14 +177,7 @@ def _one(http: Http, work_id: str) -> Result[Record]:
     reply = http.get(HOST, "/works/" + quote(split_id(work_id)[1], safe="/"))
     if reply.status in (400, 404):
         return Result(Fetch.NOT_FOUND, None, "not_found")
-    if reply.fetch is not Fetch.OK:
-        return Result(reply.fetch, None, reply.reason)
-    try:
-        items, _ = _items(reply.body)
-        record = parse_work(items[0])
-    except ParseError:
-        return Result(Fetch.FAILED, None, "parse_error")
-    return Result(Fetch.OK, record)
+    return parsed(reply, lambda body: parse_work(_items(body)[0][0]))
 
 
 def _title(item: Mapping[str, Any]) -> str:

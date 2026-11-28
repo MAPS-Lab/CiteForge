@@ -185,20 +185,15 @@ def _primary(records: Sequence[Record]) -> Record:
             or any(map(is_copy_id, ids_of(r.ids, "doi")))
             or any(rel is Rel.VARIANT_OF for rel, _ in r.relations)
         )
-        if r.source in REGISTRIES and not secondary:
-            tier = 0
-        elif r.source is Source.CURATED:
-            tier = 1
-        elif r.source is Source.DBLP and not secondary:
-            tier = 2
-        elif r.source in REGISTRIES:
-            tier = 3
-        elif r.source is Source.ARXIV:
-            tier = 4
-        elif r.source is Source.DBLP:
-            tier = 5
-        else:
-            tier = 6
+        tiers = (
+            r.source in REGISTRIES and not secondary,
+            r.source is Source.CURATED,
+            r.source is Source.DBLP and not secondary,
+            r.source in REGISTRIES,
+            r.source is Source.ARXIV,
+            r.source is Source.DBLP,
+        )
+        tier = next((n for n, hit in enumerate(tiers) if hit), len(tiers))
         return tier, kind_rank, r.year if r.year is not None else 9999, min(r.ids, default="")
 
     return min(records, key=rank)
