@@ -391,11 +391,9 @@ def apply_links(works: Sequence[Work]) -> list[Work]:
                 excluded.setdefault(w.key, f"translation_of:{target_key}")
     books = {title_key(w.primary.title): w for w in works if w.kind is Kind.BOOK and w.excluded is None}
     for w in works:
-        book = (
-            books.get(title_key(w.primary.container[0]))
-            if w.kind is Kind.INCOLLECTION and w.primary.container
-            else None
-        )
+        # Crossref lists a chapter's series before its book title, so every container name is tried
+        titles = (title_key(c) for c in w.primary.container) if w.kind is Kind.INCOLLECTION else ()
+        book = next((books[t] for t in titles if t in books), None)
         if book is not None and book.key != w.key and _families(w) and _families(w) <= _families(book):
             linked.setdefault(book.key, set()).add(w.key)
             excluded.setdefault(w.key, f"chapter_of:{book.key}")

@@ -395,7 +395,7 @@ def test_chapters_of_an_authored_book_fold_into_the_book() -> None:
                 title="Introduction and outlook",
                 authors=me,
                 kind=Kind.INCOLLECTION,
-                container=(title,),
+                container=("SpringerBriefs in Computer Science", title),  # Crossref puts the series first
             )
         ),
         Curated(),
