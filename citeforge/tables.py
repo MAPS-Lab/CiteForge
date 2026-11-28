@@ -137,6 +137,6 @@ STOPWORDS: frozenset[str] = frozenset(
     }
 )
 
-CSL_HOSTS: frozenset[str] = frozenset({"data.medra.org", "japanlinkcenter.org"})
+CSL_HOSTS: frozenset[str] = frozenset({"data.medra.org", "japanlinkcenter.org", "ra.publications.europa.eu"})
 
 DATA_DOI_PREFIXES: tuple[str, ...] = ("10.6084/m9.figshare", "10.5281/zenodo")
