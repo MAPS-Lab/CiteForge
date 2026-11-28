@@ -3,6 +3,7 @@ import os
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -13,11 +14,21 @@ STATE_FILE = "works.jsonl"
 
 
 @dataclass(frozen=True, slots=True)
+class Searched:
+    """A title search that linked nothing: its query, the review it raised if any, and the day it ran."""
+
+    query: tuple[str, str, int | None]
+    review: str | None
+    on: date
+
+
+@dataclass(frozen=True, slots=True)
 class StateRow:
     work: Work
     names: Names
     members: Mapping[str, Decision] = field(default_factory=dict)
     missing: Mapping[str, int] = field(default_factory=dict)
+    searches: Mapping[str, Searched] = field(default_factory=dict)
 
 
 type State = Mapping[str, StateRow]
@@ -26,6 +37,8 @@ type State = Mapping[str, StateRow]
 def _plain(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
+    if isinstance(value, date):
+        return value.isoformat()
     if isinstance(value, frozenset):
         return sorted((_plain(v) for v in value), key=lambda v: json.dumps(v, sort_keys=True))
     if isinstance(value, tuple | list):
@@ -87,6 +100,10 @@ def decode(line: str) -> StateRow:
             m: Decision(Verdict(x["verdict"]), x["rule"], frozenset(x["evidence"])) for m, x in d["members"].items()
         },
         missing=dict(d["missing"]),
+        searches={
+            k: Searched((x["query"][0], x["query"][1], x["query"][2]), x["review"], date.fromisoformat(x["on"]))
+            for k, x in d.get("searches", {}).items()
+        },
     )
 
 

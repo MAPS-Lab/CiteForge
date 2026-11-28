@@ -615,17 +615,37 @@ def test_affiliation_emails_never_reach_state_report_or_output(workdir: Path, mo
     assert b"Dalhousie University, Halifax, Canada." in written["state/works.jsonl"]
 
 
-def test_orcid_work_without_an_identifier_is_counted(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_orcid_work_without_an_identifier_is_searched_and_counted(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     world = default_world()
     title = "Soft-sensing approach for predicting bovine respiratory disease"
-    world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset(), title, 2024))
+    listed = world.crossref["doi:10.1016/j.oceaneng.2024.117234"].title
+    bare = [
+        Claim(Source.ORCID, frozenset({f"orcidwork:{SPADON_ORCID}/{n}"}), t, 2024)
+        for n, t in ((1, title), (2, listed.upper()))
+    ]
+    world.orcid_works[SPADON_ORCID] += bare
     install(monkeypatch, world)
     assert cli.main([]) == 0
     coverage = json.loads((workdir / "state/report.json").read_text())["coverage"]
-    assert {"member": SPADON, "id": "", "title": title, "reason": "no_identifier"} in coverage["items"]
-    assert coverage["unexplained"] == 0
+    assert {"member": SPADON, "id": "", "title": title, "reason": "unmatched"} in coverage["items"]
+    assert {"member": SPADON, "id": "", "title": bare[1].title, "reason": "no_identifier"} in coverage["items"]
+    assert coverage["unexplained"] == 1
     assert coverage["claimed"] == coverage["emitted"] + len(coverage["items"])
-    assert f"{SPADON}: {title} (no_identifier)" in (workdir / "run/report.md").read_text()
+    assert f"{SPADON}: {title} (unmatched)" in (workdir / "run/report.md").read_text()
+    assert world.calls["crossref.search"] == 3  # the DOI-less KDD listing and both ORCID works
+
+
+def test_a_search_that_linked_nothing_is_not_repeated_next_run(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    cold = world.calls["crossref.search"]
+    rows = [json.loads(line) for line in (workdir / "state/works.jsonl").read_text().splitlines()]
+    assert cold > 0 and sum(len(r["searches"]) for r in rows) == cold
+    assert cli.main([]) == 0
+    assert world.calls["crossref.search"] == cold
 
 
 TODAY = date(2026, 6, 1)

@@ -7,9 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from citeforge.ids import split_id
 from citeforge.model import Claim, Decision, Event, EventKind, Verdict, Work
 from citeforge.publish import publishable
 from citeforge.state import StateRow, atomic_write
+from citeforge.text import ratio
+
+LISTED_TITLE = 0.90
 
 WEBSITE_DIR = "Spadon (bfdGsGUAAAAJ)"
 MARKDOWN_MAX = 60_000
@@ -42,8 +46,16 @@ def _toml_line(section: str, member: str, work_id: str) -> str:
     return f'[[{section}]]\nmember = {json.dumps(member, ensure_ascii=False)}\nid = "{work_id}"'
 
 
+def _bare(ids: frozenset[str]) -> bool:
+    return all(split_id(i)[0] == "orcidwork" for i in ids)
+
+
 def _coverage(data: RunData) -> dict[str, Any]:
     owner = {a: k for k, w in sorted(data.works.items()) for a in w.aliases}
+    titles = {
+        m: [data.works[k].primary.title for k, d in mine.items() if publishable(d, data.works.get(k))]
+        for m, mine in data.decisions.items()
+    }
     held = {(m, i) for m, c in data.held for i in c.ids}
     dropped = {(e.member, e.id): e.kind for e in data.events if e.kind in (EventKind.DOI_DETACHED, EventKind.DOI_DEAD)}
     items = []
@@ -57,8 +69,10 @@ def _coverage(data: RunData) -> dict[str, Any]:
                 continue
             d = data.decisions.get(member, {}).get(key or "")
             work = data.works.get(key or "")
-            if not c.ids:
-                reason = "no_identifier"
+            if _bare(c.ids) and (work is None or _bare(work.aliases)):
+                # a work with no identifier is explained only when the member's list holds it by title
+                listed = any(ratio(c.title, t) >= LISTED_TITLE for t in titles.get(member, ()))
+                reason = "no_identifier" if listed else "unmatched"
             elif work is not None and work.excluded:
                 reason = work.excluded
             elif d is not None:
@@ -69,7 +83,9 @@ def _coverage(data: RunData) -> dict[str, Any]:
                 reason = kinds[0]
             else:
                 reason = "unmatched"
-            items.append({"member": member, "id": key or min(c.ids, default=""), "title": c.title, "reason": reason})
+            # a put-code means nothing to a reader, so a work without an identifier shows its title
+            shown = "" if _bare(c.ids) else key or min(c.ids, default="")
+            items.append({"member": member, "id": shown, "title": c.title, "reason": reason})
     unexplained = sum(1 for i in items if i["reason"] == "unmatched")
     return {"claimed": claimed, "emitted": emitted, "unexplained": unexplained, "items": items}
 

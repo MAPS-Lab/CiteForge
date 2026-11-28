@@ -1,4 +1,5 @@
 import dataclasses
+from datetime import date
 
 import pytest
 from hypothesis import given, settings
@@ -8,9 +9,9 @@ from citeforge import cluster as cl
 from citeforge.curated import Curated
 from citeforge.http import Result
 from citeforge.ids import is_copy_id, split_id
-from citeforge.model import Claim, Fetch, Kind, Names, Record, Registries, Rel, Source, Status, Work
+from citeforge.model import Author, Claim, Fetch, Kind, Names, Record, Registries, Rel, Source, Status, Work
 from citeforge.state import StateRow
-from citeforge.text import name_key
+from citeforge.text import name_key, ratio
 from citeforge.works import build
 from tests.factories import author, member, record
 from tests.unit.test_authorship import identity
@@ -182,12 +183,24 @@ def test_one_published_version_absorbs_several_copies() -> None:
     assert g.ids == {"arxiv:2201.00001", "doi:10.2139/ssrn.1", "doi:10.1234/p"}
 
 
-def test_copy_with_two_published_partners_stays_apart() -> None:
+def test_copy_tied_between_two_published_partners_joins_the_longer_one_and_is_proposed() -> None:
     authors = (author("Gabriel Spadon"), author("Stan Matwin"))
-    arx = record("arxiv:2201.00001", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors, year=2023)
+    arx = record("arxiv:2604.09611", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors, year=2026)
+    full = record("doi:10.1145/3788089", authors=authors, year=2026, pages="1-26")
+    short = record("doi:10.1145/3801489.3806907", authors=authors, year=2026, pages="91-93")
+    groups, events = cl.cluster([], reg(arx, full, short), Curated())
+    assert sorted(sorted(g.ids) for g in groups) == [
+        ["arxiv:2604.09611", "doi:10.1145/3788089"],
+        ["doi:10.1145/3801489.3806907"],
+    ]
+    assert [(e.kind, e.detail) for e in events] == [
+        ("link_proposal", "doi:10.1145/3788089 doi:10.1145/3801489.3806907"),
+        ("fuzzy_link", "doi:10.1145/3788089"),
+    ]
     conf = record("doi:10.1234/conf", authors=authors, year=2024, kind=Kind.INPROCEEDINGS)
     journal = record("doi:10.1234/journal", authors=authors, year=2025)
-    assert len(cl.cluster([], reg(arx, conf, journal), Curated())[0]) == 3
+    groups, _ = cl.cluster([], reg(arx, journal, conf), Curated())
+    assert {"arxiv:2604.09611", "doi:10.1234/conf"} in [g.ids for g in groups] and len(groups) == 2
 
 
 def test_copy_links_to_its_clearly_closest_partner_and_never_to_a_notice_or_abstract() -> None:
@@ -209,14 +222,17 @@ def test_copy_links_to_its_clearly_closest_partner_and_never_to_a_notice_or_abst
     ]
 
 
-def test_copy_with_partners_closer_than_the_margin_is_only_proposed() -> None:
+def test_copy_with_partners_closer_than_the_margin_joins_one_and_is_proposed() -> None:
     authors = (author("Gabriel Spadon"), author("Stan Matwin"))
     arx = record("arxiv:2201.00001", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors, year=2023)
     a = record("doi:10.1234/a", authors=authors, year=2024, title=TITLE + "s")
     b = record("doi:10.1234/b", authors=authors, year=2024, title=TITLE + "es")
     groups, events = cl.cluster([], reg(arx, a, b), Curated())
-    assert len(groups) == 3
-    assert [(e.kind, e.detail) for e in events] == [("link_proposal", "doi:10.1234/a doi:10.1234/b")]
+    assert {"arxiv:2201.00001", "doi:10.1234/a"} in [g.ids for g in groups] and len(groups) == 2
+    assert [(e.kind, e.detail) for e in events] == [
+        ("link_proposal", "doi:10.1234/a doi:10.1234/b"),
+        ("fuzzy_link", "doi:10.1234/a"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -348,9 +364,22 @@ def test_cluster_invariant_under_shuffle_and_duplication(raw, rnd) -> None:
         assert sum(1 for i in g.ids if split_id(i)[0] == "doi" and not is_copy_id(i)) <= 1
 
 
-def _search(groups, previous=None, min_year=2020, registries=None):
+TODAY = date(2026, 6, 1)
+
+
+def _search(groups, previous=None, min_year=2020, registries=None, searched=None, today=TODAY):
     linked = cl.previous_links(previous or {})
-    return cl.search_unidentified(groups, None, {ME: identity()}, min_year, linked, registries or reg())  # type: ignore[arg-type]
+    found, events, _ = cl.search_unidentified(
+        groups,
+        None,  # type: ignore[arg-type]
+        {ME: identity()},
+        min_year,
+        linked,
+        registries or reg(),
+        searched or {},
+        today,
+    )
+    return found, events
 
 
 def _dblp_group(title: str = TITLE, year: int = 2023):
@@ -434,7 +463,7 @@ def test_search_sends_a_compound_surname_as_its_words(monkeypatch: pytest.Monkey
         cl.crossref, "search", lambda http, title, family, year: seen.append(family) or Result(Fetch.OK, ())
     )
     nur = identity(member=member(name="Nur Zincir-Heywood", dirname=ME), names=(name_key("Nur", "Zincir-Heywood"),))
-    cl.search_unidentified(_dblp_group()[1], None, {ME: nur}, 2020, {}, reg())  # type: ignore[arg-type]
+    cl.search_unidentified(_dblp_group()[1], None, {ME: nur}, 2020, {}, reg(), {}, TODAY)  # type: ignore[arg-type]
     assert seen == ["zincir heywood"]
 
 
@@ -478,10 +507,10 @@ def test_preprint_links_once_search_joins_its_two_published_listings(monkeypatch
     kryven = identity(names=(name_key("Marta", "Kryven"),))
 
     def search(gs):
-        return cl.search_unidentified(gs, None, {ME: kryven}, 2020, {}, reg())  # type: ignore[arg-type]
+        return cl.search_unidentified(gs, None, {ME: kryven}, 2020, {}, reg(), {}, TODAY)[:2]  # type: ignore[arg-type]
 
     without, _ = cl.cluster(pairs, reg(arx, doi), Curated())
-    assert len(without) == 3
+    assert len(without) == 2
     (g,), events = cl.cluster(pairs, reg(arx, doi), Curated(), search)
     assert g.ids == {"arxiv:2106.07824", "dblp:conf/nips/AcquavivaPKS22", "doi:10.52202/068431-0270"}
     assert {"search_linked", "fuzzy_link"} <= {e.kind for e in events}
@@ -496,16 +525,16 @@ def test_preprint_links_once_search_joins_its_two_published_listings(monkeypatch
         (("muse", "rahman"), ("muse", "rahman"), (2022, 2020)),
     ],
 )
-def test_fuzzy_ok_accepts_split_surnames_and_postprints(pre, pub, years) -> None:
-    assert cl._fuzzy_ok(cl._Profile("t", years[0], pre), cl._Profile("t", years[1], pub))
+def test_byline_fit_accepts_split_surnames_and_postprints(pre, pub, years) -> None:
+    assert cl._byline_fit(cl._Profile("t", years[0], pre), cl._Profile("t", years[1], pub)) == "link"
 
 
-def test_fuzzy_ok_still_refuses_other_bylines_and_distant_years() -> None:
+def test_byline_fit_still_refuses_other_bylines_and_distant_years() -> None:
     p = cl._Profile("t", 2021, ("brandt", "maza", "chen"))
-    assert not cl._fuzzy_ok(p, cl._Profile("t", 2021, ("brandt", "lee", "kim")))
-    assert not cl._fuzzy_ok(p, cl._Profile("t", 2018, ("brandt", "maza", "chen")))
-    assert not cl._fuzzy_ok(p, cl._Profile("t", 2025, ("brandt", "maza", "chen")))
-    assert not cl._fuzzy_ok(cl._Profile("t", 2021, ("brandt",) * 3), cl._Profile("t", 2021, ("brandt", "x", "y")))
+    assert cl._byline_fit(p, cl._Profile("t", 2021, ("brandt", "lee", "kim"))) is None
+    assert cl._byline_fit(p, cl._Profile("t", 2018, ("brandt", "maza", "chen"))) is None
+    assert cl._byline_fit(p, cl._Profile("t", 2025, ("brandt", "maza", "chen"))) is None
+    assert cl._byline_fit(cl._Profile("t", 2021, ("brandt",) * 3), cl._Profile("t", 2021, ("brandt", "x", "y"))) is None
 
 
 def test_search_covers_a_listed_version_that_only_has_an_arxiv_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -517,3 +546,268 @@ def test_search_covers_a_listed_version_that_only_has_an_arxiv_id(monkeypatch: p
     groups, _ = cl.cluster(pairs, reg(), Curated())
     _search(groups)
     assert len(seen) == 1
+
+
+def _searches(monkeypatch: pytest.MonkeyPatch, *hits: Record, fetch: Fetch = Fetch.OK) -> list[tuple]:
+    seen: list[tuple] = []
+
+    def fake(http, title, family, year):
+        seen.append((title, family, year))
+        return Result(fetch, hits if fetch is Fetch.OK else None, "timeout")
+
+    monkeypatch.setattr(cl.crossref, "search", fake)
+    return seen
+
+
+def _run_search(groups, searched, today=TODAY):
+    return cl.search_unidentified(groups, None, {ME: identity()}, 2020, {}, reg(), searched, today)  # type: ignore[arg-type]
+
+
+def test_a_search_that_linked_nothing_is_kept_and_not_repeated(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _searches(monkeypatch)
+    _, groups = _dblp_group()
+    found, events, keep = _run_search(groups, {})
+    assert found == [] and events == [] and len(seen) == 1
+    assert keep == {"dblp:conf/x/S23": cl.Searched((TITLE, "spadon", 2023), None, TODAY)}
+    later = date.fromordinal(TODAY.toordinal() + cl.SEARCH_REUSE_DAYS - 1)
+    assert _run_search(groups, keep, later) == ([], [], keep) and len(seen) == 1
+    _run_search(groups, keep, date.fromordinal(TODAY.toordinal() + cl.SEARCH_REUSE_DAYS))
+    assert len(seen) == 2
+    _run_search(_dblp_group(year=2024)[1], keep)
+    _run_search(_dblp_group(title=TITLE + " at sea")[1], keep)
+    assert len(seen) == 4
+
+
+def test_a_kept_review_is_reported_again_and_a_failed_search_keeps_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    longer = record("doi:10.1234/found", title=TITLE + " at scale", year=2023)
+    seen = _searches(monkeypatch, longer)
+    _, groups = _dblp_group()
+    _, events, keep = _run_search(groups, {})
+    assert [e.kind for e in events] == ["search_review"] and keep["dblp:conf/x/S23"].review == events[0].detail
+    assert _run_search(groups, keep)[1] == events and len(seen) == 1
+    _searches(monkeypatch, fetch=Fetch.FAILED)
+    stale = date.fromordinal(TODAY.toordinal() + cl.SEARCH_REUSE_DAYS)
+    _, events, kept = _run_search(groups, keep, stale)
+    assert [e.kind for e in events] == ["search_failed"] and kept == keep
+
+
+def test_one_query_is_sent_once_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    hit = record("doi:10.1234/found", year=2023)
+    seen = _searches(monkeypatch, hit)
+    dblp_rec = record("dblp:conf/x/S23", source=Source.DBLP, year=2023)
+    oa_rec = record("openalex:W9", source=Source.OPENALEX, year=2023)
+    pairs = [(ME, claim(*r.ids, source=r.source, rec=r)) for r in (dblp_rec, oa_rec)]
+    groups, _ = cl.cluster(pairs, reg(), Curated())
+    assert len(groups) == 2
+    found, _, _ = _run_search(groups, {})
+    assert len(seen) == 1 and found == [("dblp:conf/x/S23", hit), ("openalex:W9", hit)]
+
+
+@pytest.mark.parametrize(
+    ("year", "count", "linked"),
+    [(2024, 2, True), (2025, 2, False), (2022, 2, True), (2021, 2, False), (2023, 4, True), (2023, 5, False)],
+)
+def test_search_accepts_a_hit_within_a_year_and_half_the_byline(
+    monkeypatch: pytest.MonkeyPatch, year: int, count: int, linked: bool
+) -> None:
+    by = (author("Gabriel Spadon"), *(author(f"Ana Lima{n}") for n in range(count - 1)))
+    hit = record("doi:10.1234/found", year=year, authors=by)
+    _searches(monkeypatch, hit)
+    two = (author("Gabriel Spadon"), author("Stan Matwin"))
+    dblp_rec = record("dblp:conf/x/S23", source=Source.DBLP, year=2023, authors=two)
+    groups, _ = cl.cluster([(ME, claim("dblp:conf/x/S23", source=Source.DBLP, rec=dblp_rec))], reg(), Curated())
+    found, events = _search(groups)
+    assert (found == [("dblp:conf/x/S23", hit)]) is linked
+    assert [e.kind for e in events] == ["search_linked" if linked else "search_review"]
+
+
+def test_search_never_joins_two_dblp_publications(monkeypatch: pytest.MonkeyPatch) -> None:
+    title = "Give more data, awareness and control to individual citizens"
+    hit = record("doi:10.1007/s10676-020-09572-w", title=title, year=2021)
+    _searches(monkeypatch, hit)
+    tdp = record("dblp:journals/tdp/Nanni20", source=Source.DBLP, title=title, year=2020)
+    ethics = record("dblp:journals/ethicsit/Nanni21", *hit.ids, source=Source.DBLP, title=title, year=2021)
+    pairs = [(ME, claim(*r.ids, source=Source.DBLP, title=title, rec=r)) for r in (tdp, ethics)]
+    groups, events = cl.cluster(pairs, reg(hit), Curated(), lambda gs: _search(gs))
+    assert sorted(sorted(g.ids) for g in groups) == [
+        ["dblp:journals/ethicsit/Nanni21", "doi:10.1007/s10676-020-09572-w"],
+        ["dblp:journals/tdp/Nanni20"],
+    ]
+    review = [e.detail for e in events if e.kind == "search_review"]
+    assert review == ["doi:10.1007/s10676-020-09572-w ratio=1.00 listed=dblp:journals/ethicsit/Nanni21"]
+
+
+def test_search_covers_an_orcid_work_without_an_identifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    hit = record("doi:10.1007/s00415-022-11293-7", year=2023)
+    _searches(monkeypatch, hit)
+    pairs = [(ME, claim("orcidwork:0000-0002-1825-0097/101"))]
+    kept, _, _, _ = cl.verify(pairs, reg(), {ME: identity()})
+    (g,), _ = cl.cluster(kept, reg(hit), Curated(), lambda gs: _search(gs))
+    assert g.ids == {"orcidwork:0000-0002-1825-0097/101", "doi:10.1007/s00415-022-11293-7"}
+    work, _ = build(g, Curated())
+    assert work.key == "doi:10.1007/s00415-022-11293-7" and work.excluded is None
+    (bare,), _ = cl.cluster(kept, reg(), Curated())
+    assert build(bare, Curated())[0].excluded == "kind:other"
+
+
+@pytest.mark.parametrize(
+    ("pre", "pub", "fit"),
+    [
+        (("boucher", "gagie", "hong", "li", "zeh"), ("hong", "boucher", "gagie", "li", "zeh"), "link"),
+        (("boucher", "gagie", "hong"), ("hong", "boucher", "kim"), "propose"),
+    ],
+)
+def test_byline_fit_links_a_reordered_byline_and_proposes_a_new_lead(pre, pub, fit) -> None:
+    assert cl._byline_fit(cl._Profile("t", 2023, pre), cl._Profile("t", 2024, pub)) == fit
+
+
+def test_reordered_byline_links_and_an_organiser_never_leads() -> None:
+    title = "Interpreting the Effects of Quantization on LLMs"
+    acl = Author("", "", literal="Association for Computational Linguistics 2025")
+    talk = record(
+        "doi:10.48448/1vag-qn48",
+        source=Source.DATACITE,
+        kind=Kind.OTHER,
+        title=title,
+        authors=(acl, author("Hassan Sajjad"), author("Manpreet Singh")),
+        year=2025,
+    )
+    paper = record(
+        "doi:10.18653/v1/2025.ijcnlp-long.123",
+        kind=Kind.INPROCEEDINGS,
+        title=title,
+        authors=(author("Manpreet Singh"), author("Hassan Sajjad")),
+        year=2025,
+    )
+    (g,), events = cl.cluster([], reg(talk, paper), Curated())
+    assert g.fuzzy and [e.kind for e in events] == ["fuzzy_link"]
+    reordered = dataclasses.replace(paper, authors=(author("Manpreet Singh"), author("Ana Lima")))
+    groups, events = cl.cluster([], reg(talk, reordered), Curated())
+    assert len(groups) == 2 and [e.kind for e in events] == ["link_proposal"]
+
+
+def test_listed_version_holding_a_copy_doi_is_published_and_absorbs_its_arxiv_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    title = "Open Technical Problems in Open-Weight AI Model Risk Management"
+    tmlr = record("dblp:journals/tmlr/Casper26", source=Source.DBLP, title=title, year=2026)
+    listed = cl.Group("k", frozenset({*tmlr.ids, "doi:10.2139/ssrn.5705186"}), (tmlr,), ())
+    assert cl._published_group(listed) and not cl._copy_group(listed)
+    corr = record(
+        "dblp:journals/corr/abs-2608-07514", "arxiv:2608.07514", source=Source.DBLP, kind=Kind.PREPRINT, title=title
+    )
+    corr = dataclasses.replace(corr, year=2026)
+    arx = record("arxiv:2608.07514", source=Source.ARXIV, kind=Kind.PREPRINT, title=title, year=2026)
+    ssrn = record("doi:10.2139/ssrn.5705186", kind=Kind.PREPRINT, title=title, year=2026)
+    pairs = [(ME, claim(*r.ids, source=Source.DBLP, title=title, rec=r)) for r in (tmlr, corr)]
+    _searches(monkeypatch, ssrn)
+    (g,), _ = cl.cluster(pairs, reg(arx), Curated(), lambda gs: _search(gs))
+    assert g.ids == {*tmlr.ids, *corr.ids, *ssrn.ids}
+
+
+def test_copies_of_one_paper_on_two_servers_join_and_then_link_once() -> None:
+    title = "Decoding poultry vocalizations with self-supervised audio models"
+    arx = record("arxiv:2412.16182", source=Source.ARXIV, kind=Kind.PREPRINT, title=title, year=2024)
+    bio = record("doi:10.1101/2024.12.18.629057", kind=Kind.PREPRINT, title=title, year=2024)
+    ssrn = record("doi:10.2139/ssrn.4939071", kind=Kind.PREPRINT, title=title, year=2025)
+    (g,), events = cl.cluster([], reg(arx, bio, ssrn), Curated())
+    assert g.fuzzy and g.ids == {*arx.ids, *bio.ids, *ssrn.ids}
+    assert [e.kind for e in events] == ["fuzzy_link"] * 2
+    a = record("doi:10.1234/a", title=title, year=2025)
+    b = record("doi:10.1234/b", title=title + " in broilers", year=2025)
+    groups, _ = cl.cluster([], reg(arx, bio, a, b), Curated())
+    assert sorted(sorted(g.ids) for g in groups) == [[*sorted(arx.ids | bio.ids), "doi:10.1234/a"], ["doi:10.1234/b"]]
+    other = dataclasses.replace(bio, title="Decoding cattle vocalizations with self-supervised audio models")
+    assert len(cl.cluster([], reg(arx, other), Curated())[0]) == 2
+
+
+def test_repository_deposit_of_a_crossref_article_joins_it_and_never_leads() -> None:
+    title = "Meta-analysis of genome-wide association studies of hoarding symptoms"
+    by = tuple(author(n) for n in ("Nora Strom", "Dirk Smit", "Manuel Mattheisen", "Danielle Cath", "James Crowley"))
+    article = record("doi:10.1038/s41398-022-02248-7", title=title, authors=by, year=2022, publisher="Springer")
+    deposit = record(
+        "doi:10.18452/26278",
+        source=Source.DATACITE,
+        source_type="Text",
+        title=title,
+        authors=(*by[:3], by[4], by[3]),
+        year=2022,
+        publisher="Humboldt-Universität zu Berlin",
+    )
+    claims = [(ME, claim(*r.ids, source=Source.OPENALEX, title=title)) for r in (article, deposit)]
+    (g,), events = cl.cluster(claims, reg(article, deposit), Curated())
+    assert g.ids == {*article.ids, *deposit.ids} and events == []
+    assert build(g, Curated())[0].key == "doi:10.1038/s41398-022-02248-7"
+    for other in (
+        dataclasses.replace(deposit, year=2021),
+        dataclasses.replace(deposit, authors=by[:2]),
+        dataclasses.replace(deposit, publisher="Springer"),
+    ):
+        assert len(cl.cluster(claims, reg(article, other), Curated())[0]) == 2
+
+
+def test_springer_living_reference_revisions_and_print_chapter_are_one_work() -> None:
+    title = "Genetics of Psychiatric Disorders: Advances in Genetic Epidemiology"
+    by = (author("Sara Oraki Kohshour"), author("Manuel Mattheisen"))
+
+    def chapter(doi: str, container: str = "Tasman's Psychiatry") -> Record:
+        return record(
+            doi,
+            kind=Kind.INCOLLECTION,
+            source_type="book-chapter",
+            title=title,
+            authors=by,
+            year=2024,
+            container=(container,),
+        )
+
+    v1, v2 = chapter("doi:10.1007/978-3-030-42825-9_51-1"), chapter("doi:10.1007/978-3-030-42825-9_51-2")
+    printed = chapter("doi:10.1007/978-3-030-51366-5_51")
+    claims = [(ME, claim(*r.ids, title=title)) for r in (v1, v2, printed)]
+    (g,), events = cl.cluster(claims, reg(v1, v2, printed), Curated())
+    assert g.ids == {*v1.ids, *v2.ids, *printed.ids} and events == []
+    assert build(g, Curated())[0].key == "doi:10.1007/978-3-030-51366-5_51"
+    (g,), _ = cl.cluster(claims[:2], reg(v1, v2), Curated())
+    assert build(g, Curated())[0].primary.ids == v2.ids
+    for other in (chapter("doi:10.1007/978-3-030-51366-5_52"), chapter(min(printed.ids), container="Other")):
+        groups, _ = cl.cluster([*claims[:2], (ME, claim(*other.ids))], reg(v1, v2, other), Curated())
+        assert sorted(len(g.ids) for g in groups) == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "distinct"),
+    [
+        (
+            "Meta-analysis of genome-wide association studies of hoarding symptoms in 27,651 individuals",
+            "Meta-Analysis of Genome-Wide Association Studies of Hoarding Symptoms in 27 537 Individuals",
+            False,
+        ),
+        ("Ship routing in 1,200 ports", "Ship routing in 2,200 ports", False),
+        ("Ship routing with 150 vessels", "Ship routing with 300 vessels", False),
+        ("Ship routing benchmark 2023", "Ship routing benchmark 2024", True),
+        ("Ship routing, volume 2", "Ship routing, volume 3", True),
+        ("Ship routing: Part IV", "Ship routing: Part V", True),
+    ],
+)
+def test_only_part_volume_and_year_numbers_name_sibling_titles(a: str, b: str, distinct: bool) -> None:
+    assert cl._distinct_titles(a, b) is distinct
+
+
+@pytest.mark.parametrize(
+    ("other", "score", "joined"),
+    [
+        ("Graph neural networks for vessel trajectory forecasts at seas", 0.897, False),
+        ("Graph neural networks for vessel trajectory forecasting at the port", 0.902, True),
+        ("Graph neural networks for vessel trajectory forecasting: Part II", 0.932, False),
+    ],
+)
+def test_crosswalk_joins_titles_from_the_threshold_up_unless_they_are_siblings(
+    other: str, score: float, joined: bool
+) -> None:
+    assert ratio(TITLE, other) == pytest.approx(score, abs=0.001)
+    pub = record("doi:10.1234/p")
+    ax = record("arxiv:2101.00001", source=Source.ARXIV, kind=Kind.PREPRINT, title=other)
+    oa = record("doi:10.1234/p", "arxiv:2101.00001", "openalex:W1", source=Source.OPENALEX)
+    groups, events = cl.cluster([(ME, claim(*oa.ids, source=Source.OPENALEX, rec=oa))], reg(pub, ax), Curated())
+    assert (len(groups) == 1) is joined
+    assert any(e.kind == "crosswalk_rejected" for e in events) is not joined

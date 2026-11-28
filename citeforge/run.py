@@ -24,12 +24,13 @@ from citeforge.model import (
     Listing,
     Member,
     Names,
+    Record,
     Source,
     Verdict,
     Work,
 )
 from citeforge.sources import pubmed
-from citeforge.state import State, StateRow
+from citeforge.state import Searched, State, StateRow
 
 MAX_WORKERS = 8
 SINCE_SLACK_YEARS = 2
@@ -287,9 +288,15 @@ def run(
     held_ids: dict[str, set[str]] = defaultdict(set)
     for member, c in held:
         held_ids[member] |= c.ids
-    groups, ev = cluster.cluster(
-        kept, reg, curated, lambda gs: cluster.search_unidentified(gs, http, identities, s.min_year, linked, reg)
-    )
+    earlier = {a: x for row in previous.values() for a, x in row.searches.items()}
+    searched: dict[str, Searched] = {}
+
+    def search(gs: Sequence[Group]) -> tuple[list[tuple[str, Record]], list[Event]]:
+        found, ev, keep = cluster.search_unidentified(gs, http, identities, s.min_year, linked, reg, earlier, s.today)
+        searched.update(keep)
+        return found, ev
+
+    groups, ev = cluster.cluster(kept, reg, curated, search)
     events += ev
     for name in sorted({e.member for e in ev if e.kind is EventKind.SEARCH_FAILED and e.member in listings}):
         listing = listings[name]
@@ -393,6 +400,7 @@ def run(
             names=names.get(k) or prev_names.get(k) or EMPTY_NAMES,
             members=dict(sorted(row_members.items())),
             missing=dict(sorted(missing.get(k, {}).items())),
+            searches={a: searched[a] for a in sorted(all_works[k].aliases) if a in searched},
         )
     files = publish.plan(new_state, members, group, s.output.name or "output")
     problems = publish.check(files)

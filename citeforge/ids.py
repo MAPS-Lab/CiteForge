@@ -2,7 +2,7 @@ import re
 from collections.abc import Iterable
 from urllib.parse import unquote
 
-from citeforge.model import WORK_KEY_ORDER, Kind, Record, Source
+from citeforge.model import WORK_KEY_ORDER
 from citeforge.tables import DATA_DOI_PREFIXES, PREPRINT_SERVERS
 
 _DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
@@ -120,13 +120,3 @@ def is_copy_id(work_id: str) -> bool:
     """True for an id that names a preprint or repository copy, never a version of record."""
     kind, value = split_id(work_id)
     return kind == "arxiv" or (kind == "doi" and is_secondary_doi(value))
-
-
-_DEPOSIT_KINDS = frozenset({Kind.ARTICLE, Kind.INPROCEEDINGS, Kind.INCOLLECTION, Kind.OTHER})
-
-
-def is_copy(r: Record) -> bool:
-    """True for a copy: a copy DOI, or a DataCite paper outside any journal, which is a repository deposit."""
-    if any(is_copy_id(i) for i in r.ids if split_id(i)[0] == "doi"):
-        return True
-    return r.source is Source.DATACITE and r.kind in _DEPOSIT_KINDS and not r.container
