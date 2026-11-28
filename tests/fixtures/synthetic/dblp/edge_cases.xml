@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<dblpperson name="Wei Ye 0003" pid="00/0003" n="12">
+<person key="homepages/00/0003" mdate="2024-01-01">
+<author pid="00/0003">Wei Ye 0003</author>
+<note type="uname">W&#233;i Y&#234;</note>
+<url>https://orcid.org/0000-0002-1825-0097</url>
+<url>https://orcid.org/not-an-orcid</url>
+</person>
+<r><inproceedings key="conf/x/BlankAuthor24" mdate="2024-01-01">
+<author pid="00/0003">Wei Ye 0003</author>
+<author pid="99/9999"></author>
+<title>A Record With An Empty Author.</title>
+<year>2024</year>
+<booktitle>X</booktitle>
+</inproceedings></r>
+<r><www key="homepages/00/0003/alt" mdate="2024-01-01"><author pid="00/0003">Wei Ye</author><title>Home Page</title></www></r>
+<r><article publtype="informal withdrawn" key="journals/corr/abs-cs-0601001" mdate="2024-01-01">
+<author pid="00/0003">Wei Ye 0003</author>
+<title>An Old-Style Preprint.</title>
+<year>2006</year>
+<volume>abs/cs/0601001</volume>
+<journal>CoRR</journal>
+</article></r>
+<r><article key="journals/x/YeK23" mdate="2024-01-01">
+<author orcid="0000-0002-1825-0097" pid="00/0003">Wei Ye 0003</author>
+<author pid="11/1111">Kiran K</author>
+<title>Cooling <i>in situ</i> with H<sub>2</sub>O and CO<sup>2</sup>.</title>
+<pages>101-120</pages>
+<year>2023</year>
+<volume>7</volume>
+<number>2</number>
+<journal>J. X</journal>
+<ee>https://doi.ieeecomputersociety.org/10.1109/X.2023.0042</ee>
+<ee>https://www.wikidata.org/entity/Q1</ee>
+</article></r>
+<r><phdthesis key="phd/x/Ye2021" mdate="2024-01-01">
+<author pid="00/0003">Wei Ye 0003</author>
+<title>Why Do Ships Drift?</title>
+<year>2021</year>
+<school>Example University</school>
+<ee>https://www.wikidata.org/entity/Q2</ee>
+<ee type="oa">https://repository.example.org/handle/1/2</ee>
+</phdthesis></r>
+<r><book key="series/x/2020-1" mdate="2024-01-01">
+<editor orcid="0000-0002-1825-0097" pid="00/0003">Wei Ye 0003</editor>
+<title>An Edited Volume</title>
+<booktitle>An Edited Volume</booktitle>
+<publisher>Springer</publisher>
+<year>2020</year>
+<ee>https://doi.org/10.1007/978-3-000-00000-0</ee>
+</book></r>
+<r><data publtype="software" key="data/10/Ye22" mdate="2024-01-01">
+<author pid="00/0003">Wei Ye 0003</author>
+<title>ShipTool release 1.0.</title>
+<year>2022</year>
+<ee type="oa">https://doi.org/10.5281/zenodo.200</ee>
+<rel sort="1" label="Version 1" uri="https://doi.org/10.5281/ZENODO.199" type="versionOf"></rel>
+<rel sort="2" uri="https://example.org/other" type="versionOf"></rel>
+</data></r>
+<r><article key="journals/x/YeNoYear" mdate="2024-01-01">
+<author pid="00/0003">Wei Ye 0003</author>
+<title>An Article With No Year.</title>
+<year>in press</year>
+<journal>J. X</journal>
+<ee>https://arxiv.org/abs/2310.18948v2</ee>
+</article></r>
+</dblpperson>
