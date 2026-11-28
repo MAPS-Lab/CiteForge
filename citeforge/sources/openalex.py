@@ -226,10 +226,19 @@ def _lists_author(item: Mapping[str, Any], author_ids: frozenset[str]) -> bool:
     return False
 
 
-def _full_byline(http: Http, item: Mapping[str, Any], author_ids: frozenset[str]) -> Result[Mapping[str, Any]]:
-    """List results stop at 100 authorships; refetch the single work when the listed author fell past that cut."""
+def _full_byline(
+    http: Http, item: Mapping[str, Any], author_ids: frozenset[str], known: frozenset[str]
+) -> Result[Mapping[str, Any]]:
+    """Refetch a work whose listed author fell past the 100-authorship cut of a list result.
+
+    A work the member's other listings claim by DOI is decided without it, and the refetches stop at the member's
+    request cap, leaving the truncated byline.
+    """
     wid = norm_openalex(item["id"]) if isinstance(item.get("id"), str) else None
+    doi = to_id("doi", item["doi"]) if isinstance(item.get("doi"), str) else None
     if item.get("is_authors_truncated") is not True or wid is None or _lists_author(item, author_ids):
+        return Result(Fetch.OK, item)
+    if doi in known or not http.can_spend():
         return Result(Fetch.OK, item)
     reply = http.get(HOST, f"/works/{wid}", {"select": WORK_FIELDS})
     if reply.fetch is not Fetch.OK:
@@ -240,16 +249,24 @@ def _full_byline(http: Http, item: Mapping[str, Any], author_ids: frozenset[str]
         return Result(Fetch.FAILED, None, "parse_error")
 
 
-def list_works(http: Http, author_ids: Sequence[str], since_year: int) -> Result[tuple[Claim, ...]]:
-    """Cursor-page every work of the authors from since_year; each Claim carries its Record."""
+def list_works(
+    http: Http, author_ids: Sequence[str], since_year: int, known: frozenset[str] = frozenset()
+) -> Result[tuple[Claim, ...]]:
+    """Cursor-page every work of the authors from since_year; each Claim carries its Record.
+
+    known holds the doi: ids the member's ORCID and DBLP listings claim.
+    """
     claims: dict[str, Claim] = {}
     for chunk in batched(sorted(set(author_ids)), IDS_PER_CALL, strict=False):
         flt = f"authorships.author.id:{_or(chunk)},from_publication_date:{since_year}-01-01"
         res = _pages(http, "/works", {"filter": flt, "select": WORK_FIELDS})
         if res.value is None:
             return Result(res.fetch, None, res.reason)
-        for listed in res.value:
-            full = _full_byline(http, listed, frozenset(chunk))
+        newest_first = sorted(
+            res.value, key=lambda i: -i["publication_year"] if type(i.get("publication_year")) is int else 0
+        )
+        for listed in newest_first:
+            full = _full_byline(http, listed, frozenset(chunk), known)
             if full.value is None:
                 return Result(full.fetch, None, full.reason)
             if (claim := _claim(full.value)) is not None:

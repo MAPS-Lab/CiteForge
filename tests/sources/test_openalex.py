@@ -10,6 +10,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from citeforge import http as http_module
 from citeforge.http import Http, ParseError
 from citeforge.model import Fetch, Kind, Source, Status
 from citeforge.sources import openalex
@@ -199,6 +200,28 @@ def test_list_works_refetches_a_byline_cut_before_the_member(clock: FakeClock) -
     assert len(refetched.authors) == 260 and refetched.authors[119].openalex == SPADON
     assert len(untouched.authors) == 100
     assert seen == ["/works", "/works/W4000000001"]
+
+
+def test_list_works_refetches_newest_first_skips_known_dois_and_stops_at_the_cap(
+    clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+    cut = [
+        work(f"W40000000{n:02d}", doi=f"https://doi.org/10.1234/c{n}", publication_year=2020 + n,
+             authorships=_crowd(100, None), is_authors_truncated=True)
+        for n in range(4)
+    ]  # fmt: skip
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return json_response(cut[int(request.url.path[-2:])]) if request.url.path.startswith("/works/W") else page(cut)
+
+    monkeypatch.setattr(http_module, "MEMBER_REQUESTS", 3)
+    http = make_http(handle, clock)
+    with http_module.on_behalf_of("Spadon (bfdGsGUAAAAJ)"):
+        res = openalex.list_works(http, [SPADON], 2018, frozenset({"doi:10.1234/c3"}))
+    assert res.value is not None and len(res.value) == 4
+    assert seen == ["/works", "/works/W4000000002", "/works/W4000000001"]  # c3 is known, c0 is past the cap
 
 
 def test_list_works_fails_when_a_cut_byline_cannot_be_refetched(clock: FakeClock) -> None:

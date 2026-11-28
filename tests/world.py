@@ -181,7 +181,7 @@ def install(monkeypatch: pytest.MonkeyPatch, world: World) -> None:
         count("openalex.author")
         return Result(Fetch.OK, (aid, SPADON_ORCID))
 
-    def list_works(http, ids, since):
+    def list_works(http, ids, since, known=frozenset()):
         count("openalex.list_works")
         return Result(Fetch.OK, tuple(c for c in world.openalex_claims if (c.year or 0) >= since))
 

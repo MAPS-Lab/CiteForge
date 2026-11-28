@@ -28,7 +28,8 @@ def discover(
         fetch[Source.DBLP] = dblp.fetch
         raw[Source.DBLP] = dblp.value.claims if dblp.value else ()
     if identity.openalex:
-        listed = openalex.list_works(http, sorted(identity.openalex), since_year)
+        known = frozenset(i for claims in raw.values() for c in claims for i in c.ids if i.startswith("doi:"))
+        listed = openalex.list_works(http, sorted(identity.openalex), since_year, known)
         fetch[Source.OPENALEX] = listed.fetch
         raw[Source.OPENALEX] = listed.value or ()
     if openalex_lookup is Fetch.FAILED:

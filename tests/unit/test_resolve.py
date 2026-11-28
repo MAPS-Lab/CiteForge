@@ -91,7 +91,7 @@ def claims(n: int, source: Source, year: int = 2023) -> tuple[Claim, ...]:
 
 
 def test_discover_filters_years_and_suspects_empty_listing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(disc.openalex, "list_works", lambda http, ids, since: Result(Fetch.OK, ()))
+    monkeypatch.setattr(disc.openalex, "list_works", lambda http, ids, since, known=frozenset(): Result(Fetch.OK, ()))
     orcid = Result(Fetch.OK, orcid_rec(claims(6, Source.ORCID) + claims(1, Source.ORCID, 2010)))
     dblp = Result(Fetch.OK, DblpPerson((), (), claims(2, Source.DBLP)))
     listing = disc.discover(identity(), orcid, dblp, None, None, 2018)  # type: ignore[arg-type]
@@ -115,14 +115,16 @@ def test_failed_openalex_lookup_marks_the_listing_failed(monkeypatch: pytest.Mon
     listing = disc.discover(ident, orcid_result, person, lookup, None, 2018)  # type: ignore[arg-type]
     assert listing.fetch[Source.OPENALEX] is Fetch.FAILED
     monkeypatch.setattr(
-        disc.openalex, "list_works", lambda http, ids, since: Result(Fetch.OK, claims(1, Source.OPENALEX))
+        disc.openalex,
+        "list_works",
+        lambda *args: Result(Fetch.OK, claims(1, Source.OPENALEX)),
     )
     listing = disc.discover(identity(), orcid_result, person, Fetch.FAILED, None, 2018)  # type: ignore[arg-type]
     assert listing.fetch[Source.OPENALEX] is Fetch.FAILED and len(listing.claims) == 1
 
 
 def test_discover_window_compares_listings_over_the_same_years(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(disc.openalex, "list_works", lambda http, ids, since: Result(Fetch.OK, ()))
+    monkeypatch.setattr(disc.openalex, "list_works", lambda http, ids, since, known=frozenset(): Result(Fetch.OK, ()))
     old = Result(Fetch.OK, DblpPerson((), (), claims(6, Source.DBLP, 2010)))
     listing = disc.discover(identity(), None, old, Fetch.OK, None, 2018)  # type: ignore[arg-type]
     assert listing.fetch == {Source.DBLP: Fetch.OK, Source.OPENALEX: Fetch.OK} and listing.claims == ()

@@ -40,8 +40,6 @@ SEARCH_REVIEW = 0.85
 PREPRINT_YEARS = 3
 POSTPRINT_YEARS = 2
 SEARCH_REUSE_DAYS = 90
-# the spec's cap on one member's requests in a cold run; title searches spend what the listings left
-MEMBER_REQUESTS = 25
 # a part, volume or edition number, or a year; a longer number is a count that changes between versions
 _NUMERAL = re.compile(r"\d{1,2}|(?:19|20)\d\d|x{0,3}(?:ix|iv|v?i{0,3})")
 _GROUPED_NUMBER = re.compile(r"(?<!\d)\d{1,3}(?:[,\u2009\u202f ]\d{3})+(?!\d)")
@@ -491,7 +489,7 @@ def search_unidentified(
 ) -> tuple[list[tuple[str, Record]], list[Event], dict[str, Searched]]:
     """Link each DOI-less listed group to its Crossref DOI: by the member's own listing, an earlier link, or a search.
 
-    Searches run newest first while the member stays under MEMBER_REQUESTS, and one that linked nothing is not
+    Searches run newest first while the member stays under http.MEMBER_REQUESTS, and one that linked nothing is not
     repeated for SEARCH_REUSE_DAYS unless its query changes.
     """
     events: list[Event] = []
@@ -543,13 +541,15 @@ def search_unidentified(
     pending.sort(key=lambda t: (t[0], -(t[2].year or 0), t[1].key))
     for member, g, profile, identity, query, before in pending:
         if query not in results:
-            if http.used_by(member) >= MEMBER_REQUESTS:
-                events.append(Event(EventKind.SEARCH_DEFERRED, member, g.key, f"{MEMBER_REQUESTS} requests used"))
+            with on_behalf_of(member):
+                spare = http.can_spend()
+                if spare:
+                    results[query] = crossref.search(http, *query)
+            if not spare:
+                events.append(Event(EventKind.SEARCH_DEFERRED, member, g.key, "member request cap reached"))
                 if before is not None:
                     keep[g.key] = before
                 continue
-            with on_behalf_of(member):
-                results[query] = crossref.search(http, *query)
         result = results[query]
         if result.fetch is not Fetch.OK or result.value is None:
             events += [

@@ -56,6 +56,8 @@ HOSTS: Mapping[str, Host] = {
 ALLOWED = frozenset(HOSTS) | CSL_HOSTS
 FIXED_PARAMS: Mapping[str, Mapping[str, str]] = {"dblp.org": {"app": "citeforge"}}
 _MEMBER: ContextVar[str | None] = ContextVar("member", default=None)
+# the spec's cap on one member's requests in a cold run; title searches and byline refetches spend what is left
+MEMBER_REQUESTS = 25
 
 
 REDIRECT = "redirect"
@@ -190,6 +192,11 @@ class Http:
 
     def used_by(self, member: str) -> int:
         return self._by_member[member]
+
+    def can_spend(self) -> bool:
+        """Whether the member the current requests are made for is still under MEMBER_REQUESTS."""
+        member = _MEMBER.get()
+        return member is None or self._by_member[member] < MEMBER_REQUESTS
 
     def stats(self) -> dict[str, dict[str, int | float]]:
         out: dict[str, dict[str, int | float]] = {}

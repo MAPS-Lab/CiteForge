@@ -7,6 +7,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from citeforge import cluster as cl
+from citeforge import http as http_module
 from citeforge.curated import Curated
 from citeforge.http import Http, Result
 from citeforge.ids import is_copy_id, split_id
@@ -837,7 +838,7 @@ def test_searches_stop_at_the_member_request_cap_newest_first(monkeypatch: pytes
         return Result(Fetch.OK, ())
 
     monkeypatch.setattr(cl.crossref, "search", spend)
-    monkeypatch.setattr(cl, "MEMBER_REQUESTS", 2)
+    monkeypatch.setattr(http_module, "MEMBER_REQUESTS", 2)
     pairs = []
     for year in (2021, 2024, 2023):
         rec = record(f"dblp:conf/x/S{year}", source=Source.DBLP, title=f"{TITLE} {year}", year=year)
