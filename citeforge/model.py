@@ -50,6 +50,7 @@ class Rel(StrEnum):
     PREPRINT_OF = "preprint_of"
     VERSION_OF = "version_of"
     IDENTICAL = "identical"
+    VARIANT_OF = "variant_of"
     PUBLISHED_AS = "published_as"
     TRANSLATION_OF = "translation_of"
     HAS_TRANSLATION = "has_translation"
@@ -58,7 +59,11 @@ class Rel(StrEnum):
     WITHDRAWS = "withdraws"
 
 
-VERSION_RELS = frozenset({Rel.HAS_PREPRINT, Rel.PREPRINT_OF, Rel.VERSION_OF, Rel.PUBLISHED_AS, Rel.IDENTICAL})
+VERSION_RELS = frozenset(
+    {Rel.HAS_PREPRINT, Rel.PREPRINT_OF, Rel.VERSION_OF, Rel.PUBLISHED_AS, Rel.IDENTICAL, Rel.VARIANT_OF}
+)
+# A registry that calls two DOIs one object, or one DOI a copy of the other, joins them past the two-DOI guard.
+SAME_OBJECT_RELS = frozenset({Rel.IDENTICAL, Rel.VARIANT_OF})
 
 
 class Fetch(StrEnum):
@@ -122,6 +127,7 @@ class Record:
     degree: str | None = None
     relations: frozenset[tuple[Rel, str]] = frozenset()
     status: Status = Status.OK
+    alt_titles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

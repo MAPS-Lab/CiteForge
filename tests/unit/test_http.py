@@ -2,8 +2,17 @@ import io
 import json
 
 import httpx
+import pytest
 
-from citeforge.http import HOSTS, USER_AGENT, Http, _parse_retry_after, _scrub_secrets
+from citeforge.http import (
+    CIRCUIT_FAILURES,
+    HOSTS,
+    MAX_RETRY_WAIT_S,
+    USER_AGENT,
+    Http,
+    _parse_retry_after,
+    _scrub_secrets,
+)
 from citeforge.model import Fetch
 from tests.conftest import FakeClock, json_response, make_http
 
@@ -102,7 +111,7 @@ def test_corrupt_body_is_retried_then_failed(clock: FakeClock) -> None:
 
 
 def test_circuit_breaker_after_five_failures(clock: FakeClock) -> None:
-    handle, seen = sequence(json_response({}, 400))
+    handle, seen = sequence(json_response({}, 403))
     http = make_http(handle, clock)
     for _ in range(5):
         assert http.get(CROSSREF, "/works").reason == "http_error"
@@ -112,7 +121,7 @@ def test_circuit_breaker_after_five_failures(clock: FakeClock) -> None:
 
 
 def test_not_found_resets_failures(clock: FakeClock) -> None:
-    handle, _ = sequence(json_response({}, 400), json_response({}, 400), json_response({}, 404))
+    handle, _ = sequence(json_response({}, 403), json_response({}, 403), json_response({}, 404))
     http = make_http(handle, clock)
     http.get(CROSSREF, "/a")
     http.get(CROSSREF, "/b")
@@ -154,9 +163,31 @@ def test_redirect_reply_and_allowlist(clock: FakeClock) -> None:
         assert reply.reason == "redirect"
         assert reply.location == "https://data.medra.org/10.1400%2F245393"
     assert http.down(DOI) is None
-    assert http.get(DOI, "", url="https://evil.example.com/x").reason == "redirect_blocked"
-    assert http.get(DOI, "", url="http://data.medra.org/x").reason == "redirect_blocked"
     assert len(seen) == 6
+
+
+@pytest.mark.parametrize(
+    "location", ["https://evil.example.com/x", "http://data.medra.org/x", "https://doi.org:8443/x"]
+)
+def test_redirect_off_allowlist_sends_no_request(clock: FakeClock, location: str) -> None:
+    handle, seen = sequence(httpx.Response(302, headers={"location": location}))
+    reply = make_http(handle, clock).get(DOI, "/10.1400/245393", follow_redirects=True)
+    assert reply.reason == "redirect_blocked"
+    assert len(seen) == 1
+
+
+def test_followed_redirect_reports_the_final_url_and_keeps_params_on_the_host(clock: FakeClock) -> None:
+    xml = httpx.Response(200, headers={"content-type": "application/xml"}, content=b"<x/>")
+    handle, seen = sequence(httpx.Response(301, headers={"location": "/pid/9/9.xml"}), xml)
+    reply = make_http(handle, clock).get(DBLP, "/pid/1/2.xml", follow_redirects=True)
+    assert reply.fetch is Fetch.OK
+    assert reply.url == str(seen[1].url) == "https://dblp.org/pid/9/9.xml?app=citeforge"
+
+
+def test_followed_redirect_to_another_host_drops_the_key(clock: FakeClock) -> None:
+    handle, seen = sequence(httpx.Response(302, headers={"location": "https://doi.org/x"}), json_response({}))
+    make_http(handle, clock, keys={"api.openalex.org": "SECRETKEY"}).get(OPENALEX, "/works", follow_redirects=True)
+    assert "api_key" in seen[0].url.params and "SECRETKEY" not in str(seen[1].url)
 
 
 def test_log_lines_are_scrubbed(clock: FakeClock) -> None:
@@ -181,3 +212,39 @@ def test_scrub_and_retry_after_parsing() -> None:
     assert _parse_retry_after("garbage") == 0.0
     assert _parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
     assert _parse_retry_after(None) == 0.0
+
+
+def test_retry_after_on_the_last_attempt_delays_the_next_call(clock: FakeClock) -> None:
+    sent: list[float] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(clock.now)
+        return json_response({}, 429, {"retry-after": "60"})
+
+    http = make_http(handle, clock)
+    http.get(CROSSREF, "/works")
+    http.get(CROSSREF, "/works")
+    assert len(sent) > 4
+    assert sent[4] - sent[3] >= 60.0
+
+
+def test_throttling_host_goes_down_once_its_wait_budget_is_spent(clock: FakeClock) -> None:
+    handle, seen = sequence(json_response({}, 429, {"retry-after": "120"}))
+    http = make_http(handle, clock)
+    calls = 0
+    while http.down(CROSSREF) is None:
+        http.get(CROSSREF, "/works")
+        calls += 1
+    down = http.down(CROSSREF)
+    assert down is not None and down.startswith("retry_wait")
+    assert sum(clock.sleeps) <= MAX_RETRY_WAIT_S
+    assert calls == 1 and len(seen) == 3
+
+
+@pytest.mark.parametrize("status", [400, 409])
+def test_record_level_answers_never_open_the_circuit(clock: FakeClock, status: int) -> None:
+    handle, seen = sequence(json_response({"error-code": 9007}, status))
+    http = make_http(handle, clock)
+    for _ in range(CIRCUIT_FAILURES + 3):
+        assert http.get(CROSSREF, "/works").reason == "http_error"
+    assert http.down(CROSSREF) is None and len(seen) == CIRCUIT_FAILURES + 3

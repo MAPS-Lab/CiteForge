@@ -586,7 +586,9 @@ def test_window_boundary_and_unpublishable_reviews(workdir: Path, monkeypatch: p
     for doi, (title, year, authors) in titles.items():
         world.crossref[doi] = cr(doi, title, authors or (SP,), year=year)
         world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset({doi}), title, year))
-    world.crossref["doi:10.1234/rnote"] = dataclasses.replace(world.crossref["doi:10.1234/rnote"], source_type="other")
+    world.crossref["doi:10.1234/rnote"] = dataclasses.replace(
+        world.crossref["doi:10.1234/rnote"], source_type="other", kind=Kind.OTHER
+    )
     install(monkeypatch, world)
     assert cli.main([]) == 0
     assert (workdir / "output" / SPADON / "Spadon2020-SeaIce.bib").exists()
@@ -624,3 +626,18 @@ def test_arxiv_copy_of_a_thesis_ships_as_the_thesis(workdir: Path, monkeypatch: 
     assert entry["ENTRYTYPE"] == "phdthesis"
     assert (entry["doi"], entry["year"]) == (thesis.removeprefix("doi:"), "2021")
     assert entry["school"] == "Universidade de São Paulo"
+
+
+def test_a_deprecated_orcid_names_its_primary_id_in_the_report(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install(monkeypatch, default_world())
+    real = orcid.record
+    primary = "0000-0002-9079-593X"
+
+    def record(http: Http, orcid_id: str) -> Result:
+        return Result(Fetch.FAILED, None, f"deprecated:{primary}") if orcid_id == YE_ORCID else real(http, orcid_id)
+
+    monkeypatch.setattr(orcid, "record", record)
+    assert cli.main([]) == 3
+    stable = json.loads((workdir / "state/report.json").read_text())
+    assert ["orcid_status", YE, YE_ORCID, f"deprecated:{primary}"] in stable["events"]["items"]
+    assert f"{YE}: {YE_ORCID} is deprecated:{primary}" in (workdir / "run/report.md").read_text()

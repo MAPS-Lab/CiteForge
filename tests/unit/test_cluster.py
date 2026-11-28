@@ -11,6 +11,7 @@ from citeforge.ids import is_copy_id, split_id
 from citeforge.model import Claim, Fetch, Kind, Names, Record, Registries, Rel, Source, Status, Work
 from citeforge.state import StateRow
 from citeforge.text import name_key
+from citeforge.works import build
 from tests.factories import author, member, record
 from tests.unit.test_authorship import identity
 
@@ -28,7 +29,7 @@ def reg(*records: Record, **kw) -> Registries:
 
 def test_verify_detaches_dead_and_mismatched_dois_and_holds_reviews() -> None:
     good = record("doi:10.1234/good")
-    wrong = record("doi:10.1234/wrong", title="Protein folding with diffusion")
+    wrong = record("doi:10.1234/wrong", title="Protein folding with diffusion", authors=(author("Ana Lima"),))
     middle = record("doi:10.1234/mid", title="Graph networks for ship trajectory forecasts at sea")
     claims = [
         (ME, claim("doi:10.1234/good")),
@@ -77,6 +78,22 @@ def test_guard_never_joins_two_published_dois() -> None:
     groups, events = cl.cluster([], reg(same, record("doi:10.1145/3801489.3806907")), Curated())
     assert [sorted(g.ids) for g in groups] == [["doi:10.1145/3801489.3806907", "doi:10.1145/3820171.3806907"]]
     assert events == []
+
+
+def test_repository_copy_joins_the_publisher_doi_and_never_leads() -> None:
+    pub = record("doi:10.3390/s1", title=TITLE)
+    copy = record(
+        "doi:10.25560/1",
+        title=TITLE,
+        source=Source.DATACITE,
+        source_type="JournalArticle",
+        relations=frozenset({(Rel.VARIANT_OF, "doi:10.3390/s1")}),
+    )
+    groups, events = cl.cluster([(ME, claim("doi:10.25560/1"))], reg(pub, copy), Curated())
+    (g,) = groups
+    assert g.ids == {"doi:10.3390/s1", "doi:10.25560/1"} and events == []
+    work, _ = build(g, Curated())
+    assert work.primary.ids == {"doi:10.3390/s1"} and work.key == "doi:10.3390/s1"
 
 
 def test_crosswalk_needs_matching_registry_titles() -> None:

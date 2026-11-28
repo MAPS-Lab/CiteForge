@@ -20,14 +20,24 @@ def own_slots(i: Identity, w: Work, claims: Iterable[Claim]) -> list[Author]:
 
 
 def _affil(i: Identity, slots: Iterable[Author]) -> tuple[bool, bool]:
+    """Return (matched, contradicted); only a member whose ORCID names institutions can be contradicted."""
     stated = matched = False
     for a in slots:
         if a.rors or a.affiliations:
             stated = True
-        if any(r in i.rors for r in a.rors) or any(n in fold(aff) for aff in a.affiliations for n in i.inst_names):
+        texts = [f" {fold(aff)} " for aff in a.affiliations]
+        if any(r in i.rors for r in a.rors) or any(f" {n} " in t for t in texts for n in i.inst_names):
             matched = True
-    has_institutions = bool(i.rors or i.inst_names)
-    return matched, stated and not matched and has_institutions
+    return matched, stated and not matched and bool(i.inst_names)
+
+
+def _registry_slots(i: Identity, w: Work) -> list[Author]:
+    """The member's slots on a Crossref or DataCite byline whose affiliations no other source filled in."""
+    filled = dict(w.provenance).get("author_affiliations")
+    registry = (Source.CROSSREF, Source.DATACITE)
+    if w.primary.source not in registry or (filled is not None and filled not in registry):
+        return []
+    return [a for a in w.primary.authors if is_own(i, a)]
 
 
 def decide(i: Identity, w: Work, claims: Iterable[Claim], curated: Curated) -> Decision:
@@ -59,14 +69,14 @@ def decide(i: Identity, w: Work, claims: Iterable[Claim], curated: Curated) -> D
         return Decision(Verdict.REJECT, "orcid_contra", frozenset(a.orcid for a in named if a.orcid))
     if Source.DBLP in sources:
         return Decision(Verdict.ACCEPT, "dblp_listed", frozenset({i.dblp or ""}))
-    slots = own_slots(i, w, claims)
-    affil_ok, affil_contra = _affil(i, slots)
     if Source.ORCID in sources:
-        if affil_contra:
-            return Decision(Verdict.REVIEW, "orcid_affil_contra", _affil_evidence(slots))
+        registry_slots = _registry_slots(i, w)
+        if _affil(i, registry_slots)[1]:
+            return Decision(Verdict.REVIEW, "orcid_affil_contra", _affil_evidence(registry_slots))
         return Decision(Verdict.ACCEPT, "orcid_claim", frozenset())
+    slots = own_slots(i, w, claims)
     if any(a.openalex in i.openalex for a in slots if a.openalex):
-        if affil_ok:
+        if _affil(i, slots)[0]:
             return Decision(Verdict.ACCEPT, "openalex_affil", _affil_evidence(slots))
         return Decision(Verdict.REVIEW, "openalex_only", _affil_evidence(slots))
     return Decision(Verdict.REJECT, "no_evidence", frozenset())

@@ -97,6 +97,7 @@ def test_markdown_is_capped() -> None:
         "excluded": {},
         "links": {},
         "coverage": {"claimed": 0, "emitted": 0, "unexplained": 0, "items": []},
+        "events": {"counts": {}, "items": []},
     }
     assert len(markdown(report)) <= MARKDOWN_MAX
 
@@ -129,3 +130,14 @@ def test_identify_proposals(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out.getvalue().splitlines()[1].startswith("Spadon (bfdGsGUAAAAJ)\t0000-0002-1825-0097\tA1234567\ttrue\t3")
     (none,) = identify.propose([member(dblp=None)], None, frozenset({lab}))  # type: ignore[arg-type]
     assert not none.accept and none.note == "no ORCID candidate"
+
+
+def test_write_never_prunes_through_a_symlinked_member_folder(tmp_path: Path) -> None:
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "Keep2020-A.bib").write_text("@misc{k}\n", encoding="utf-8")
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / SP.dirname).symlink_to(outside, target_is_directory=True)
+    publish.write(output, {}, [SP.dirname])
+    assert (outside / "Keep2020-A.bib").exists()

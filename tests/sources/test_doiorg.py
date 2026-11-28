@@ -3,7 +3,7 @@ import io
 import httpx
 import pytest
 
-from citeforge.http import Http, ParseError
+from citeforge.http import MAX_REDIRECTS, Http, ParseError
 from citeforge.model import Author, Fetch, Kind, Source
 from citeforge.sources import doiorg
 from tests.conftest import FIXTURES, FakeClock, fixture_transport, json_response, make_http
@@ -142,7 +142,7 @@ def test_csl_recorded_medra_chapter_without_date(recorded: Http) -> None:
     res = doiorg.csl(recorded, MEDRA_CHAPTER)
     assert res.fetch is Fetch.OK and res.value is not None
     r = res.value
-    assert (r.source, r.kind, r.source_type) == (Source.CSL, Kind.OTHER, "chapter")
+    assert (r.source, r.kind, r.source_type) == (Source.CSL, Kind.INCOLLECTION, "chapter")
     assert r.ids == {MEDRA_CHAPTER}
     assert r.title == "L'inquisition et l'Islam"
     assert r.authors == (Author("Bernard", "Vincent"),)
@@ -198,7 +198,7 @@ def test_csl_three_hops_allowed_four_is_failed(clock: FakeClock) -> None:
     assert doiorg.csl(make_http(lambda r: replies.pop(0), clock), MEDRA_CHAPTER).fetch is Fetch.OK
     handle, seen = counting(lambda r: redirect(f"https://data.medra.org/{len(seen)}"))
     assert doiorg.csl(make_http(handle, clock), MEDRA_CHAPTER) == doiorg.Result(Fetch.FAILED, None, "redirect_limit")
-    assert len(seen) == doiorg.MAX_HOPS + 1
+    assert len(seen) == MAX_REDIRECTS + 1
 
 
 @pytest.mark.parametrize("location", ["https://example.org/landing", "http://data.medra.org/10.1400/227379"])
@@ -228,7 +228,7 @@ def test_blocked_redirects_never_open_the_circuit(clock: FakeClock) -> None:
 
 def test_csl_redirect_without_location_is_failed(clock: FakeClock) -> None:
     http = make_http(lambda r: httpx.Response(302), clock)
-    assert doiorg.csl(http, MEDRA_CHAPTER) == doiorg.Result(Fetch.FAILED, None, "parse_error")
+    assert doiorg.csl(http, MEDRA_CHAPTER) == doiorg.Result(Fetch.FAILED, None, "redirect")
 
 
 def test_csl_404_after_redirect_is_failed_not_dead(clock: FakeClock) -> None:

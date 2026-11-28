@@ -9,6 +9,7 @@ from citeforge.http import Http
 from citeforge.ids import is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
+    SAME_OBJECT_RELS,
     VERSION_RELS,
     Claim,
     Event,
@@ -18,7 +19,6 @@ from citeforge.model import (
     Kind,
     Record,
     Registries,
-    Rel,
     Source,
 )
 from citeforge.sources import crossref
@@ -202,14 +202,13 @@ def cluster(
         if r.source in REGISTRIES or r.source in (Source.ARXIV, Source.CURATED):
             strong |= {_edge(ids[0], x) for x in ids[1:]}
             strong |= {_edge(ids[0], t) for rel, t in r.relations if rel in VERSION_RELS and ids}
-            identical |= {_edge(ids[0], t) for rel, t in r.relations if rel is Rel.IDENTICAL and ids}
+            identical |= {_edge(ids[0], t) for rel, t in r.relations if rel in SAME_OBJECT_RELS and ids}
         else:
             _crosswalk(r.ids, r.source.value, strong, crosswalk)
     for _, c in claims:
         for x in c.ids:
             forest.add(x)
         _crosswalk(c.ids, c.source.value, strong, crosswalk)
-    # a registry that calls two DOIs identical names one object, so the two-published-DOI guard does not apply
     for a, b in sorted(identical):
         forest.union(a, b, guard=False)
     for a, b in sorted(strong):

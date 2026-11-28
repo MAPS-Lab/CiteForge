@@ -52,7 +52,13 @@ def resolve(
     m: Member, http: Http, lab_rors: frozenset[str]
 ) -> tuple[Identity, Result[OrcidRecord] | None, Result[DblpPerson] | None, Fetch | None, tuple[Event, ...]]:
     events: list[Event] = []
-    orcid_result = _merge_orcid([orcid.record(http, o) for o in m.orcids])
+    results = [orcid.record(http, o) for o in m.orcids]
+    events += [
+        Event("orcid_status", m.dirname, o, r.reason)
+        for o, r in zip(m.orcids, results, strict=True)
+        if r.fetch is Fetch.FAILED and r.reason.partition(":")[0] in orcid.STATUS_REASONS.values()
+    ]
+    orcid_result = _merge_orcid(results)
     person = dblp.person(http, m.dblp) if m.dblp else None
     author_ids: set[str] = set()
     lookup = None

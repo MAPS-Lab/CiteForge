@@ -7,12 +7,33 @@ from urllib.parse import quote
 from citeforge.http import HOSTS, Batch, Http, ParseError, Result
 from citeforge.ids import norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Rel, Source, Status
+from citeforge.tables import GENERIC_SERIES_NAMES
 from citeforge.text import affiliation, clean, fold
-from citeforge.works import CROSSREF_KINDS
 
 HOST = HOSTS["api.crossref.org"]
 CHUNK = 50
 SEARCH_ROWS = 5
+KINDS: Mapping[str, Kind] = {
+    "journal-article": Kind.ARTICLE,
+    "proceedings-article": Kind.INPROCEEDINGS,
+    "book-chapter": Kind.INCOLLECTION,
+    "book-part": Kind.INCOLLECTION,
+    "book-section": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "monograph": Kind.BOOK,
+    "reference-book": Kind.BOOK,
+    "edited-book": Kind.PROCEEDINGS,
+    "proceedings": Kind.PROCEEDINGS,
+    "journal-issue": Kind.PROCEEDINGS,
+    "journal": Kind.PROCEEDINGS,
+    "report": Kind.TECHREPORT,
+    "dissertation": Kind.PHDTHESIS,
+    "posted-content": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "component": Kind.COMPONENT,
+    "peer-review": Kind.PEER_REVIEW,
+    "editorial": Kind.EDITORIAL,
+}
 _RELATIONS: Mapping[str, Rel] = {
     "has-preprint": Rel.HAS_PREPRINT,
     "is-preprint-of": Rel.PREPRINT_OF,
@@ -118,20 +139,24 @@ def parse_work(item: Mapping[str, Any]) -> Record:
     title = _title(item)
     if not title:
         raise ParseError(f"{doi} has no title")
+    authors, editors = _people(item.get("author"), doi), _people(item.get("editor"), doi)
+    container = tuple(dict.fromkeys(c for c in map(clean, _strs(item.get("container-title"))) if c))
+    event = _first_name([item.get("event")])
     relations = {*_relations(item.get("relation"), doi), *_updates(item.get("update-to"), doi)}
     institution = _first_name(item.get("institution"))
     year = next((y for path in _YEAR_FIELDS if (y := _year(_dig(item, path))) is not None), None)
     return Record(
         source=Source.CROSSREF,
         ids=frozenset({doi}),
-        kind=CROSSREF_KINDS.get(source_type, Kind.OTHER),
+        kind=_kind(source_type, authors, editors, event, container),
         source_type=source_type,
         title=title,
-        authors=_people(item.get("author"), doi),
-        editors=_people(item.get("editor"), doi),
+        alt_titles=_alt_titles(item, title),
+        authors=authors,
+        editors=editors,
         year=year,
-        container=tuple(dict.fromkeys(c for c in map(clean, _strs(item.get("container-title"))) if c)),
-        event=_first_name([item.get("event")]),
+        container=container,
+        event=event,
         publisher=clean(_str(item.get("publisher"))) or None,
         volume=_field(item, "volume"),
         number=_field(item, "issue"),
@@ -144,6 +169,20 @@ def parse_work(item: Mapping[str, Any]) -> Record:
         relations=frozenset(relations),
         status=_status(item.get("updated-by")),
     )
+
+
+def _kind(
+    source_type: str,
+    authors: tuple[Author, ...],
+    editors: tuple[Author, ...],
+    event: str | None,
+    container: tuple[str, ...],
+) -> Kind:
+    if source_type == "edited-book" and authors and not editors:
+        return Kind.BOOK
+    if source_type == "book-chapter" and (event or any(c.strip().lower() in GENERIC_SERIES_NAMES for c in container)):
+        return Kind.INPROCEEDINGS
+    return KINDS.get(source_type, Kind.OTHER)
 
 
 def _items(body: bytes) -> tuple[list[Mapping[str, Any]], bool]:
@@ -199,6 +238,13 @@ def _title(item: Mapping[str, Any]) -> str:
     if not title or not subtitle or fold(subtitle) in fold(title):
         return title or subtitle
     return f"{title}: {subtitle}"
+
+
+def _alt_titles(item: Mapping[str, Any], title: str) -> tuple[str, ...]:
+    """Every other title and original-title entry, as bilingual journals deposit both languages."""
+    own = fold(title)
+    found = (t for key in ("title", "original-title") for t in map(clean, _strs(item.get(key))))
+    return tuple(t for t in dict.fromkeys(found) if not own.startswith(fold(t)))
 
 
 def _people(value: object, doi: str) -> tuple[Author, ...]:

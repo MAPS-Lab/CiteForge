@@ -161,6 +161,8 @@ def markdown(report: Mapping[str, Any]) -> str:
     lines += _list("Registry lookups failed", report["run"]["registry_failed"])
     partial = [f"{m}: {v['status']}" for m, v in members.items() if v["status"] != "complete"]
     lines += _list("Members not complete", partial, None)
+    orcid_status = [f"{m}: {i} is {d}" for k, m, i, d in report["events"]["items"] if k == "orcid_status"]
+    lines += _list("ORCID records to fix in the roster", orcid_status, None)
     site = members.get(WEBSITE_DIR)
     if site:
         changes = [f"added {k} as {stem}" for k, stem in site["added"]]

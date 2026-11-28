@@ -8,7 +8,6 @@ from citeforge.model import Fetch, Member
 from citeforge.sources import dblp, openalex, orcid
 
 DBLP_OVERLAP = 3
-EMPLOYMENT_OVERLAP = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,11 +48,8 @@ def propose(members: Sequence[Member], http: Http, lab_rors: frozenset[str]) -> 
             overlap = len(_dois(rec.value.works) & dblp_dois)
             employment = any(a.kind == "employment" and a.ror in lab_rors for a in rec.value.affiliations)
             listed = candidate in dblp_orcids
-            accept = (
-                candidate in m.orcids
-                or (listed and overlap >= DBLP_OVERLAP)
-                or (overlap >= EMPLOYMENT_OVERLAP and employment)
-            )
+            # Every candidate is pinned or listed by DBLP, so the DBLP overlap is the one test an unpinned iD meets.
+            accept = candidate in m.orcids or (listed and overlap >= DBLP_OVERLAP)
             authors = openalex.authors_by_orcid(http, [candidate]) if accept else None
             ids = authors.value.get(candidate, ()) if authors and authors.value else ()
             note = "pinned" if candidate in m.orcids else ("accepted" if accept else "below threshold")

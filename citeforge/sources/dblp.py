@@ -2,7 +2,7 @@ import pyexpat
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 from citeforge.http import HOSTS, Http, ParseError, Result
 from citeforge.ids import norm_orcid, to_id
@@ -15,7 +15,6 @@ if pyexpat.version_info < (2, 6, 0):
 
 HOST = HOSTS["dblp.org"]
 MAX_BODY_BYTES = 50 * 1024 * 1024
-MAX_REDIRECTS = 3
 
 _KINDS = {
     "article": Kind.ARTICLE,
@@ -39,13 +38,7 @@ class DblpPerson:
 
 
 def person(http: Http, pid: str) -> Result[DblpPerson]:
-    url = f"{HOST.base}/pid/{pid}.xml"
-    reply = http.get(HOST, "", url=url)
-    for _ in range(MAX_REDIRECTS):
-        if reply.reason != "redirect" or not reply.location:
-            break
-        url = urljoin(url, reply.location)
-        reply = http.get(HOST, "", url=url)
+    reply = http.get(HOST, f"/pid/{pid}.xml", follow_redirects=True)
     if reply.fetch is not Fetch.OK:
         return Result(reply.fetch, None, reply.reason)
     try:
