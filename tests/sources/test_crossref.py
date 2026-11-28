@@ -373,11 +373,14 @@ def test_byline_rules() -> None:
     assert [(e.given, e.family) for e in record.editors] == [("Eve", "Editor")]
 
 
+def test_one_letter_family_is_kept() -> None:
+    record = crossref.parse_work({**item("10.1000/a"), "author": [{"given": "Tomohiro", "family": "I"}]})
+    assert [(a.given, a.family) for a in record.authors] == [("Tomohiro", "I")]
+
+
 @pytest.mark.parametrize(
     "bad",
     [
-        {"author": [{"given": "Gabriel", "family": "S"}]},
-        {"author": [{"given": "Gabriel", "family": "S."}]},
         {"author": "Gabriel Spadon"},
         {"author": ["Gabriel Spadon"]},
         {"DOI": "not-a-doi"},

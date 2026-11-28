@@ -41,11 +41,13 @@ def _year(stamp: str) -> int | None:
 def _author(node: ET.Element) -> Author:
     name = _text(node, "a:name")
     affiliations = tuple(a for e in node.findall("x:affiliation", NS) if (a := clean(e.text or "")))
+    if not name:
+        raise ParseError("arxiv: author has no name")
     if is_group(name) or is_affiliation(name):
         return Author("", "", literal=name, affiliations=affiliations)
     given, family = split_literal(name)
     if len(family.rstrip(".")) < 2:
-        raise ParseError(f"arxiv: unusable family name in {name!r}")
+        return Author("", "", literal=name, affiliations=affiliations)
     return Author(given, family, affiliations=affiliations)
 
 

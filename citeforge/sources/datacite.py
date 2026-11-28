@@ -161,8 +161,8 @@ def _person(c: Mapping[str, Any]) -> Author | None:
         return Author("", "", literal=name or family, rors=rors, affiliations=names)
     if not family:
         given, family = split_literal(name or "")
-    if len(family) < 2:
-        raise ParseError(f"creator {name!r} has no usable family name")
+    if not family:
+        raise ParseError(f"creator {name!r} has no family name")
     orcids = (
         norm_orcid(str(i.get("nameIdentifier") or ""))
         for i in _dicts(c.get("nameIdentifiers"))

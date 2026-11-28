@@ -133,7 +133,7 @@ def _author(authorship: Mapping[str, Any]) -> Author:
         return Author("", "", literal=name, **ids)
     given, family = split_literal(name)
     if len(family.strip(".")) < 2:
-        raise ParseError(f"author {name!r} has no usable family name")
+        return Author("", "", literal=name, **ids)
     return Author(given, family, **ids)
 
 

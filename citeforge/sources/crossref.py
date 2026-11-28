@@ -230,8 +230,6 @@ def _person(raw: object, doi: str) -> tuple[Author, str] | None:
     given, family, name = (clean(_str(raw.get(k))) for k in ("given", "family", "name"))
     if not family and not (name or given):
         return None
-    if family and not name and len(family.rstrip(".")) == 1:
-        raise ParseError(f"{doi} has a one-letter family name")
     rors: list[str] = []
     affiliations: list[str] = []
     for aff in raw.get("affiliation") or ():

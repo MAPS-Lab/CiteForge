@@ -219,7 +219,7 @@ def test_unavailable_then_ok_retries(clock: FakeClock) -> None:
 
 
 def test_bad_record_keeps_claim_without_record(clock: FakeClock) -> None:
-    bad = work("W4000000003", authorships=[authorship("Spadon G.")])
+    bad = work("W4000000003", authorships=[authorship("")])
     res = openalex.list_works(make_http(lambda r: page([bad, work("W4000000004", title=None)]), clock), [SPADON], 2020)
     assert res.value is not None
     assert len(res.value) == 1
@@ -340,10 +340,15 @@ def test_parse_authors() -> None:
     assert org.literal == "Dalhousie University"
 
 
-@pytest.mark.parametrize("name", ["", "Spadon G", "Gabriel S."])
-def test_parse_unusable_family_fails(name: str) -> None:
+def test_parse_nameless_author_fails() -> None:
     with pytest.raises(ParseError):
-        openalex.parse_work(work(authorships=[{"author": {"display_name": name}, "raw_author_name": None}]))
+        openalex.parse_work(work(authorships=[{"author": {"display_name": ""}, "raw_author_name": None}]))
+
+
+@pytest.mark.parametrize("name", ["Spadon G", "Gabriel S.", "Tomohiro I"])
+def test_one_letter_family_becomes_literal(name: str) -> None:
+    record = openalex.parse_work(work(authorships=[{"author": {"display_name": name}, "raw_author_name": None}]))
+    assert [(a.literal, a.family) for a in record.authors] == [(name, "")]
 
 
 @pytest.mark.parametrize("bad", [{"id": None}, {"title": None}, {"publication_year": "2024"}, {"authorships": {}}])

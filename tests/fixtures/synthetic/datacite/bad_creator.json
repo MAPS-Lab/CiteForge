@@ -1,6 +1,6 @@
 {"data": [
   {"id": "10.5555/bad", "attributes": {"doi": "10.5555/bad", "types": {"resourceTypeGeneral": "JournalArticle"},
-   "titles": [{"title": "One letter family"}], "creators": [{"nameType": "Personal", "givenName": "Jane", "familyName": "D"}],
+   "titles": [{"title": "Nameless creator"}], "creators": [{"nameType": "Personal", "name": ", Jane"}],
    "publicationYear": 2024}},
   {"id": "10.5555/untitled", "attributes": {"doi": "10.5555/untitled", "types": {"resourceTypeGeneral": "JournalArticle"},
    "titles": [{"title": "(:unas)"}], "publicationYear": 2024}},

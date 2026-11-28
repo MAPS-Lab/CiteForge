@@ -243,7 +243,7 @@ def test_csl_down_host_sends_nothing(clock: FakeClock) -> None:
         "csl_truncated.json",
         "csl_wrong_root.json",
         "csl_no_title.json",
-        "csl_one_letter_family.json",
+        "csl_no_family.json",
         "csl_author_not_list.json",
     ],
 )

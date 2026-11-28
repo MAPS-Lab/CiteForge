@@ -112,8 +112,8 @@ def _people(value: Any) -> tuple[Author, ...]:
             continue
         family = " ".join(filter(None, (_text(p.get("non-dropping-particle")), _text(p.get("family")))))
         given = " ".join(filter(None, (_text(p.get("given")), _text(p.get("dropping-particle")))))
-        if len(family) < 2:
-            raise ParseError(f"csl: unusable family name {family!r}")
+        if not family:
+            raise ParseError("csl: name has no family")
         orcid = norm_orcid(p["ORCID"]) if isinstance(p.get("ORCID"), str) else None
         people.append(Author(given, family, orcid=orcid))
     return tuple(people)

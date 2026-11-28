@@ -130,8 +130,9 @@ def test_entry_shapes_and_per_entry_failures() -> None:
     ids = [f"arxiv:2101.0000{n}" for n in range(1, 6)]
     http, _, _ = serving(atom(synthetic("shapes.xml")))
     batch = arxiv.by_id(http, ids)
-    assert set(batch.found) == {"arxiv:2101.00001", "arxiv:2101.00004"}
-    assert batch.failed == {"arxiv:2101.00002", "arxiv:2101.00003", "arxiv:2101.00005"}
+    assert set(batch.found) == {"arxiv:2101.00001", "arxiv:2101.00002", "arxiv:2101.00004"}
+    assert batch.failed == {"arxiv:2101.00003", "arxiv:2101.00005"}
+    assert batch.found["arxiv:2101.00002"].authors == (Author("", "", literal="Wei Z."),)
     assert not batch.missing
 
     rich = batch.found["arxiv:2101.00001"]
