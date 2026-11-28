@@ -1,0 +1,10 @@
+{"data": [
+  {"id": "10.5555/bad", "attributes": {"doi": "10.5555/bad", "types": {"resourceTypeGeneral": "JournalArticle"},
+   "titles": [{"title": "One letter family"}], "creators": [{"nameType": "Personal", "givenName": "Jane", "familyName": "D"}],
+   "publicationYear": 2024}},
+  {"id": "10.5555/untitled", "attributes": {"doi": "10.5555/untitled", "types": {"resourceTypeGeneral": "JournalArticle"},
+   "titles": [{"title": "(:unas)"}], "publicationYear": 2024}},
+  {"id": "10.5555/good", "attributes": {"doi": "10.5555/good", "types": {"resourceTypeGeneral": "ConferencePaper"},
+   "titles": [{"title": "A good paper"}], "creators": [{"name": "Smith, J."}], "publicationYear": 2024,
+   "publisher": {"name": "Example Press"}}}
+]}

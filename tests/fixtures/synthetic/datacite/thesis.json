@@ -1,0 +1,33 @@
+{"data": [{"id": "10.5555/Thesis.1", "type": "dois", "attributes": {
+  "doi": "10.5555/thesis.1",
+  "types": {"resourceTypeGeneral": "Text", "resourceType": "Master's Thesis"},
+  "titles": [{"title": "Learning vessel routes", "lang": "en"}, {"title": "a graph approach", "titleType": "Subtitle"},
+             {"title": "Apprendre les routes", "titleType": "TranslatedTitle"}],
+  "creators": [
+    {"nameType": "Personal", "name": "Doe, Jane", "givenName": "Jane", "familyName": "Doe",
+     "nameIdentifiers": [{"nameIdentifier": "https://orcid.org/0000-0002-1825-0097", "nameIdentifierScheme": "ORCID"}],
+     "affiliation": [{"name": "University of Waterloo", "affiliationIdentifier": "01AEFF406", "affiliationIdentifierScheme": "ROR"}]},
+    {"name": "Roe, Richard", "affiliation": ["University of Waterloo"], "nameIdentifiers": []},
+    {"name": "Ocean Tracking Network", "nameIdentifiers": []},
+    {"name": "(:unav)", "nameType": "Personal"}
+  ],
+  "contributors": [
+    {"contributorType": "Editor", "name": "Poe, Edgar", "givenName": "Edgar", "familyName": "Poe"},
+    {"contributorType": "Supervisor", "name": "Moe, Ann", "givenName": "Ann", "familyName": "Moe"}
+  ],
+  "publisher": "UWSpace (University of Waterloo)",
+  "publicationYear": "2021",
+  "dates": [{"date": "2020-12-01", "dateType": "Submitted"}, {"date": "(:unav)", "dateType": "Issued"}],
+  "container": {"type": "Series", "title": "Theses", "volume": "3", "issue": "1", "firstPage": "1", "lastPage": "90"},
+  "language": "en",
+  "url": "https://uwspace.example/handle/1",
+  "relatedIdentifiers": [
+    {"relationType": "IsVersionOf", "relatedIdentifierType": "URL", "relatedIdentifier": "https://doi.org/10.5555/THESIS.0"},
+    {"relationType": "IsIdenticalTo", "relatedIdentifierType": "arXiv", "relatedIdentifier": "arXiv:2101.00001v2"},
+    {"relationType": "IsTranslationOf", "relatedIdentifierType": "DOI", "relatedIdentifier": "10.5555/these.1"},
+    {"relationType": "HasTranslation", "relatedIdentifierType": "DOI", "relatedIdentifier": "10.5555/these.2"},
+    {"relationType": "IsNewVersionOf", "relatedIdentifierType": "DOI", "relatedIdentifier": "10.5555/thesis.1"},
+    {"relationType": "References", "relatedIdentifierType": "DOI", "relatedIdentifier": "10.5555/other"},
+    {"relationType": "IsPublishedIn", "relatedIdentifierType": "ISSN", "relatedIdentifier": "1234-5678"},
+    {"relationType": "IsVersionOf", "relatedIdentifierType": "Handle", "relatedIdentifier": "10012/1"}
+  ]}}]}
