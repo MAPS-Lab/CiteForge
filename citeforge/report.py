@@ -14,6 +14,9 @@ from citeforge.state import StateRow, atomic_write
 from citeforge.text import ratio
 
 LISTED_TITLE = 0.90
+SEARCH_OUTCOMES = frozenset(
+    {EventKind.SEARCH_MISSED, EventKind.SEARCH_REVIEW, EventKind.SEARCH_DEFERRED, EventKind.SEARCH_FAILED}
+)
 
 WEBSITE_DIR = "Spadon (bfdGsGUAAAAJ)"
 MARKDOWN_MAX = 60_000
@@ -58,6 +61,7 @@ def _coverage(data: RunData) -> dict[str, Any]:
     }
     held = {(m, i) for m, c in data.held for i in c.ids}
     dropped = {(e.member, e.id): e.kind for e in data.events if e.kind in (EventKind.DOI_DETACHED, EventKind.DOI_DEAD)}
+    searches = {e.id: e.kind for e in data.events if e.kind in SEARCH_OUTCOMES}
     items = []
     claimed = emitted = 0
     for member, claims in sorted(data.orcid_claims.items()):
@@ -70,9 +74,9 @@ def _coverage(data: RunData) -> dict[str, Any]:
             d = data.decisions.get(member, {}).get(key or "")
             work = data.works.get(key or "")
             if _bare(c.ids) and (work is None or _bare(work.aliases)):
-                # a work with no identifier is explained only when the member's list holds it by title
+                # a work with no identifier is explained by the member's list holding it by title, or by its search
                 listed = any(ratio(c.title, t) >= LISTED_TITLE for t in titles.get(member, ()))
-                reason = "no_identifier" if listed else "unmatched"
+                reason = "no_identifier" if listed else searches.get(key or "", "unmatched")
             elif work is not None and work.excluded:
                 reason = work.excluded
             elif d is not None:

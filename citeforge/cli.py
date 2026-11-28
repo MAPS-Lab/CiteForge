@@ -35,7 +35,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _identify(ns: argparse.Namespace) -> int:
-    settings = Settings.from_args(ns, os.environ, datetime.now(UTC).date())
+    # identify reads one author filter per ORCID, which OpenAlex serves without a key
+    settings = Settings.from_args(ns, os.environ, datetime.now(UTC).date(), keyless=True)
     members = roster.load(settings.input, strict=False)
     lab = curated_mod.load(settings.curated).lab_rors
     with open(os.devnull, "w", encoding="utf-8") as log:

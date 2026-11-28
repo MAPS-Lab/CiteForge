@@ -201,7 +201,7 @@ def test_log_lines_are_scrubbed(clock: FakeClock) -> None:
     assert line["host"] == "api.openalex.org"
     assert line["status"] == 200
     assert line["attempt"] == 1
-    assert set(line) == {"t", "host", "path", "status", "attempt", "ms", "bytes", "retry_after", "reason"}
+    assert set(line) == {"t", "host", "member", "path", "status", "attempt", "ms", "bytes", "retry_after", "reason"}
 
 
 def test_scrub_and_retry_after_parsing() -> None:

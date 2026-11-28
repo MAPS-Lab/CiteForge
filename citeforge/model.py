@@ -219,8 +219,10 @@ class EventKind(StrEnum):
     OPENALEX_ORCID_CONFLICT = "openalex_orcid_conflict"
     ORCID_STATUS = "orcid_status"
     PENDING = "pending"
+    SEARCH_DEFERRED = "search_deferred"
     SEARCH_FAILED = "search_failed"
     SEARCH_LINKED = "search_linked"
+    SEARCH_MISSED = "search_missed"
     SEARCH_REVIEW = "search_review"
     SHRINK_GUARD = "shrink_guard"
 

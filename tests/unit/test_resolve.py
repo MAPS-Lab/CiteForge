@@ -38,8 +38,8 @@ def test_resolve_merges_identity_and_checks_pinned_ids(monkeypatch: pytest.Monke
         "A4000004": Result(Fetch.NOT_FOUND, None, "not_found"),
         "A5000005": Result(Fetch.FAILED, None, "timeout"),
     }
-    monkeypatch.setattr(res.openalex, "author", lambda http, a: answers[a])
-    m = member(orcids=(ME,), openalex=tuple(answers))
+    monkeypatch.setattr(res.openalex, "author", lambda http, a: answers[a])  # A1000001 would raise KeyError
+    m = member(orcids=(ME,), openalex=("A1000001", *answers))
     ident, orcid_result, person, lookup, events = res.resolve(m, None, frozenset({LAB}))  # type: ignore[arg-type]
     assert lookup is Fetch.OK
     assert ident.openalex == {"A1000001", "A2000009", "A5000005"}

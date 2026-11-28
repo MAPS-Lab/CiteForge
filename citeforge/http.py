@@ -5,7 +5,9 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -49,14 +51,11 @@ HOSTS: Mapping[str, Host] = {
         Host("api.datacite.org", "https://api.datacite.org", 0.35, 300, "json"),
         Host("doi.org", "https://doi.org", 0.5, 200, "any"),
         Host("export.arxiv.org", "https://export.arxiv.org", 3.0, 60, "xml"),
-        Host("eutils.ncbi.nlm.nih.gov", "https://eutils.ncbi.nlm.nih.gov", 0.34, 50, "json"),
     )
 }
 ALLOWED = frozenset(HOSTS) | CSL_HOSTS
-FIXED_PARAMS: Mapping[str, Mapping[str, str]] = {
-    "dblp.org": {"app": "citeforge"},
-    "eutils.ncbi.nlm.nih.gov": {"tool": "citeforge"},
-}
+FIXED_PARAMS: Mapping[str, Mapping[str, str]] = {"dblp.org": {"app": "citeforge"}}
+_MEMBER: ContextVar[str | None] = ContextVar("member", default=None)
 
 
 REDIRECT = "redirect"
@@ -94,6 +93,26 @@ class Batch:
     found: Mapping[str, Record]
     missing: frozenset[str]
     failed: frozenset[str]
+
+
+@contextmanager
+def on_behalf_of(member: str | None) -> Generator[None]:
+    """Attribute the requests made inside the block to a member, in the log and in Http.used_by."""
+    token = _MEMBER.set(member)
+    try:
+        yield
+    finally:
+        _MEMBER.reset(token)
+
+
+def parsed[T](reply: Reply, parse: Callable[[bytes], T]) -> Result[T]:
+    """The parsed body of an OK reply; a failed reply keeps its fetch and reason, a body parse rejects is FAILED."""
+    if reply.fetch is not Fetch.OK:
+        return Result(reply.fetch, None, reply.reason)
+    try:
+        return Result(Fetch.OK, parse(reply.body))
+    except ParseError:
+        return Result(Fetch.FAILED, None, "parse_error")
 
 
 def _scrub_secrets(text: str) -> str:
@@ -155,6 +174,7 @@ class Http:
         self._sleep = sleep
         self._rng = rng or random.Random(0)
         self._states = {name: _HostState() for name in HOSTS}
+        self._by_member: Counter[str | None] = Counter()
         self._client = httpx.Client(
             transport=transport,
             follow_redirects=False,
@@ -167,6 +187,9 @@ class Http:
 
     def down(self, host: Host) -> str | None:
         return self._states[host.name].down
+
+    def used_by(self, member: str) -> int:
+        return self._by_member[member]
 
     def stats(self) -> dict[str, dict[str, int | float]]:
         out: dict[str, dict[str, int | float]] = {}
@@ -189,6 +212,8 @@ class Http:
     ) -> Reply:
         """GET host.base + path; with follow_redirects, Location is followed up to MAX_REDIRECTS hops."""
         st = self._states[host.name]
+        with self._log_lock:
+            self._by_member[_MEMBER.get()] += 1
         query = {**params, **FIXED_PARAMS.get(host.name, {})}
         if host.key_param and (key := self._keys.get(host.name)):
             query[host.key_param] = key
@@ -310,6 +335,7 @@ class Http:
         line = {
             "t": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "host": host.name if target.host == host.name else target.host,
+            "member": _MEMBER.get(),
             "path": _scrub_secrets(target.raw_path.decode("ascii", "replace")),
             "status": reply.status,
             "attempt": attempt,

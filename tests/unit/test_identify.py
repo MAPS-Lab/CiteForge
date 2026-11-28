@@ -94,6 +94,7 @@ def test_cli_identify_prints_one_row_per_candidate(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     install(monkeypatch, default_world())
+    monkeypatch.delenv("OPENALEX_API_KEY")  # identify reads only endpoints that answer without a key
     assert cli.main(["identify"]) == 0
     header, *rows = capsys.readouterr().out.splitlines()
     assert header == "member\torcid\topenalex\tdblp_lists\toverlap\temployment\taccept\tnote"

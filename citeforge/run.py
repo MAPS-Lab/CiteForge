@@ -10,7 +10,7 @@ from pathlib import Path
 from citeforge import authorship, cluster, discover, enrich, publish, report, resolve, works
 from citeforge.bibtex import assign_names
 from citeforge.curated import Curated
-from citeforge.http import HOSTS, Http
+from citeforge.http import HOSTS, Http, on_behalf_of
 from citeforge.ids import ids_of
 from citeforge.model import (
     REGISTRIES,
@@ -29,7 +29,6 @@ from citeforge.model import (
     Verdict,
     Work,
 )
-from citeforge.sources import pubmed
 from citeforge.state import Searched, State, StateRow
 
 MAX_WORKERS = 8
@@ -59,7 +58,7 @@ class Settings:
     openalex_key: str
 
     @classmethod
-    def from_args(cls, ns: argparse.Namespace, env: Mapping[str, str], today: date) -> Settings:
+    def from_args(cls, ns: argparse.Namespace, env: Mapping[str, str], today: date, keyless: bool = False) -> Settings:
         raw = env.get("CITEFORGE_MIN_YEAR")
         if raw is None:
             min_year = 2020
@@ -73,22 +72,13 @@ class Settings:
         key_file = Path("keys/OpenAlex.key")
         if not key and key_file.is_file():
             key = key_file.read_text(encoding="utf-8").strip()
-        if not key:
+        if not key and not keyless:
             raise ConfigError("set OPENALEX_API_KEY or write keys/OpenAlex.key")
         for path in (ns.input, ns.group, ns.curated):
             if not Path(path).is_file():
                 raise ConfigError(f"{path} does not exist")
-        return cls(
-            input=Path(ns.input),
-            output=Path(ns.output),
-            group=Path(ns.group),
-            curated=Path(ns.curated),
-            state=Path(ns.state),
-            run=Path(ns.run),
-            min_year=min_year,
-            today=today,
-            openalex_key=key,
-        )
+        paths = (Path(p) for p in (ns.input, ns.output, ns.group, ns.curated, ns.state, ns.run))
+        return cls(*paths, min_year=min_year, today=today, openalex_key=key)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -124,22 +114,6 @@ def _pairs(w: Work, g: Group, identities: Mapping[str, Identity], curated: Curat
             for member in members & identities.keys():
                 out.setdefault(member, [])
     return out
-
-
-def _with_pubmed_dois(pairs: list[tuple[str, Claim]], http: Http) -> tuple[list[tuple[str, Claim]], frozenset[str]]:
-    def doi_less(c: Claim) -> bool:
-        return not ids_of(c.ids, "doi")
-
-    pmids = sorted({i for _, c in pairs if doi_less(c) for i in ids_of(c.ids, "pmid")})
-    if not pmids:
-        return pairs, frozenset()
-    res = pubmed.dois(http, pmids)
-    found = res.value or {}
-    failed = frozenset(pmids) - found.keys() if res.fetch is Fetch.FAILED else frozenset()
-    return [
-        (m, dataclasses.replace(c, ids=c.ids | {found[i] for i in c.ids if i in found})) if doi_less(c) else (m, c)
-        for m, c in pairs
-    ], failed
 
 
 def _windowed(d: Decision, w: Work, s: Settings) -> Decision:
@@ -255,9 +229,10 @@ def run(
     events: list[Event] = []
 
     def per_member(m: Member) -> tuple[Identity, Listing, tuple[Event, ...]]:
-        identity, orcid_result, dblp_result, openalex_lookup, ev = resolve.resolve(m, http, curated.lab_rors)
-        since = s.min_year - SINCE_SLACK_YEARS
-        listing = discover.discover(identity, orcid_result, dblp_result, openalex_lookup, http, since)
+        with on_behalf_of(m.dirname):
+            identity, orcid_result, dblp_result, openalex_lookup, ev = resolve.resolve(m, http, curated.lab_rors)
+            since = s.min_year - SINCE_SLACK_YEARS
+            listing = discover.discover(identity, orcid_result, dblp_result, openalex_lookup, http, since)
         return identity, listing, ev
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
@@ -268,10 +243,10 @@ def run(
     for _, _, ev in resolved:
         events += ev
     pairs = sorted(((lst.member, c) for lst in listings.values() for c in lst.claims), key=_claim_order)
-    pairs, pubmed_failed = _with_pubmed_dois(pairs, http)
     linked = cluster.previous_links(previous)
     wanted = {i for _, c in pairs for i in ids_of(c.ids, "doi", "arxiv")}
-    wanted |= {i for link in curated.links for i in link}
+    # a curated accept names a work no listing may return, such as a paper filed under a namesake's ORCID
+    wanted |= {i for link in curated.links for i in link} | {i for _, i in curated.accept}
     wanted |= {i for _, c in pairs for a in c.ids & linked.keys() for i in ids_of(linked[a].ids, "doi")}
     have = {
         i: c.record
@@ -280,7 +255,6 @@ def run(
         for i in ids_of(c.record.ids, "doi")
     }
     reg = enrich.fetch(wanted, http, have)
-    reg = dataclasses.replace(reg, failed=reg.failed | pubmed_failed)
     events += [Event(EventKind.DOI_UNLISTED, None, i, "") for i in sorted(reg.unlisted)]
     t = stage("enrich", t)
     kept, held, ev, reg = cluster.verify(pairs, reg, identities)

@@ -1,4 +1,5 @@
 import dataclasses
+import io
 from datetime import date
 
 import pytest
@@ -7,16 +8,18 @@ from hypothesis import strategies as st
 
 from citeforge import cluster as cl
 from citeforge.curated import Curated
-from citeforge.http import Result
+from citeforge.http import Http, Result
 from citeforge.ids import is_copy_id, split_id
 from citeforge.model import Author, Claim, Fetch, Kind, Names, Record, Registries, Rel, Source, Status, Work
 from citeforge.state import StateRow
 from citeforge.text import name_key, ratio
 from citeforge.works import build
+from tests.conftest import json_response, make_http
 from tests.factories import author, member, record
 from tests.unit.test_authorship import identity
 
 ME = "Spadon (bfdGsGUAAAAJ)"
+IDLE = Http(io.StringIO(), {})  # crossref.search is replaced in these tests, so no request goes out
 TITLE = "Graph neural networks for vessel trajectory forecasting"
 
 
@@ -383,7 +386,7 @@ def _search(groups, previous=None, min_year=2020, registries=None, searched=None
     linked = cl.previous_links(previous or {})
     found, events, _ = cl.search_unidentified(
         groups,
-        None,  # type: ignore[arg-type]
+        IDLE,
         {ME: identity()},
         min_year,
         linked,
@@ -475,7 +478,7 @@ def test_search_sends_a_compound_surname_as_its_words(monkeypatch: pytest.Monkey
         cl.crossref, "search", lambda http, title, family, year: seen.append(family) or Result(Fetch.OK, ())
     )
     nur = identity(member=member(name="Nur Zincir-Heywood", dirname=ME), names=(name_key("Nur", "Zincir-Heywood"),))
-    cl.search_unidentified(_dblp_group()[1], None, {ME: nur}, 2020, {}, reg(), {}, TODAY)  # type: ignore[arg-type]
+    cl.search_unidentified(_dblp_group()[1], IDLE, {ME: nur}, 2020, {}, reg(), {}, TODAY)
     assert seen == ["zincir heywood"]
 
 
@@ -519,7 +522,7 @@ def test_preprint_links_once_search_joins_its_two_published_listings(monkeypatch
     kryven = identity(names=(name_key("Marta", "Kryven"),))
 
     def search(gs):
-        return cl.search_unidentified(gs, None, {ME: kryven}, 2020, {}, reg(), {}, TODAY)[:2]  # type: ignore[arg-type]
+        return cl.search_unidentified(gs, IDLE, {ME: kryven}, 2020, {}, reg(), {}, TODAY)[:2]
 
     without, _ = cl.cluster(pairs, reg(arx, doi), Curated())
     assert len(without) == 2
@@ -572,17 +575,18 @@ def _searches(monkeypatch: pytest.MonkeyPatch, *hits: Record, fetch: Fetch = Fet
 
 
 def _run_search(groups, searched, today=TODAY):
-    return cl.search_unidentified(groups, None, {ME: identity()}, 2020, {}, reg(), searched, today)  # type: ignore[arg-type]
+    return cl.search_unidentified(groups, IDLE, {ME: identity()}, 2020, {}, reg(), searched, today)
 
 
 def test_a_search_that_linked_nothing_is_kept_and_not_repeated(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _searches(monkeypatch)
     _, groups = _dblp_group()
     found, events, keep = _run_search(groups, {})
-    assert found == [] and events == [] and len(seen) == 1
+    missed = [cl.Event(cl.EventKind.SEARCH_MISSED, ME, "dblp:conf/x/S23", "")]
+    assert found == [] and events == missed and len(seen) == 1
     assert keep == {"dblp:conf/x/S23": cl.Searched((TITLE, "spadon", 2023), None, TODAY)}
     later = date.fromordinal(TODAY.toordinal() + cl.SEARCH_REUSE_DAYS - 1)
-    assert _run_search(groups, keep, later) == ([], [], keep) and len(seen) == 1
+    assert _run_search(groups, keep, later) == ([], missed, keep) and len(seen) == 1
     _run_search(groups, keep, date.fromordinal(TODAY.toordinal() + cl.SEARCH_REUSE_DAYS))
     assert len(seen) == 2
     _run_search(_dblp_group(year=2024)[1], keep)
@@ -823,3 +827,24 @@ def test_crosswalk_joins_titles_from_the_threshold_up_unless_they_are_siblings(
     groups, events = cl.cluster([(ME, claim(*oa.ids, source=Source.OPENALEX, rec=oa))], reg(pub, ax), Curated())
     assert (len(groups) == 1) is joined
     assert any(e.kind == "crosswalk_rejected" for e in events) is not joined
+
+
+def test_searches_stop_at_the_member_request_cap_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    http = make_http(lambda request: json_response({"status": "ok", "message": {"items": []}}))
+
+    def spend(h, title, family, year):
+        h.get(cl.crossref.HOST, "/works")
+        return Result(Fetch.OK, ())
+
+    monkeypatch.setattr(cl.crossref, "search", spend)
+    monkeypatch.setattr(cl, "MEMBER_REQUESTS", 2)
+    pairs = []
+    for year in (2021, 2024, 2023):
+        rec = record(f"dblp:conf/x/S{year}", source=Source.DBLP, title=f"{TITLE} {year}", year=year)
+        pairs.append((ME, claim(*rec.ids, source=Source.DBLP, title=rec.title, rec=rec)))
+    groups = cl.cluster(pairs, reg(), Curated())[0]
+    _, events, keep = cl.search_unidentified(groups, http, {ME: identity()}, 2020, {}, reg(), {}, TODAY)
+    assert http.used_by(ME) == 2 and sorted(keep) == ["dblp:conf/x/S2023", "dblp:conf/x/S2024"]
+    assert [(e.kind, e.id) for e in events if e.kind is cl.EventKind.SEARCH_DEFERRED] == [
+        (cl.EventKind.SEARCH_DEFERRED, "dblp:conf/x/S2021")
+    ]

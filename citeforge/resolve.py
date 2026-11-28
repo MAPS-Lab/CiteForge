@@ -72,7 +72,8 @@ def resolve(
         lookup = found.fetch
         if found.value:
             author_ids |= {a for ids in found.value.values() for a in ids}
-    for pinned in m.openalex:
+    # a pinned id the ORCID filter returned is current and carries the member's ORCID, so it needs no lookup
+    for pinned in (p for p in m.openalex if p not in author_ids):
         res = openalex.author(http, pinned)
         if res.fetch is Fetch.NOT_FOUND:
             events.append(Event(EventKind.OPENALEX_ID_DELETED, m.dirname, pinned, ""))

@@ -8,7 +8,7 @@ from typing import Literal
 from rapidfuzz import fuzz
 
 from citeforge.curated import Curated
-from citeforge.http import Http, Result
+from citeforge.http import Http, Result, on_behalf_of
 from citeforge.ids import first_id, ids_of, is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
@@ -40,6 +40,8 @@ SEARCH_REVIEW = 0.85
 PREPRINT_YEARS = 3
 POSTPRINT_YEARS = 2
 SEARCH_REUSE_DAYS = 90
+# the spec's cap on one member's requests in a cold run; title searches spend what the listings left
+MEMBER_REQUESTS = 25
 # a part, volume or edition number, or a year; a longer number is a count that changes between versions
 _NUMERAL = re.compile(r"\d{1,2}|(?:19|20)\d\d|x{0,3}(?:ix|iv|v?i{0,3})")
 _GROUPED_NUMBER = re.compile(r"(?<!\d)\d{1,3}(?:[,\u2009\u202f ]\d{3})+(?!\d)")
@@ -149,6 +151,7 @@ class _Profile:
     title: str
     year: int | None
     families: tuple[str, ...]
+    record: Record | None = None
 
 
 def _profile(records: Sequence[Record], claims: Sequence[Pair]) -> _Profile | None:
@@ -163,7 +166,7 @@ def _profile(records: Sequence[Record], claims: Sequence[Pair]) -> _Profile | No
     )
     for r in ranked:
         if r.title:
-            return _Profile(r.title, r.year, _families(r))
+            return _Profile(r.title, r.year, _families(r), r)
     for _, c in sorted(claims, key=lambda p: (p[1].source.value, sorted(p[1].ids))):
         if c.title:
             return _Profile(c.title, c.year, ())
@@ -203,12 +206,7 @@ def _byline_fit(pre: _Profile, pub: _Profile) -> Literal["link", "propose"] | No
 
 
 def _variants(records: Mapping[RecordKey, Record]) -> dict[RecordKey, Record]:
-    """Mark the copies no registry relation names as variants of the record that leads.
-
-    A repository deposit of a Crossref article carries the article's title, year and byline under another publisher.
-    Springer registers each revision of a living-reference chapter as <isbn>_<n>-<v>: the print chapter
-    <isbn>_<n> of the same title, byline and book leads, else the latest revision.
-    """
+    """Mark a repository deposit of a Crossref article, and each Springer living-reference revision, as a variant."""
     out = dict(records)
     articles: dict[tuple[str, int | None], list[Record]] = defaultdict(list)
     revisions: dict[str, list[tuple[int, RecordKey, Record]]] = defaultdict(list)
@@ -472,12 +470,13 @@ def _dblp_listings(g: Group) -> frozenset[str]:
 
 
 def _other_listing(listings: Mapping[str, frozenset[str]], own: frozenset[str], doi: str) -> str | None:
-    """The DBLP key the group of doi lists, when it differs from the searched group's own listing.
-
-    DBLP lists two keys as two publications, so a title search never merges them.
-    """
+    """The DBLP key doi's group lists beside the searched group's own; two DBLP keys are two publications."""
     other = sorted(listings.get(doi, frozenset()) - own)
     return other[0] if own and other else None
+
+
+def _bare(ids: frozenset[str]) -> bool:
+    return all(split_id(i)[0] == "orcidwork" for i in ids)
 
 
 def search_unidentified(
@@ -490,18 +489,22 @@ def search_unidentified(
     searched: Mapping[str, Searched],
     today: date,
 ) -> tuple[list[tuple[str, Record]], list[Event], dict[str, Searched]]:
-    """Find the Crossref DOI of each DOI-less listed group, reusing what an earlier run found for it.
+    """Link each DOI-less listed group to its Crossref DOI: by the member's own listing, an earlier link, or a search.
 
-    A reused DOI is judged on the record fetched this run, so later metadata and retractions apply; the stored
-    record stands in only while the registry fails for that DOI. A search that linked nothing is kept by group
-    key and repeated once its query changes or SEARCH_REUSE_DAYS have passed. Returns the links, the events and
-    the searches to keep.
+    Searches run newest first while the member stays under MEMBER_REQUESTS, and one that linked nothing is not
+    repeated for SEARCH_REUSE_DAYS unless its query changes.
     """
     events: list[Event] = []
     found: list[tuple[str, Record]] = []
     keep: dict[str, Searched] = {}
     results: dict[tuple[str, str, int | None], Result[tuple[Record, ...]]] = {}
     listings = {i: keys for g in groups if (keys := _dblp_listings(g)) for i in g.ids}
+    listed: dict[str, list[Record]] = defaultdict(list)
+    for g in groups:
+        if not _bare(g.ids) and (p := _profile(g.records, g.claims)) is not None and p.record is not None:
+            for m in sorted({m for m, _ in g.claims}):
+                listed[m].append(p.record)
+    pending: list[tuple[str, Group, _Profile, Identity, tuple[str, str, int | None], Searched | None]] = []
     for g in groups:
         if ids_of(g.ids, "doi") or (ids_of(g.ids, "arxiv") and not _listed_version(g)) or not g.claims:
             continue
@@ -522,16 +525,31 @@ def search_unidentified(
             events.append(Event(EventKind.SEARCH_LINKED, member, g.key, doi or ""))
             found.append((g.key, prior))
             continue
+        if _bare(g.ids):
+            same = [r for r in listed[member] if _search_ok(profile, r, identity)]
+            if len(same) == 1:
+                events.append(Event(EventKind.SEARCH_LINKED, member, g.key, f"listed {min(same[0].ids)}"))
+                found.append((g.key, same[0]))
+                continue
         # Crossref requires every query.author word, so a hyphenated surname goes as its words, never joined
         query = (profile.title, fold(split_literal(identity.member.name)[1]), profile.year)
         before = next((searched[i] for i in sorted(g.ids) if i in searched), None)
         if before is not None and before.query == query and 0 <= (today - before.on).days < SEARCH_REUSE_DAYS:
             keep[g.key] = before
-            if before.review is not None:
-                events.append(Event(EventKind.SEARCH_REVIEW, member, g.key, before.review))
+            kind = EventKind.SEARCH_REVIEW if before.review is not None else EventKind.SEARCH_MISSED
+            events.append(Event(kind, member, g.key, before.review or ""))
             continue
+        pending.append((member, g, profile, identity, query, before))
+    pending.sort(key=lambda t: (t[0], -(t[2].year or 0), t[1].key))
+    for member, g, profile, identity, query, before in pending:
         if query not in results:
-            results[query] = crossref.search(http, *query)
+            if http.used_by(member) >= MEMBER_REQUESTS:
+                events.append(Event(EventKind.SEARCH_DEFERRED, member, g.key, f"{MEMBER_REQUESTS} requests used"))
+                if before is not None:
+                    keep[g.key] = before
+                continue
+            with on_behalf_of(member):
+                results[query] = crossref.search(http, *query)
         result = results[query]
         if result.fetch is not Fetch.OK or result.value is None:
             events += [
@@ -540,6 +558,7 @@ def search_unidentified(
             if before is not None:
                 keep[g.key] = before
             continue
+        own = _dblp_listings(g)
         scored = sorted(
             ((ratio(profile.title, r.title), doi, r) for r in result.value if (doi := first_id(r.ids, "doi"))),
             key=lambda t: (-t[0], is_copy_id(t[1]), t[1]),
@@ -551,14 +570,15 @@ def search_unidentified(
             rivals = {d for _, d in close if not is_copy_id(d)} - {doi}
             if rivals:
                 review = f"{doi} ratio={score:.2f} rivals={' '.join(sorted(rivals))}"
-            elif (listed := _other_listing(listings, own, doi)) is not None:
-                review = f"{doi} ratio={score:.2f} listed={listed}"
+            elif (other := _other_listing(listings, own, doi)) is not None:
+                review = f"{doi} ratio={score:.2f} listed={other}"
             elif _search_ok(profile, best, identity):
                 events.append(Event(EventKind.SEARCH_LINKED, member, g.key, doi))
                 found.append((g.key, best))
                 continue
             else:
                 review = f"{doi} ratio={score:.2f}"
-            events.append(Event(EventKind.SEARCH_REVIEW, member, g.key, review))
+        kind = EventKind.SEARCH_REVIEW if review is not None else EventKind.SEARCH_MISSED
+        events.append(Event(kind, member, g.key, review or ""))
         keep[g.key] = Searched(query, review, today)
     return found, events, keep

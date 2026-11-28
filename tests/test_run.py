@@ -26,6 +26,7 @@ from tests.world import (
     SP_OA,
     SPADON,
     SPADON_ORCID,
+    STRANGER_ORCID,
     YE,
     YE_ORCID,
     cr,
@@ -400,6 +401,19 @@ def test_curated_reject_after_publication_removes_the_file(workdir: Path, monkey
     assert removed(workdir, YE) == {"doi:10.1234/ye": "curated"}
 
 
+def test_curated_accept_fetches_a_work_no_listing_returns(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    doi = "doi:10.1109/temscon.2025.1"
+    world.crossref[doi] = cr(
+        doi, "Collaborative innovation in early-stage startups", (person("Xiang Ye", STRANGER_ORCID),)
+    )
+    install(monkeypatch, world)
+    with (workdir / "data/curated.toml").open("a", encoding="utf-8") as f:
+        f.write(f"\n[[accept]]\nmember = '{YE}'\nid = '{doi}'\n")
+    assert cli.main([]) == 0
+    assert any(doi.removeprefix("doi:") in p.read_text() for p in (workdir / "output" / YE).glob("*.bib"))
+
+
 def test_work_absorbed_into_a_doi_is_removed_as_merged(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     world = default_world()
     install(monkeypatch, world)
@@ -629,12 +643,12 @@ def test_orcid_work_without_an_identifier_is_searched_and_counted(
     install(monkeypatch, world)
     assert cli.main([]) == 0
     coverage = json.loads((workdir / "state/report.json").read_text())["coverage"]
-    assert {"member": SPADON, "id": "", "title": title, "reason": "unmatched"} in coverage["items"]
-    assert {"member": SPADON, "id": "", "title": bare[1].title, "reason": "no_identifier"} in coverage["items"]
-    assert coverage["unexplained"] == 1
+    assert {"member": SPADON, "id": "", "title": title, "reason": "search_missed"} in coverage["items"]
+    assert not [i for i in coverage["items"] if i["title"] == bare[1].title]  # joined its listed DOI by title
+    assert coverage["unexplained"] == 0
     assert coverage["claimed"] == coverage["emitted"] + len(coverage["items"])
-    assert f"{SPADON}: {title} (unmatched)" in (workdir / "run/report.md").read_text()
-    assert world.calls["crossref.search"] == 3  # the DOI-less KDD listing and both ORCID works
+    assert f"{SPADON}: {title} (search_missed)" in (workdir / "run/report.md").read_text()
+    assert world.calls["crossref.search"] == 2  # the DOI-less KDD listing and the unlisted ORCID work
 
 
 def test_a_title_only_orcid_work_found_by_search_joins_the_openalex_doi_and_ships(
@@ -670,7 +684,7 @@ def test_a_search_outage_on_a_title_only_orcid_work_is_unexplained_and_partial(
     assert cli.main([]) == 3
     report = json.loads((workdir / "state/report.json").read_text())
     assert report["members"][SPADON]["status"] == "partial:crossref"
-    assert {"member": SPADON, "id": "", "title": title, "reason": "unmatched"} in report["coverage"]["items"]
+    assert {"member": SPADON, "id": "", "title": title, "reason": "search_failed"} in report["coverage"]["items"]
 
 
 def test_a_search_that_linked_nothing_is_not_repeated_next_run(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
