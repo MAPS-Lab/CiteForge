@@ -157,6 +157,8 @@ def test_assign_names_collisions() -> None:
         _w("10.1234/c", "Ocean analogs"),
         _w("10.1234/d", "Ocean analogs"),
         _w("10.1234/e", "Ocean analogs", family="Müller-Lüdenscheidt"),
+        _w("10.1234/f", "Determining topic evolution and sentiment polarity for albinism in online health communities"),
+        _w("10.1234/g", "Determining topic evolution and sentiment polarity for albinism in online health communities"),
     ]
     names = assign_names(ws, {})
     assert names["doi:10.1234/a"].stem == "Spadon2023-VesselTrajectoryPrediction"
@@ -164,6 +166,8 @@ def test_assign_names_collisions() -> None:
     assert names["doi:10.1234/c"].stem == "Spadon2023-OceanAnalogs"
     assert names["doi:10.1234/d"].stem == "Spadon2023-OceanAnalogsb"
     assert names["doi:10.1234/e"].stem == "MullerLudenscheidt2023-OceanAnalogs"
+    assert names["doi:10.1234/f"].stem == "Spadon2023-DeterminingTopic"
+    assert names["doi:10.1234/g"].stem == "Spadon2023-DeterminingTopicb"
     assert names["doi:10.1234/a"].citekey == "Spadon2023:VesselTrajectoryPrediction"
 
 

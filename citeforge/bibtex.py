@@ -261,7 +261,8 @@ def assign_names(works: Sequence[Work], previous: Mapping[str, Names]) -> dict[s
         for w in group:
             mine = words[w.key]
             n = min(2, len(mine))
-            while n < len(mine) and any(words[o.key][:n] == mine[:n] for o in group if o is not w):
+            rivals = [words[o.key] for o in group if o is not w and words[o.key] != mine]
+            while n < len(mine) and any(r[:n] == mine[:n] for r in rivals):
                 n += 1
             root = f"{base}-{''.join(mine[:n])}" if mine else base
             root = root[:STEM_MAX]
