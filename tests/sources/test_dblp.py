@@ -1,9 +1,10 @@
+import contextlib
 import io
 from xml.sax.saxutils import escape
 
 import httpx
 import pytest
-from hypothesis import given
+from hypothesis import event, given
 from hypothesis import strategies as st
 
 from citeforge.http import USER_AGENT, Http, ParseError
@@ -70,13 +71,7 @@ def test_inproceedings_record_fields():
         == r.title
         == ("LOMAD: Local Anomaly Detection in Maritime Trajectories Using LSTM Prediction and Visual Analytics")
     )
-    assert (r.kind, r.source_type, r.year, r.dates, c.year) == (
-        Kind.INPROCEEDINGS,
-        "inproceedings",
-        2026,
-        (2026,),
-        2026,
-    )
+    assert (r.kind, r.source_type, r.year, c.year) == (Kind.INPROCEEDINGS, "inproceedings", 2026, 2026)
     assert r.container == ("MDM",)
     assert r.pages == "351-354"
     assert r.url is None
@@ -163,7 +158,7 @@ def test_edge_cases():
     assert software.kind is Kind.SOFTWARE
     assert software.relations == {(Rel.VERSION_OF, "doi:10.5281/zenodo.199")}
     undated = record(p, "journals/x/YeNoYear")
-    assert (claim(p, "journals/x/YeNoYear").year, undated.year, undated.dates) == (None, None, ())
+    assert (claim(p, "journals/x/YeNoYear").year, undated.year) == (None, None)
     assert "arxiv:2310.18948" in undated.ids
 
 
@@ -237,13 +232,68 @@ def test_redirect_loop_stops():
     assert len(seen) == dblp.MAX_REDIRECTS + 1
 
 
-@given(st.binary(max_size=512))
-def test_parse_raises_only_parse_error(body: bytes):
+def mixed(valid: st.SearchStrategy[str]) -> st.SearchStrategy[str]:
+    return st.one_of(valid, valid, st.text(max_size=30))
+
+
+dblp_field = st.one_of(
+    st.tuples(st.just("author"), mixed(st.sampled_from(["Gabriel Spadon", "Stan Matwin 0001", "X"]))),
+    st.tuples(st.just("editor"), mixed(st.just("Ana Lima"))),
+    st.tuples(st.just("title"), mixed(st.just("Vessel trajectory forecasting."))),
+    st.tuples(st.just("year"), mixed(st.from_regex(r"(19|20)\d\d", fullmatch=True) | st.just("²⁰²⁴"))),
+    st.tuples(st.sampled_from(["journal", "booktitle"]), mixed(st.sampled_from(["CoRR", "KDD", "Ocean Eng."]))),
+    st.tuples(st.just("volume"), mixed(st.sampled_from(["abs/2101.00001", "12"]))),
+    st.tuples(st.just("pages"), mixed(st.sampled_from(["1-10", "e12"]))),
+    st.tuples(
+        st.just("ee"), mixed(st.sampled_from(["https://doi.org/10.1234/ABC", "https://arxiv.org/abs/2101.00001"]))
+    ),
+)
+dblp_entry = st.tuples(
+    mixed(st.sampled_from(["article", "inproceedings", "incollection", "book", "proceedings", "phdthesis", "data"])),
+    mixed(st.sampled_from(["journals/x/A1", "conf/kdd/B2"])),
+    mixed(st.sampled_from(["", "informal", "software"])),
+    st.tuples(
+        st.tuples(st.just("title"), mixed(st.just("Vessel trajectory forecasting."))),
+        st.tuples(st.just("author"), mixed(st.just("Gabriel Spadon"))),
+        st.lists(dblp_field, max_size=6),
+    ).map(lambda t: [t[0], t[1], *t[2]]),
+)
+
+
+def _xml_name(tag: str) -> str:
+    return tag if tag.isascii() and tag.isalpha() else "article"
+
+
+def _attr(value: str) -> str:
+    return escape("".join(c for c in value if c.isprintable()), {'"': "&quot;"})
+
+
+def _entry_xml(entry: tuple[str, str, str, list[tuple[str, str]]]) -> str:
+    tag, key, publtype, children = _xml_name(entry[0]), entry[1], entry[2], entry[3]
+    body = "".join(f"<{n}>{escape(''.join(c for c in v if c.isprintable()))}</{n}>" for n, v in children)
+    return f'<{tag} key="{_attr(key)}" publtype="{_attr(publtype)}">{body}</{tag}>'
+
+
+@given(st.lists(dblp_entry, max_size=4))
+def test_any_listed_entry_parses_to_a_valid_record(entries: list) -> None:
+    records = "".join(f"<r>{_entry_xml(e)}</r>" for e in entries)
+    body = f'<dblpperson name="Gabriel Spadon" pid="192/1659" n="1">{records}</dblpperson>'
     try:
-        person = dblp.parse_person(body)
+        person = dblp.parse_person(body.encode())
     except ParseError:
+        event("parse_error")
         return
-    assert [p for c in person.claims if c.record for p in bib_problems(c.record)] == []
+    event("claims" if person.claims else "no claims")
+    for c in person.claims:
+        assert c.title and c.record is not None and (c.record.authors or c.record.editors)
+        assert c.ids == c.record.ids
+        assert not c.ids or bib_problems(c.record) == []
+
+
+@given(st.binary(max_size=512))
+def test_garbage_bytes_raise_only_parse_error(body: bytes) -> None:
+    with contextlib.suppress(ParseError):
+        dblp.parse_person(body)
 
 
 @given(st.text(max_size=200))

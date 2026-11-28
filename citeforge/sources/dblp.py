@@ -136,7 +136,7 @@ def _claim(el: ET.Element) -> Claim | None:
     elif kind is Kind.BOOK and not authors:
         kind = Kind.PROCEEDINGS
     year_text = _field(el, "year")
-    year = int(year_text) if year_text and year_text.isdigit() else None
+    year = int(year_text) if year_text and year_text.isdecimal() else None
     container = journal or _field(el, "booktitle")
     relations = {
         (Rel.VERSION_OF, rel_id)
@@ -154,7 +154,6 @@ def _claim(el: ET.Element) -> Claim | None:
         authors=tuple(a for a in authors if a),
         editors=tuple(a for a in editors if a),
         year=year,
-        dates=(year,) if year is not None else (),
         container=(container,) if container and kind is not Kind.BOOK else (),
         publisher=_field(el, "publisher"),
         volume=volume,

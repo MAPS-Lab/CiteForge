@@ -60,12 +60,15 @@ def _strip_id(claim: Claim, work_id: str) -> Claim:
 
 def verify(
     claims: Sequence[Pair], reg: Registries, identities: Mapping[str, Identity]
-) -> tuple[list[Pair], list[Pair], list[Event]]:
+) -> tuple[list[Pair], list[Pair], list[Event], Registries]:
+    """Detach dead and mismatched DOIs from claims, and drop the OpenAlex records that would rejoin them."""
     kept, held, events = [], [], []
+    detached: set[tuple[str, str]] = set()
     for member, claim in claims:
         hold = False
         for work_id in sorted(i for i in claim.ids if split_id(i)[0] == "doi"):
             if work_id in reg.dead:
+                detached |= {(work_id, i) for i in claim.ids - {work_id}}
                 claim = _strip_id(claim, work_id)
                 events.append(Event("doi_unresolved", member, work_id, claim.title))
                 continue
@@ -74,6 +77,7 @@ def verify(
                 continue
             match doi_agrees(claim.title, identities[member], record):
                 case "detach":
+                    detached |= {(work_id, i) for i in claim.ids - {work_id}}
                     claim = _strip_id(claim, work_id)
                     events.append(Event("doi_mismatch", member, work_id, f"{claim.title} | {record.title}"))
                 case "review" | "group" as verdict:
@@ -86,7 +90,8 @@ def verify(
             held.append((member, claim))
         elif claim.ids:
             kept.append((member, claim))
-    return kept, held, events
+    openalex = {k: r for k, r in reg.openalex.items() if not any((d, i) in detached for d in r.ids for i in r.ids)}
+    return kept, held, events, dataclasses.replace(reg, openalex=openalex)
 
 
 class _Forest:

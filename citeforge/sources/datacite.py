@@ -109,7 +109,6 @@ def parse_work(work_id: str, attrs: Mapping[str, Any]) -> Record:
     title = _title(attrs.get("titles"))
     if not title:
         raise ParseError(f"{work_id}: no title")
-    years = [_year(attrs.get("publicationYear"))] + [_year(d.get("date")) for d in _dicts(attrs.get("dates"))]
     container = _dict(attrs.get("container"))
     first, last = _text(container.get("firstPage")), _text(container.get("lastPage"))
     raw_publisher = attrs.get("publisher")
@@ -123,8 +122,7 @@ def parse_work(work_id: str, attrs: Mapping[str, Any]) -> Record:
         title=title,
         authors=_people(attrs.get("creators")),
         editors=_people([c for c in _dicts(attrs.get("contributors")) if c.get("contributorType") == "Editor"]),
-        year=years[0],
-        dates=tuple(sorted({y for y in years if y is not None})),
+        year=_year(attrs.get("publicationYear")),
         container=tuple(t for t in [_text(container.get("title"))] if t),
         publisher=publisher,
         volume=_text(container.get("volume")),

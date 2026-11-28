@@ -63,7 +63,7 @@ class Settings:
             min_year = 2020
         elif not raw.strip():
             min_year = today.year - (ROLLING_WINDOW_YEARS - 1)
-        elif raw.strip().isdigit() and 1900 <= int(raw) <= today.year + 1:
+        elif raw.strip().isdecimal() and 1900 <= int(raw) <= today.year + 1:
             min_year = int(raw)
         else:
             raise ConfigError(f"CITEFORGE_MIN_YEAR={raw!r} is not a year")
@@ -123,36 +123,40 @@ def _pairs(w: Work, g: Group, identities: Mapping[str, Identity], curated: Curat
     return out
 
 
-def _with_pubmed_dois(pairs: list[tuple[str, Claim]], http: Http) -> list[tuple[str, Claim]]:
+def _with_pubmed_dois(pairs: list[tuple[str, Claim]], http: Http) -> tuple[list[tuple[str, Claim]], frozenset[str]]:
     def doi_less(c: Claim) -> bool:
         return not any(split_id(i)[0] == "doi" for i in c.ids)
 
     pmids = sorted({i for _, c in pairs if doi_less(c) for i in c.ids if split_id(i)[0] == "pmid"})
     if not pmids:
-        return pairs
-    found = pubmed.dois(http, pmids).value or {}
+        return pairs, frozenset()
+    res = pubmed.dois(http, pmids)
+    found = res.value or {}
+    failed = frozenset(pmids) - found.keys() if res.fetch is Fetch.FAILED else frozenset()
     return [
         (m, dataclasses.replace(c, ids=c.ids | {found[i] for i in c.ids if i in found})) if doi_less(c) else (m, c)
         for m, c in pairs
-    ]
+    ], failed
 
 
 def _windowed(d: Decision, w: Work, s: Settings) -> Decision:
-    if d.verdict is not Verdict.ACCEPT:
+    if d.verdict is Verdict.REJECT:
+        return d
+    if w.year is not None and w.year < s.min_year:
+        return Decision(Verdict.REJECT, "out_of_window", d.evidence | {d.rule})
+    if d.verdict is Verdict.REVIEW:
         return d
     if w.year is None:
         return Decision(Verdict.REVIEW, "no_year", d.evidence | {d.rule})
     if w.year > s.today.year + 1 and w.primary.source not in REGISTRIES:
         return Decision(Verdict.REVIEW, "future_year", d.evidence | {d.rule})
-    if w.year < s.min_year:
-        return Decision(Verdict.REJECT, "out_of_window", d.evidence | {d.rule})
     return d
 
 
-def _status(listing: Listing, over_cap: bool, emitted: int) -> str:
+def _status(listing: Listing, over_cap: bool, registry_failed: bool, emitted: int) -> str:
     if over_cap:
         return "over_cap"
-    failed = sorted(s.value for s, f in listing.fetch.items() if f is Fetch.FAILED)
+    failed = sorted(s.value for s, f in listing.fetch.items() if f is Fetch.FAILED) + ["registry"] * registry_failed
     if failed:
         return "partial:" + ",".join(failed)
     if Fetch.OK not in listing.fetch.values():
@@ -193,7 +197,7 @@ def run(
     for _, _, ev in resolved:
         events += ev
     pairs = sorted(((lst.member, c) for lst in listings.values() for c in lst.claims), key=_claim_order)
-    pairs = _with_pubmed_dois(pairs, http)
+    pairs, pubmed_failed = _with_pubmed_dois(pairs, http)
     wanted = {i for _, c in pairs for i in c.ids if split_id(i)[0] in ("doi", "arxiv")}
     wanted |= {i for link in curated.links for i in link}
     have = {
@@ -204,8 +208,9 @@ def run(
         if split_id(i)[0] == "doi"
     }
     reg = enrich.fetch(wanted, http, have)
+    reg = dataclasses.replace(reg, failed=reg.failed | pubmed_failed)
     t = stage("enrich", t)
-    kept, held, ev = cluster.verify(pairs, reg, identities)
+    kept, held, ev, reg = cluster.verify(pairs, reg, identities)
     events += ev
     held_ids: dict[str, set[str]] = defaultdict(set)
     for member, c in held:
@@ -247,7 +252,8 @@ def run(
         decisions[m] = {k: _windowed(d, by_key[k], s) for k, d in decisions[m].items()}
     t = stage("decide", t)
 
-    failed_registry = {w.key for w in current if (w.aliases & reg.failed) and w.primary.source not in REGISTRIES}
+    registry_held = {w.key for w in current if w.aliases & reg.failed}
+    failed_registry = {k for k in registry_held if by_key[k].primary.source not in REGISTRIES}
     window_years = s.today.year - s.min_year + 1
     final: dict[str, dict[str, Decision]] = {}
     missing: dict[str, dict[str, int]] = defaultdict(dict)
@@ -261,6 +267,7 @@ def run(
         listing = listings[name]
         partial = Fetch.FAILED in listing.fetch.values() or Fetch.OK not in listing.fetch.values()
         mine = dict(decisions.get(name, {}))
+        registry_failed = False
         prev = {k: row for k, row in previous.items() if publish.emitted(row, name)}
         accepted = [k for k, d in mine.items() if publish.publishable(d, by_key[k])]
         over_cap = len(accepted) > PER_YEAR_CAP * window_years
@@ -278,10 +285,13 @@ def run(
             else:
                 mine.pop(k)
                 events.append(Event("pending", name, k, "pending:registry"))
+                registry_failed = True
         removals: dict[str, str] = {}
         for k, row in sorted(prev.items()):
-            if k in failed_registry:
+            # a work whose registry or donor lookup failed is judged on last run's record, never removed
+            if k in registry_held or row.work.aliases & reg.failed:
                 mine[k] = row.members[name]
+                carried_works[k] = row.work
                 continue
             now = mine.get(k)
             w = by_key.get(k)
@@ -323,7 +333,8 @@ def run(
         final[name] = mine
         member_changes[name] = {"removed": sorted(removals.items())}
         emitted = sum(publish.publishable(d, carried_works.get(k) or by_key[k]) for k, d in mine.items())
-        statuses[name] = _status(listing, over_cap, emitted)
+        registry_failed |= any((carried_works.get(k) or by_key[k]).aliases & reg.failed for k in mine)
+        statuses[name] = _status(listing, over_cap, registry_failed, emitted)
     t = stage("failure_rules", t)
 
     all_works = {**by_key, **carried_works}
@@ -359,7 +370,7 @@ def run(
         )
     down = {h: r for h in sorted(HOSTS) if (r := http.down(HOSTS[h]))}
     partial_any = any(st.startswith("partial") or st == "no_profile" for st in statuses.values())
-    exit_code = 3 if partial_any or down or guard else 0
+    exit_code = 3 if partial_any or down or guard or reg.failed else 0
     data = report.RunData(
         min_year=s.min_year,
         stages=stages,
@@ -378,6 +389,7 @@ def run(
             n: [c for c in lst.claims if c.source is Source.ORCID and (c.year is None or c.year >= s.min_year)]
             for n, lst in listings.items()
         },
+        registry_failed=reg.failed,
         exit_code=exit_code,
     )
     stage("total", started)

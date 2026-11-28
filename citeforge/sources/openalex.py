@@ -173,7 +173,6 @@ def parse_work(item: Mapping[str, Any]) -> Record:
         title=title,
         authors=tuple(_author(a) for a in authorships),
         year=year,
-        dates=(year,) if year is not None else (),
         container=(clean(container),) if container else (),
         publisher=_text(venue.get("host_organization_name")),
         volume=_text(biblio.get("volume")),

@@ -172,7 +172,6 @@ def _record(where: str, entry: Mapping[str, Any]) -> tuple[Record, frozenset[str
         title=clean(_str(entry, "title", where)),
         authors=tuple(Author(*split_literal(clean(a))) for a in authors),
         year=year,
-        dates=(year,),
         container=container,
         **optional,
     )

@@ -28,7 +28,6 @@ def record(
         title=title,
         authors=authors or (author("Gabriel Spadon"), author("Stan Matwin")),
         year=year,
-        dates=(year,) if year else (),
         **kw,
     )
 
@@ -48,7 +47,7 @@ def work(r: Record, *, eprint: Record | None = None, key: str | None = None, exc
 
 
 def member(name: str = "Gabriel Spadon", dirname: str = "Spadon (bfdGsGUAAAAJ)", **kw: Any) -> Member:
-    fields: dict[str, Any] = {"row": 41, "scholar": "bfdGsGUAAAAJ", "dblp": "192/1659", "orcids": (), "openalex": ()}
+    fields: dict[str, Any] = {"dblp": "192/1659", "orcids": (), "openalex": ()}
     fields.update(kw)
     return Member(name=name, dirname=dirname, **fields)
 

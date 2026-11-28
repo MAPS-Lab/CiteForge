@@ -59,9 +59,13 @@ def test_doi_less_claims_gain_the_pubmed_doi(clock: FakeClock) -> None:
     http = make_http(lambda r: json_response(summary(RLBWT)), clock)
     bare = Claim(Source.OPENALEX, frozenset({"pmid:39157646", "openalex:W4401713284"}), "RLBWT Tricks", 2022)
     with_doi = Claim(Source.ORCID, frozenset({"pmid:39157646", "doi:10.1109/dcc52660.2022.00055"}), "RLBWT", 2022)
-    out = _with_pubmed_dois([("A", bare), ("B", with_doi)], http)
+    out, failed = _with_pubmed_dois([("A", bare), ("B", with_doi)], http)
     assert out[0][1].ids == bare.ids | {"doi:10.4230/lipics.sea.2022.16"}
     assert out[1] == ("B", with_doi)
-    assert _with_pubmed_dois([("B", with_doi)], make_http(lambda r: pytest.fail("no request"), clock)) == [
-        ("B", with_doi)
-    ]
+    assert failed == frozenset()
+    assert _with_pubmed_dois([("B", with_doi)], make_http(lambda r: pytest.fail("no request"), clock)) == (
+        [("B", with_doi)],
+        frozenset(),
+    )
+    down = make_http(lambda r: httpx.Response(500), clock)
+    assert _with_pubmed_dois([("A", bare)], down) == ([("A", bare)], frozenset({"pmid:39157646"}))

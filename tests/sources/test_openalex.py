@@ -132,7 +132,7 @@ def test_list_works_recorded(clock: FakeClock) -> None:
         assert c.source is Source.OPENALEX
         assert c.record is not None
         assert c.year is not None and c.year >= 2023
-        assert c.record.dates == (c.year,)
+        assert c.record.year == c.year
         me = [a for a in c.record.authors if a.openalex == SPADON]
         assert me and me[0].orcid is None and me[0].rors
     crosswalked = claims["openalex:W4402209710"]
@@ -355,7 +355,7 @@ def test_parse_drops_arxiv_crosswalk_on_doi_work() -> None:
 
 def test_parse_fields() -> None:
     r = openalex.parse_work(work(is_retracted=True, publication_year=2025))
-    assert (r.year, r.dates, r.status) == (2025, (2025,), Status.RETRACTED)
+    assert (r.year, r.status) == (2025, Status.RETRACTED)
     assert (r.volume, r.pages, r.language) == ("308", "1-12", "en")
     single = openalex.parse_work(work(biblio={"first_page": "118303", "last_page": "118303"}))
     assert single.pages == "118303"

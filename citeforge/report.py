@@ -33,6 +33,7 @@ class RunData:
     held: Sequence[tuple[str, Claim]]
     events: Sequence[Event]
     orcid_claims: Mapping[str, Sequence[Claim]]
+    registry_failed: frozenset[str]
     exit_code: int
 
 
@@ -89,7 +90,7 @@ def build(data: RunData) -> dict[str, Any]:
             "renamed": [list(x) for x in changes.get("renamed", [])],
         }
         for key, d in sorted(mine.items()):
-            if d.verdict is Verdict.REVIEW:
+            if d.verdict is Verdict.REVIEW and data.works[key].excluded is None:
                 review.append(
                     {
                         "member": member,
@@ -112,6 +113,7 @@ def build(data: RunData) -> dict[str, Any]:
             "python": platform.python_version(),
             "min_year": data.min_year,
             "exit_code": data.exit_code,
+            "registry_failed": sorted(data.registry_failed),
         },
         "timing": dict(data.stages),
         "sources": {h: {**dict(v), "down": data.down.get(h)} for h, v in sorted(data.sources.items())},
@@ -156,6 +158,7 @@ def markdown(report: Mapping[str, Any]) -> str:
     ]
     down = [f"{h}: {v['down']}" for h, v in report["sources"].items() if v.get("down")]
     lines += _list("Hosts down", down, None)
+    lines += _list("Registry lookups failed", report["run"]["registry_failed"])
     partial = [f"{m}: {v['status']}" for m, v in members.items() if v["status"] != "complete"]
     lines += _list("Members not complete", partial, None)
     site = members.get(WEBSITE_DIR)

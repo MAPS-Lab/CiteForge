@@ -9,15 +9,21 @@ from rapidfuzz import fuzz
 from unidecode import unidecode
 
 from citeforge.model import Author, NameKey
-from citeforge.tables import ACRONYM_CASE_CORRECTIONS, AUTHOR_NAME_SUFFIXES, STOPWORDS
+from citeforge.tables import ACRONYM_CASE_CORRECTIONS, AUTHOR_NAME_SUFFIXES, NAME_HONORIFICS, STOPWORDS
 
 _TAG = re.compile(r"</?[A-Za-z][\w:.-]*(?:\s[^<>]*)?/?>")
 _LATEX_SPECIAL = re.compile(r"(?<!\\)([%$&#_])")
 _MATH_SPECIAL = re.compile(r"(?<!\\)([%&#])")
 # Pandoc's rule for $...$: opens before a non-space, closes after one, not followed by a digit; $$...$$ is free.
+# A lone macro such as $\sim$ may close before a digit, as in $\sim$10.
 _MATH = re.compile(
     r"\$\$(?=[^$]*(?:[^\W_]|\\))([^$]+?)\$\$|(?<!\$)\$(?=[^\s$])(?=[^$]*(?:[^\W_]|\\))([^$]*?[^\s$])\$(?![\d$])"
+    r"|(?<!\$)\$(\\[A-Za-z]+)\$(?!\$)"
 )
+_SCRIPT = re.compile(r"(?<!\\)([\^_])\s*(?:\{\s*(\\circ|[\d+\-=()ni]+)\s*\}|(\\circ(?![A-Za-z])|\d))")
+_SUPERSCRIPT = str.maketrans("0123456789+-=()ni", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ")
+_SUBSCRIPT = str.maketrans("0123456789+-=()ni", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₙᵢ")
+_SCRIPT_LEFT = re.compile(r"(?<!\\)[\^_]")
 _ESCAPED_DOLLAR = re.compile(r"(?<!\\)((?:\\\\)*)\\\$")
 _MATH_ALNUM = re.compile("[\U0001d400-\U0001d7ff]")
 _INVISIBLE = dict.fromkeys(map(ord, "­​‌‍⁠﻿"))
@@ -37,6 +43,7 @@ _EMAIL = re.compile(
     r"(?:\b(?:electronic address|e-?mail(?: address)?)\s*[:.]?\s*)?[\w.%+-]+@[\w-]+(?:\.[\w-]+)+\.?", re.I
 )
 _EMPTY_PART = re.compile(r"\(\s*\)|\[\s*\]|(?<=[,;])\s*[,;]")
+_LEADING_WORD = re.compile(r"\s*([^\W\d_]+)\.?(?![^\W\d_])\s*")
 _latex = LatexNodes2Text()
 
 
@@ -51,16 +58,23 @@ def _strip_markup(s: str) -> str:
         s = stripped
 
 
+def _script(m: re.Match[str]) -> str:
+    body = m[2] or m[3]
+    if body == "\\circ":
+        return "°" if m[1] == "^" else ""
+    return body.translate(_SUPERSCRIPT if m[1] == "^" else _SUBSCRIPT)
+
+
+def _math_text(math: str) -> str:
+    # plain text has no script operator, so a ^ or _ with no Unicode form is dropped
+    return _MATH_SPECIAL.sub(r"\\\1", _SCRIPT_LEFT.sub("", _SCRIPT.sub(_script, math)))
+
+
 def _latex_source(s: str) -> str:
     s = _ESCAPED_DOLLAR.sub(r"\1$", s)
     parts, last = [], 0
     for m in _MATH.finditer(s):
-        parts += [
-            _LATEX_SPECIAL.sub(r"\\\1", s[last : m.start()]),
-            "$",
-            _MATH_SPECIAL.sub(r"\\\1", m.group(1) or m.group(2)),
-            "$",
-        ]
+        parts += [_LATEX_SPECIAL.sub(r"\\\1", s[last : m.start()]), "$", _math_text(m[1] or m[2] or m[3]), "$"]
         last = m.end()
     return "".join(parts) + _LATEX_SPECIAL.sub(r"\\\1", s[last:])
 
@@ -120,7 +134,15 @@ def family_keys(family: str) -> frozenset[str]:
     return frozenset(keys)
 
 
+def _title_word(given: str) -> re.Match[str] | None:
+    m = _LEADING_WORD.match(given)
+    # an upper-case "DR" or "MS" is a pair of initials, not a title
+    return m if m and given[m.end() :] and fold(m[1]) in NAME_HONORIFICS and not m[1].isupper() else None
+
+
 def initials(given: str) -> str:
+    while m := _title_word(given):
+        given = given[m.end() :]
     return "".join(t[0] for t in fold(given).split() if t not in AUTHOR_NAME_SUFFIXES)
 
 
@@ -146,11 +168,17 @@ def author_key(a: Author) -> NameKey | None:
     return None
 
 
-def name_matches(names: Iterable[NameKey], a: Author) -> bool:
-    key = author_key(a)
-    if key is None:
-        return False
-    return any(n.families & key.families and _initials_compatible(n.initials, key.initials) for n in names)
+def name_matches(names: Iterable[NameKey], a: Author, swapped: bool = False) -> bool:
+    """Match a byline slot to the member's names; swapped also reads the given name as the family name."""
+    keys = [author_key(a)]
+    if swapped and a.given and a.family:
+        keys.append(name_key(a.family, a.given))
+    return any(
+        n.families & k.families and _initials_compatible(n.initials, k.initials)
+        for k in keys
+        if k is not None
+        for n in names
+    )
 
 
 def _initials_compatible(a: str, b: str) -> bool:

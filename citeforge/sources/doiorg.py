@@ -89,7 +89,7 @@ def _year(date: Any) -> int | None:
         first = parts[0][0]
         if isinstance(first, int) and not isinstance(first, bool):
             return first if 1000 <= first <= 9999 else None
-        if isinstance(first, str) and first.strip().isdigit():
+        if isinstance(first, str) and first.strip().isdecimal():
             return _year({"date-parts": [[int(first)]]})
     for key in ("raw", "literal"):
         if isinstance(date.get(key), str) and (m := _YEAR.search(date[key])):
@@ -131,7 +131,6 @@ def parse_csl(body: bytes) -> Record:
         raise ParseError("csl: no title")
     source_type = item.get("type") if isinstance(item.get("type"), str) else ""
     doi = to_id("doi", item["DOI"]) if isinstance(item.get("DOI"), str) else None
-    years = [_year(item.get(k)) for k in ("issued", "published-print", "published-online")]
     thesis = source_type == "thesis"
     publisher = _text(item.get("publisher"))
     return Record(
@@ -142,8 +141,7 @@ def parse_csl(body: bytes) -> Record:
         title=title,
         authors=_people(item.get("author")),
         editors=_people(item.get("editor")),
-        year=years[0],
-        dates=tuple(sorted({y for y in years if y is not None})),
+        year=_year(item.get("issued")),
         container=tuple(filter(None, (_text(item.get("container-title")), _text(item.get("collection-title"))))),
         event=_text(item.get("event-title")) or _text(item.get("event")),
         publisher=None if thesis else publisher,

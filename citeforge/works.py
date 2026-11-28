@@ -207,7 +207,8 @@ def doi_agrees(claim_title: str, member: Identity, reg: Record) -> Literal["ok",
     title_ok = title_score >= 0.90 or ratio(claim_title, reg.title) >= 0.85 or word_prefix(claim_title, reg.title)
     people = [a for a in reg.authors if a.family or a.literal]
     # A foreign ORCID on a named slot is an authorship question for decide, not a sign of a wrong DOI.
-    named = any(is_own(member, a) or name_matches(member.names, a) for a in people)
+    # The member's own listing names this work, so a byline with given and family swapped still counts.
+    named = any(is_own(member, a) or name_matches(member.names, a, swapped=True) for a in people)
     if title_score < 0.60:
         return "detach"
     if people and not named:
@@ -309,7 +310,7 @@ def clean_byline(authors: tuple[Author, ...]) -> tuple[tuple[Author, ...], list[
 
 def _apply_override(r: Record, name: str, value: str) -> Record:
     if name == "year":
-        return dataclasses.replace(r, year=int(value), dates=(int(value),))
+        return dataclasses.replace(r, year=int(value))
     attr = _OVERRIDE_ATTR.get(name, name)
     change: dict[str, Any] = {attr: (value,) if attr == "container" else value}
     return dataclasses.replace(r, **change)

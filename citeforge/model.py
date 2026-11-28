@@ -78,10 +78,8 @@ WORK_KEY_ORDER = ("doi", "arxiv", "pmid", "dblp", "openalex", "manual")
 
 @dataclass(frozen=True, slots=True)
 class Member:
-    row: int
     name: str
     dirname: str
-    scholar: str | None
     dblp: str | None
     orcids: tuple[str, ...]
     openalex: tuple[str, ...]
@@ -108,7 +106,6 @@ class Record:
     authors: tuple[Author, ...] = ()
     editors: tuple[Author, ...] = ()
     year: int | None = None
-    dates: tuple[int, ...] = ()
     container: tuple[str, ...] = ()
     event: str | None = None
     publisher: str | None = None
@@ -133,7 +130,6 @@ class Claim:
     ids: frozenset[str]
     title: str
     year: int | None
-    by_self: bool | None = None
     record: Record | None = None
 
 

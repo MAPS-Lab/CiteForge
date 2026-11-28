@@ -41,10 +41,11 @@ def decide(i: Identity, w: Work, claims: Iterable[Claim], curated: Curated) -> D
         return Decision(Verdict.ACCEPT, "authorship_orcid", frozenset(i.orcids))
     sources = {c.source for c in claims}
     listed = sources & {Source.DBLP, Source.ORCID}
-    named = [a for a in w.primary.authors if name_matches(i.names, a)]
+    # a swapped given and family name counts only on a work the member's own listing names
+    named = [a for a in w.primary.authors if name_matches(i.names, a, swapped=bool(claims))]
     # OpenAlex bylines carry the author entity's name, so only the member's own listings may stand in.
     listed_named = any(
-        name_matches(i.names, a)
+        name_matches(i.names, a, swapped=True)
         for c in claims
         if c.record is not None and c.source in listed
         for a in c.record.authors

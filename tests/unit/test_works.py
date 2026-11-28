@@ -133,6 +133,10 @@ def test_doi_agrees_bands() -> None:
     assert doi_agrees(reg.title, me, stranger) == "detach"
     foreign = dataclasses.replace(reg, authors=(author("Gabriel Spadon", orcid="0000-0001-5109-3700"),))
     assert doi_agrees(reg.title, me, foreign) == "ok"
+    titled = dataclasses.replace(reg, authors=(author("Ana Lima"), Author("Dr. Gabriel", "Spadon")))
+    assert doi_agrees(reg.title, me, titled) == "ok"
+    swapped = dataclasses.replace(reg, authors=(Author("Spadon", "Gabriel"),))
+    assert doi_agrees(reg.title, me, swapped) == "ok"
 
 
 def test_doi_agrees_holds_a_consortium_byline_instead_of_detaching() -> None:

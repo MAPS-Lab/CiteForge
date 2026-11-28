@@ -50,7 +50,6 @@ def _record(d: Mapping[str, Any]) -> Record:
         "kind": Kind(d["kind"]),
         "authors": tuple(map(_author, d["authors"])),
         "editors": tuple(map(_author, d["editors"])),
-        "dates": tuple(d["dates"]),
         "container": tuple(d["container"]),
         "relations": frozenset((Rel(r), t) for r, t in d["relations"]),
         "status": Status(d["status"]),

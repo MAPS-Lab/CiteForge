@@ -87,15 +87,14 @@ def _year(summary: object) -> int | None:
     return int(value) if value and _YEAR.fullmatch(value) else None
 
 
-def _claim(group: object, orcid: str) -> Claim | None:
+def _claim(group: object) -> Claim | None:
     summaries = [s for s in _items(group, "work-summary") if isinstance(s, dict)]
     ids = frozenset(i for s in summaries for i in _ids(s))
     title = next((t for s in summaries if (t := clean(_text(s, "title", "title", "value") or ""))), "")
     if not ids and not title:
         return None
     year = next((y for s in summaries if (y := _year(s)) is not None), None)
-    by_self = any(_text(s, "source", "source-orcid", "path") == orcid for s in summaries)
-    return Claim(Source.ORCID, ids, title, year, by_self=by_self)
+    return Claim(Source.ORCID, ids, title, year)
 
 
 def parse_record(body: bytes, orcid: str) -> OrcidRecord:
@@ -117,7 +116,7 @@ def parse_record(body: bytes, orcid: str) -> OrcidRecord:
         credit=_text(name, "credit-name", "value"),
         other_names=tuple(dict.fromkeys(o for o in others if o)),
         affiliations=_affiliations(activities),
-        works=tuple(c for g in groups if (c := _claim(g, orcid)) is not None),
+        works=tuple(c for g in groups if (c := _claim(g)) is not None),
     )
 
 
@@ -136,7 +135,7 @@ def _status_reason(reply: Reply) -> str:
 
 
 def record(http: Http, orcid: str) -> Result[OrcidRecord]:
-    """Fetch /v3.0/{orcid}/record; Claim.by_self is True when the work summary source is the iD itself."""
+    """Fetch /v3.0/{orcid}/record."""
     oid = norm_orcid(orcid)
     if oid is None:
         return Result(Fetch.NOT_FOUND, None, "invalid_orcid")

@@ -80,7 +80,7 @@ def test_recorded_batch_splits_found_and_missing(clock: FakeClock) -> None:
 def test_recorded_fields(clock: FakeClock) -> None:
     found = crossref.by_doi(recorded_http(clock), RECORDED).found
     card = found["doi:10.1093/nar/gkz935"]
-    assert (card.year, card.dates, card.volume, card.pages) == (2019, (2019,), None, None)
+    assert (card.year, card.volume, card.pages) == (2019, None, None)
     assert card.article_number == "gkz935"
     assert card.language == "en"
     assert card.title.startswith("CARD 2020: antibiotic resistome surveillance")
@@ -303,6 +303,7 @@ def date(*parts: Any) -> dict[str, Any]:
         ({"issued": date(None), "approved": date(1999, 1, 1)}, 1999),
         ({"issued": {"date-parts": [[]]}, "posted": date(2024, 2)}, 2024),
         ({"issued": date("2018")}, 2018),
+        ({"issued": date("²⁰¹⁸")}, None),
         ({"issued": date(True)}, None),
         ({"issued": date(20201)}, None),
         ({"issued": {"date-parts": "2020"}}, None),
@@ -312,17 +313,6 @@ def date(*parts: Any) -> dict[str, Any]:
 def test_year_rule(dates: dict[str, Any], year: int | None) -> None:
     record = crossref.parse_work({**item("10.1000/a"), "issued": None, **dates})
     assert record.year == year
-
-
-def test_dates_collect_every_stated_year() -> None:
-    record = crossref.parse_work(
-        item(
-            "10.1000/a",
-            issued=date(2023, 12),
-            **{"published-online": date(2023, 12), "published-print": date(2024, 2), "accepted": date(2023, 9)},
-        )
-    )
-    assert (record.year, record.dates) == (2024, (2023, 2024))
 
 
 @pytest.mark.parametrize(

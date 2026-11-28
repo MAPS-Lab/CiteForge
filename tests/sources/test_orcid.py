@@ -1,14 +1,17 @@
+import functools
 import gzip
 import io
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 import pytest
-from hypothesis import given
+from hypothesis import event, given
 from hypothesis import strategies as st
 
 from citeforge.http import Http, ParseError
+from citeforge.ids import norm_ror, split_id, to_id
 from citeforge.model import Fetch, Source
 from citeforge.sources import orcid
 from citeforge.sources.orcid import Affiliation
@@ -60,25 +63,16 @@ def test_recorded_record_names_affiliations_and_works() -> None:
     assert sum(not c.ids for c in rec.works) == 3
     mdpi = by_id(rec.works, "doi:10.3390/s22166063")
     assert mdpi.source is Source.ORCID and mdpi.record is None
-    assert mdpi.year == 2022 and mdpi.by_self is False
-    assert by_id(rec.works, "doi:10.1109/access.2022.3197215").by_self is True
+    assert mdpi.year == 2022
     assert by_id(rec.works, "arxiv:1909.04605").year == 2019
     assert all(c.title or c.ids for c in rec.works)
     assert all(i.split(":")[0] in orcid.ID_KINDS for c in rec.works for i in c.ids)
 
 
-def test_by_self_only_when_the_source_is_the_id_itself() -> None:
-    rec = orcid.record(recorded(), CARBERRY).value
-    assert rec is not None
-    assert by_id(rec.works, "doi:10.5555/12345680").by_self is True
-    assert sum(c.by_self is False for c in rec.works) == 1
-
-
-def test_integration_pushed_record_has_ror_and_no_self_claims() -> None:
+def test_integration_pushed_record_has_ror() -> None:
     rec = orcid.record(recorded(), NEETHIRAJAN).value
     assert rec is not None
     assert Affiliation("https://ror.org/01e6qks80", "Dalhousie University", "employment") in rec.affiliations
-    assert sum(c.by_self is True for c in rec.works) == 1
     assert len(rec.works) == 290
     assert sum(not c.ids for c in rec.works) == 33
     assert any(c.year is None for c in rec.works)
@@ -127,9 +121,9 @@ def test_edge_record_tolerates_nulls_and_normalizes() -> None:
         frozenset({"doi:10.5555/upper"}),
     }
     merged = works[frozenset({"doi:10.5555/abc.1", "pmid:31415926"})]
-    assert (merged.title, merged.year, merged.by_self) == ("Tiny & Fast Graphs", 2021, True)
+    assert (merged.title, merged.year) == ("Tiny & Fast Graphs", 2021)
     untitled = works[frozenset({"arxiv:hep-th/9901001"})]
-    assert (untitled.title, untitled.year, untitled.by_self) == ("", None, False)
+    assert (untitled.title, untitled.year) == ("", None)
 
 
 def test_empty_record_is_ok_with_no_works() -> None:
@@ -197,18 +191,84 @@ json_values = st.recursive(
     lambda inner: st.lists(inner, max_size=3) | st.dictionaries(st.text(max_size=8), inner, max_size=3),
     max_leaves=20,
 )
-section_keys = st.sampled_from(["person", "activities-summary", "works", "group", "work-summary", "employments"])
 
 
-@given(st.dictionaries(section_keys, json_values, max_size=4), json_values)
-def test_parse_record_only_raises_parse_error(extra: dict, groups: object) -> None:
-    doc = {"orcid-identifier": {"path": CARBERRY}, "activities-summary": {"works": {"group": groups}}, **extra}
+def shaped(valid: st.SearchStrategy) -> st.SearchStrategy:
+    """A field of the ORCID shape that is sometimes replaced by arbitrary JSON."""
+    return st.one_of(valid, valid, valid, json_values)
+
+
+def wrap(*path: str) -> Callable[[object], object]:
+    def build(value: object) -> object:
+        return functools.reduce(lambda inner, key: {key: inner}, reversed(path), value)
+
+    return build
+
+
+external_id = st.fixed_dictionaries(
+    {
+        "external-id-type": shaped(st.sampled_from(["doi", "DOI", "arxiv", "pmid", "eid"])),
+        "external-id-value": shaped(st.sampled_from(["10.1234/ABC", "arXiv:2101.00001", "31415926", "x"]) | st.text()),
+        "external-id-relationship": shaped(st.sampled_from(["self", "part-of"])),
+    }
+)
+work_summary = st.fixed_dictionaries(
+    {
+        "title": shaped(st.text(min_size=1, max_size=20).map(wrap("title", "value"))),
+        "publication-date": shaped(
+            (st.from_regex(r"\d{4}", fullmatch=True) | st.text(max_size=5)).map(wrap("year", "value"))
+        ),
+        "external-ids": shaped(st.lists(external_id, max_size=3).map(wrap("external-id"))),
+    }
+)
+employment = st.fixed_dictionaries(
+    {
+        "name": shaped(st.text(max_size=12)),
+        "disambiguated-organization": shaped(
+            st.fixed_dictionaries(
+                {
+                    "disambiguation-source": shaped(st.just("ROR")),
+                    "disambiguated-organization-identifier": shaped(
+                        st.sampled_from(["https://ror.org/01e6qks80", "x"])
+                    ),
+                }
+            )
+        ),
+    }
+).map(wrap("employment-summary", "organization"))
+orcid_doc = st.fixed_dictionaries(
+    {
+        "orcid-identifier": st.just({"path": CARBERRY}),
+        "person": shaped(st.text(max_size=8).map(wrap("name", "given-names", "value"))),
+        "activities-summary": st.fixed_dictionaries(
+            {
+                "works": st.lists(
+                    shaped(st.lists(work_summary, min_size=1, max_size=2).map(wrap("work-summary"))), max_size=4
+                ).map(wrap("group")),
+                "employments": shaped(
+                    st.lists(st.lists(employment, max_size=2).map(wrap("summaries")), max_size=2).map(
+                        wrap("affiliation-group")
+                    )
+                ),
+            }
+        ),
+    }
+)
+
+
+@given(orcid_doc)
+def test_parse_record_only_raises_parse_error(doc: dict) -> None:
     try:
         rec = orcid.parse_record(json.dumps(doc).encode(), CARBERRY)
     except ParseError:
+        event("parse_error")
         return
-    assert all(c.ids and c.source is Source.ORCID for c in rec.works)
-    assert all(isinstance(a.name, str) and a.name for a in rec.affiliations)
+    event("works" if rec.works else "no works")
+    for c in rec.works:
+        assert c.source is Source.ORCID and (c.ids or c.title)
+        assert all(split_id(i)[0] in orcid.ID_KINDS and to_id(split_id(i)[0], split_id(i)[1]) == i for i in c.ids)
+    for a in rec.affiliations:
+        assert a.name and (a.ror is None or norm_ror(a.ror) == a.ror)
 
 
 def test_fixtures_hold_no_contact_fields() -> None:

@@ -43,13 +43,6 @@ _UPDATES: Mapping[str, Rel] = {
 _STATUS = {Rel.RETRACTS: Status.RETRACTED, Rel.WITHDRAWS: Status.WITHDRAWN}
 # issued is Crossref's earliest publication date; approved and posted stand in when a deposit leaves it empty.
 _YEAR_FIELDS = (("published-print",), ("journal-issue", "published-print"), ("issued",), ("approved",), ("posted",))
-_DATE_FIELDS = (
-    *_YEAR_FIELDS,
-    ("published-online",),
-    ("published",),
-    ("journal-issue", "published-online"),
-    ("accepted",),
-)
 
 
 def by_doi(http: Http, ids: Sequence[str]) -> Batch:
@@ -128,7 +121,6 @@ def parse_work(item: Mapping[str, Any]) -> Record:
     relations = {*_relations(item.get("relation"), doi), *_updates(item.get("update-to"), doi)}
     institution = _first_name(item.get("institution"))
     year = next((y for path in _YEAR_FIELDS if (y := _year(_dig(item, path))) is not None), None)
-    dates = {y for path in _DATE_FIELDS if (y := _year(_dig(item, path))) is not None}
     return Record(
         source=Source.CROSSREF,
         ids=frozenset({doi}),
@@ -138,7 +130,6 @@ def parse_work(item: Mapping[str, Any]) -> Record:
         authors=_people(item.get("author"), doi),
         editors=_people(item.get("editor"), doi),
         year=year,
-        dates=tuple(sorted(dates)),
         container=tuple(dict.fromkeys(c for c in map(clean, _strs(item.get("container-title"))) if c)),
         event=_first_name([item.get("event")]),
         publisher=clean(_str(item.get("publisher"))) or None,
@@ -310,7 +301,7 @@ def _year(date: object) -> int | None:
     if not isinstance(parts, list) or not parts or not isinstance(parts[0], list) or not parts[0]:
         return None
     y = parts[0][0]
-    if isinstance(y, str) and y.isdigit():
+    if isinstance(y, str) and y.isdecimal():
         y = int(y)
     return y if isinstance(y, int) and not isinstance(y, bool) and 1000 <= y <= 9999 else None
 

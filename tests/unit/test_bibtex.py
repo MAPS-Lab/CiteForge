@@ -135,6 +135,12 @@ def test_render_preprint_and_eprint() -> None:
     assert e["eprint"] == "2310.18948"
     assert e["pages"] == "e12"
     assert "url" not in e and "howpublished" not in e
+    series = ("Advances in Educational Technologies and Instructional Design",
+              "Cognitive and Affective Perspectives on Immersive Technology in Education")  # fmt: skip
+    chapter = record("doi:10.4018/978-1-7998-3250-8.ch011", kind=Kind.INCOLLECTION, container=series)
+    assert read_entry(render(work(chapter), Names("S", "S")))["booktitle"] == series[1]
+    dblp = dataclasses.replace(chapter, source=Source.DBLP)
+    assert read_entry(render(work(dblp), Names("S", "S")))["booktitle"] == series[0]
 
 
 def test_invalid_pages_dropped() -> None:

@@ -207,7 +207,7 @@ def load(path: Path, strict: bool = True) -> tuple[Member, ...]:
         if dirname.casefold() in seen_dirs:
             raise RosterError(f"row {row}: folder {dirname!r} collides with row {seen_dirs[dirname.casefold()]}")
         seen_dirs[dirname.casefold()] = row
-        members.append(Member(row, name, dirname, scholar or None, dblp or None, orcids, openalex))
+        members.append(Member(name, dirname, dblp or None, orcids, openalex))
     return tuple(members)
 
 

@@ -60,7 +60,7 @@ years.
 | 0 | complete |
 | 1 | unexpected error, traceback on stderr |
 | 2 | bad input, curated file or key, before any request |
-| 3 | written, but a person was partial, a source was down or a guard held removals |
+| 3 | written, but a person was partial, a source was down, a registry lookup failed or a guard held removals |
 
 ## Outputs
 
@@ -81,7 +81,9 @@ A work has the same file name and the same bytes in every folder it appears in. 
 given, is kept while the first author's family name and the year stay the same.
 
 `state/works.jsonl` is the memory between runs. When a source fails, the person is marked
-partial: works can be added but none are removed. A person whose ORCID, DBLP pid or OpenAlex
+partial: works can be added but none are removed. When a registry or OpenAlex lookup fails for
+a work, that work keeps its last decision and record and the person reads `partial:registry`.
+A person whose ORCID, DBLP pid or OpenAlex
 id is not found anywhere reads `no_profile` and is held the same way. A file is removed only with complete
 listings and a named reason, and never when a person would lose more than 20% of their
 entries at once.
@@ -129,7 +131,10 @@ Each run's `run/report.md` lists the cases held for review with a ready `[[accep
 ## Monthly refresh
 
 `.github/workflows/refresh.yml` runs on the 2nd of each month, checks the committed corpus and
-opens a `data: monthly refresh YYYY-MM` pull request with `run/report.md` as its body.
+opens a `data: monthly refresh YYYY-MM` pull request with `run/report.md` as its body. It pushes
+and opens the pull request with the `CITEFORGE_BOT_TOKEN` secret, a fine-grained token for this
+repository with contents and pull-request write access, because GitHub runs no workflow on a
+pull request made with `GITHUB_TOKEN`.
 
 ## Development
 

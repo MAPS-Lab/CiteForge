@@ -2,17 +2,21 @@ import dataclasses
 import functools
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 import httpx
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-from citeforge import cli
+from citeforge import cli, run
 from citeforge.bibtex import read_entry
-from citeforge.http import Http, Result
-from citeforge.model import Claim, Fetch, Kind, Record, Source, Status
+from citeforge.http import Batch, Http, Result
+from citeforge.model import Claim, Decision, Fetch, Kind, Record, Rel, Source, Status, Verdict
 from citeforge.sources import crossref, openalex, orcid
 from tests.conftest import FakeClock
+from tests.factories import record, work
 from tests.world import (
     INPUT,
     MATWIN,
@@ -26,6 +30,7 @@ from tests.world import (
     cr,
     default_world,
     install,
+    person,
     repo,
     tree,
 )
@@ -106,20 +111,45 @@ def _assert_outage_kept_everything(workdir: Path, before: dict[str, bytes]) -> d
     report = json.loads((workdir / "state/report.json").read_text())
     assert all(m["removed"] == [] for m in report["members"].values())
     assert "shrink_guard" not in report["events"]["counts"]
-    assert report["members"][SPADON]["status"] == "complete"
+    assert report["members"][SPADON]["status"] == "partial:registry"
+    assert report["run"]["exit_code"] == 3 and report["run"]["registry_failed"]
     return report
 
 
-def test_crossref_outage_removes_nothing(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_crossref_outage_removes_nothing_and_exits_3(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     world = default_world()
     install(monkeypatch, world)
     assert cli.main([]) == 0
     before = tree(workdir / "output")
     world.crossref_down = True
-    assert cli.main([]) == 0
+    assert cli.main([]) == 3
     assert world.calls["crossref.by_doi"] == 2
     report = _assert_outage_kept_everything(workdir, before)
     assert report["events"]["counts"]["pending"] >= 1
+    assert "### Registry lookups failed" in (workdir / "run/report.md").read_text()
+
+
+def test_openalex_donor_outage_keeps_a_file_whose_kind_it_supplied(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = default_world()
+    doi, title = "doi:10.5555/other-typed", "Vessel emissions inventories from terrestrial AIS"
+    world.crossref[doi] = cr(doi, title, (SP,), source_type="other", kind=Kind.OTHER)
+    world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset({doi}), title, 2024))
+    install(monkeypatch, world)
+    oa = record(doi, "openalex:W555", title=title, authors=(SP_OA,), source=Source.OPENALEX, year=2024,
+                source_type="article", container=("Ocean Engineering",))  # fmt: skip
+    monkeypatch.setattr(
+        openalex, "works_by_doi", lambda http, ids: Batch({doi: oa} if doi in ids else {}, frozenset(), frozenset())
+    )
+    path = workdir / "output" / SPADON / "Spadon2024-VesselEmissions.bib"
+    assert cli.main([]) == 0 and path.exists()
+    monkeypatch.setattr(openalex, "works_by_doi", lambda http, ids: Batch({}, frozenset(), frozenset(ids)))
+    for _ in range(3):
+        assert cli.main([]) == 3
+        assert path.exists()
+    assert removed(workdir, SPADON) == {}
+    assert status(workdir, SPADON) == "partial:registry"
 
 
 def test_crossref_503_marks_the_host_down_and_exits_3(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,7 +164,6 @@ def test_crossref_503_marks_the_host_down_and_exits_3(workdir: Path, monkeypatch
     assert cli.main([]) == 3
     report = _assert_outage_kept_everything(workdir, before)
     assert report["sources"]["api.crossref.org"]["down"] == "retry_after 600s"
-    assert report["run"]["exit_code"] == 3
 
 
 def test_search_failure_keeps_the_linked_doi_and_ships_one_file(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,6 +244,7 @@ def test_over_cap_carries_previous_decisions(workdir: Path, monkeypatch: pytest.
     [
         ({"OPENALEX_API_KEY": ""}, None, "OPENALEX_API_KEY"),
         ({"CITEFORGE_MIN_YEAR": "twenty"}, None, "CITEFORGE_MIN_YEAR"),
+        ({"CITEFORGE_MIN_YEAR": "²⁰²⁰"}, None, "CITEFORGE_MIN_YEAR"),
         ({}, ("data/input.csv", INPUT.replace("true,\n", "maybe,\n", 1)), "Enabled must be"),
         ({}, ("data/curated.toml", "[[accept]]\nmember = 'Nobody (x)'\nid = 'doi:10.1234/x'\n"), "unknown members"),
         ({}, ("data/a2i2.csv", "Name\nA\nB\nC\n"), "group members"),
@@ -339,7 +369,7 @@ def test_retraction_after_publication_removes_the_file(workdir: Path, monkeypatc
 
 def test_missing_and_future_years_are_held_for_review(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     world = default_world()
-    undated = dataclasses.replace(cr("doi:10.1234/undated", "An undated note on sea ice", (SP,)), year=None, dates=())
+    undated = dataclasses.replace(cr("doi:10.1234/undated", "An undated note on sea ice", (SP,)), year=None)
     world.crossref["doi:10.1234/undated"] = undated
     world.orcid_works[SPADON_ORCID].append(
         Claim(Source.ORCID, frozenset({"doi:10.1234/undated"}), "An undated note on sea ice", None)
@@ -352,7 +382,6 @@ def test_missing_and_future_years_are_held_for_review(workdir: Path, monkeypatch
         "Vessel routing in a later decade",
         authors=(MW,),
         year=2999,
-        dates=(2999,),
         container=("X",),
     )
     world.dblp_claims["m/StanMatwin"] = [
@@ -378,7 +407,7 @@ def test_registry_outage_holds_new_works_as_pending(workdir: Path, monkeypatch: 
     doi = "doi:10.1234/late"
     world.crossref[doi] = cr(doi, "A late paper on sea ice", (SP,))
     late = Record(Source.DBLP, frozenset({doi, "dblp:journals/x/Spadon24"}), Kind.ARTICLE, "article",
-                  "A late paper on sea ice", authors=(SP,), year=2024, dates=(2024,), container=("X",))  # fmt: skip
+                  "A late paper on sea ice", authors=(SP,), year=2024, container=("X",))  # fmt: skip
     world.dblp_claims["192/1659"] = [
         *world.dblp_claims["192/1659"],
         Claim(Source.DBLP, late.ids, late.title, 2024, record=late),
@@ -422,7 +451,7 @@ def test_openalex_lookup_failure_keeps_openalex_only_works(workdir: Path, monkey
     doi = "doi:10.1234/oaonly"
     world.crossref[doi] = cr(doi, "Sea ice drift from vessel tracks", (SP_OA,), year=2023)
     oa = Record(Source.OPENALEX, frozenset({doi, "openalex:W9"}), Kind.ARTICLE, "article",
-                "Sea ice drift from vessel tracks", authors=(SP_OA,), year=2023, dates=(2023,))  # fmt: skip
+                "Sea ice drift from vessel tracks", authors=(SP_OA,), year=2023)  # fmt: skip
     world.openalex_claims.append(Claim(Source.OPENALEX, oa.ids, oa.title, 2023, record=oa))
     install(monkeypatch, world)
     assert cli.main([]) == 0
@@ -484,7 +513,7 @@ def test_affiliation_emails_never_reach_state_report_or_output(workdir: Path, mo
 def test_orcid_work_without_an_identifier_is_counted(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     world = default_world()
     title = "Soft-sensing approach for predicting bovine respiratory disease"
-    world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset(), title, 2024, by_self=True))
+    world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset(), title, 2024))
     install(monkeypatch, world)
     assert cli.main([]) == 0
     coverage = json.loads((workdir / "state/report.json").read_text())["coverage"]
@@ -492,3 +521,80 @@ def test_orcid_work_without_an_identifier_is_counted(workdir: Path, monkeypatch:
     assert coverage["unexplained"] == 0
     assert coverage["claimed"] == coverage["emitted"] + len(coverage["items"])
     assert f"{SPADON}: {title} (no_identifier)" in (workdir / "run/report.md").read_text()
+
+
+TODAY = date(2026, 6, 1)
+
+
+@given(
+    st.sampled_from(Verdict),
+    st.one_of(st.none(), st.integers(1990, 2030)),
+    st.integers(2015, 2027),
+    st.sampled_from([Source.CROSSREF, Source.DBLP]),
+)
+def test_window_keeps_exactly_the_years_from_min_year(verdict, year, min_year, source) -> None:
+    s = run.Settings(Path(), Path(), Path(), Path(), Path(), Path(), min_year, TODAY, "k")
+    w = work(record("doi:10.1234/x", source=source, year=year))
+    out = run._windowed(Decision(verdict, "orcid_doi"), w, s)
+    if verdict is Verdict.REJECT:
+        assert out == Decision(verdict, "orcid_doi")
+    elif year is not None and year < min_year:
+        assert (out.verdict, out.rule) == (Verdict.REJECT, "out_of_window")
+    elif verdict is Verdict.REVIEW:
+        assert out.verdict is Verdict.REVIEW and out.rule == "orcid_doi"
+    elif year is None or (year > TODAY.year + 1 and source is Source.DBLP):
+        assert (out.verdict, out.rule) == (Verdict.REVIEW, "no_year" if year is None else "future_year")
+    else:
+        assert out == Decision(verdict, "orcid_doi")
+
+
+def test_window_boundary_and_unpublishable_reviews(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    away = (person("Gabriel Spadon", rors=("https://ror.org/02xyz0000",)),)
+    titles = {
+        "doi:10.1234/y2020": ("Sea ice drift observed in the first window year", 2020, ()),
+        "doi:10.1234/y2019": ("Sea ice drift observed a year before the window", 2019, ()),
+        "doi:10.1234/r2019": ("Vessel noise measured a year before the window", 2019, away),
+        "doi:10.1234/rnote": ("Vessel noise in a short note", 2024, away),
+    }
+    for doi, (title, year, authors) in titles.items():
+        world.crossref[doi] = cr(doi, title, authors or (SP,), year=year)
+        world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset({doi}), title, year))
+    world.crossref["doi:10.1234/rnote"] = dataclasses.replace(world.crossref["doi:10.1234/rnote"], source_type="other")
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    assert (workdir / "output" / SPADON / "Spadon2020-SeaIce.bib").exists()
+    assert not any("2019" in f for f in tree(workdir / "output"))
+    rows = {r["work"]["key"]: r for r in map(json.loads, (workdir / "state/works.jsonl").read_text().splitlines())}
+    assert rows["doi:10.1234/y2019"]["members"][SPADON]["rule"] == "out_of_window"
+    assert rows["doi:10.1234/r2019"]["members"][SPADON]["rule"] == "out_of_window"
+    assert rows["doi:10.1234/rnote"]["members"][SPADON]["verdict"] == "review"
+    assert rows["doi:10.1234/rnote"]["work"]["excluded"] == "kind:other"
+    review = json.loads((workdir / "state/report.json").read_text())["review"]
+    assert not {"doi:10.1234/r2019", "doi:10.1234/rnote"} & {i["id"] for i in review}
+
+
+def test_arxiv_copy_of_a_thesis_ships_as_the_thesis(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    thesis = "doi:10.11606/t.55.2021.tde-01092021-104851"
+    title = "From cities to series: complex networks and deep learning for improved spatial and temporal analytics"
+    raw = {
+        "DOI": thesis.removeprefix("doi:"),
+        "type": "dissertation",
+        "title": [title],
+        "author": [{"given": "Gabriel", "family": "Spadon", "ORCID": f"https://orcid.org/{SPADON_ORCID}"}],
+        "institution": [{"name": "Universidade de São Paulo"}],
+        "approved": {"date-parts": [[2021, 7, 12]]},
+    }
+    world.crossref[thesis] = crossref.parse_work(raw)
+    preprint = Record(Source.ARXIV, frozenset({"arxiv:2206.01176"}), Kind.PREPRINT, "arxiv", title, authors=(SP,),
+                      year=2022, relations=frozenset({(Rel.PUBLISHED_AS, thesis)}))  # fmt: skip
+    world.arxiv[min(preprint.ids)] = preprint
+    world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, preprint.ids, title, 2022))
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    (path,) = (workdir / "output" / SPADON).glob("Spadon2021-*.bib")
+    entry = read_entry(path.read_text(encoding="utf-8"))
+    assert entry["ENTRYTYPE"] == "phdthesis"
+    assert (entry["doi"], entry["year"]) == (thesis.removeprefix("doi:"), "2021")
+    assert entry["school"] == "Universidade de São Paulo"

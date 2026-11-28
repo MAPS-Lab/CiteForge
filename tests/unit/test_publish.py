@@ -13,7 +13,7 @@ from citeforge.sources.orcid import Affiliation, OrcidRecord
 from citeforge.state import StateRow
 from tests.factories import member, record, work
 
-SP, MW = member(), member("Stan Matwin", "Matwin (rCoJeuYAAAAJ)", row=3, scholar="rCoJeuYAAAAJ", dblp=None)
+SP, MW = member(), member("Stan Matwin", "Matwin (rCoJeuYAAAAJ)", dblp=None)
 OK = Decision(Verdict.ACCEPT, "authorship_orcid")
 
 
@@ -88,7 +88,7 @@ def test_markdown_is_capped() -> None:
     members = {f"M{i} (x)": {"status": "complete", "added": [["doi:10.1/" + "x" * 200, "S"]] * 50, "removed": [],
                              "renamed": []} for i in range(100)}  # fmt: skip
     report = {
-        "run": {"exit_code": 0, "min_year": 2020},
+        "run": {"exit_code": 0, "min_year": 2020, "registry_failed": []},
         "sources": {},
         "members": members,
         "review": [],

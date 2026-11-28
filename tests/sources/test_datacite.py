@@ -80,7 +80,6 @@ def test_recorded_people_ids_and_organisations(batch: Batch) -> None:
     big = batch.found["doi:10.82444/warw.34422843.v1"]
     assert len(big.authors) == 306
     assert big.year == 2026
-    assert big.dates == (2025, 2026)
 
 
 def test_recorded_text_without_type_hint_stays_other(batch: Batch) -> None:
@@ -106,7 +105,7 @@ def test_thesis_parse() -> None:
         Kind.MASTERSTHESIS,
     )
     assert r.school == "University of Waterloo"
-    assert (r.year, r.dates) == (2021, (2020, 2021))
+    assert r.year == 2021
     assert (r.container, r.volume, r.number, r.pages) == (("Theses",), "3", "1", "1-90")
     assert (r.language, r.url, r.publisher) == (
         "en",

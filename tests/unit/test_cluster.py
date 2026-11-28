@@ -36,12 +36,25 @@ def test_verify_detaches_dead_and_mismatched_dois_and_holds_reviews() -> None:
         (ME, claim("doi:10.1234/dead")),
         (ME, claim("doi:10.1234/mid")),
     ]
-    kept, held, events = cl.verify(
+    kept, held, events, _ = cl.verify(
         claims, reg(good, wrong, middle, dead=frozenset({"doi:10.1234/dead"})), {ME: identity()}
     )
     assert [c.ids for _, c in kept] == [{"doi:10.1234/good"}, {"arxiv:2101.00001"}]
     assert [c.ids for _, c in held] == [{"doi:10.1234/mid"}]
     assert [e.kind for e in events] == ["doi_mismatch", "doi_unresolved", "doi_review"]
+
+
+def test_a_doi_detached_from_an_openalex_claim_stays_apart_from_it() -> None:
+    oa = record("openalex:W1", "doi:10.1/wrong", source=Source.OPENALEX)
+    other = record("doi:10.1/wrong", title="Soil bacteria in tropical farms", authors=(author("Ana Lima"),))
+    registries = reg(other, openalex={"doi:10.1/wrong": oa})
+    kept, _, events, registries = cl.verify(
+        [(ME, claim(*oa.ids, source=Source.OPENALEX, rec=oa))], registries, {ME: identity()}
+    )
+    assert [e.kind for e in events] == ["doi_mismatch"]
+    groups, _ = cl.cluster(kept, registries, Curated())
+    assert sorted(sorted(g.ids) for g in groups) == [["doi:10.1/wrong"], ["openalex:W1"]]
+    assert [g.claims for g in groups if g.key == "doi:10.1/wrong"] == [()]
 
 
 def test_strong_edges_and_preprint_relation() -> None:

@@ -146,7 +146,7 @@ def test_csl_recorded_medra_chapter_without_date(recorded: Http) -> None:
     assert r.ids == {MEDRA_CHAPTER}
     assert r.title == "L'inquisition et l'Islam"
     assert r.authors == (Author("Bernard", "Vincent"),)
-    assert (r.year, r.dates) == (None, ())
+    assert r.year is None
     assert r.container[0].startswith("L'inquisizione : atti del Simposio internazionale : Città del Vaticano")
     assert r.publisher == "Biblioteca Apostolica Vaticana"
     assert r.language == "fre"
@@ -155,7 +155,7 @@ def test_csl_recorded_medra_chapter_without_date(recorded: Http) -> None:
 def test_csl_recorded_medra_article(recorded: Http) -> None:
     r = doiorg.csl(recorded, MEDRA_ARTICLE).value
     assert r is not None
-    assert (r.source_type, r.title, r.year, r.dates) == ("article-journal", "Reliance Imaginale", 2012, (2012,))
+    assert (r.source_type, r.title, r.year) == ("article-journal", "Reliance Imaginale", 2012)
     assert r.container == ("Im@go. Rivista di Studi Sociali sull'Immaginario",)
     assert (r.publisher, r.number, r.pages, r.volume) == ("Mimesis Edizioni", "Anno I - n. 0", "10\u201318", None)
 
@@ -282,7 +282,7 @@ def test_parse_csl_odd_shapes() -> None:
         Author("Ana de", "Souza"),
     )
     assert r.editors == (Author("Stan", "Matwin"),)
-    assert (r.year, r.dates) == (2021, (2020, 2021))
+    assert r.year == 2021
     assert r.container == ("Lecture Notes",)
     assert r.event == "Workshop on Ocean Data"
     assert (r.volume, r.number, r.pages, r.article_number) == ("12", "3", "101-115", "e42")
@@ -300,6 +300,7 @@ def test_csl_adds_requested_id_to_record(clock: FakeClock) -> None:
     [
         ({"date-parts": [[2019, 10, 29]]}, 2019),
         ({"date-parts": [["2019"]]}, 2019),
+        ({"date-parts": [["²⁰¹⁹"]]}, None),
         ({"date-parts": [[None]]}, None),
         ({"date-parts": [[]]}, None),
         ({"date-parts": [[True]]}, None),

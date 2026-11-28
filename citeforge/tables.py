@@ -114,6 +114,7 @@ GENERIC_SERIES_NAMES: frozenset[str] = frozenset(
 )
 
 AUTHOR_NAME_SUFFIXES: frozenset[str] = frozenset(["ii", "iii", "iv", "jr", "sr", "v"])
+NAME_HONORIFICS: frozenset[str] = frozenset(["dr", "prof", "mr", "mrs", "ms", "sir"])
 
 STOPWORDS: frozenset[str] = frozenset(
     {

@@ -73,7 +73,7 @@ def test_recorded_batch_maps_every_id() -> None:
     own = batch.found["arxiv:2310.18948"]
     assert (own.source, own.kind, own.source_type, own.howpublished) == (Source.ARXIV, Kind.PREPRINT, "arxiv", "arXiv")
     assert own.title.startswith("Multi-Path Long-Term Vessel Trajectories Forecasting")
-    assert (own.year, own.dates, own.primary_class) == (2023, (2023, 2024), "cs.LG")
+    assert (own.year, own.primary_class) == (2023, "cs.LG")
     assert own.authors[0] == Author("Gabriel", "Spadon") and len(own.authors) == 9
     assert own.relations == {(Rel.PUBLISHED_AS, "doi:10.1016/j.oceaneng.2024.119138")}
     assert own.url == "https://arxiv.org/abs/2310.18948" and own.status is Status.OK
@@ -137,7 +137,7 @@ def test_entry_shapes_and_per_entry_failures() -> None:
 
     rich = batch.found["arxiv:2101.00001"]
     assert rich.title == "Learning O(n) the AIS Graph Model"
-    assert (rich.year, rich.dates) == (2021, (2021, 2022))
+    assert rich.year == 2021
     assert rich.authors == (
         Author("Ana", "Lima", affiliations=("Dalhousie University",)),
         Author("João", "Souza"),

@@ -91,13 +91,12 @@ def default_world() -> World:
         "Physics informed graph networks for AIS vessel trajectory forecasting",
         authors=(SP, MW),
         year=2023,
-        dates=(2023,),
         primary_class="cs.LG",
         url="https://arxiv.org/abs/2310.18948",
     )
 
     def oclaim(work_id: str, title: str, year: int = 2024) -> Claim:
-        return Claim(Source.ORCID, frozenset({work_id}), title, year, by_self=True)
+        return Claim(Source.ORCID, frozenset({work_id}), title, year)
 
     dblp_conf = Record(
         Source.DBLP,
@@ -107,7 +106,6 @@ def default_world() -> World:
         "Maritime traffic graphs at scale",
         authors=(SP, MW),
         year=2023,
-        dates=(2023,),
         container=("KDD",),
     )
     dblp_gnn = Record(
@@ -118,7 +116,6 @@ def default_world() -> World:
         records[gnn].title,
         authors=(SP, MW),
         year=2024,
-        dates=(2024,),
         container=("Ocean Eng.",),
     )
     dclaims = [Claim(Source.DBLP, r.ids, r.title, r.year, record=r) for r in (dblp_conf, dblp_gnn)]
@@ -130,7 +127,6 @@ def default_world() -> World:
         "Soil bacteria in tropical farms",
         authors=(person("Gabriel Spadon", openalex="A5023888391"),),
         year=2023,
-        dates=(2023,),
     )
     oa_gnn = Record(
         Source.OPENALEX,
@@ -140,7 +136,6 @@ def default_world() -> World:
         records[gnn].title,
         authors=(SP_OA, MW),
         year=2024,
-        dates=(2024,),
     )
     spadon_orcid = [
         oclaim(gnn, records[gnn].title),

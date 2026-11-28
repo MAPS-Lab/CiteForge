@@ -69,9 +69,6 @@ def parse_entry(node: ET.Element, ids: frozenset[str]) -> Record:
     if not authors:
         raise ParseError(f"arxiv: {work_id} has no authors")
     year = _year(node.findtext("a:published", "", NS).strip())
-    dates = tuple(
-        dict.fromkeys(y for p in ("a:published", "a:updated") if (y := _year(node.findtext(p, "", NS).strip())))
-    )
     published = to_id("doi", node.findtext("x:doi", "", NS))
     primary = node.find("x:primary_category", NS)
     return Record(
@@ -82,7 +79,6 @@ def parse_entry(node: ET.Element, ids: frozenset[str]) -> Record:
         title,
         authors=authors,
         year=year,
-        dates=dates,
         url=f"https://arxiv.org/abs/{form}",
         howpublished="arXiv",
         primary_class=(primary.get("term") or None) if primary is not None else None,
@@ -104,7 +100,7 @@ def parse_feed(body: bytes) -> list[ET.Element]:
         if "/api/errors" in e.findtext("a:id", "", NS):
             raise ParseError(f"arxiv: {_text(e, 'a:summary') or 'error entry'}")
     total = root.findtext("o:totalResults", "", NS).strip()
-    if not total.isdigit() or int(total) != len(entries):
+    if not total.isdecimal() or int(total) != len(entries):
         raise ParseError(f"arxiv: totalResults {total!r} for {len(entries)} entries")
     return entries
 

@@ -11,8 +11,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency: refresh
 
@@ -22,6 +21,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # a persisted GITHUB_TOKEN header would override the bot token on push
+          persist-credentials: false
 
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
@@ -51,10 +53,12 @@ jobs:
       - name: Open the data pull request
         if: ${{ !inputs.dry_run }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # a pull request pushed or opened with GITHUB_TOKEN starts no workflow, so CI would never run on it
+          GH_TOKEN: ${{ secrets.CITEFORGE_BOT_TOKEN }}
           CODE: ${{ steps.build.outputs.code }}
         run: |
           set -euo pipefail
+          gh auth setup-git --hostname github.com
           month="$(date -u +%Y-%m)"
           branch="data/refresh-$month"
           title="data: monthly refresh $month"

@@ -52,9 +52,7 @@ def test_load_valid_roster(tmp_path: Path) -> None:
     assert spadon.dirname == "Spadon (bfdGsGUAAAAJ)"
     assert spadon.orcids == ("0000-0002-1825-0097",)
     assert spadon.openalex == ("A5023888391", "A5000000001")
-    assert spadon.row == 2
     assert brodsky.dirname == "Brodsky (b-AlexBrodsky)"
-    assert brodsky.scholar is None
 
 
 @pytest.mark.parametrize(

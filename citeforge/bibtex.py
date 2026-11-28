@@ -2,7 +2,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 
 from citeforge.ids import split_id
-from citeforge.model import Author, Kind, Names, Record, Work
+from citeforge.model import Author, Kind, Names, Record, Source, Work
 from citeforge.tables import (
     GENERIC_SERIES_NAMES,
     PREPRINT_ONLY_PUBLISHERS,
@@ -164,7 +164,11 @@ def _first(ids: frozenset[str], kind: str) -> str | None:
 
 def fields(w: Work) -> dict[str, str]:
     r = w.primary
-    container = first_non_generic_container(clean(c) for c in r.container)
+    containers = [clean(c) for c in r.container]
+    if r.source is Source.CROSSREF and w.kind in (Kind.INPROCEEDINGS, Kind.INCOLLECTION):
+        # Crossref lists a chapter's series before its volume title
+        containers.reverse()
+    container = first_non_generic_container(containers)
     journal = booktitle = howpublished = None
     if w.kind is Kind.ARTICLE:
         journal = container

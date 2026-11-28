@@ -150,3 +150,13 @@ def test_a_present_orcid_decides_whether_a_slot_is_the_member() -> None:
     assert is_own(i, author("G. Other", openalex="A5023888391"))
     slots = own_slots(i, w(author("Gabriel Spadon", orcid=OTHER), author("Stan Matwin")), [])
     assert slots == []
+
+
+def test_a_titled_or_swapped_byline_is_the_member_only_on_a_listed_work() -> None:
+    milios = identity(names=(name_key("Evangelos", "Milios"),), orcids=frozenset(), rors=frozenset())
+    chapter = w(author("Sanjukta Goswami"), Author("Dr. Evangelos E.", "Milios"))
+    assert verdict(milios, chapter, [claim(Source.ORCID)]) == (Verdict.ACCEPT, "orcid_claim")
+    he = identity(names=(name_key("Meng", "He"),), orcids=frozenset(), rors=frozenset())
+    swapped = w(author("Chuan He"), Author("He", "Meng"))
+    assert verdict(he, swapped, [claim(Source.ORCID)]) == (Verdict.ACCEPT, "orcid_claim")
+    assert verdict(he, swapped) == (Verdict.REJECT, "not_named")

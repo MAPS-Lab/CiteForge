@@ -40,6 +40,12 @@ from citeforge.text import (
         (r"Tom \& {Jerry}", "Tom & Jerry"),
         ("line\nbreak\ttab​zero", "line break tabzero"),
         ("Café", "Café"),
+        ("Adaptive 360$^{\\circ }$ Video", "Adaptive 360° Video"),
+        ("a $\\sim$10x speedup", "a \u223c10x speedup"),
+        ("Graphene/$\\text{MoS}_2$ layers", "Graphene/MoS₂ layers"),
+        ("$10^{6}$ points at $10^{-3}$ and $x^{n}_{i}$", "10⁶ points at 10⁻³ and xⁿᵢ"),
+        ("$k^{th}$ order and $a\\_b$", "kth order and a_b"),
+        ("between $5 and $10", "between $5 and $10"),
     ],
 )
 def test_clean(raw: str, expected: str) -> None:
@@ -75,6 +81,23 @@ def test_names() -> None:
     assert name_matches(spadon, Author("", "", literal="Gabriel Spadon"))
     assert not name_matches(spadon, Author("", "", literal="Spadon Research Group"))
     assert name_matches([name_key("Anna", "de Souza")], Author("A.", "Souza"))
+
+
+@pytest.mark.parametrize(
+    ("given", "want"),
+    [("Dr. Evangelos E.", "ee"), ("Dr.Evangelos.E.", "ee"), ("Prof. Dr. Evangelos", "e"), ("Ms. Ana", "a"),
+     ("DR", "d"), ("M S", "ms"), ("Dr", "d"), ("Sirius", "s"), ("Mr", "m")],
+)  # fmt: skip
+def test_initials_skip_a_leading_title_but_keep_upper_case_initials(given: str, want: str) -> None:
+    assert initials(given) == want
+
+
+def test_swapped_given_and_family_match_only_when_asked() -> None:
+    he = [name_key("Meng", "He")]
+    assert not name_matches(he, Author("He", "Meng"))
+    assert name_matches(he, Author("He", "Meng"), swapped=True)
+    assert not name_matches(he, Author("He", "Chuan"), swapped=True)
+    assert not name_matches(he, Author("", "Meng"), swapped=True)
 
 
 def test_group_and_affiliation() -> None:
