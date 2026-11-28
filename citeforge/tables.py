@@ -1,48 +1,23 @@
-PREPRINT_SERVERS: frozenset[str] = frozenset(
-    [
-        "agrirxiv",
-        "arxiv",
-        "arxiv e-prints",
-        "authorea",
-        "biorxiv",
-        "chemrxiv",
-        "e-prints",
-        "edarxiv",
-        "medrxiv",
-        "preprint server",
-        "preprints",
-        "preprints.org",
-        "psyarxiv",
-        "qeios",
-        "research square",
-        "socarxiv",
-        "social science research network",
-        "ssrn",
-        "techrxiv",
-        "zenodo",
-    ]
-)
-
-PREPRINT_DOI_PREFIXES: tuple[str, ...] = (
-    "10.48550/arxiv",
-    "10.21203/rs.",
-    "10.31234/osf.io",
-    "10.31219/osf.io",
-    "10.1101/",
-    "10.26434/chemrxiv",
-    "10.20944/preprints",
-    "10.2196/preprints.",
-    "10.2139/",
-    "10.13140/",
-    "10.64898/",
-    "10.36227/techrxiv",
-    "10.33774/",
-    "10.5194/egusphere",
-    "10.2172/",
-    "10.31220/agrirxiv",
-    "10.32388/",
-    "10.48448/",
-    "10.32920/",
+PREPRINT_SERVERS: tuple[tuple[str, str], ...] = (
+    ("10.48550/arxiv", "arXiv"),
+    ("10.21203/rs.", "Research Square"),
+    ("10.31234/osf.io", "OSF Preprints"),
+    ("10.31219/osf.io", "OSF Preprints"),
+    ("10.1101/", "bioRxiv"),
+    ("10.26434/chemrxiv", "ChemRxiv"),
+    ("10.20944/preprints", "Preprints.org"),
+    ("10.2196/preprints.", "JMIR Preprints"),
+    ("10.2139/", "SSRN"),
+    ("10.13140/", "ResearchGate"),
+    ("10.64898/", "openRxiv"),
+    ("10.36227/techrxiv", "TechRxiv"),
+    ("10.33774/", "Cambridge Open Engage"),
+    ("10.5194/egusphere", "EGU"),
+    ("10.2172/", "OSTI"),
+    ("10.31220/agrirxiv", "agriRxiv"),
+    ("10.32388/", "Qeios"),
+    ("10.48448/", "Underline Science"),
+    ("10.32920/", "Toronto Metropolitan University"),
 )
 
 PREPRINT_ONLY_PUBLISHERS: frozenset[str] = frozenset(
@@ -162,6 +137,6 @@ STOPWORDS: frozenset[str] = frozenset(
     }
 )
 
-CSL_HOSTS: frozenset[str] = frozenset({"data.medra.org", "japanlinkcenter.org"})
+CSL_HOSTS: frozenset[str] = frozenset({"data.medra.org", "japanlinkcenter.org", "ra.publications.europa.eu"})
 
 DATA_DOI_PREFIXES: tuple[str, ...] = ("10.6084/m9.figshare", "10.5281/zenodo")

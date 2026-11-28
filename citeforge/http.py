@@ -44,10 +44,14 @@ HOSTS: Mapping[str, Host] = {
         Host("api.datacite.org", "https://api.datacite.org", 0.35, 300, "json"),
         Host("doi.org", "https://doi.org", 0.5, 200, "any"),
         Host("export.arxiv.org", "https://export.arxiv.org", 3.0, 60, "xml"),
+        Host("eutils.ncbi.nlm.nih.gov", "https://eutils.ncbi.nlm.nih.gov", 0.34, 50, "json"),
     )
 }
 ALLOWED = frozenset(HOSTS) | CSL_HOSTS
-FIXED_PARAMS: Mapping[str, Mapping[str, str]] = {"dblp.org": {"app": "citeforge"}}
+FIXED_PARAMS: Mapping[str, Mapping[str, str]] = {
+    "dblp.org": {"app": "citeforge"},
+    "eutils.ncbi.nlm.nih.gov": {"tool": "citeforge"},
+}
 
 
 @dataclass(frozen=True, slots=True)

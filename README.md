@@ -5,7 +5,8 @@
 CiteForge builds one BibTeX file per publication for every person on a roster. It lists each
 person's works from ORCID, OpenAlex and DBLP, takes the metadata from the registry that
 issued the identifier (Crossref, DataCite, the doi.org content service for other agencies,
-and arXiv), joins preprints to their published versions, and decides authorship from
+and arXiv, with PubMed supplying the DOI of a work listed only by PMID), joins preprints
+to their published versions, and decides authorship from
 ORCID, DBLP and affiliation evidence. Every decision and every request is recorded.
 
 Built and maintained by the [MAPS Lab](https://mapslab.tech/) at Dalhousie University.

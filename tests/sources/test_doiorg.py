@@ -208,6 +208,24 @@ def test_csl_redirect_off_allowlist_sends_no_request(clock: FakeClock, location:
     assert len(seen) == 1
 
 
+def test_csl_follows_publications_office_redirect(clock: FakeClock) -> None:
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "doi.org":
+            return redirect("https://ra.publications.europa.eu/data/10.2760%2F53624")
+        return csl_reply({"type": "book", "title": "SASLAB final technical report", "DOI": "10.2760/53624"})
+
+    res = doiorg.csl(make_http(answer, clock), "doi:10.2760/53624")
+    assert res.fetch is Fetch.OK
+    assert res.value is not None and res.value.title == "SASLAB final technical report"
+
+
+def test_blocked_redirects_never_open_the_circuit(clock: FakeClock) -> None:
+    http = make_http(lambda r: redirect("https://example.org/landing"), clock)
+    for _ in range(8):
+        assert doiorg.csl(http, MEDRA_CHAPTER).reason == "redirect_blocked"
+    assert http.down(doiorg.HOST) is None
+
+
 def test_csl_redirect_without_location_is_failed(clock: FakeClock) -> None:
     http = make_http(lambda r: httpx.Response(302), clock)
     assert doiorg.csl(http, MEDRA_CHAPTER) == doiorg.Result(Fetch.FAILED, None, "parse_error")

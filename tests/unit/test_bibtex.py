@@ -3,14 +3,17 @@ import re
 from pathlib import Path
 
 import bibtexparser
+import pytest
 from bibtexparser.bparser import BibTexParser
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from pylatexenc.latex2text import LatexNodes2Text
 
 from citeforge import publish
-from citeforge.bibtex import assign_names, escape, protect, read_entry, render
+from citeforge.bibtex import assign_names, escape, preprint_server, protect, read_entry, render
+from citeforge.ids import is_preprint_doi
 from citeforge.model import Author, Kind, Names, Source
+from citeforge.tables import PREPRINT_SERVERS
 from citeforge.text import clean
 from tests.factories import author, bib_problems, record, work
 
@@ -185,6 +188,28 @@ def test_assign_names_collisions() -> None:
     assert names["doi:10.1234/f"].stem == "Spadon2023-DeterminingTopic"
     assert names["doi:10.1234/g"].stem == "Spadon2023-DeterminingTopicb"
     assert names["doi:10.1234/a"].citekey == "Spadon2023:VesselTrajectoryPrediction"
+
+
+def test_citekeys_unique_when_titles_share_four_words() -> None:
+    a = _w("10.1101/2024.03.06.24303776", "Genome-wide association study of hoarding symptoms", "Strom", 2024)
+    ocd = "Genome-wide association study of obsessive-compulsive symptoms"
+    b = _w("10.1038/s41380-024-02489-6", ocd, "Strom", 2024)
+    c = _w("10.1101/2024.07.03.24309466", ocd, "Strom", 2024)
+    names = assign_names([a, b, c], {})
+    assert len({n.citekey.casefold() for n in names.values()}) == 3
+    assert names[a.key].citekey == "Strom2024:GenomeWideAssociationStudyHoarding"
+    shared = Names("Strom2024-Old", "Strom2024:GenomeWideAssociationStudy")
+    kept = assign_names([a, b], {b.key: shared, a.key: dataclasses.replace(shared, stem="Strom2024-Older")})
+    assert kept[b.key] == shared
+    assert kept[a.key] == Names("Strom2024-Older", "Strom2024:GenomeWideAssociationStudyb")
+
+
+@pytest.mark.parametrize(("prefix", "server"), PREPRINT_SERVERS)
+def test_every_preprint_prefix_names_its_server(prefix: str, server: str) -> None:
+    doi = prefix + "x1"
+    r = record(f"doi:{doi}", kind=Kind.PREPRINT, container=("Some Container",))
+    assert is_preprint_doi(doi)
+    assert preprint_server(r) == ("arXiv" if prefix == "10.48550/arxiv" else server)
 
 
 def test_assign_names_keeps_previous_until_base_changes() -> None:

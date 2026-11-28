@@ -8,10 +8,16 @@ from pathlib import Path
 
 import httpx
 import pytest
+from hypothesis import settings
 
 from citeforge.http import Http, _scrub_secrets
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+# A loaded host (nice 19) makes single examples exceed the 200 ms default and fail at random.
+settings.register_profile("dev", deadline=None)
+if settings.get_current_profile_name() == "default":
+    settings.load_profile("dev")
 
 
 @pytest.fixture(autouse=True)
