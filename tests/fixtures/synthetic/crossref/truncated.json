@@ -1,0 +1,7 @@
+{
+ "status": 200,
+ "headers": {
+  "content-type": "application/json"
+ },
+ "body": "{\"status\":\"ok\",\"message-type\":\"work-list\",\"message\":{\"total-results\":1,\"items\":[{\"DOI\":\"10.1093/nar/gkz9"
+}
