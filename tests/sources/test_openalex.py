@@ -14,6 +14,7 @@ from citeforge.http import Http, ParseError
 from citeforge.model import Fetch, Kind, Source, Status
 from citeforge.sources import openalex
 from tests.conftest import FIXTURES, FakeClock, fixture_transport, json_response, make_http
+from tests.factories import bib_problems
 
 SYNTHETIC = FIXTURES / "synthetic" / "openalex"
 SPADON = "A5073978680"
@@ -133,7 +134,7 @@ def test_list_works_recorded(clock: FakeClock) -> None:
         assert c.year is not None and c.year >= 2023
         assert c.record.dates == (c.year,)
         me = [a for a in c.record.authors if a.openalex == SPADON]
-        assert me and me[0].orcid == SPADON_ORCID and me[0].rors
+        assert me and me[0].orcid is None and me[0].rors
     crosswalked = claims["openalex:W4402209710"]
     assert crosswalked.ids == {"doi:10.1016/j.oceaneng.2024.119138", "openalex:W4402209710"}
     assert claims["openalex:W4400834265"].ids >= {"pmid:39030401", "doi:10.1038/s41598-024-67552-2"}
@@ -168,6 +169,46 @@ def test_list_works_pages_with_cursor(clock: FakeClock) -> None:
     assert params["per_page"] == "200"
     assert params["select"] == openalex.WORK_FIELDS
     assert len(seen) == 3
+
+
+def _crowd(n: int, member_at: int | None) -> list[dict[str, Any]]:
+    people = [authorship(f"Author{i:03d} Person", id=f"https://openalex.org/A{5000000100 + i}") for i in range(n)]
+    if member_at is not None:
+        people[member_at] = authorship("Gabriel Spadon", id=f"https://openalex.org/{SPADON}")
+    return people
+
+
+def test_list_works_refetches_a_byline_cut_before_the_member(clock: FakeClock) -> None:
+    seen: list[str] = []
+    full = work(authorships=_crowd(260, 119), is_authors_truncated=False)
+    cut = {**full, "authorships": full["authorships"][:100], "is_authors_truncated": True}
+    kept = work("W4000000002", authorships=_crowd(100, 3), is_authors_truncated=True)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/works/W4000000001":
+            assert request.url.params["select"] == openalex.WORK_FIELDS
+            return json_response(full)
+        return page([cut, kept])
+
+    res = openalex.list_works(make_http(handle, clock), [SPADON], 2018)
+    assert res.value is not None
+    by_id = {min(i for i in c.ids if i.startswith("openalex:")): c.record for c in res.value}
+    refetched, untouched = by_id["openalex:W4000000001"], by_id["openalex:W4000000002"]
+    assert refetched is not None and untouched is not None
+    assert len(refetched.authors) == 260 and refetched.authors[119].openalex == SPADON
+    assert len(untouched.authors) == 100
+    assert seen == ["/works", "/works/W4000000001"]
+
+
+def test_list_works_fails_when_a_cut_byline_cannot_be_refetched(clock: FakeClock) -> None:
+    cut = work(authorships=_crowd(100, None), is_authors_truncated=True)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return synthetic("unavailable") if request.url.path.startswith("/works/W") else page([cut])
+
+    res = openalex.list_works(make_http(handle, clock), [SPADON], 2018)
+    assert res.fetch is Fetch.FAILED and res.value is None
 
 
 def test_list_works_failure_mid_paging_returns_nothing(clock: FakeClock) -> None:
@@ -334,7 +375,7 @@ def test_parse_authors() -> None:
         authorship("Dalhousie University"),
     ]))  # fmt: skip
     me, group, org = r.authors
-    assert (me.given, me.family, me.orcid, me.openalex, me.rors) == ("Gabriel", "Spadon", SPADON_ORCID, SPADON, (LAB,))
+    assert (me.given, me.family, me.orcid, me.openalex, me.rors) == ("Gabriel", "Spadon", None, SPADON, (LAB,))
     assert me.affiliations == ("Faculty of Computer Science, Dalhousie University", "Dalhousie University")
     assert (group.literal, group.family) == ("ATLAS Collaboration", "")
     assert org.literal == "Dalhousie University"
@@ -371,8 +412,35 @@ _keys = st.sampled_from(["id", "doi", "ids", "title", "publication_year", "type"
 
 @given(st.dictionaries(_keys, _json))
 def test_parse_work_only_raises_parse_error(item: dict[str, Any]) -> None:
-    with contextlib.suppress(ParseError):
-        openalex.parse_work({**work(), **item})
+    try:
+        record = openalex.parse_work({**work(), **item})
+    except ParseError:
+        return
+    assert bib_problems(record) == []
+
+
+@given(st.lists(st.text(max_size=16), min_size=8, max_size=8))
+def test_every_parsed_work_renders_a_valid_entry(texts: list[str]) -> None:
+    title, first, last, volume, issue, venue, name, url = texts
+    item = work(
+        title=title,
+        biblio={"first_page": first, "last_page": last, "volume": volume, "issue": issue},
+        primary_location={"source": {"display_name": venue, "type": "journal"}, "landing_page_url": url},
+        authorships=[authorship(name), authorship("Gabriel Spadon")],
+    )
+    try:
+        record = openalex.parse_work(item)
+    except ParseError:
+        return
+    assert bib_problems(record) == []
+
+
+def test_control_characters_never_reach_the_entry() -> None:
+    record = openalex.parse_work(work(biblio={"first_page": "12\x1b", "last_page": None}))
+    assert record.pages == "12\x1b" and bib_problems(record) == []
+    assert openalex.parse_work(work(doi="10.1234/ab\x1bc")).ids == {"openalex:W4000000001"}
+    location = {"source": {"display_name": "V", "type": "journal"}, "landing_page_url": "https://x.org/a\x1bb"}
+    assert bib_problems(openalex.parse_work(work(doi=None, primary_location=location))) == []
 
 
 @given(st.binary(max_size=64))

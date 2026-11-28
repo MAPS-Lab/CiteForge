@@ -60,6 +60,7 @@ _PREPRINT_SERVERS = (
     ("10.48448/", "Underline Science"),
     ("10.13140/", "ResearchGate"),
 )
+_URL = re.compile(r"[^\s\x00-\x1f\x7f-\x9f]+")
 _FIELD_LINE = re.compile(r"  ([a-z]+) = \{(.*)\},?")
 _HEAD = re.compile(r"@([a-z]+)\{([^,\s]+),")
 
@@ -117,19 +118,21 @@ def _invalid_pages_reason(pages: str) -> tuple[str, int] | None:
 
 
 def format_pages(r: Record) -> str | None:
-    if r.pages and _invalid_pages_reason(r.pages.strip()) is None:
-        parts = [p for p in _PAGE_DASH.split(r.pages.strip()) if p]
+    pages, number = clean(r.pages or ""), clean(r.article_number or "")
+    if pages and _invalid_pages_reason(pages) is None:
+        parts = [p for p in _PAGE_DASH.split(pages) if p]
         if len(parts) == 2 and parts[0] == parts[1]:
             return parts[0]
         return "--".join(parts)
-    if r.article_number and re.fullmatch(r"[A-Za-z]?\d+[A-Za-z]?", r.article_number.strip()):
-        return r.article_number.strip()
+    if re.fullmatch(r"[A-Za-z]?\d+[A-Za-z]?", number):
+        return number
     return None
 
 
 def _name(a: Author) -> str:
-    if not a.family:
-        return "{" + escape(clean(a.literal or ""), "author") + "}"
+    if not clean(a.family):
+        literal = escape(clean(a.literal or a.given), "author")
+        return "{" + literal + "}" if literal else ""
     family = escape(clean(a.family), "author")
     words = family.split()
     if "," in family or (len(words) > 1 and not any(w in _PARTICLES for w in words)):
@@ -139,7 +142,7 @@ def _name(a: Author) -> str:
 
 
 def _names(authors: Sequence[Author]) -> str | None:
-    return " and ".join(_name(a) for a in authors) or None
+    return " and ".join(n for a in authors if (n := _name(a))) or None
 
 
 def venue_case(venue: str) -> str:
@@ -200,10 +203,10 @@ def fields(w: Work) -> dict[str, str]:
         "number": clean(r.number) if r.number else None,
         "pages": format_pages(r),
         "doi": doi,
-        "url": None if doi or not r.url else r.url.strip(),
+        "url": None if doi or not r.url or not _URL.fullmatch(r.url.strip()) else r.url.strip(),
         "eprint": arxiv,
         "archiveprefix": "arXiv" if arxiv else None,
-        "primaryclass": primary_class if arxiv else None,
+        "primaryclass": clean(primary_class) if arxiv and primary_class else None,
         "editor": _names(r.editors),
         "school": clean(r.school) if r.school and w.kind in (Kind.PHDTHESIS, Kind.MASTERSTHESIS) else None,
         "institution": clean(r.institution) if r.institution and w.kind is Kind.TECHREPORT else None,

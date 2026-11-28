@@ -115,6 +115,9 @@ def check(files: Mapping[Path, str]) -> list[str]:
         for field, value in entry.items():
             if not _balanced(value):
                 problems.append(f"{path}: unbalanced braces in {field}")
+        for field in ("author", "editor"):
+            if field in entry and any(p.strip() in ("", "{}") for p in f" {entry[field]} ".split(" and ")):
+                problems.append(f"{path}: empty name in {field}")
         for field in ("doi", "eprint"):
             if field in entry:
                 key = (folder, field, entry[field].casefold())

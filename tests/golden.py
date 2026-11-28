@@ -10,11 +10,11 @@ from citeforge.state import StateRow
 CLASSES = frozenset(
     {"namesake", "not_namesake", "wrong_doi", "dead_doi", "dup_pair", "preprint_published", "notice", "withdrawn",
      "front_matter", "group_author", "reorder", "repeat_authors", "org_author", "diacritic", "year", "orcid_missing",
-     "type", "venue", "text", "split_profile"}
+     "type", "venue", "text", "split_profile", "openalex_namesake"}
 )  # fmt: skip
 EXACT = frozenset(
-    {"namesake", "not_namesake", "wrong_doi", "dead_doi", "notice", "withdrawn", "front_matter", "group_author",
-     "repeat_authors", "org_author", "diacritic"}
+    {"namesake", "openalex_namesake", "not_namesake", "wrong_doi", "dead_doi", "notice", "withdrawn", "front_matter",
+     "group_author", "repeat_authors", "org_author", "diacritic"}
 )  # fmt: skip
 NEAR = {"dup_pair": 0.95, "preprint_published": 0.95, "reorder": 0.95}
 OVERALL = 0.98

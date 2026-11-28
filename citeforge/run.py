@@ -261,6 +261,9 @@ def run(
                 events.append(Event("pending", name, k, "pending:registry"))
         removals: dict[str, str] = {}
         for k, row in sorted(prev.items()):
+            if k in failed_registry:
+                mine[k] = row.members[name]
+                continue
             now = mine.get(k)
             w = by_key.get(k)
             if now is not None and now.verdict is Verdict.ACCEPT and w is not None and w.excluded is None:
@@ -300,7 +303,7 @@ def run(
         emitted = sum(
             1
             for k, d in mine.items()
-            if d.verdict is Verdict.ACCEPT and (by_key.get(k) or carried_works[k]).excluded is None
+            if d.verdict is Verdict.ACCEPT and (carried_works.get(k) or by_key[k]).excluded is None
         )
         statuses[name] = _status(listing, over_cap, emitted)
     t = stage("failure_rules", t)

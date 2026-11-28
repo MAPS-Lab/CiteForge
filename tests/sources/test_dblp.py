@@ -1,4 +1,3 @@
-import contextlib
 import io
 from xml.sax.saxutils import escape
 
@@ -11,6 +10,7 @@ from citeforge.http import USER_AGENT, Http, ParseError
 from citeforge.model import Author, Claim, Fetch, Kind, Record, Rel, Source, Status
 from citeforge.sources import dblp
 from tests.conftest import FIXTURES, FakeClock, fixture_transport, make_http
+from tests.factories import bib_problems
 
 SYNTHETIC = FIXTURES / "synthetic" / "dblp"
 XML = {"content-type": "application/xml; charset=utf-8"}
@@ -239,8 +239,11 @@ def test_redirect_loop_stops():
 
 @given(st.binary(max_size=512))
 def test_parse_raises_only_parse_error(body: bytes):
-    with contextlib.suppress(ParseError):
-        dblp.parse_person(body)
+    try:
+        person = dblp.parse_person(body)
+    except ParseError:
+        return
+    assert [p for c in person.claims if c.record for p in bib_problems(c.record)] == []
 
 
 @given(st.text(max_size=200))
@@ -255,3 +258,4 @@ def test_parse_survives_arbitrary_titles_and_names(text: str):
     for c in p.claims:
         assert c.title and c.record is not None and c.record.authors
         assert all(a.family or a.literal for a in c.record.authors)
+        assert bib_problems(c.record) == []

@@ -60,7 +60,9 @@ def _coverage(data: RunData) -> dict[str, Any]:
                 continue
             d = data.decisions.get(member, {}).get(key or "")
             work = data.works.get(key or "")
-            if work is not None and work.excluded:
+            if not c.ids:
+                reason = "no_identifier"
+            elif work is not None and work.excluded:
                 reason = work.excluded
             elif d is not None:
                 reason = f"{d.verdict.value}:{d.rule}"
@@ -177,7 +179,7 @@ def markdown(report: Mapping[str, Any]) -> str:
     cov = report["coverage"]
     lines += [f"Coverage: {cov['emitted']} of {cov['claimed']} ORCID-claimed works emitted, "
               f"{cov['unexplained']} unexplained.", ""]  # fmt: skip
-    lines += _list("Not emitted", [f"{i['member']}: {i['id']} ({i['reason']})" for i in cov["items"]])
+    lines += _list("Not emitted", [f"{i['member']}: {i['id'] or i['title']} ({i['reason']})" for i in cov["items"]])
     text = "\n".join(lines)
     if len(text) > MARKDOWN_MAX:
         text = text[: MARKDOWN_MAX - 40].rsplit("\n", 1)[0] + "\n\nThe report was cut at 60000 characters.\n"

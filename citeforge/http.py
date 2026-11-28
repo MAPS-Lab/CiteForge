@@ -211,7 +211,7 @@ class Http:
             ms = (self._clock() - started) * 1000
             st.next_at = self._clock() + host.min_interval_s
             self._write_log(host, target, reply, attempt, retry_after, ms)
-            retryable = reply.reason in ("timeout", "conn_error") or (
+            retryable = reply.reason in ("timeout", "conn_error", "decode_error") or (
                 reply.status is not None and reply.status in RETRY_STATUS
             )
             if not retryable:
@@ -231,7 +231,9 @@ class Http:
         except httpx.TimeoutException:
             st.counts["timeouts"] += 1
             return Reply(Fetch.FAILED, None, {}, b"", "timeout"), 0.0
-        except httpx.TransportError:
+        except httpx.DecodingError:
+            return Reply(Fetch.FAILED, None, {}, b"", "decode_error"), 0.0
+        except httpx.RequestError:
             return Reply(Fetch.FAILED, None, {}, b"", "conn_error"), 0.0
         status = resp.status_code
         hdrs = {k.lower(): v for k, v in resp.headers.items()}

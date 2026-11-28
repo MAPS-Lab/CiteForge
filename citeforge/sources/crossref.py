@@ -1,27 +1,25 @@
 import json
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import batched
 from typing import Any
 from urllib.parse import quote
 
 from citeforge.http import HOSTS, Batch, Http, ParseError, Result
-from citeforge.ids import norm_orcid, split_id, to_id
+from citeforge.ids import norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Rel, Source, Status
-from citeforge.text import clean, fold
+from citeforge.text import affiliation, clean, fold
 from citeforge.works import CROSSREF_KINDS
 
 HOST = HOSTS["api.crossref.org"]
 CHUNK = 50
 SEARCH_ROWS = 5
-_ROR = re.compile(r"^(?:https?://(?:www\.)?ror\.org/)?(0[a-z0-9]{8})/?$", re.IGNORECASE)
 _RELATIONS: Mapping[str, Rel] = {
     "has-preprint": Rel.HAS_PREPRINT,
     "is-preprint-of": Rel.PREPRINT_OF,
     "is-version-of": Rel.VERSION_OF,
     "has-version": Rel.VERSION_OF,
-    "is-identical-to": Rel.VERSION_OF,
-    "is-same-as": Rel.VERSION_OF,
+    "is-identical-to": Rel.IDENTICAL,
+    "is-same-as": Rel.IDENTICAL,
     "is-translation-of": Rel.TRANSLATION_OF,
     "has-translation": Rel.HAS_TRANSLATION,
 }
@@ -235,12 +233,12 @@ def _person(raw: object, doi: str) -> tuple[Author, str] | None:
     for aff in raw.get("affiliation") or ():
         if not isinstance(aff, Mapping):
             continue
-        if aff_name := clean(_str(aff.get("name"))):
+        if aff_name := affiliation(_str(aff.get("name"))):
             affiliations.append(aff_name)
         for ident in aff.get("id") or ():
             is_ror = isinstance(ident, Mapping) and _str(ident.get("id-type")).upper() == "ROR"
-            if is_ror and (m := _ROR.match(_str(ident.get("id")).strip())):
-                rors.append("https://ror.org/" + m.group(1).lower())
+            if is_ror and (ror := norm_ror(_str(ident.get("id")))):
+                rors.append(ror)
     author = Author(
         given=given if family else "",
         family=family,

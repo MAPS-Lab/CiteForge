@@ -4,16 +4,17 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
 from citeforge.http import HOSTS, Batch, Http, ParseError, Reply, Result
-from citeforge.ids import is_preprint_doi, norm_openalex, norm_orcid, split_id, to_id
+from citeforge.ids import is_preprint_doi, norm_openalex, norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Claim, Fetch, Kind, Record, Source, Status
-from citeforge.text import clean, is_affiliation, is_group, split_literal
+from citeforge.text import affiliation, clean, is_affiliation, is_group, split_literal
 
 HOST = HOSTS["api.openalex.org"]
 ORCIDS_PER_CALL = 50
 IDS_PER_CALL = 100
 PER_PAGE = "200"
 WORK_FIELDS = (
-    "id,doi,ids,title,publication_year,type,authorships,primary_location,locations,biblio,language,is_retracted"
+    "id,doi,ids,title,publication_year,type,authorships,is_authors_truncated,primary_location,locations,biblio,"
+    "language,is_retracted"
 )
 TYPE_KINDS: Mapping[str, Kind] = {
     "article": Kind.ARTICLE,
@@ -117,12 +118,12 @@ def _author(authorship: Mapping[str, Any]) -> Author:
     who = _object(authorship.get("author") or {}, "author")
     name = clean(_text(who.get("display_name")) or _text(authorship.get("raw_author_name")) or "")
     institutions = [_object(i, "institution") for i in _list(authorship.get("institutions"), "institutions")]
-    rors = tuple(dict.fromkeys(r for i in institutions if (r := _text(i.get("ror")))))
+    rors = tuple(dict.fromkeys(r for i in institutions if (r := norm_ror(_text(i.get("ror")) or ""))))
     raw_affiliations = [_text(a) for a in _list(authorship.get("raw_affiliation_strings"), "affiliations")]
     names = [_text(i.get("display_name")) for i in institutions]
-    affiliations = tuple(dict.fromkeys(clean(a) for a in (*raw_affiliations, *names) if a))
+    affiliations = tuple(dict.fromkeys(f for a in (*raw_affiliations, *names) if a and (f := affiliation(a))))
+    # the author entity's ORCID belongs to OpenAlex's cluster, not to this byline, so only its id is kept
     ids: dict[str, Any] = {
-        "orcid": norm_orcid(_text(who.get("orcid")) or ""),
         "openalex": norm_openalex(_text(who.get("id")) or ""),
         "rors": rors,
         "affiliations": affiliations,
@@ -252,6 +253,29 @@ def _claim(item: Mapping[str, Any]) -> Claim | None:
     return Claim(Source.OPENALEX, record.ids, record.title, record.year, record=record)
 
 
+def _lists_author(item: Mapping[str, Any], author_ids: frozenset[str]) -> bool:
+    authorships = item.get("authorships")
+    for a in authorships if isinstance(authorships, list) else ():
+        who = a.get("author") if isinstance(a, dict) else None
+        if isinstance(who, dict) and isinstance(who.get("id"), str) and norm_openalex(who["id"]) in author_ids:
+            return True
+    return False
+
+
+def _full_byline(http: Http, item: Mapping[str, Any], author_ids: frozenset[str]) -> Result[Mapping[str, Any]]:
+    """List results stop at 100 authorships; refetch the single work when the listed author fell past that cut."""
+    wid = norm_openalex(item["id"]) if isinstance(item.get("id"), str) else None
+    if item.get("is_authors_truncated") is not True or wid is None or _lists_author(item, author_ids):
+        return Result(Fetch.OK, item)
+    reply = http.get(HOST, f"/works/{wid}", {"select": WORK_FIELDS})
+    if reply.fetch is not Fetch.OK:
+        return Result(Fetch.FAILED, None, reply.reason)
+    try:
+        return Result(Fetch.OK, _load(reply.body))
+    except ParseError:
+        return Result(Fetch.FAILED, None, "parse_error")
+
+
 def list_works(http: Http, author_ids: Sequence[str], since_year: int) -> Result[tuple[Claim, ...]]:
     """Cursor-page every work of the authors from since_year; each Claim carries its Record."""
     claims: dict[str, Claim] = {}
@@ -260,8 +284,11 @@ def list_works(http: Http, author_ids: Sequence[str], since_year: int) -> Result
         res = _pages(http, "/works", {"filter": flt, "select": WORK_FIELDS})
         if res.value is None:
             return Result(res.fetch, None, res.reason)
-        for item in res.value:
-            if (claim := _claim(item)) is not None:
+        for listed in res.value:
+            full = _full_byline(http, listed, frozenset(chunk))
+            if full.value is None:
+                return Result(full.fetch, None, full.reason)
+            if (claim := _claim(full.value)) is not None:
                 work = next(i for i in claim.ids if split_id(i)[0] == "openalex")
                 claims.setdefault(work, claim)
     return Result(Fetch.OK, tuple(claims[k] for k in sorted(claims)))

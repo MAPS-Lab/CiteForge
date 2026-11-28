@@ -26,6 +26,10 @@ _AFFILIATION = re.compile(
 )
 _ACRONYMS = [(re.compile(rf"\b{re.escape(k)}\b"), v) for k, v in ACRONYM_CASE_CORRECTIONS.items()]
 _WORD = re.compile(r"\S+")
+_EMAIL = re.compile(
+    r"(?:\b(?:electronic address|e-?mail(?: address)?)\s*[:.]?\s*)?[\w.%+-]+@[\w-]+(?:\.[\w-]+)+\.?", re.I
+)
+_EMPTY_PART = re.compile(r"\(\s*\)|\[\s*\]|(?<=[,;])\s*[,;]")
 _latex = LatexNodes2Text()
 
 
@@ -48,6 +52,11 @@ def clean(s: str) -> str:
     s = "".join(" " if unicodedata.category(c) == "Cc" else c for c in s)
     s = s.replace("{", "").replace("}", "").replace("\\", "")
     return " ".join(s.split())
+
+
+def affiliation(s: str) -> str:
+    """Clean affiliation text and drop the e-mail addresses registries embed in it."""
+    return clean(_EMPTY_PART.sub("", _EMAIL.sub(" ", clean(s)))).strip(" ,;:")
 
 
 def fold(s: str) -> str:

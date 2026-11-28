@@ -58,6 +58,10 @@ def test_guard_never_joins_two_published_dois() -> None:
     groups, events = cl.cluster([], reg(a, b), Curated())
     assert len(groups) == 2
     assert [e.kind for e in events] == ["link_refused"]
+    same = record("doi:10.1145/3820171.3806907", relations=frozenset({(Rel.IDENTICAL, "doi:10.1145/3801489.3806907")}))
+    groups, events = cl.cluster([], reg(same, record("doi:10.1145/3801489.3806907")), Curated())
+    assert [sorted(g.ids) for g in groups] == [["doi:10.1145/3801489.3806907", "doi:10.1145/3820171.3806907"]]
+    assert events == []
 
 
 def test_crosswalk_needs_matching_registry_titles() -> None:

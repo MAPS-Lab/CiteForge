@@ -1,9 +1,8 @@
-import csv
-import json
 from pathlib import Path
 
 import pytest
 
+from citeforge import curated
 from citeforge.roster import COLUMNS, RosterError, format_author_dirname, load, load_group
 
 REPO = Path(__file__).resolve().parents[2]
@@ -16,20 +15,21 @@ def write(tmp_path: Path, *rows: str, header: str = HEADER) -> Path:
     return path
 
 
-def test_dirnames_of_every_current_input_row() -> None:
-    with (REPO / "data/input.csv").open(encoding="utf-8", newline="") as fh:
-        rows = list(csv.DictReader(fh))
-    assert len(rows) == 69
-    published = set(json.loads((REPO / "output/baseline.json").read_text())["authors"]) - {"a2i2"}
-    names = {}
-    for n, raw in enumerate(rows, start=2):
-        scholar = raw["Scholar Link"].partition("user=")[2]
-        dblp = raw["DBLP Link"].partition("/pid/")[2]
-        names[n] = format_author_dirname(raw["Name"], scholar or dblp)
-    assert names[41] == "Spadon (bfdGsGUAAAAJ)"
-    enabled = {names[n] for n, raw in enumerate(rows, start=2) if raw["Enabled"] == "true"}
-    assert published <= enabled
-    assert len(set(names.values())) == len(names)
+def _committed(strict: bool) -> None:
+    members = load(REPO / "data/input.csv", strict=strict)
+    assert members and len({m.dirname.casefold() for m in members}) == len(members)
+    group = load_group(REPO / "data/a2i2.csv", members)
+    assert group and set(group) <= set(members)
+    curated.load(REPO / "data/curated.toml").check_members(members)
+
+
+def test_committed_data_loads_for_identify() -> None:
+    _committed(strict=False)
+
+
+@pytest.mark.xfail(raises=RosterError, strict=True, reason="data/input.csv gains ORCID and OpenAlex with the seeding")
+def test_committed_data_loads_for_a_build() -> None:
+    _committed(strict=True)
 
 
 def test_dirname_fallbacks() -> None:

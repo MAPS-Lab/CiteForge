@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from citeforge.ids import split_id, to_id
+from citeforge.ids import norm_ror, split_id, to_id
 from citeforge.model import Author, Decision, Kind, Member, Record, Source, Verdict
 from citeforge.text import clean, split_literal
 
@@ -190,7 +190,9 @@ def load(path: Path) -> Curated:
     if not isinstance(lab, dict) or set(lab) - {"ror"}:
         raise CuratedError("[lab] must hold only ror")
     rors = lab.get("ror", [])
-    if not isinstance(rors, list) or not all(isinstance(r, str) and r.startswith("https://ror.org/") for r in rors):
+    if not isinstance(rors, list) or not all(
+        isinstance(r, str) and r.startswith("https://ror.org/") and norm_ror(r) for r in rors
+    ):
         raise CuratedError("[lab] ror must be a list of https://ror.org/ URLs")
     accept = frozenset((_str(e, "member", w), _id(e["id"], w)) for w, e in _entries(data, "accept"))
     reject: dict[tuple[str, str], str] = {}
@@ -214,7 +216,7 @@ def load(path: Path) -> Curated:
         records.append(record)
         record_members[work_id] = members
     return Curated(
-        lab_rors=frozenset(r.rstrip("/") for r in rors),
+        lab_rors=frozenset(r for r in map(norm_ror, rors) if r),
         accept=accept,
         reject=reject,
         links=links,

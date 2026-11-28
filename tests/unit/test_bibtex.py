@@ -1,4 +1,6 @@
+import dataclasses
 import re
+from pathlib import Path
 
 import bibtexparser
 from bibtexparser.bparser import BibTexParser
@@ -6,9 +8,11 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from pylatexenc.latex2text import LatexNodes2Text
 
+from citeforge import publish
 from citeforge.bibtex import assign_names, escape, protect, read_entry, render
 from citeforge.model import Author, Kind, Names, Source
-from tests.factories import author, record, work
+from citeforge.text import clean
+from tests.factories import author, bib_problems, record, work
 
 printable = st.text(
     st.characters(categories=["L", "N", "P", "S"], exclude_characters="\\\u02c6"), min_size=1, max_size=40
@@ -142,8 +146,20 @@ def test_every_render_parses(title: str, names: list[str]) -> None:
     text = render(work(record("doi:10.1234/z", title=title, authors=authors)), Names("a", "Key2023:A"))
     entry = parse(text)
     assert entry["ID"] == "Key2023:A"
-    assert len(split_authors(entry["author"])) == len(authors)
+    named = [a for a in authors if clean(a.family) or clean(a.given)]
+    if named:
+        assert len(split_authors(entry["author"])) == len(named)
+    else:
+        assert "author" not in entry
     read_entry(text)
+
+
+def test_blank_authors_are_skipped_and_checked() -> None:
+    authors = (Author("   ", " "), Author("", "", literal=" "), Author("Gabriel", "Spadon"))
+    text = render(work(record("doi:10.1234/z", authors=authors)), Names("a", "a"))
+    assert read_entry(text)["author"] == "Gabriel Spadon"
+    files = {Path("M (x)/a.bib"): text.replace("Gabriel Spadon", " and Gabriel Spadon")}
+    assert "M (x)/a.bib: empty name in author" in publish.check(files)
 
 
 def _w(doi: str, title: str, family: str = "Spadon", year: int = 2023):
@@ -209,3 +225,28 @@ def test_assign_names_unique_deterministic_stable(ts: list[str], rnd) -> None:
     assert {k: v for k, v in assign_names([*ws, unrelated], names).items() if k != unrelated.key} == names
     for n in names.values():
         assert re.fullmatch(r"[A-Za-z0-9]+-?[A-Za-z0-9]*", n.stem)
+
+
+_texts = st.text(max_size=12)
+_people = st.lists(st.builds(Author, _texts, _texts, st.none() | _texts), max_size=3).map(tuple)
+
+
+@settings(max_examples=150, deadline=None)
+@given(
+    st.sampled_from(list(Kind)),
+    st.fixed_dictionaries({
+        f: st.none() | _texts
+        for f in ("event", "publisher", "volume", "number", "pages", "article_number", "url", "language", "school",
+                  "institution", "howpublished", "primary_class", "degree")
+    }),
+    _texts,
+    st.lists(_texts, max_size=2).map(tuple),
+    _people,
+    _people,
+    st.booleans(),
+)  # fmt: skip
+def test_any_record_renders_a_valid_entry(kind, fields, title, container, authors, editors, with_doi) -> None:
+    ids = ("doi:10.1234/z", "arxiv:2310.18948") if with_doi else ("arxiv:2310.18948",)
+    r = record(*ids, kind=kind, title=title or "T", container=container, editors=editors, **fields)
+    r = dataclasses.replace(r, authors=authors)
+    assert bib_problems(r) == []

@@ -49,6 +49,7 @@ class Rel(StrEnum):
     HAS_PREPRINT = "has_preprint"
     PREPRINT_OF = "preprint_of"
     VERSION_OF = "version_of"
+    IDENTICAL = "identical"
     PUBLISHED_AS = "published_as"
     TRANSLATION_OF = "translation_of"
     HAS_TRANSLATION = "has_translation"
@@ -57,7 +58,7 @@ class Rel(StrEnum):
     WITHDRAWS = "withdraws"
 
 
-VERSION_RELS = frozenset({Rel.HAS_PREPRINT, Rel.PREPRINT_OF, Rel.VERSION_OF, Rel.PUBLISHED_AS})
+VERSION_RELS = frozenset({Rel.HAS_PREPRINT, Rel.PREPRINT_OF, Rel.VERSION_OF, Rel.PUBLISHED_AS, Rel.IDENTICAL})
 
 
 class Fetch(StrEnum):

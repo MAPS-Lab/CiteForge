@@ -56,13 +56,15 @@ def test_recorded_record_names_affiliations_and_works() -> None:
     assert rec.affiliations[0] == Affiliation(None, "Dalhousie University", "employment")
     assert {a.kind for a in rec.affiliations} == {"employment", "education"}
     assert len(rec.affiliations) == len(set(rec.affiliations))
-    assert len(rec.works) == 31
+    assert len(rec.works) == 34
+    assert sum(not c.ids for c in rec.works) == 3
     mdpi = by_id(rec.works, "doi:10.3390/s22166063")
     assert mdpi.source is Source.ORCID and mdpi.record is None
     assert mdpi.year == 2022 and mdpi.by_self is False
     assert by_id(rec.works, "doi:10.1109/access.2022.3197215").by_self is True
     assert by_id(rec.works, "arxiv:1909.04605").year == 2019
-    assert all(c.ids and all(i.split(":")[0] in orcid.ID_KINDS for i in c.ids) for c in rec.works)
+    assert all(c.title or c.ids for c in rec.works)
+    assert all(i.split(":")[0] in orcid.ID_KINDS for c in rec.works for i in c.ids)
 
 
 def test_by_self_only_when_the_source_is_the_id_itself() -> None:
@@ -77,7 +79,8 @@ def test_integration_pushed_record_has_ror_and_no_self_claims() -> None:
     assert rec is not None
     assert Affiliation("https://ror.org/01e6qks80", "Dalhousie University", "employment") in rec.affiliations
     assert sum(c.by_self is True for c in rec.works) == 1
-    assert len(rec.works) == 257
+    assert len(rec.works) == 290
+    assert sum(not c.ids for c in rec.works) == 33
     assert any(c.year is None for c in rec.works)
 
 
@@ -114,7 +117,8 @@ def test_edge_record_tolerates_nulls_and_normalizes() -> None:
         Affiliation(None, "Bad Ror College", "employment"),
         Affiliation(None, "Brown University", "education"),
     )
-    works = {c.ids: c for c in rec.works}
+    assert [(c.title, c.year) for c in rec.works if not c.ids] == [("Version only", 2023), ("Isbn only", 2019)]
+    works = {c.ids: c for c in rec.works if c.ids}
     assert set(works) == {
         frozenset({"doi:10.5555/abc.1", "pmid:31415926"}),
         frozenset({"arxiv:2101.00001"}),
@@ -211,3 +215,19 @@ def test_fixtures_hold_no_contact_fields() -> None:
     recorded_files = [gzip.decompress(p.read_bytes()) for p in (FIXTURES / "http" / "pub.orcid.org").glob("*.json.gz")]
     for text in [*recorded_files, *(p.read_bytes() for p in Path(SYNTHETIC).glob("*.json"))]:
         assert b'"emails"' not in text and b'"addresses"' not in text
+
+
+def test_work_without_a_resolvable_id_stays_a_title_claim() -> None:
+    def group(title: str | None, kind: str) -> dict:
+        ext = {"external-id-type": kind, "external-id-value": "2-s2.0-1", "external-id-relationship": "self"}
+        summary = {"title": {"title": {"value": title}} if title else None,
+                   "publication-date": {"year": {"value": "2024"}}, "external-ids": {"external-id": [ext]}}  # fmt: skip
+        return {"work-summary": [summary]}
+
+    doc = {
+        "orcid-identifier": {"path": CARBERRY},
+        "person": {"name": {}},
+        "activities-summary": {"works": {"group": [group("Paper with no DOI", "eid"), group(None, "eid")]}},
+    }
+    rec = orcid.parse_record(json.dumps(doc).encode(), CARBERRY)
+    assert [(c.ids, c.title, c.year) for c in rec.works] == [(frozenset(), "Paper with no DOI", 2024)]

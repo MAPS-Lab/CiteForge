@@ -1,6 +1,9 @@
+from pathlib import Path
 from typing import Any
 
-from citeforge.model import Author, Kind, Member, Record, Source, Status, Work
+from citeforge import publish
+from citeforge.bibtex import render
+from citeforge.model import Author, Kind, Member, Names, Record, Source, Status, Work
 
 
 def author(name: str, **kw: Any) -> Author:
@@ -48,3 +51,8 @@ def member(name: str = "Gabriel Spadon", dirname: str = "Spadon (bfdGsGUAAAAJ)",
     fields: dict[str, Any] = {"row": 41, "scholar": "bfdGsGUAAAAJ", "dblp": "192/1659", "orcids": (), "openalex": ()}
     fields.update(kw)
     return Member(name=name, dirname=dirname, **fields)
+
+
+def bib_problems(r: Record) -> list[str]:
+    files = {Path("M (x)/Key2023-A.bib"): render(work(r), Names("Key2023-A", "Key2023:A"))}
+    return [p for p in publish.check(files) if not p.startswith(("summary.csv", "baseline.json"))]
