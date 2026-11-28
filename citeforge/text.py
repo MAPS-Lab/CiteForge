@@ -12,7 +12,7 @@ from citeforge.model import Author, NameKey
 from citeforge.tables import ACRONYM_CASE_CORRECTIONS, AUTHOR_NAME_SUFFIXES, STOPWORDS
 
 _TAG = re.compile(r"</?[A-Za-z][\w:.-]*(?:\s[^<>]*)?/?>")
-_LATEX_SPECIAL = re.compile(r"(?<!\\)([%$])")
+_LATEX_SPECIAL = re.compile(r"(?<!\\)([%$&#_])")
 _INVISIBLE = dict.fromkeys(map(ord, "­​‌‍⁠﻿"))
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 _PARTICLES = frozenset({"de", "da", "do", "dos", "das", "van", "von", "der", "den", "du", "la", "le", "del", "di"})
