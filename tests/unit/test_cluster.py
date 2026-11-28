@@ -92,6 +92,35 @@ def test_fuzzy_link_and_proposal() -> None:
     assert len(cl.cluster([], reg(pub, late), Curated())[0]) == 2
 
 
+@pytest.mark.parametrize(
+    ("copy", "published"),
+    [
+        (
+            ("arxiv:2201.00001", Source.ARXIV, Kind.PREPRINT),
+            ("dblp:conf/iclr/Spadon24", Source.DBLP, Kind.INPROCEEDINGS),
+        ),
+        (("doi:10.5281/zenodo.1", Source.DATACITE, Kind.ARTICLE), ("doi:10.1234/p", Source.CROSSREF, Kind.ARTICLE)),
+        (
+            ("doi:10.2196/preprints.17813", Source.CROSSREF, Kind.PREPRINT),
+            ("doi:10.2196/17813", Source.CROSSREF, Kind.ARTICLE),
+        ),
+    ],
+)
+def test_fuzzy_link_hides_copies_behind_the_published_version(copy, published) -> None:
+    authors = (author("Gabriel Spadon"), author("Stan Matwin"))
+    a = record(copy[0], source=copy[1], kind=copy[2], authors=authors, year=2023)
+    b = record(published[0], source=published[1], kind=published[2], authors=authors, year=2024)
+    (g,) = cl.cluster([], reg(a, b), Curated())[0]
+    assert g.fuzzy and g.ids == {copy[0], published[0]}
+
+
+def test_dblp_preprint_is_not_a_published_version() -> None:
+    authors = (author("Gabriel Spadon"),)
+    a = record("arxiv:2201.00001", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors)
+    b = record("dblp:journals/corr/abs-2201-00001x", source=Source.DBLP, kind=Kind.PREPRINT, authors=authors)
+    assert len(cl.cluster([], reg(a, b), Curated())[0]) == 2
+
+
 def test_two_published_dois_never_joined_by_title() -> None:
     a, b = record("doi:10.1234/a", year=2021), record("doi:10.1234/b", year=2025)
     assert len(cl.cluster([], reg(a, b), Curated())[0]) == 2

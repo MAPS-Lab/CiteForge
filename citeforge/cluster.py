@@ -5,11 +5,23 @@ from rapidfuzz import fuzz
 
 from citeforge.curated import Curated
 from citeforge.http import Http
-from citeforge.ids import is_preprint_id, split_id, work_key
-from citeforge.model import REGISTRIES, VERSION_RELS, Claim, Event, Fetch, Group, Identity, Record, Registries, Source
+from citeforge.ids import is_preprint_id, is_secondary_doi, split_id, work_key
+from citeforge.model import (
+    REGISTRIES,
+    VERSION_RELS,
+    Claim,
+    Event,
+    Fetch,
+    Group,
+    Identity,
+    Kind,
+    Record,
+    Registries,
+    Source,
+)
 from citeforge.sources import crossref
 from citeforge.text import family_keys, fold, name_matches, ratio, title_key
-from citeforge.works import doi_agrees, is_preprint_group
+from citeforge.works import doi_agrees
 
 CROSSWALK_MIN = 0.90
 FUZZY_LINK = 0.92
@@ -222,12 +234,27 @@ def _groups(
     return sorted(out, key=lambda g: g.key)
 
 
+def _is_copy(work_id: str) -> bool:
+    kind, value = split_id(work_id)
+    return is_preprint_id(work_id) or (kind == "doi" and is_secondary_doi(value))
+
+
+def _copy_group(ids: frozenset[str]) -> bool:
+    version = _version_ids(ids)
+    return bool(version) and all(_is_copy(i) for i in version)
+
+
+def _published_group(g: Group) -> bool:
+    version = _version_ids(g.ids)
+    if version:
+        return any(split_id(i)[0] == "doi" and not _is_copy(i) for i in version)
+    return any(r.kind is not Kind.PREPRINT for r in g.records)
+
+
 def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str, str]]:
     profiles = {g.key: _profile(g.records, g.claims) for g in groups}
-    pre = [g for g in groups if is_preprint_group(g.ids) and profiles[g.key]]
-    pub = [
-        g for g in groups if any(split_id(i)[0] == "doi" and not is_preprint_id(i) for i in g.ids) and profiles[g.key]
-    ]
+    pre = [g for g in groups if _copy_group(g.ids) and profiles[g.key]]
+    pub = [g for g in groups if _published_group(g) and profiles[g.key]]
     partners: dict[str, list[str]] = {}
     for p in pre:
         pp = profiles[p.key]
@@ -246,7 +273,7 @@ def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str
                 events.append(Event("link_proposal", None, p.key, f"{q.key} ratio={score:.2f}"))
     links = []
     for a, bs in sorted(partners.items()):
-        if len(bs) == 1 and len(partners.get(bs[0], [])) == 1 and is_preprint_group([a]):
+        if len(bs) == 1 and len(partners.get(bs[0], [])) == 1 and _copy_group(frozenset({a})):
             links.append((a, bs[0]))
             events.append(Event("fuzzy_link", None, a, bs[0]))
     return links

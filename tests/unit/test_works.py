@@ -52,6 +52,7 @@ def test_kind_map(source: Source, source_type: str, extra: dict, kind: Kind) -> 
     ("title", "kind"),
     [
         ("Guest Editorial: Maritime AI", Kind.EDITORIAL),
+        ("Series Editorial: Wireless Networks", Kind.EDITORIAL),
         ("Preface", Kind.FRONT_MATTER),
         ("Message from the General Chairs", Kind.FRONT_MATTER),
         ("Conclusions and future work", Kind.FRONT_MATTER),
@@ -156,6 +157,9 @@ def test_build_version_of_record_fallbacks() -> None:
     oa = record("openalex:W9", source=Source.OPENALEX)
     only, _ = build(_group(oa), Curated())
     assert only.primary == oa and only.key == "openalex:W9"
+    copy = record("doi:10.5281/zenodo.1", source=Source.DATACITE, year=2022)
+    publisher = record("doi:10.3390/x1", year=2023)
+    assert build(_group(copy, publisher, fuzzy=True), Curated())[0].primary.ids == publisher.ids
 
 
 def test_build_exclusions_and_overrides() -> None:

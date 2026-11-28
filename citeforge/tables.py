@@ -31,6 +31,7 @@ PREPRINT_DOI_PREFIXES: tuple[str, ...] = (
     "10.1101/",
     "10.26434/chemrxiv",
     "10.20944/preprints",
+    "10.2196/preprints.",
     "10.2139/",
     "10.13140/",
     "10.64898/",

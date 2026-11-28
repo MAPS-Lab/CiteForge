@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal
 
 from citeforge.curated import Curated
-from citeforge.ids import is_preprint_id, split_id, work_key
+from citeforge.ids import is_secondary_doi, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     Author,
@@ -84,7 +84,7 @@ CSL_KINDS: Mapping[str, Kind] = {
     "patent": Kind.PATENT,
     "review": Kind.PEER_REVIEW,
 }
-_EDITORIAL = re.compile(r"^(guest )?editorial\b", re.IGNORECASE)
+_EDITORIAL = re.compile(r"^((guest|series) )?editorial\b", re.IGNORECASE)
 _FRONT = re.compile(
     r"^(preface\b|foreword\b|front matter\b|message from\b|welcome(?![-\w])|table of contents\b"
     r"|conclusions?( and future works?)?$|dear )",
@@ -210,7 +210,7 @@ def _primary(records: Sequence[Record]) -> Record:
     def rank(r: Record) -> tuple[int, int, int, str]:
         kind = classify(r)
         kind_rank = _PRIMARY_KIND_RANK.index(kind) if kind in _PRIMARY_KIND_RANK else len(_PRIMARY_KIND_RANK)
-        preprint = kind is Kind.PREPRINT
+        preprint = kind is Kind.PREPRINT or any(k == "doi" and is_secondary_doi(v) for k, v in map(split_id, r.ids))
         if r.source in REGISTRIES and not preprint:
             tier = 0
         elif r.source is Source.CURATED:
@@ -412,8 +412,3 @@ def apply_links(works: Sequence[Work]) -> list[Work]:
             )
         )
     return out
-
-
-def is_preprint_group(ids: Iterable[str]) -> bool:
-    version_ids = [i for i in ids if split_id(i)[0] in ("doi", "arxiv")]
-    return bool(version_ids) and all(is_preprint_id(i) for i in version_ids)
