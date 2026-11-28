@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from citeforge.authorship import is_own
 from citeforge.curated import Curated
-from citeforge.ids import is_secondary_doi, split_id, work_key
+from citeforge.ids import is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     Author,
@@ -98,11 +98,14 @@ CSL_KINDS: Mapping[str, Kind] = {
 }
 _EDITORIAL = re.compile(r"^((guest|series) )?editorial\b", re.IGNORECASE)
 _FRONT = re.compile(
-    r"^(preface\b|foreword\b|front matter\b|message from\b|welcome(?![-\w])|table of contents\b"
+    r"^(preface\b|foreword\b|front matter\b|message from\b|table of contents\b"
+    r"|welcome(\W*$| message\b| from\b| address\b| to the \d+(st|nd|rd|th)\b)"
     r"|conclusions?( and future works?)?$|dear |proceedings of\b)",
     re.IGNORECASE,
 )
-_NOTICE = re.compile(r"^(corrections? to|correction:|erratum|corrigendum|retraction|expression of concern)\b", re.I)
+_NOTICE = re.compile(r"^(corrections? to|correction:|erratum|corrigendum|expression of concern)\b", re.I)
+_RETRACTION = re.compile(r"^retraction\b", re.I)
+_PAGE_RANGE = re.compile(r"(\d+)\s*[-\u2013\u2014]+\s*(\d+)")
 _ABSTRACT = re.compile(r"^[A-Z]{0,2}\d{1,4}(?:\.\d{1,3}\.?|\.)\s+(?=[A-Z])")
 _ABSTRACT_PAGES = re.compile(r"^(S\d|e?\d+$)")
 _CONFERENCE_SUFFIX = re.compile(r"conference|workshop|symposium")
@@ -174,6 +177,21 @@ def _base_kind(r: Record) -> Kind:
     return kind
 
 
+def _page_span(pages: str | None) -> int | None:
+    m = _PAGE_RANGE.fullmatch((pages or "").strip())
+    if m is None:
+        return None
+    first, last = m.groups()
+    if len(last) < len(first):
+        last = first[: len(first) - len(last)] + last
+    return int(last) - int(first) + 1
+
+
+def _research_paper(r: Record, kind: Kind) -> bool:
+    span = _page_span(r.pages)
+    return kind in _PRIMARY_KIND_RANK and any(a.family for a in r.authors) and span is not None and span > 2
+
+
 def classify(r: Record) -> Kind:
     kind = _base_kind(r)
     title = clean(r.title)
@@ -181,7 +199,10 @@ def classify(r: Record) -> Kind:
         return Kind.EDITORIAL
     if _FRONT.match(title):
         return Kind.FRONT_MATTER
-    if _NOTICE.match(title) or any(rel in (Rel.CORRECTS, Rel.RETRACTS, Rel.WITHDRAWS) for rel, _ in r.relations):
+    if any(rel in (Rel.CORRECTS, Rel.RETRACTS, Rel.WITHDRAWS) for rel, _ in r.relations) or _NOTICE.match(title):
+        return Kind.NOTICE
+    # a study of retractions starts its title the same way; notices run a page or two and research runs longer
+    if _RETRACTION.match(title) and not _research_paper(r, kind):
         return Kind.NOTICE
     one_page = bool(r.pages and _ABSTRACT_PAGES.match(r.pages)) or "suppl" in (r.number or "").lower()
     if _ABSTRACT.match(title) and one_page:
@@ -228,7 +249,8 @@ def _primary(records: Sequence[Record]) -> Record:
     def rank(r: Record) -> tuple[int, int, int, str]:
         kind = classify(r)
         kind_rank = _PRIMARY_KIND_RANK.index(kind) if kind in _PRIMARY_KIND_RANK else len(_PRIMARY_KIND_RANK)
-        preprint = kind is Kind.PREPRINT or any(k == "doi" and is_secondary_doi(v) for k, v in map(split_id, r.ids))
+        # a DBLP listing carries the arXiv id of its paper, so only a copy DOI marks a record as a copy
+        preprint = kind is Kind.PREPRINT or any(is_copy_id(i) for i in r.ids if split_id(i)[0] == "doi")
         if r.source in REGISTRIES and not preprint:
             tier = 0
         elif r.source is Source.CURATED:
@@ -321,6 +343,7 @@ def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
         claim = min((c for _, c in g.claims), key=lambda c: (c.source.value, sorted(c.ids)))
         records = [Record(claim.source, claim.ids, Kind.OTHER, "claim", claim.title, year=claim.year)]
     primary = _primary(records)
+    own_authors = primary.authors
     provenance: dict[str, Source] = {"title": primary.source, "authors": primary.source}
     doi = _doi(primary)
     donors = sorted(
@@ -370,7 +393,8 @@ def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
         arxiv = [r for r in records if r is not primary and any(split_id(i)[0] == "arxiv" for i in r.ids)]
         arxiv.sort(key=lambda r: (r.source is not Source.ARXIV, _record_order(r)))
         eprint = arxiv[0] if arxiv else None
-    kind = classify(primary)
+    # an edited book counts as authored only by its own registry byline, never one filled in from another source
+    kind = classify(dataclasses.replace(primary, authors=own_authors))
     if kind is Kind.OTHER and primary.container:
         kind = next((k for d in donors if d.source is Source.OPENALEX and (k := classify(d)) is not Kind.OTHER), kind)
     status = primary.status
