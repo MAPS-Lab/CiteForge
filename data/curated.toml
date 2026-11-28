@@ -13,3 +13,8 @@ reason = "namesake"
 [[accept]]
 member = "Evans (NqlOPkMAAAAJ)"
 id = "doi:10.1109/temsconglobal64363.2025.11238339"
+
+# the arXiv survey became this SpringerBrief under a shorter title (ratio 0.90, below the 0.92 link)
+[[link]]
+preprint = "arxiv:2112.07041"
+published = "doi:10.1007/978-3-031-33617-1"
