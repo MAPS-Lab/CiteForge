@@ -1,0 +1,1 @@
+{"status": 200, "headers": {"content-type": "application/json"}, "body": "{\"meta\": {\"count\": 1, \"next_cursor\": null}, \"results\": [{\"id\": \"https://openalex.org/W1\", \"title\": \"Trunc"}
