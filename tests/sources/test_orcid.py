@@ -60,13 +60,14 @@ def test_recorded_record_names_affiliations_and_works() -> None:
     assert {a.kind for a in rec.affiliations} == {"employment", "education"}
     assert len(rec.affiliations) == len(set(rec.affiliations))
     assert len(rec.works) == 34
-    assert sum(not c.ids for c in rec.works) == 3
+    bare = [c for c in rec.works if all(i.startswith(f"orcidwork:{SPADON}/") for i in c.ids)]
+    assert len(bare) == 3 and all(len(c.ids) == 1 and c.title for c in bare)
     mdpi = by_id(rec.works, "doi:10.3390/s22166063")
     assert mdpi.source is Source.ORCID and mdpi.record is None
     assert mdpi.year == 2022
     assert by_id(rec.works, "arxiv:1909.04605").year == 2019
     assert all(c.title or c.ids for c in rec.works)
-    assert all(i.split(":")[0] in orcid.ID_KINDS for c in rec.works for i in c.ids)
+    assert all(i.split(":")[0] in orcid.ID_KINDS for c in rec.works if c not in bare for i in c.ids)
 
 
 def test_integration_pushed_record_has_ror() -> None:
@@ -74,7 +75,7 @@ def test_integration_pushed_record_has_ror() -> None:
     assert rec is not None
     assert Affiliation("https://ror.org/01e6qks80", "Dalhousie University", "employment") in rec.affiliations
     assert len(rec.works) == 290
-    assert sum(not c.ids for c in rec.works) == 33
+    assert sum(all(i.startswith(f"orcidwork:{NEETHIRAJAN}/") for i in c.ids) for c in rec.works) == 33
     assert any(c.year is None for c in rec.works)
 
 

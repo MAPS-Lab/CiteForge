@@ -78,7 +78,7 @@ class Verdict(StrEnum):
     REJECT = "reject"
 
 
-WORK_KEY_ORDER = ("doi", "arxiv", "pmid", "dblp", "openalex", "manual")
+WORK_KEY_ORDER = ("doi", "arxiv", "pmid", "dblp", "openalex", "manual", "orcidwork")
 
 
 @dataclass(frozen=True, slots=True)
