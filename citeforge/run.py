@@ -194,10 +194,13 @@ def run(
     held_ids: dict[str, set[str]] = defaultdict(set)
     for member, c in held:
         held_ids[member] |= c.ids
-    groups, ev = cluster.cluster(kept, reg, curated)
+    groups, ev = cluster.cluster(
+        kept, reg, curated, lambda gs: cluster.search_unidentified(gs, http, identities, s.min_year, previous)
+    )
     events += ev
-    groups, ev = cluster.search_unidentified(groups, http, identities)
-    events += ev
+    for name in sorted({e.member for e in ev if e.kind == "search_failed" and e.member in listings}):
+        listing = listings[name]
+        listings[name] = dataclasses.replace(listing, fetch={**listing.fetch, Source.CROSSREF: Fetch.FAILED})
     t = stage("cluster", t)
     built = [works.build(g, curated) for g in groups]
     for _, ev in built:
@@ -265,7 +268,10 @@ def run(
             w = by_key.get(k)
             if publish.publishable(now, w):
                 continue
-            if partial or over_cap:
+            heir = next((alias_owner[a] for a in sorted(row.work.aliases) if a in alias_owner), None)
+            if w is None and heir is not None and publish.publishable(mine.get(heir), by_key[heir]):
+                reason = f"merged_into:{heir}"
+            elif partial or over_cap:
                 reason = None
             elif w is not None and w.excluded is not None:
                 reason = w.excluded

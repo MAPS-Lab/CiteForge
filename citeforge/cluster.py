@@ -1,5 +1,5 @@
 import dataclasses
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from rapidfuzz import fuzz
 
@@ -20,6 +20,7 @@ from citeforge.model import (
     Source,
 )
 from citeforge.sources import crossref
+from citeforge.state import State
 from citeforge.text import family_keys, fold, name_matches, ratio, title_key
 from citeforge.works import doi_agrees
 
@@ -28,8 +29,11 @@ FUZZY_LINK = 0.92
 FUZZY_PROPOSAL = 0.80
 SEARCH_ACCEPT = 0.95
 SEARCH_REVIEW = 0.85
+PREPRINT_YEARS = 3
+POSTPRINT_YEARS = 2
 
 type Pair = tuple[str, Claim]
+type Search = Callable[[Sequence[Group]], tuple[list[tuple[str, Record]], list[Event]]]
 
 
 def _version_ids(ids: frozenset[str]) -> list[str]:
@@ -138,18 +142,30 @@ def _profile(records: Sequence[Record], claims: Sequence[Pair]) -> _Profile | No
     return None
 
 
+def _shared_authors(a: Sequence[str], b: Sequence[str]) -> float:
+    unmatched = [family_keys(f) for f in b]
+    matched = 0
+    for keys in map(family_keys, a):
+        hit = next((n for n, other in enumerate(unmatched) if keys & other), None)
+        if hit is not None:
+            matched += 1
+            del unmatched[hit]
+    return matched / max(len(a), len(b))
+
+
 def _fuzzy_ok(pre: _Profile, pub: _Profile) -> bool:
     if not pre.families or not pub.families or pre.year is None or pub.year is None:
         return False
-    if not 0 <= pub.year - pre.year <= 3:
+    if not -POSTPRINT_YEARS <= pub.year - pre.year <= PREPRINT_YEARS:
         return False
     if not family_keys(pre.families[0]) & family_keys(pub.families[0]):
         return False
-    a, b = set(pre.families), set(pub.families)
-    return len(a & b) / len(a | b) >= 0.5
+    return _shared_authors(pre.families, pub.families) >= 0.5
 
 
-def cluster(claims: Sequence[Pair], reg: Registries, curated: Curated) -> tuple[list[Group], list[Event]]:
+def cluster(
+    claims: Sequence[Pair], reg: Registries, curated: Curated, search: Search | None = None
+) -> tuple[list[Group], list[Event]]:
     forest = _Forest()
     events: list[Event] = []
     records: dict[tuple[Source, frozenset[str]], Record] = {}
@@ -183,6 +199,15 @@ def cluster(claims: Sequence[Pair], reg: Registries, curated: Curated) -> tuple[
         if ta is None or tb is None or ratio(ta, tb) < CROSSWALK_MIN or not forest.union(a, b):
             events.append(Event("crosswalk_rejected", None, a, f"{b} via {source}"))
     groups = _groups(forest, records, claims)
+    if search is not None:
+        found, ev = search(groups)
+        events += ev
+        for key, r in found:
+            records.setdefault((r.source, r.ids), r)
+            for x in sorted(r.ids):
+                if not forest.union(key, x):
+                    events.append(Event("link_refused", None, key, x))
+        groups = _groups(forest, records, claims)
     fuzzy = _fuzzy_links(groups, events)
     for a, b in fuzzy:
         forest.union(a, b, guard=False)
@@ -279,18 +304,45 @@ def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str
                 events.append(Event("link_proposal", None, p.key, f"{q.key} ratio={score:.2f}"))
     links = []
     for a, bs in sorted(partners.items()):
-        if len(bs) == 1 and _copy_group(frozenset({a})):
+        if not _copy_group(frozenset({a})):
+            continue
+        if len(bs) == 1:
             links.append((a, bs[0]))
             events.append(Event("fuzzy_link", None, a, bs[0]))
+        else:
+            events.append(Event("link_proposal", None, a, " ".join(sorted(bs))))
     return links
 
 
+def _search_ok(profile: _Profile, found: Record, identity: Identity) -> bool:
+    year_ok = profile.year is None or found.year is None or abs(found.year - profile.year) <= 1
+    named = any(name_matches(identity.names, a) for a in found.authors)
+    counts = [n for n in (len(profile.families), len(found.authors)) if n]
+    count_ok = len(counts) < 2 or min(counts) / max(counts) >= 0.5
+    return ratio(profile.title, found.title) >= SEARCH_ACCEPT and year_ok and named and count_ok
+
+
+def _doi_of(r: Record) -> str | None:
+    return next((i for i in sorted(r.ids) if split_id(i)[0] == "doi"), None)
+
+
+def _previous_links(previous: State) -> dict[str, Record]:
+    out: dict[str, Record] = {}
+    for key, row in sorted(previous.items()):
+        primary = row.work.primary
+        if split_id(key)[0] == "doi" and primary.source is Source.CROSSREF and key in primary.ids:
+            for alias in sorted(row.work.aliases - {key}):
+                out.setdefault(alias, primary)
+    return out
+
+
 def search_unidentified(
-    groups: Sequence[Group], http: Http, identities: Mapping[str, Identity]
-) -> tuple[list[Group], list[Event]]:
+    groups: Sequence[Group], http: Http, identities: Mapping[str, Identity], min_year: int, previous: State
+) -> tuple[list[tuple[str, Record]], list[Event]]:
+    """Find the Crossref DOI of each DOI-less listed group, reusing the DOI an earlier run linked it to."""
     events: list[Event] = []
-    by_doi = {i: g.key for g in groups for i in g.ids if split_id(i)[0] == "doi"}
-    merged: dict[str, Group] = {g.key: g for g in groups}
+    found: list[tuple[str, Record]] = []
+    linked = _previous_links(previous)
     for g in groups:
         kinds = {split_id(i)[0] for i in g.ids}
         if "doi" in kinds or ("arxiv" in kinds and not _listed_version(g)) or not g.claims:
@@ -300,33 +352,35 @@ def search_unidentified(
         identity = identities.get(member)
         if profile is None or identity is None or not identity.names:
             continue
+        # a match must land within a year of the group, and anything before min_year is cut anyway
+        if profile.year is not None and profile.year < min_year - 1:
+            continue
+        prior = next((linked[i] for i in sorted(g.ids) if i in linked), None)
+        if prior is not None and _search_ok(profile, prior, identity):
+            events.append(Event("search_linked", member, g.key, _doi_of(prior) or ""))
+            found.append((g.key, prior))
+            continue
         family = next(iter(sorted(identity.names[0].families, key=len, reverse=True)), "")
-        found = crossref.search(http, profile.title, family, profile.year)
-        if found.fetch is not Fetch.OK or not found.value:
+        result = crossref.search(http, profile.title, family, profile.year)
+        if result.fetch is not Fetch.OK or result.value is None:
+            events += [Event("search_failed", m, g.key, result.reason) for m in sorted({m for m, _ in g.claims})]
             continue
-        best = max(found.value, key=lambda r: (ratio(profile.title, r.title), sorted(r.ids)))
-        score = ratio(profile.title, best.title)
-        doi = next((i for i in sorted(best.ids) if split_id(i)[0] == "doi"), None)
-        if doi is None or score < SEARCH_REVIEW:
+        scored = sorted(
+            ((ratio(profile.title, r.title), doi, r) for r in result.value if (doi := _doi_of(r))),
+            key=lambda t: (-t[0], is_secondary_doi(split_id(t[1])[1]), t[1]),
+        )
+        close = [(score, doi) for score, doi, _ in scored if score >= SEARCH_REVIEW]
+        if not close:
             continue
-        year_ok = profile.year is None or best.year is None or abs(best.year - profile.year) <= 1
-        named = any(name_matches(identity.names, a) for a in best.authors)
-        counts = [n for n in (len(profile.families), len(best.authors)) if n]
-        count_ok = len(counts) < 2 or min(counts) / max(counts) >= 0.5
-        if score >= SEARCH_ACCEPT and year_ok and named and count_ok:
+        score, doi, best = scored[0]
+        rivals = {d for _, d in close if not is_secondary_doi(split_id(d)[1])} - {doi}
+        if rivals:
+            events.append(
+                Event("search_review", member, g.key, f"{doi} ratio={score:.2f} rivals={' '.join(sorted(rivals))}")
+            )
+        elif _search_ok(profile, best, identity):
             events.append(Event("search_linked", member, g.key, doi))
-            target_key = by_doi.get(doi)
-            if target_key is not None and target_key in merged and target_key != g.key:
-                t = merged.pop(target_key)
-                cur = merged.pop(g.key)
-                merged[target_key] = dataclasses.replace(
-                    t, ids=t.ids | cur.ids, records=t.records + cur.records, claims=t.claims + cur.claims
-                )
-            elif g.key in merged:
-                cur = merged.pop(g.key)
-                new = dataclasses.replace(cur, key=doi, ids=cur.ids | best.ids, records=(*cur.records, best))
-                merged[doi] = new
-                by_doi[doi] = doi
+            found.append((g.key, best))
         else:
             events.append(Event("search_review", member, g.key, f"{doi} ratio={score:.2f}"))
-    return sorted(merged.values(), key=lambda g: g.key), events
+    return found, events

@@ -8,7 +8,9 @@ from citeforge import cluster as cl
 from citeforge.curated import Curated
 from citeforge.http import Result
 from citeforge.ids import is_preprint_id, split_id
-from citeforge.model import Claim, Fetch, Kind, Record, Registries, Rel, Source
+from citeforge.model import Claim, Fetch, Kind, Names, Record, Registries, Rel, Source, Status, Work
+from citeforge.state import StateRow
+from citeforge.text import name_key
 from tests.factories import author, record
 from tests.unit.test_authorship import identity
 
@@ -179,6 +181,16 @@ def test_cluster_invariant_under_shuffle_and_duplication(raw, rnd) -> None:
         assert sum(1 for i in g.ids if split_id(i)[0] == "doi" and not is_preprint_id(i)) <= 1
 
 
+def _search(groups, previous=None, min_year=2020):
+    return cl.search_unidentified(groups, None, {ME: identity()}, min_year, previous or {})  # type: ignore[arg-type]
+
+
+def _dblp_group(title: str = TITLE, year: int = 2023):
+    dblp_rec = record("dblp:conf/x/S23", source=Source.DBLP, title=title, year=year)
+    pairs = [(ME, claim("dblp:conf/x/S23", source=Source.DBLP, title=title, rec=dblp_rec))]
+    return pairs, cl.cluster(pairs, reg(), Curated())[0]
+
+
 def test_search_unidentified(monkeypatch: pytest.MonkeyPatch) -> None:
     hit = record("doi:10.1234/found", year=2023)
     seen = []
@@ -188,23 +200,102 @@ def test_search_unidentified(monkeypatch: pytest.MonkeyPatch) -> None:
         return Result(Fetch.OK, (hit,))
 
     monkeypatch.setattr(cl.crossref, "search", fake_search)
-    dblp_rec = record("dblp:conf/x/S23", source=Source.DBLP)
-    groups, _ = cl.cluster([(ME, claim("dblp:conf/x/S23", source=Source.DBLP, rec=dblp_rec))], reg(), Curated())
-    out, events = cl.search_unidentified(groups, None, {ME: identity()})  # type: ignore[arg-type]
+    pairs, groups = _dblp_group()
+    found, events = _search(groups)
     assert seen == [(TITLE, "spadon", 2023)]
     assert [e.kind for e in events] == ["search_linked"]
-    assert out[0].ids == {"dblp:conf/x/S23", "doi:10.1234/found"}
-    monkeypatch.setattr(
-        cl.crossref,
-        "search",
-        lambda *a: Result(
-            Fetch.OK,
-            (dataclasses.replace(hit, title="Graph neural networks for vessel trajectory forecasting at scale"),),
-        ),
+    assert found == [("dblp:conf/x/S23", hit)]
+    (g,), _ = cl.cluster(pairs, reg(), Curated(), _search)
+    assert g.ids == {"dblp:conf/x/S23", "doi:10.1234/found"} and g.key == "doi:10.1234/found"
+    longer = dataclasses.replace(hit, title="Graph neural networks for vessel trajectory forecasting at scale")
+    monkeypatch.setattr(cl.crossref, "search", lambda *a: Result(Fetch.OK, (longer,)))
+    found, events = _search(groups)
+    assert [e.kind for e in events] == ["search_review"] and found == []
+
+
+def test_search_refuses_two_same_title_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    conf = record("doi:10.1109/dcc.2022.55", year=2023, kind=Kind.INPROCEEDINGS)
+    journal = record("doi:10.4230/lipics.sea.2022.16", year=2023)
+    preprint = record("doi:10.1101/2022.01.01.1", year=2023, kind=Kind.PREPRINT)
+    monkeypatch.setattr(cl.crossref, "search", lambda *a: Result(Fetch.OK, (conf, journal)))
+    _, groups = _dblp_group()
+    found, events = _search(groups)
+    assert found == [] and [e.kind for e in events] == ["search_review"]
+    assert "rivals=doi:10.4230/lipics.sea.2022.16" in events[0].detail
+    monkeypatch.setattr(cl.crossref, "search", lambda *a: Result(Fetch.OK, (conf, preprint)))
+    found, _ = _search(groups)
+    assert found == [("dblp:conf/x/S23", conf)]
+
+
+def test_search_failure_is_reported_per_member(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cl.crossref, "search", lambda *a: Result(Fetch.FAILED, None, "timeout"))
+    _, groups = _dblp_group()
+    found, events = _search(groups)
+    assert found == [] and [(e.kind, e.member, e.detail) for e in events] == [("search_failed", ME, "timeout")]
+
+
+def test_search_reuses_the_previous_link_without_a_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cl.crossref, "search", lambda *a: pytest.fail("searched again"))
+    hit = record("doi:10.1234/found", year=2023)
+    w = Work("doi:10.1234/found", hit, None, frozenset(), Kind.ARTICLE, Status.OK, 2023, None)
+    w = dataclasses.replace(w, aliases=frozenset({"doi:10.1234/found", "dblp:conf/x/S23"}))
+    previous = {w.key: StateRow(w, Names("Spadon2023-Graph", "Spadon2023:Graph"))}
+    _, groups = _dblp_group()
+    found, events = _search(groups, previous)
+    assert found == [("dblp:conf/x/S23", hit)] and [e.kind for e in events] == ["search_linked"]
+
+
+def test_search_skips_groups_that_cannot_reach_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+    monkeypatch.setattr(cl.crossref, "search", lambda http, *a: seen.append(a) or Result(Fetch.OK, ()))
+    _search(_dblp_group(year=2018)[1], min_year=2020)
+    assert seen == []
+    _search(_dblp_group(year=2019)[1], min_year=2020)
+    assert len(seen) == 1
+
+
+def test_preprint_links_once_search_joins_its_two_published_listings(monkeypatch: pytest.MonkeyPatch) -> None:
+    authors = (author("Samuel Acquaviva"), author("Yewen Pu"), author("Marta Kryven"))
+    title = "Communicating natural programs to humans and machines"
+    arx = record("arxiv:2106.07824", source=Source.ARXIV, kind=Kind.PREPRINT, title=title, authors=authors, year=2021)
+    nips = record(
+        "dblp:conf/nips/AcquavivaPKS22", source=Source.DBLP, kind=Kind.INPROCEEDINGS, title=title, authors=authors
     )
-    out, events = cl.search_unidentified(groups, None, {ME: identity()})  # type: ignore[arg-type]
-    assert [e.kind for e in events] == ["search_review"]
-    assert out == groups
+    nips = dataclasses.replace(nips, year=2022)
+    doi = record("doi:10.52202/068431-0270", kind=Kind.INPROCEEDINGS, title=title, authors=authors, year=2022)
+    pairs = [(ME, claim(*r.ids, source=Source.DBLP, title=title, rec=r)) for r in (nips,)]
+    monkeypatch.setattr(cl.crossref, "search", lambda *a: Result(Fetch.OK, (doi,)))
+    kryven = identity(names=(name_key("Marta", "Kryven"),))
+
+    def search(gs):
+        return cl.search_unidentified(gs, None, {ME: kryven}, 2020, {})  # type: ignore[arg-type]
+
+    without, _ = cl.cluster(pairs, reg(arx, doi), Curated())
+    assert len(without) == 3
+    (g,), events = cl.cluster(pairs, reg(arx, doi), Curated(), search)
+    assert g.ids == {"arxiv:2106.07824", "dblp:conf/nips/AcquavivaPKS22", "doi:10.52202/068431-0270"}
+    assert {"search_linked", "fuzzy_link"} <= {e.kind for e in events}
+
+
+@pytest.mark.parametrize(
+    ("pre", "pub", "years"),
+    [
+        (("samir", "rahman"), ("mohammed samir", "masudur rahman"), (2025, 2026)),
+        (("brandt", "maza"), ("brandt", "moreno maza"), (2021, 2021)),
+        (("muse", "shah"), ("muse", "b shah"), (2024, 2025)),
+        (("muse", "rahman"), ("muse", "rahman"), (2022, 2020)),
+    ],
+)
+def test_fuzzy_ok_accepts_split_surnames_and_postprints(pre, pub, years) -> None:
+    assert cl._fuzzy_ok(cl._Profile("t", years[0], pre), cl._Profile("t", years[1], pub))
+
+
+def test_fuzzy_ok_still_refuses_other_bylines_and_distant_years() -> None:
+    p = cl._Profile("t", 2021, ("brandt", "maza", "chen"))
+    assert not cl._fuzzy_ok(p, cl._Profile("t", 2021, ("brandt", "lee", "kim")))
+    assert not cl._fuzzy_ok(p, cl._Profile("t", 2018, ("brandt", "maza", "chen")))
+    assert not cl._fuzzy_ok(p, cl._Profile("t", 2025, ("brandt", "maza", "chen")))
+    assert not cl._fuzzy_ok(cl._Profile("t", 2021, ("brandt",) * 3), cl._Profile("t", 2021, ("brandt", "x", "y")))
 
 
 def test_search_covers_a_listed_version_that_only_has_an_arxiv_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,5 +305,5 @@ def test_search_covers_a_listed_version_that_only_has_an_arxiv_id(monkeypatch: p
     corr = record("dblp:journals/corr/S23", "arxiv:2201.00002", source=Source.DBLP, kind=Kind.PREPRINT)
     pairs = [(ME, claim(*r.ids, source=Source.DBLP, rec=r)) for r in (listed, corr)]
     groups, _ = cl.cluster(pairs, reg(), Curated())
-    cl.search_unidentified(groups, None, {ME: identity()})  # type: ignore[arg-type]
+    _search(groups)
     assert len(seen) == 1

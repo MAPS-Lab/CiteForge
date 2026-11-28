@@ -5,7 +5,10 @@ import pytest
 
 from citeforge import cli
 from citeforge.bibtex import read_entry
-from tests.world import INPUT, MATWIN, SPADON, YE, default_world, install, repo, tree
+from citeforge.http import Result
+from citeforge.model import Fetch
+from citeforge.sources import crossref
+from tests.world import INPUT, MATWIN, MW, SP, SPADON, YE, cr, default_world, install, repo, tree
 
 
 @pytest.fixture
@@ -88,6 +91,34 @@ def test_crossref_outage_removes_nothing(workdir: Path, monkeypatch: pytest.Monk
     assert tree(workdir / "output") == {
         k.removeprefix("output/"): v for k, v in first.items() if k.startswith("output/")
     }
+
+
+def test_search_failure_keeps_the_linked_doi_and_ships_one_file(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install(monkeypatch, default_world())
+    linked = cr("doi:10.1145/3580305.1", "Maritime traffic graphs at scale", (SP, MW), year=2023)
+    monkeypatch.setattr(crossref, "search", lambda *a: Result(Fetch.OK, (linked,)))
+    assert cli.main([]) == 0
+
+    def maritime() -> list[str]:
+        folder = workdir / "output" / SPADON
+        return sorted(p.name for p in folder.glob("*.bib") if "Maritime traffic" in p.read_text(encoding="utf-8"))
+
+    assert maritime() == ["Spadon2023-MaritimeTraffic.bib"]
+    assert "10.1145/3580305.1" in (workdir / "output" / SPADON / "Spadon2023-MaritimeTraffic.bib").read_text()
+    first = tree(workdir / "output")
+    monkeypatch.setattr(crossref, "search", lambda *a: Result(Fetch.FAILED, None, "down"))
+    assert cli.main([]) == 0
+    assert tree(workdir / "output") == first
+    rows = [json.loads(line) for line in (workdir / "state/works.jsonl").read_text().splitlines()]
+    assert "dblp:conf/kdd/SpadonM23" not in {r["work"]["key"] for r in rows}
+
+
+def test_search_outage_on_a_new_group_marks_the_member_partial(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install(monkeypatch, default_world())
+    monkeypatch.setattr(crossref, "search", lambda *a: Result(Fetch.FAILED, None, "down"))
+    assert cli.main([]) == 3
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert report["members"][SPADON]["status"] == "partial:crossref"
 
 
 def test_dblp_challenge_keeps_every_entry_and_exits_3(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
