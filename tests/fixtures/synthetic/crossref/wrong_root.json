@@ -1,0 +1,7 @@
+{
+ "status": 200,
+ "headers": {
+  "content-type": "application/json"
+ },
+ "body": "{\"status\": \"ok\", \"message-type\": \"funder-list\", \"message\": {\"items\": [], \"total-results\": 0}}"
+}
