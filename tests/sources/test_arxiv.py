@@ -6,6 +6,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from citeforge.http import Http, ParseError
+from citeforge.ids import to_id
 from citeforge.model import Author, Kind, Rel, Source, Status
 from citeforge.sources import arxiv
 from tests.conftest import FIXTURES, FakeClock, fixture_transport, make_http
@@ -170,6 +171,37 @@ def test_broken_payload_fails_the_chunk_and_marks_nothing_missing(name: str) -> 
     http, _, _ = serving(atom(synthetic(name)))
     batch = arxiv.by_id(http, ["arxiv:2101.00001", "arxiv:2101.00002"])
     assert batch.failed == {"arxiv:2101.00001", "arxiv:2101.00002"} and not batch.found and not batch.missing
+
+
+def rejected(form: str) -> bytes:
+    return (
+        '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">'
+        "<opensearch:totalResults>1</opensearch:totalResults><entry>"
+        f"<id>https://arxiv.org/api/errors#incorrect_id_format_for_{form}</id><title>Error</title>"
+        f"<summary>incorrect id format for {form}</summary></entry></feed>"
+    ).encode()
+
+
+def test_an_id_the_api_refuses_is_missing_and_the_rest_of_its_batch_is_asked_again() -> None:
+    refused = "hep-th/9901001"
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        asked = request.url.params["id_list"]
+        seen.append(asked)
+        return atom(rejected(refused)) if refused in asked.split(",") else echo(request)
+
+    batch = arxiv.by_id(make_http(handle, FakeClock()), ["arxiv:2101.00001", f"arxiv:{refused}", "arxiv:2101.00002"])
+    assert set(batch.found) == {"arxiv:2101.00001", "arxiv:2101.00002"}
+    assert batch.missing == {f"arxiv:{refused}"} and not batch.failed
+    assert seen == [f"2101.00001,2101.00002,{refused}", "2101.00001,2101.00002"]
+
+
+def test_an_unknown_old_style_archive_is_never_sent() -> None:
+    http, _, seen = serving(atom(feed()))
+    batch = arxiv.by_id(http, ["arxiv:arxiv/0101001"])
+    assert batch.missing == {"arxiv:arxiv/0101001"} and not seen
+    assert to_id("arxiv", "arXiv/0101001") is None
 
 
 def test_empty_feed_for_several_ids_is_a_failure_not_a_verdict() -> None:

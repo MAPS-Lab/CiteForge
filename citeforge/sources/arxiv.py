@@ -22,6 +22,15 @@ _ABS = re.compile(r"^https?://arxiv\.org/abs/(.+?)(?:v\d+)?$")
 _OLD_CLASS = re.compile(r"^([a-z-]+)\.[A-Z]{2}/")
 _YEAR = re.compile(r"^(\d{4})-\d{2}-\d{2}T")
 _WITHDRAWN = re.compile(r"\bwithdrawn\b", re.IGNORECASE)
+_REJECTED = re.compile(r"/api/errors#incorrect_id_format_for_(\S+)$")
+
+
+class RejectedIdError(ParseError):
+    """The API refused one id of the batch and answered for none of the others."""
+
+    def __init__(self, form: str) -> None:
+        super().__init__(f"arxiv: incorrect id format for {form}")
+        self.form = form
 
 
 def query_form(arxiv_id: str) -> str:
@@ -97,7 +106,10 @@ def parse_feed(body: bytes) -> list[ET.Element]:
         raise ParseError(f"arxiv: unexpected root {root.tag}")
     entries = root.findall("a:entry", NS)
     for e in entries:
-        if "/api/errors" in e.findtext("a:id", "", NS):
+        entry_id = e.findtext("a:id", "", NS).strip()
+        if m := _REJECTED.search(entry_id):
+            raise RejectedIdError(m.group(1))
+        if "/api/errors" in entry_id:
             raise ParseError(f"arxiv: {_text(e, 'a:summary') or 'error entry'}")
     total = root.findtext("o:totalResults", "", NS).strip()
     if not total.isdecimal() or int(total) != len(entries):
@@ -118,12 +130,22 @@ def by_id(http: Http, ids: Sequence[str]) -> Batch:
     found: dict[str, Record] = {}
     failed: set[str] = set()
     forms = list(wanted)
-    for start in range(0, len(forms), CHUNK):
-        chunk = forms[start : start + CHUNK]
+    chunks = [forms[start : start + CHUNK] for start in range(0, len(forms), CHUNK)]
+    while chunks:
+        chunk = chunks.pop(0)
         asked = [i for f in chunk for i in wanted[f]]
         reply = http.get(HOST, "/api/query", {"id_list": ",".join(chunk), "max_results": str(CHUNK)})
         try:
             entries = parse_feed(reply.body) if reply.fetch is Fetch.OK else None
+        except RejectedIdError as e:
+            if e.form not in chunk:
+                failed.update(asked)
+                continue
+            # the refused id would fail its batch on every run, so it is missing and the rest is asked again
+            missing.update(wanted[e.form])
+            if rest := [f for f in chunk if f != e.form]:
+                chunks.insert(0, rest)
+            continue
         except ParseError:
             entries = None
         if entries is None or (not entries and len(chunk) > 1):

@@ -10,7 +10,15 @@ _DOI_SHAPE = re.compile(r"10\.\d{4,9}/[^\s\x00-\x1f\x7f-\x9f]+")
 _TEX_ESCAPE = re.compile(r"\\([_&%#$])")
 _ARXIV_PREFIX = re.compile(r"^(?:https?://(?:export\.)?arxiv\.org/(?:abs|pdf)/|arxiv:\s*)", re.IGNORECASE)
 _ARXIV_NEW = re.compile(r"(\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?", re.IGNORECASE)
-_ARXIV_OLD = re.compile(r"([a-z-]+)(\.[a-z]{2})?/(\d{7})(?:v\d+)?(?:\.pdf)?", re.IGNORECASE)
+_ARXIV_OLD = re.compile(r"([a-z-]+)(\.[a-z]{2})?/((\d{2})(\d{2})\d{3})(?:v\d+)?(?:\.pdf)?", re.IGNORECASE)
+# every archive that issued YYMMNNN ids (9107 to 0703), from arXiv's taxonomy; only four took a subject class
+ARXIV_OLD_ARCHIVES = frozenset({
+    "acc-phys", "adap-org", "alg-geom", "ao-sci", "astro-ph", "atom-ph", "bayes-an", "chao-dyn", "chem-ph", "cmp-lg",
+    "comp-gas", "cond-mat", "cs", "dg-ga", "funct-an", "gr-qc", "hep-ex", "hep-lat", "hep-ph", "hep-th", "math",
+    "math-ph", "mtrl-th", "nlin", "nucl-ex", "nucl-th", "patt-sol", "physics", "plasm-ph", "q-alg", "q-bio",
+    "quant-ph", "solv-int", "supr-con",
+})  # fmt: skip
+_ARXIV_CLASSED = frozenset({"math", "cs", "nlin", "q-bio"})
 _ORCID = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]")
 _ORCID_PREFIX = re.compile(r"^(?:https?://(?:www\.)?orcid\.org/|orcid:\s*)", re.IGNORECASE)
 _ROR = re.compile(r"(?:https?://(?:www\.)?ror\.org/)?(0[0-9a-hjkmnp-tv-z]{6}\d{2})/?")
@@ -34,7 +42,11 @@ def norm_arxiv(s: str) -> str | None:
     if m := _ARXIV_NEW.fullmatch(t):
         return m.group(1)
     if m := _ARXIV_OLD.fullmatch(t):
-        return f"{m.group(1).lower()}{(m.group(2) or '').upper()}/{m.group(3)}"
+        archive, subject, number, yy, mm = m.group(1).lower(), (m.group(2) or "").upper(), *m.groups()[2:]
+        month = (1900 + int(yy) if int(yy) >= 91 else 2000 + int(yy)) * 100 + int(mm)
+        dated = 1 <= int(mm) <= 12 and 199107 <= month <= 200703
+        if dated and archive in ARXIV_OLD_ARCHIVES and (not subject or archive in _ARXIV_CLASSED):
+            return f"{archive}{subject}/{number}"
     return None
 
 

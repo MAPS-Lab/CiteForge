@@ -3,6 +3,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from citeforge.ids import (
+    ARXIV_OLD_ARCHIVES,
     is_copy_id,
     is_preprint_doi,
     is_secondary_doi,
@@ -53,14 +54,33 @@ def test_norm_doi_idempotent_and_prefix_free(doi: str, prefix: str) -> None:
         ("https://arxiv.org/abs/2101.12345v2", "2101.12345"),
         ("math.GT/0309136", "math.GT/0309136"),
         ("HEP-TH/9901001v1", "hep-th/9901001"),
+        ("solv-int/9901001", "solv-int/9901001"),
         ("1234.567", None),
+        ("arXiv/0101001", None),
+        ("foo/0101001", None),
+        ("hep-th/9913001", None),
+        ("hep-th/9106001", None),
+        ("math/0704001", None),
+        ("hep-th.GT/9901001", None),
     ],
 )
 def test_norm_arxiv(raw: str, expected: str | None) -> None:
     assert norm_arxiv(raw) == expected
 
 
-@given(st.from_regex(r"\d{4}\.\d{4,5}(v\d)?|[a-z-]{2,8}(\.[A-Z]{2})?/\d{7}(v\d)?", fullmatch=True))
+@given(
+    st.one_of(
+        st.from_regex(r"\d{4}\.\d{4,5}(v\d)?", fullmatch=True),
+        st.builds(
+            lambda archive, subject, yymm, n, v: f"{archive}{subject if archive == 'math' else ''}/{yymm}{n:03d}{v}",
+            st.sampled_from(sorted(ARXIV_OLD_ARCHIVES)),
+            st.sampled_from(["", ".GT", ".dg"]),
+            st.sampled_from(["9107", "9912", "0001", "0703"]),
+            st.integers(0, 999),
+            st.sampled_from(["", "v2"]),
+        ),
+    )
+)
 def test_norm_arxiv_idempotent_case_insensitive(raw: str) -> None:
     once = norm_arxiv(raw)
     assert once is not None
