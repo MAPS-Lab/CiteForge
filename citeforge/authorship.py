@@ -47,7 +47,7 @@ def decide(i: Identity, w: Work, claims: Iterable[Claim], curated: Curated) -> D
     persons = [a for a in w.primary.authors if a.family or (a.literal and not is_group(a.literal))]
     if not named and (persons or not sources & {Source.DBLP, Source.ORCID}):
         return Decision(Verdict.REJECT, "not_named", frozenset())
-    if i.orcids and named and all(a.orcid and a.orcid not in i.orcids for a in named):
+    if i.orcids and named and all(a.orcid and a.orcid not in i.orcids for a in named) and not _affil(i, named)[0]:
         return Decision(Verdict.REJECT, "orcid_contra", frozenset(a.orcid for a in named if a.orcid))
     if Source.DBLP in sources:
         return Decision(Verdict.ACCEPT, "dblp_listed", frozenset({i.dblp or ""}))

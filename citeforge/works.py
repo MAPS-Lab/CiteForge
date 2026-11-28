@@ -87,7 +87,7 @@ CSL_KINDS: Mapping[str, Kind] = {
 _EDITORIAL = re.compile(r"^((guest|series) )?editorial\b", re.IGNORECASE)
 _FRONT = re.compile(
     r"^(preface\b|foreword\b|front matter\b|message from\b|welcome(?![-\w])|table of contents\b"
-    r"|conclusions?( and future works?)?$|dear )",
+    r"|conclusions?( and future works?)?$|dear |proceedings of\b)",
     re.IGNORECASE,
 )
 _NOTICE = re.compile(r"^(corrections? to|correction:|erratum|corrigendum|retraction|expression of concern)\b", re.I)

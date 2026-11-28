@@ -79,6 +79,12 @@ def test_rule_4_orcid_contra_never_accepts() -> None:
     assert verdict(identity(orcids=frozenset()), namesake, [claim(Source.DBLP)]) == (Verdict.ACCEPT, "dblp_listed")
 
 
+def test_rule_4_yields_when_the_slot_names_the_home_institution() -> None:
+    second_orcid = w(author("Gabriel Spadon", orcid=OTHER, rors=(LAB,)))
+    assert verdict(identity(), second_orcid, [claim(Source.DBLP)]) == (Verdict.ACCEPT, "dblp_listed")
+    assert verdict(identity(), second_orcid, []) == (Verdict.REJECT, "no_evidence")
+
+
 def test_rules_5_to_8() -> None:
     assert verdict(identity(), w(), [claim(Source.DBLP)]) == (Verdict.ACCEPT, "dblp_listed")
     assert verdict(identity(), w(), [claim(Source.ORCID)]) == (Verdict.ACCEPT, "orcid_claim")

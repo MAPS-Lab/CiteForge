@@ -53,6 +53,7 @@ def test_kind_map(source: Source, source_type: str, extra: dict, kind: Kind) -> 
     [
         ("Guest Editorial: Maritime AI", Kind.EDITORIAL),
         ("Series Editorial: Wireless Networks", Kind.EDITORIAL),
+        ("Proceedings of the 50th Graphics Interface Conference", Kind.FRONT_MATTER),
         ("Preface", Kind.FRONT_MATTER),
         ("Message from the General Chairs", Kind.FRONT_MATTER),
         ("Conclusions and future work", Kind.FRONT_MATTER),
