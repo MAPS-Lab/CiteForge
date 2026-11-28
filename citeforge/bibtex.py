@@ -43,7 +43,6 @@ _ESCAPES = {
 _ESCAPE_RE = re.compile(r"[\\~^&%$#_{}]")
 _PAGE_DASH = re.compile(r"\s*[-‐-―−]+\s*")  # noqa: RUF001
 _PAGE_PART_SPLIT = re.compile(r"[-–—,\s]+")  # noqa: RUF001
-_PARTICLES = frozenset({"de", "da", "do", "dos", "das", "van", "von", "der", "den", "du", "la", "le", "del", "di"})
 _URL = re.compile(r"[^\s\x00-\x1f\x7f-\x9f]+")
 _FIELD_LINE = re.compile(r"  ([a-z]+) = \{(.*)\},?")
 _HEAD = re.compile(r"@([a-z]+)\{([^,\s]+),")
@@ -113,15 +112,21 @@ def format_pages(r: Record) -> str | None:
     return None
 
 
+def _breaks_slot(part: str) -> bool:
+    """True when BibTeX would read `part` as more than one name part: a comma, an `and`, or a lowercase word."""
+    return "," in part or any(w[:1].islower() or w.lower() == "and" for w in re.split(r"[\s~-]+", part) if w)
+
+
 def _name(a: Author) -> str:
-    if not clean(a.family):
+    family = clean(a.family).strip(",; ")
+    if not family:
         literal = escape(clean(a.literal or a.given), "author")
         return "{" + literal + "}" if literal else ""
-    family = escape(clean(a.family), "author")
-    words = family.split()
-    if "," in family or (len(words) > 1 and not any(w in _PARTICLES for w in words)):
+    given, family = escape(clean(a.given).strip(",; "), "author"), escape(family, "author")
+    if len(family.split()) > 1 or _breaks_slot(family):
         family = "{" + family + "}"
-    given = escape(clean(a.given), "author")
+    if _breaks_slot(given):
+        given = "{" + given + "}"
     return f"{given} {family}" if given else family
 
 

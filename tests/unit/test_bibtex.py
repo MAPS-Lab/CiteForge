@@ -5,6 +5,7 @@ from pathlib import Path
 import bibtexparser
 import pytest
 from bibtexparser.bparser import BibTexParser
+from bibtexparser.customization import splitname
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from pylatexenc.latex2text import LatexNodes2Text
@@ -95,7 +96,7 @@ def test_render_article_shape_and_website_parse() -> None:
         "@article{Alam2024:EnhancingShortTermVessel,\n"
         "  title = {Enhancing short-term vessel trajectory prediction with {AIS} \\& {SAR}},\n"
         "  author = {Md Mahbub Alam and Gabriel Spadon and {The ATLAS Collaboration} and Ana {Pérez García}"
-        " and Luis da Silva},\n"
+        " and Luis {da Silva}},\n"
         "  year = {2024},\n"
         "  journal = {Ocean Engineering},\n"
         "  publisher = {Elsevier BV},\n"
@@ -108,6 +109,37 @@ def test_render_article_shape_and_website_parse() -> None:
     assert entry["ENTRYTYPE"] == "article"
     assert len(split_authors(entry["author"])) == 5
     assert read_entry(text)["doi"] == "10.1016/j.oceaneng.2024.118303"
+
+
+@pytest.mark.parametrize(
+    ("given", "family", "first", "last"),
+    [
+        ("Sandra", "Van der Auwera", "Sandra", "Van der Auwera"),
+        ("Beatriz", "Treviño-de la Garza", "Beatriz", "Treviño-de la Garza"),
+        ("Lorena", "Fernández de la Cruz", "Lorena", "Fernández de la Cruz"),
+        ("Ludger", "Tebartz van Elst", "Ludger", "Tebartz van Elst"),
+        ("Jose Miguel", "Caldas-de-Almeida", "Jose Miguel", "Caldas-de-Almeida"),
+        ("Luis", "da Silva", "Luis", "da Silva"),
+        ("Padmanabhan Jagannathan Prajesh,", "Prajesh", "Padmanabhan Jagannathan Prajesh", "Prajesh"),
+        ("Ana, Maria", "Lima", "Ana, Maria", "Lima"),
+        ("Jan van", "Dijk", "Jan van", "Dijk"),
+        ("Mary", "Smith-Jones", "Mary", "Smith-Jones"),
+        ("Gabriel", "Spadon", "Gabriel", "Spadon"),
+    ],
+)
+def test_every_author_slot_reads_back_as_the_given_and_family_names(
+    given: str, family: str, first: str, last: str
+) -> None:
+    other = Author("Stan", "Matwin")
+    text = render(work(record("doi:10.1234/a", authors=(Author(given, family), other))), Names("A2023-A", "A2023:A"))
+    names = split_authors(parse(text)["author"])
+    assert len(names) == 2
+    parts = splitname(names[0])
+    assert not parts["von"] and not parts["jr"]
+    assert " ".join(parts["first"]).strip("{}") == first and " ".join(parts["last"]).strip("{}") == last
+    # BibTeX splits on hyphens too, so a hyphenated family with a lowercase part must be one brace group
+    if "-" in family and any(w[:1].islower() for w in re.split(r"[ -]", family)):
+        assert f"{{{family}}}" in names[0]
 
 
 def test_render_preprint_and_eprint() -> None:
