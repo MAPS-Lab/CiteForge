@@ -3,6 +3,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal
 
+from citeforge.authorship import is_own
 from citeforge.curated import Curated
 from citeforge.ids import is_secondary_doi, split_id, work_key
 from citeforge.model import (
@@ -27,7 +28,18 @@ from citeforge.tables import (
     PROCEEDINGS_SERIES_AS_JOURNAL,
     REPOSITORY_AS_JOURNAL,
 )
-from citeforge.text import clean, family_keys, fold, is_affiliation, name_matches, ratio, token_set, word_prefix
+from citeforge.text import (
+    clean,
+    family_keys,
+    fold,
+    is_affiliation,
+    is_group,
+    name_matches,
+    ratio,
+    title_key,
+    token_set,
+    word_prefix,
+)
 
 EXCLUDED_KINDS = frozenset(
     {Kind.PROCEEDINGS, Kind.DATASET, Kind.SOFTWARE, Kind.PATENT, Kind.EDITORIAL, Kind.FRONT_MATTER, Kind.ABSTRACT,
@@ -91,7 +103,8 @@ _FRONT = re.compile(
     re.IGNORECASE,
 )
 _NOTICE = re.compile(r"^(corrections? to|correction:|erratum|corrigendum|retraction|expression of concern)\b", re.I)
-_ABSTRACT = re.compile(r"^[A-Z]{0,2}\d{1,4}\.\s")
+_ABSTRACT = re.compile(r"^[A-Z]{0,2}\d{1,4}(?:\.\d{1,3}\.?|\.)\s+(?=[A-Z])")
+_ABSTRACT_PAGES = re.compile(r"^(S\d|e?\d+$)")
 _CONFERENCE_SUFFIX = re.compile(r"conference|workshop|symposium")
 _CONFERENCE_JOURNAL = re.compile(r"^(proceedings of|proc\.|conference|international conference|workshop)\b")
 _PRIMARY_KIND_RANK = (
@@ -144,6 +157,8 @@ def _base_kind(r: Record) -> Kind:
     match r.source:
         case Source.CROSSREF:
             kind = CROSSREF_KINDS.get(source_type, Kind.OTHER)
+            if source_type == "edited-book" and r.authors and not r.editors:
+                return Kind.BOOK
             if source_type == "book-chapter" and (
                 r.event or any(c.strip().lower() in GENERIC_SERIES_NAMES for c in r.container)
             ):
@@ -168,8 +183,8 @@ def classify(r: Record) -> Kind:
         return Kind.FRONT_MATTER
     if _NOTICE.match(title) or any(rel in (Rel.CORRECTS, Rel.RETRACTS, Rel.WITHDRAWS) for rel, _ in r.relations):
         return Kind.NOTICE
-    supplement = bool(r.pages and re.match(r"^S\d+", r.pages)) or "suppl" in (r.number or "").lower()
-    if _ABSTRACT.match(title) and supplement:
+    one_page = bool(r.pages and _ABSTRACT_PAGES.match(r.pages)) or "suppl" in (r.number or "").lower()
+    if _ABSTRACT.match(title) and one_page:
         return Kind.ABSTRACT
     venue = (r.container[0] if r.container else "").strip().lower()
     if venue:
@@ -187,13 +202,16 @@ def year_of(records: Sequence[Record]) -> int | None:
     return None
 
 
-def doi_agrees(claim_title: str, member: Identity, reg: Record) -> Literal["ok", "review", "detach"]:
+def doi_agrees(claim_title: str, member: Identity, reg: Record) -> Literal["ok", "review", "group", "detach"]:
     title_score = token_set(claim_title, reg.title)
     title_ok = title_score >= 0.90 or ratio(claim_title, reg.title) >= 0.85 or word_prefix(claim_title, reg.title)
     people = [a for a in reg.authors if a.family or a.literal]
-    named = any((a.orcid and a.orcid in member.orcids) or name_matches(member.names, a) for a in people)
-    if title_score < 0.60 or (people and not named):
+    # A foreign ORCID on a named slot is an authorship question for decide, not a sign of a wrong DOI.
+    named = any(is_own(member, a) or name_matches(member.names, a) for a in people)
+    if title_score < 0.60:
         return "detach"
+    if people and not named:
+        return "group" if title_ok and any(a.literal and is_group(a.literal) for a in people) else "detach"
     return "ok" if title_ok else "review"
 
 
@@ -353,6 +371,8 @@ def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
         arxiv.sort(key=lambda r: (r.source is not Source.ARXIV, _record_order(r)))
         eprint = arxiv[0] if arxiv else None
     kind = classify(primary)
+    if kind is Kind.OTHER and primary.container:
+        kind = next((k for d in donors if d.source is Source.OPENALEX and (k := classify(d)) is not Kind.OTHER), kind)
     status = primary.status
     excluded = None
     if kind in EXCLUDED_KINDS:
@@ -381,6 +401,10 @@ def _keyable(r: Record) -> bool:
     return any(split_id(i)[0] != "openalex" for i in r.ids)
 
 
+def _families(w: Work) -> frozenset[str]:
+    return frozenset(fold(a.family) for a in w.primary.authors if a.family)
+
+
 def apply_links(works: Sequence[Work]) -> list[Work]:
     by_alias = {alias: w.key for w in works for alias in w.aliases}
     linked: dict[str, set[str]] = {}
@@ -400,6 +424,16 @@ def apply_links(works: Sequence[Work]) -> list[Work]:
             elif rel is Rel.TRANSLATION_OF:
                 linked.setdefault(target_key, set()).add(w.key)
                 excluded.setdefault(w.key, f"translation_of:{target_key}")
+    books = {title_key(w.primary.title): w for w in works if w.kind is Kind.BOOK and w.excluded is None}
+    for w in works:
+        book = (
+            books.get(title_key(w.primary.container[0]))
+            if w.kind is Kind.INCOLLECTION and w.primary.container
+            else None
+        )
+        if book is not None and book.key != w.key and _families(w) and _families(w) <= _families(book):
+            linked.setdefault(book.key, set()).add(w.key)
+            excluded.setdefault(w.key, f"chapter_of:{book.key}")
     out = []
     for w in works:
         new_status = status.get(w.key, w.status)

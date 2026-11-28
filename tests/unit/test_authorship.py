@@ -1,7 +1,7 @@
 import dataclasses
 from typing import Any
 
-from citeforge.authorship import decide
+from citeforge.authorship import decide, is_own, own_slots
 from citeforge.curated import Curated
 from citeforge.model import Author, Claim, Identity, Kind, Source, Verdict
 from citeforge.text import name_key
@@ -102,3 +102,26 @@ def test_rules_5_to_8() -> None:
 def test_dblp_primary_and_curated_record_are_registries_enough() -> None:
     dblp_only = work(record("dblp:conf/x/S23", source=Source.DBLP, kind=Kind.INPROCEEDINGS))
     assert verdict(identity(), dblp_only, [claim(Source.DBLP)]) == (Verdict.ACCEPT, "dblp_listed")
+
+
+def test_a_dblp_or_orcid_byline_names_the_member_when_the_arxiv_byline_is_mistyped() -> None:
+    i = identity(names=(name_key("Janarthanan", "Rajendran"),), orcids=frozenset(), dblp="x/1")
+    typed = (author("Shagun Sodhani"), author("Janarthanan Janarthanan"), author("Sarath Chandar"))
+    arx = record("arxiv:2207.04354", source=Source.ARXIV, kind=Kind.PREPRINT, authors=typed)
+    listed = (author("Shagun Sodhani"), author("Janarthanan Rajendran"), author("Sarath Chandar"))
+    dblp = record("arxiv:2207.04354", source=Source.DBLP, kind=Kind.PREPRINT, authors=listed)
+    assert verdict(i, work(arx), [claim(Source.DBLP, dblp)]) == (Verdict.ACCEPT, "dblp_listed")
+    assert verdict(i, work(arx), [claim(Source.ORCID)]) == (Verdict.REVIEW, "not_named_unregistered")
+    assert verdict(i, work(arx), [claim(Source.OPENALEX, dblp)]) == (Verdict.REJECT, "not_named")
+    registered = record("doi:10.1234/w", authors=typed)
+    assert verdict(i, work(registered), [claim(Source.ORCID)]) == (Verdict.REJECT, "not_named")
+
+
+def test_a_present_orcid_decides_whether_a_slot_is_the_member() -> None:
+    i = identity()
+    assert is_own(i, author("Gabriel Spadon"))
+    assert is_own(i, author("Someone Else", orcid=ME))
+    assert not is_own(i, author("Gabriel Spadon", orcid=OTHER))
+    assert is_own(i, author("G. Other", openalex="A5023888391"))
+    slots = own_slots(i, w(author("Gabriel Spadon", orcid=OTHER), author("Stan Matwin")), [])
+    assert slots == []

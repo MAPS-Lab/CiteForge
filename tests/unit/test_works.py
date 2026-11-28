@@ -21,7 +21,8 @@ from tests.unit.test_authorship import identity
         (Source.CROSSREF, "book-chapter", {"event": "KDD 2023"}, Kind.INPROCEEDINGS),
         (Source.CROSSREF, "book-chapter", {"container": ("Handbook of Things",)}, Kind.INCOLLECTION),
         (Source.CROSSREF, "monograph", {}, Kind.BOOK),
-        (Source.CROSSREF, "edited-book", {}, Kind.PROCEEDINGS),
+        (Source.CROSSREF, "edited-book", {}, Kind.BOOK),
+        (Source.CROSSREF, "edited-book", {"editors": (author("Stan Matwin"),)}, Kind.PROCEEDINGS),
         (Source.CROSSREF, "report", {}, Kind.TECHREPORT),
         (Source.CROSSREF, "dissertation", {"degree": "Master of Science"}, Kind.MASTERSTHESIS),
         (Source.CROSSREF, "dissertation", {}, Kind.PHDTHESIS),
@@ -66,9 +67,29 @@ def test_title_patterns(title: str, kind: Kind) -> None:
     assert classify(record("doi:10.1234/t", title=title)) is kind
 
 
-def test_abstract_pattern_needs_supplement() -> None:
-    assert classify(record("doi:10.1234/a", title="P12. A poster", pages="S45")) is Kind.ABSTRACT
-    assert classify(record("doi:10.1234/a", title="P12. A poster", pages="45")) is Kind.ARTICLE
+@pytest.mark.parametrize(
+    ("title", "pages", "number", "kind"),
+    [
+        ("P12. A poster", "S45", None, Kind.ABSTRACT),
+        ("P12. A poster", "45-52", None, Kind.ARTICLE),
+        ("P12. A poster", "45-52", "Suppl 2", Kind.ABSTRACT),
+        ("P12. A poster", None, None, Kind.ARTICLE),
+        (
+            "95. GENOME-WIDE ASSOCIATION STUDY OF 14,000 CASES IDENTIFIES FOUR NEW RISK GENES",
+            "e97",
+            None,
+            Kind.ABSTRACT,
+        ),
+        ("W25. CHECKING, SYMMETRY/ORDERING, CONTAMINATION/WASHING, AND TABOO OBSESSIONS", "220", None, Kind.ABSTRACT),
+        ("13.2 Identification and Characterization of Genome-Wide Associated Loci in OCD", "S296", "10", Kind.ABSTRACT),
+        ("2.127 Genetic Correlates of Pediatric OCD", "S205", "10", Kind.ABSTRACT),
+        ("3D printing of ship hulls", "220", None, Kind.ARTICLE),
+        ("100 Years of ocean science", "e97", None, Kind.ARTICLE),
+        ("2. results", "e97", None, Kind.ARTICLE),
+    ],
+)
+def test_abstract_needs_a_numbered_title_and_a_one_page_or_supplement(title, pages, number, kind) -> None:
+    assert classify(record("doi:10.1016/j.euroneuro.2022.07.180", title=title, pages=pages, number=number)) is kind
 
 
 @given(
@@ -110,6 +131,17 @@ def test_doi_agrees_bands() -> None:
     assert doi_agrees("Protein folding with diffusion", me, reg) == "detach"
     stranger = dataclasses.replace(reg, authors=(author("Ana Lima"),))
     assert doi_agrees(reg.title, me, stranger) == "detach"
+    foreign = dataclasses.replace(reg, authors=(author("Gabriel Spadon", orcid="0000-0001-5109-3700"),))
+    assert doi_agrees(reg.title, me, foreign) == "ok"
+
+
+def test_doi_agrees_holds_a_consortium_byline_instead_of_detaching() -> None:
+    title = "Complement genes contribute sex-biased vulnerability in diverse disorders"
+    group = Author("", "", literal="Schizophrenia Working Group of the Psychiatric Genomics Consortium")
+    reg = record("doi:10.1038/s41586-020-2277-x", title=title, authors=(author("Nolan Kamitaki"), group))
+    assert doi_agrees(title, identity(), reg) == "group"
+    assert doi_agrees("Protein folding with diffusion models at scale", identity(), reg) == "detach"
+    assert doi_agrees(title, identity(), dataclasses.replace(reg, authors=(author("Nolan Kamitaki"),))) == "detach"
 
 
 def _group(*records: Record, fuzzy: bool = False) -> Group:
@@ -236,3 +268,67 @@ def test_apply_links_notices_retractions_translations() -> None:
 
 def test_name_key_reexport_sanity() -> None:
     assert name_key("Gabriel", "Spadon").initials == "g"
+
+
+def test_crossref_other_with_a_container_takes_the_openalex_kind() -> None:
+    doi = "doi:10.1002/9781119675525.ch1"
+    book = ("Communication Networks and Service Management in the Era of Artificial Intelligence and Machine Learning",)
+    cr = record(doi, title="Overview of Network and Service Management", source_type="other", container=book)
+    oa = dataclasses.replace(
+        cr,
+        source=Source.OPENALEX,
+        ids=frozenset({doi, "openalex:W1"}),
+        source_type="book-chapter",
+        kind=Kind.INCOLLECTION,
+    )
+    assert build(_group(cr, oa), Curated())[0].kind is Kind.INCOLLECTION
+    assert build(_group(cr), Curated())[0].excluded == "kind:other"
+    bare = dataclasses.replace(cr, container=())
+    assert build(_group(bare, dataclasses.replace(oa, container=())), Curated())[0].excluded == "kind:other"
+
+
+def test_chapters_of_an_authored_book_fold_into_the_book() -> None:
+    me = (author("Thomas P. Trappenberg"),)
+    title = "Fundamentals of Computational Neuroscience"
+    book = build(
+        _group(
+            record(
+                "doi:10.1093/oso/9780192869364.001.0001",
+                title=title,
+                authors=me,
+                source_type="edited-book",
+                container=(),
+            )
+        ),
+        Curated(),
+    )[0]
+    assert book.kind is Kind.BOOK and book.excluded is None
+    chapter = build(
+        _group(
+            record(
+                "doi:10.1093/oso/9780192869364.003.0001",
+                title="Introduction and outlook",
+                authors=me,
+                source_type="book-chapter",
+                container=(title,),
+            )
+        ),
+        Curated(),
+    )[0]
+    guest = build(
+        _group(
+            record(
+                "doi:10.1093/oso/9780192869364.003.0099",
+                title="A guest chapter",
+                authors=(*me, author("Ana Lima")),
+                source_type="book-chapter",
+                container=(title,),
+            )
+        ),
+        Curated(),
+    )[0]
+    out = {w.key: w for w in apply_links([book, chapter, guest])}
+    assert out[chapter.key].excluded == f"chapter_of:{book.key}"
+    assert out[book.key].linked == {chapter.key} and out[book.key].excluded is None
+    assert out[guest.key].excluded is None
+    assert apply_links([chapter])[0].excluded is None

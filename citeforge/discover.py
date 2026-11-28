@@ -15,6 +15,7 @@ def discover(
     identity: Identity,
     orcid: Result[OrcidRecord] | None,
     dblp: Result[DblpPerson] | None,
+    openalex_lookup: Fetch | None,
     http: Http,
     since_year: int,
 ) -> Listing:
@@ -30,7 +31,10 @@ def discover(
         listed = openalex.list_works(http, sorted(identity.openalex), since_year)
         fetch[Source.OPENALEX] = listed.fetch
         raw[Source.OPENALEX] = listed.value or ()
-    most = max((len(c) for c in raw.values()), default=0)
+    if openalex_lookup is Fetch.FAILED:
+        fetch[Source.OPENALEX] = Fetch.FAILED
+    # OpenAlex is listed from since_year on the server, so the others are compared over the same window.
+    most = max((len(_since(c, since_year)) for c in raw.values()), default=0)
     for source, found in raw.items():
         # A parsed ORCID record with no works is the owner's own empty list, not a silent failure.
         if not found and source is not Source.ORCID and fetch[source] is not Fetch.FAILED and most >= SUSPECT_OTHER_MIN:

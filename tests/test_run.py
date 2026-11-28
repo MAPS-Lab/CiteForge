@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from pathlib import Path
 
@@ -5,7 +6,25 @@ import pytest
 
 from citeforge import cli
 from citeforge.bibtex import read_entry
-from tests.world import INPUT, MATWIN, SPADON, YE, default_world, install, repo, tree
+from citeforge.http import Result
+from citeforge.model import Claim, Fetch, Kind, Record, Source, Status
+from citeforge.sources import crossref, openalex, orcid
+from tests.world import (
+    INPUT,
+    MATWIN,
+    MW,
+    SP,
+    SP_OA,
+    SPADON,
+    SPADON_ORCID,
+    YE,
+    YE_ORCID,
+    cr,
+    default_world,
+    install,
+    repo,
+    tree,
+)
 
 
 @pytest.fixture
@@ -179,3 +198,204 @@ def test_unhandled_error_exits_1(workdir: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("citeforge.sources.crossref.by_doi", boom)
     assert cli.main([]) == 1
     assert not (workdir / "state/works.jsonl").exists()
+
+
+def removed(root: Path, member: str) -> dict[str, str]:
+    report = json.loads((root / "state/report.json").read_text())
+    return dict(report["members"][member]["removed"])
+
+
+def status(root: Path, member: str) -> str:
+    return json.loads((root / "state/report.json").read_text())["members"][member]["status"]
+
+
+def test_dblp_challenge_keeps_every_entry_past_the_missing_runs(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    before = {f for f in tree(workdir / "output") if f.startswith((SPADON, MATWIN))}
+    world.dblp_challenge = True
+    for _ in range(3):
+        assert cli.main([]) == 3
+    assert before <= set(tree(workdir / "output"))
+    assert status(workdir, MATWIN) == "partial:dblp"
+
+
+def test_curated_reject_after_publication_removes_the_file(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install(monkeypatch, default_world())
+    assert cli.main([]) == 0
+    path = workdir / "output" / YE / "Ye2024-WirelessChannel.bib"
+    assert path.exists()
+    with (workdir / "data/curated.toml").open("a", encoding="utf-8") as f:
+        f.write(f"\n[[reject]]\nmember = '{YE}'\nid = 'doi:10.1234/ye'\n")
+    assert cli.main([]) == 0
+    assert not path.exists()
+    assert removed(workdir, YE) == {"doi:10.1234/ye": "curated"}
+
+
+def test_work_absorbed_into_a_doi_is_removed_as_merged(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    old = "dblp:conf/kdd/SpadonM23"
+    conf = world.dblp_claims["192/1659"][0]
+    assert conf.ids == {old} and conf.record is not None
+    doi = "doi:10.1234/kdd23"
+    world.crossref[doi] = cr(doi, conf.title, (SP, MW), year=2023, container=("Proceedings of KDD",))
+    rec = dataclasses.replace(conf.record, ids=conf.ids | {doi})
+    world.dblp_claims["192/1659"][0] = world.dblp_claims["m/StanMatwin"][0] = dataclasses.replace(
+        conf, ids=rec.ids, record=rec
+    )
+    assert cli.main([]) == 0
+    assert removed(workdir, SPADON) == {old: f"merged_into:{doi}"}
+
+
+def test_held_doi_review_keeps_the_earlier_file(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    ye = world.crossref["doi:10.1234/ye"]
+    world.crossref["doi:10.1234/ye"] = dataclasses.replace(
+        ye, authors=(dataclasses.replace(ye.authors[0], orcid=None),)
+    )
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    path = workdir / "output" / YE / "Ye2024-WirelessChannel.bib"
+    assert path.exists()
+    claim = world.orcid_works[YE_ORCID][0]
+    world.orcid_works[YE_ORCID] = [
+        dataclasses.replace(claim, title="Channel estimation for wireless links with attention models")
+    ]
+    for _ in range(3):
+        assert cli.main([]) == 0
+        assert path.exists()
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert report["events"]["counts"]["doi_review"] == 1
+
+
+def test_retraction_after_publication_removes_the_file(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    world.crossref["doi:10.1234/ye"] = dataclasses.replace(world.crossref["doi:10.1234/ye"], status=Status.RETRACTED)
+    assert cli.main([]) == 0
+    assert not (workdir / "output" / YE / "Ye2024-WirelessChannel.bib").exists()
+    assert removed(workdir, YE) == {"doi:10.1234/ye": "status:retracted"}
+
+
+def test_missing_and_future_years_are_held_for_review(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    undated = dataclasses.replace(cr("doi:10.1234/undated", "An undated note on sea ice", (SP,)), year=None, dates=())
+    world.crossref["doi:10.1234/undated"] = undated
+    world.orcid_works[SPADON_ORCID].append(
+        Claim(Source.ORCID, frozenset({"doi:10.1234/undated"}), "An undated note on sea ice", None)
+    )
+    future = Record(
+        Source.DBLP,
+        frozenset({"dblp:conf/x/Matwin99"}),
+        Kind.INPROCEEDINGS,
+        "inproceedings",
+        "Vessel routing in a later decade",
+        authors=(MW,),
+        year=2999,
+        dates=(2999,),
+        container=("X",),
+    )
+    world.dblp_claims["m/StanMatwin"] = [
+        *world.dblp_claims["m/StanMatwin"],
+        Claim(Source.DBLP, future.ids, future.title, 2999, record=future),
+    ]
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    rows = {r["work"]["key"]: r for r in map(json.loads, (workdir / "state/works.jsonl").read_text().splitlines())}
+    assert rows["doi:10.1234/undated"]["members"][SPADON]["verdict"] == "review"
+    assert rows["doi:10.1234/undated"]["members"][SPADON]["rule"] == "no_year"
+    assert rows["dblp:conf/x/Matwin99"]["members"][MATWIN]["rule"] == "future_year"
+    files = tree(workdir / "output")
+    assert not any("Undated" in f or "Later" in f for f in files)
+
+
+def test_registry_outage_holds_new_works_as_pending(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    before = tree(workdir / "output")
+    world.crossref_down = True
+    doi = "doi:10.1234/late"
+    world.crossref[doi] = cr(doi, "A late paper on sea ice", (SP,))
+    late = Record(Source.DBLP, frozenset({doi, "dblp:journals/x/Spadon24"}), Kind.ARTICLE, "article",
+                  "A late paper on sea ice", authors=(SP,), year=2024, dates=(2024,), container=("X",))  # fmt: skip
+    world.dblp_claims["192/1659"] = [
+        *world.dblp_claims["192/1659"],
+        Claim(Source.DBLP, late.ids, late.title, 2024, record=late),
+    ]
+    for _ in range(3):
+        cli.main([])
+        assert tree(workdir / "output") == before
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert ["pending", SPADON, "doi:10.1234/late", "pending:registry"] in report["events"]["items"]
+    world.crossref_down = False
+    cli.main([])
+    assert (workdir / "output" / SPADON / "Spadon2024-LatePaper.bib").exists()
+
+
+def test_unknown_or_failed_profiles_hold_removals_and_exit_3(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install(monkeypatch, default_world())
+    assert cli.main([]) == 0
+    path = workdir / "output" / YE / "Ye2024-WirelessChannel.bib"
+    real = orcid.record
+    monkeypatch.setattr(
+        orcid, "record", lambda http, o: Result(Fetch.NOT_FOUND, None, "not_found") if o == YE_ORCID else real(http, o)
+    )
+    for _ in range(3):
+        assert cli.main([]) == 3
+        assert path.exists()
+    assert status(workdir, YE) == "no_profile"
+    world_down = default_world()
+    world_down.dblp_challenge = True
+    install(monkeypatch, world_down)
+    monkeypatch.setattr(orcid, "record", lambda http, o: Result(Fetch.FAILED, None, "timeout"))
+    before = set(tree(workdir / "output"))
+    for _ in range(3):
+        assert cli.main([]) == 3
+    assert set(tree(workdir / "output")) == before
+    assert status(workdir, SPADON) == "partial:dblp,orcid"
+
+
+def test_openalex_lookup_failure_keeps_openalex_only_works(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (workdir / "data/input.csv").write_text(INPUT.replace(",A5023888391,", ",,"), encoding="utf-8")
+    world = default_world()
+    doi = "doi:10.1234/oaonly"
+    world.crossref[doi] = cr(doi, "Sea ice drift from vessel tracks", (SP_OA,), year=2023)
+    oa = Record(Source.OPENALEX, frozenset({doi, "openalex:W9"}), Kind.ARTICLE, "article",
+                "Sea ice drift from vessel tracks", authors=(SP_OA,), year=2023, dates=(2023,))  # fmt: skip
+    world.openalex_claims.append(Claim(Source.OPENALEX, oa.ids, oa.title, 2023, record=oa))
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    path = workdir / "output" / SPADON / "Spadon2023-SeaIce.bib"
+    assert path.exists()
+    monkeypatch.setattr(openalex, "authors_by_orcid", lambda http, o: Result(Fetch.FAILED, None, "down"))
+    for _ in range(3):
+        assert cli.main([]) == 3
+        assert path.exists()
+    assert status(workdir, SPADON).startswith("partial") and "openalex" in status(workdir, SPADON)
+
+
+def test_warm_run_reuses_search_links_and_writes_the_same_bytes(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    doi = "doi:10.1145/kdd23"
+    found = cr(doi, "Maritime traffic graphs at scale", (SP, MW), year=2023, container=("Proceedings of KDD",))
+    install(monkeypatch, world)
+    world.crossref[doi] = found
+    searches = []
+    monkeypatch.setattr(crossref, "search", lambda http, t, f, y: searches.append(t) or Result(Fetch.OK, (found,)))
+    assert cli.main([]) == 0
+    cold = outputs(workdir)
+    assert len(searches) == 1
+    rows = {r["work"]["key"]: r for r in map(json.loads, (workdir / "state/works.jsonl").read_text().splitlines())}
+    assert "dblp:conf/kdd/SpadonM23" in rows[doi]["work"]["aliases"]
+    assert cli.main([]) == 0
+    warm = outputs(workdir)
+    assert cli.main([]) == 0
+    assert len(searches) == 1 and outputs(workdir) == warm
+    assert {k: v for k, v in warm.items() if k != "state/report.json"} == {
+        k: v for k, v in cold.items() if k != "state/report.json"
+    }

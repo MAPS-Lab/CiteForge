@@ -5,21 +5,18 @@ from citeforge.model import REGISTRIES, Author, Claim, Decision, Identity, Sourc
 from citeforge.text import fold, is_group, name_matches
 
 
-def _bylines(w: Work, claims: Iterable[Claim]) -> list[tuple[Author, ...]]:
+def bylines(w: Work, claims: Iterable[Claim]) -> list[tuple[Author, ...]]:
     return [w.primary.authors, *(c.record.authors for c in claims if c.record is not None)]
 
 
+def is_own(i: Identity, a: Author) -> bool:
+    if a.orcid:
+        return a.orcid in i.orcids
+    return bool(a.openalex and a.openalex in i.openalex) or name_matches(i.names, a)
+
+
 def own_slots(i: Identity, w: Work, claims: Iterable[Claim]) -> list[Author]:
-    slots = []
-    for byline in _bylines(w, claims):
-        for a in byline:
-            if (
-                (a.orcid and a.orcid in i.orcids)
-                or (a.openalex and a.openalex in i.openalex)
-                or name_matches(i.names, a)
-            ):
-                slots.append(a)
-    return slots
+    return [a for byline in bylines(w, claims) for a in byline if is_own(i, a)]
 
 
 def _affil(i: Identity, slots: Iterable[Author]) -> tuple[bool, bool]:
@@ -39,13 +36,23 @@ def decide(i: Identity, w: Work, claims: Iterable[Claim], curated: Curated) -> D
         return decision
     if w.primary.source not in REGISTRIES | {Source.CURATED, Source.DBLP, Source.ARXIV}:
         return Decision(Verdict.REVIEW, "no_registry", frozenset({w.primary.source.value}))
-    bylines = _bylines(w, claims)
-    if any(a.orcid in i.orcids for byline in bylines for a in byline if a.orcid):
+    lines = bylines(w, claims)
+    if any(a.orcid in i.orcids for byline in lines for a in byline if a.orcid):
         return Decision(Verdict.ACCEPT, "authorship_orcid", frozenset(i.orcids))
     sources = {c.source for c in claims}
+    listed = sources & {Source.DBLP, Source.ORCID}
     named = [a for a in w.primary.authors if name_matches(i.names, a)]
+    # OpenAlex bylines carry the author entity's name, so only the member's own listings may stand in.
+    listed_named = any(
+        name_matches(i.names, a)
+        for c in claims
+        if c.record is not None and c.source in listed
+        for a in c.record.authors
+    )
     persons = [a for a in w.primary.authors if a.family or (a.literal and not is_group(a.literal))]
-    if not named and (persons or not sources & {Source.DBLP, Source.ORCID}):
+    if not named and not listed_named and (persons or not listed):
+        if listed and w.primary.source not in REGISTRIES | {Source.CURATED}:
+            return Decision(Verdict.REVIEW, "not_named_unregistered", frozenset(s.value for s in listed))
         return Decision(Verdict.REJECT, "not_named", frozenset())
     if i.orcids and named and all(a.orcid and a.orcid not in i.orcids for a in named) and not _affil(i, named)[0]:
         return Decision(Verdict.REJECT, "orcid_contra", frozenset(a.orcid for a in named if a.orcid))

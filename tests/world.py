@@ -1,6 +1,6 @@
 import dataclasses
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -190,11 +190,11 @@ def install(monkeypatch: pytest.MonkeyPatch, world: World) -> None:
         count("openalex.list_works")
         return Result(Fetch.OK, tuple(c for c in world.openalex_claims if (c.year or 0) >= since))
 
-    def batch(name: str, table: dict[str, Record], down: bool = False):
+    def batch(name: str, table: dict[str, Record], down: Callable[[], bool] = lambda: False):
         def fn(http, ids: Sequence[str]) -> Batch:
             count(name)
             ids = list(ids)
-            if down:
+            if down():
                 return Batch({}, frozenset(), frozenset(ids))
             return Batch(
                 {i: table[i] for i in ids if i in table}, frozenset(i for i in ids if i not in table), frozenset()
@@ -208,7 +208,7 @@ def install(monkeypatch: pytest.MonkeyPatch, world: World) -> None:
     monkeypatch.setattr(openalex, "author", author)
     monkeypatch.setattr(openalex, "list_works", list_works)
     monkeypatch.setattr(openalex, "works_by_doi", batch("openalex.works_by_doi", {}))
-    monkeypatch.setattr(crossref, "by_doi", batch("crossref.by_doi", world.crossref, world.crossref_down))
+    monkeypatch.setattr(crossref, "by_doi", batch("crossref.by_doi", world.crossref, lambda: world.crossref_down))
     monkeypatch.setattr(crossref, "search", lambda http, t, f, y: (count("crossref.search"), Result(Fetch.OK, ()))[1])
     monkeypatch.setattr(datacite, "by_doi", batch("datacite.by_doi", {}))
     monkeypatch.setattr(

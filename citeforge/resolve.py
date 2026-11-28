@@ -3,12 +3,13 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 
+from citeforge.authorship import is_own
 from citeforge.http import Http, Result
-from citeforge.model import Author, Event, Fetch, Identity, Member, NameKey, Work
+from citeforge.model import Event, Fetch, Identity, Member, NameKey, Work
 from citeforge.sources import dblp, openalex, orcid
 from citeforge.sources.dblp import DblpPerson
 from citeforge.sources.orcid import OrcidRecord
-from citeforge.text import fold, name_key, name_matches, split_literal
+from citeforge.text import fold, name_key, split_literal
 
 LEARN_MIN_WORKS = 3
 STRONG_RULES = frozenset({"curated", "authorship_orcid", "dblp_listed"})
@@ -49,13 +50,15 @@ def _names(m: Member, rec: OrcidRecord | None, person: DblpPerson | None) -> tup
 
 def resolve(
     m: Member, http: Http, lab_rors: frozenset[str]
-) -> tuple[Identity, Result[OrcidRecord] | None, Result[DblpPerson] | None, tuple[Event, ...]]:
+) -> tuple[Identity, Result[OrcidRecord] | None, Result[DblpPerson] | None, Fetch | None, tuple[Event, ...]]:
     events: list[Event] = []
     orcid_result = _merge_orcid([orcid.record(http, o) for o in m.orcids])
     person = dblp.person(http, m.dblp) if m.dblp else None
     author_ids: set[str] = set()
+    lookup = None
     if m.orcids:
         found = openalex.authors_by_orcid(http, m.orcids)
+        lookup = found.fetch
         if found.value:
             author_ids |= {a for ids in found.value.values() for a in ids}
     for pinned in m.openalex:
@@ -84,13 +87,7 @@ def resolve(
         rors=lab_rors | {a.ror for a in affiliations if a.ror},
         inst_names=frozenset(f for a in affiliations if (f := fold(a.name))),
     )
-    return identity, orcid_result, person, tuple(events)
-
-
-def _own(identity: Identity, a: Author) -> bool:
-    if a.orcid:
-        return a.orcid in identity.orcids
-    return bool(a.openalex and a.openalex in identity.openalex) or name_matches(identity.names, a)
+    return identity, orcid_result, person, lookup, tuple(events)
 
 
 def learn_institutions(identity: Identity, accepted: Iterable[tuple[Work, str]]) -> Identity:
@@ -98,6 +95,6 @@ def learn_institutions(identity: Identity, accepted: Iterable[tuple[Work, str]])
     for work, rule in accepted:
         if rule not in STRONG_RULES:
             continue
-        counts.update({r for a in work.primary.authors if _own(identity, a) for r in a.rors})
+        counts.update({r for a in work.primary.authors if is_own(identity, a) for r in a.rors})
     learned = {ror for ror, n in counts.items() if n >= LEARN_MIN_WORKS}
     return dataclasses.replace(identity, rors=identity.rors | learned) if learned - identity.rors else identity

@@ -107,8 +107,7 @@ def _pairs(w: Work, g: Group, identities: Mapping[str, Identity], curated: Curat
         out[member].append(c)
     by_orcid = {o: m for m, i in identities.items() for o in i.orcids}
     by_openalex = {a: m for m, i in identities.items() for a in i.openalex}
-    bylines = [w.primary.authors, *(c.record.authors for _, c in g.claims if c.record is not None)]
-    for byline in bylines:
+    for byline in authorship.bylines(w, (c for _, c in g.claims)):
         for a in byline:
             for m in (by_orcid.get(a.orcid or ""), by_openalex.get(a.openalex or "")):
                 if m is not None:
@@ -136,13 +135,13 @@ def _windowed(d: Decision, w: Work, s: Settings) -> Decision:
 
 
 def _status(listing: Listing, over_cap: bool, emitted: int) -> str:
-    if not listing.fetch:
-        return "identity_unresolved"
     if over_cap:
         return "over_cap"
     failed = sorted(s.value for s, f in listing.fetch.items() if f is Fetch.FAILED)
     if failed:
         return "partial:" + ",".join(failed)
+    if Fetch.OK not in listing.fetch.values():
+        return "no_profile"
     return "complete" if emitted else "no_works_in_window"
 
 
@@ -166,8 +165,9 @@ def run(
     events: list[Event] = []
 
     def per_member(m: Member) -> tuple[Identity, Listing, tuple[Event, ...]]:
-        identity, orcid_result, dblp_result, ev = resolve.resolve(m, http, curated.lab_rors)
-        listing = discover.discover(identity, orcid_result, dblp_result, http, s.min_year - SINCE_SLACK_YEARS)
+        identity, orcid_result, dblp_result, openalex_lookup, ev = resolve.resolve(m, http, curated.lab_rors)
+        since = s.min_year - SINCE_SLACK_YEARS
+        listing = discover.discover(identity, orcid_result, dblp_result, openalex_lookup, http, since)
         return identity, listing, ev
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
@@ -196,7 +196,8 @@ def run(
         held_ids[member] |= c.ids
     groups, ev = cluster.cluster(kept, reg, curated)
     events += ev
-    groups, ev = cluster.search_unidentified(groups, http, identities)
+    known = {a: k for k, row in sorted(previous.items()) if split_id(k)[0] == "doi" for a in row.work.aliases if a != k}
+    groups, ev = cluster.search_unidentified(groups, http, identities, known)
     events += ev
     t = stage("cluster", t)
     built = [works.build(g, curated) for g in groups]
@@ -229,6 +230,8 @@ def run(
     t = stage("decide", t)
 
     failed_registry = {w.key for w in current if (w.aliases & reg.failed) and w.primary.source not in REGISTRIES}
+    # Until the registry answers again, such a work is judged as it was last published.
+    registry_held = {k: previous[k].work for k in failed_registry if k in previous}
     window_years = s.today.year - s.min_year + 1
     final: dict[str, dict[str, Decision]] = {}
     missing: dict[str, dict[str, int]] = defaultdict(dict)
@@ -240,7 +243,7 @@ def run(
     for m in members:
         name = m.dirname
         listing = listings[name]
-        partial = any(f is Fetch.FAILED for f in listing.fetch.values()) or not listing.fetch
+        partial = Fetch.FAILED in listing.fetch.values() or Fetch.OK not in listing.fetch.values()
         mine = dict(decisions.get(name, {}))
         prev = {k: row for k, row in previous.items() if publish.emitted(row, name)}
         accepted = [k for k, d in mine.items() if d.verdict is Verdict.ACCEPT and by_key[k].excluded is None]
@@ -262,7 +265,7 @@ def run(
         removals: dict[str, str] = {}
         for k, row in sorted(prev.items()):
             now = mine.get(k)
-            w = by_key.get(k)
+            w = registry_held.get(k) or by_key.get(k)
             if now is not None and now.verdict is Verdict.ACCEPT and w is not None and w.excluded is None:
                 continue
             if partial or over_cap:
@@ -300,15 +303,13 @@ def run(
         emitted = sum(
             1
             for k, d in mine.items()
-            if d.verdict is Verdict.ACCEPT and (by_key.get(k) or carried_works[k]).excluded is None
+            if d.verdict is Verdict.ACCEPT
+            and (registry_held.get(k) or by_key.get(k) or carried_works[k]).excluded is None
         )
         statuses[name] = _status(listing, over_cap, emitted)
     t = stage("failure_rules", t)
 
-    all_works = {**by_key, **carried_works}
-    for k in failed_registry:
-        if k in previous:
-            all_works[k] = previous[k].work
+    all_works = {**by_key, **carried_works, **registry_held}
     emitted_keys = {
         k for name, mine in final.items() for k, d in mine.items()
         if d.verdict is Verdict.ACCEPT and all_works[k].excluded is None
@@ -340,7 +341,7 @@ def run(
             (k, before[k], after[k]) for k in after.keys() & before.keys() if before[k] != after[k]
         )
     down = {h: r for h in sorted(HOSTS) if (r := http.down(HOSTS[h]))}
-    partial_any = any(st.startswith("partial") or st == "identity_unresolved" for st in statuses.values())
+    partial_any = any(st.startswith("partial") or st == "no_profile" for st in statuses.values())
     exit_code = 3 if partial_any or down or guard else 0
     data = report.RunData(
         min_year=s.min_year,

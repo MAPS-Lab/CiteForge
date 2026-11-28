@@ -39,7 +39,8 @@ def test_resolve_merges_identity_and_checks_pinned_ids(monkeypatch: pytest.Monke
     }
     monkeypatch.setattr(res.openalex, "author", lambda http, a: answers[a])
     m = member(orcids=(ME,), openalex=tuple(answers))
-    ident, orcid_result, person, events = res.resolve(m, None, frozenset({LAB}))  # type: ignore[arg-type]
+    ident, orcid_result, person, lookup, events = res.resolve(m, None, frozenset({LAB}))  # type: ignore[arg-type]
+    assert lookup is Fetch.OK
     assert ident.openalex == {"A1000001", "A2000009", "A5000005"}
     assert [e.kind for e in events] == ["openalex_id_merged", "openalex_orcid_conflict", "openalex_id_deleted"]
     assert ident.rors == {LAB, "https://ror.org/036rp1748"}
@@ -52,13 +53,14 @@ def test_resolve_merges_identity_and_checks_pinned_ids(monkeypatch: pytest.Monke
 def test_pinned_id_kept_when_member_lists_no_orcid(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(res.dblp, "person", lambda http, p: Result(Fetch.OK, DblpPerson(("Gabriel Spadon",), (), ())))
     monkeypatch.setattr(res.openalex, "author", lambda http, a: Result(Fetch.OK, ("A3000003", ME)))
-    ident, _, _, events = res.resolve(member(openalex=("A3000003",)), None, frozenset())  # type: ignore[arg-type]
+    ident, _, _, lookup, events = res.resolve(member(openalex=("A3000003",)), None, frozenset())  # type: ignore[arg-type]
+    assert lookup is None
     assert ident.openalex == {"A3000003"} and not events
 
 
 def test_resolve_without_orcid_or_dblp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(res.dblp, "person", lambda http, p: Result(Fetch.FAILED, None, "challenge"))
-    ident, orcid_result, person, _ = res.resolve(member(), None, frozenset())  # type: ignore[arg-type]
+    ident, orcid_result, person, _, _ = res.resolve(member(), None, frozenset())  # type: ignore[arg-type]
     assert orcid_result is None and person is not None and person.fetch is Fetch.FAILED
     assert ident.names and ident.openalex == frozenset()
 
@@ -81,15 +83,41 @@ def test_discover_filters_years_and_suspects_empty_listing(monkeypatch: pytest.M
     monkeypatch.setattr(disc.openalex, "list_works", lambda http, ids, since: Result(Fetch.OK, ()))
     orcid = Result(Fetch.OK, orcid_rec(claims(6, Source.ORCID) + claims(1, Source.ORCID, 2010)))
     dblp = Result(Fetch.OK, DblpPerson((), (), claims(2, Source.DBLP)))
-    listing = disc.discover(identity(), orcid, dblp, None, 2018)  # type: ignore[arg-type]
+    listing = disc.discover(identity(), orcid, dblp, None, None, 2018)  # type: ignore[arg-type]
     assert len(listing.claims) == 8
     assert listing.fetch == {Source.ORCID: Fetch.OK, Source.DBLP: Fetch.OK, Source.OPENALEX: Fetch.FAILED}
     empty_orcid = Result(Fetch.OK, orcid_rec())
     old_dblp = Result(Fetch.OK, DblpPerson((), (), claims(6, Source.DBLP, 2010)))
-    listing = disc.discover(identity(openalex=frozenset()), empty_orcid, old_dblp, None, 2018)  # type: ignore[arg-type]
+    listing = disc.discover(identity(openalex=frozenset()), empty_orcid, old_dblp, None, None, 2018)  # type: ignore[arg-type]
     assert listing.fetch == {Source.ORCID: Fetch.OK, Source.DBLP: Fetch.OK} and listing.claims == ()
-    listing = disc.discover(identity(openalex=frozenset()), None, Result(Fetch.FAILED, None, "challenge"), None, 2018)  # type: ignore[arg-type]
+    challenge = Result(Fetch.FAILED, None, "challenge")
+    listing = disc.discover(identity(openalex=frozenset()), None, challenge, None, None, 2018)  # type: ignore[arg-type]
     assert listing.fetch == {Source.DBLP: Fetch.FAILED} and listing.claims == ()
+
+
+def test_failed_openalex_lookup_marks_the_listing_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(res.orcid, "record", lambda http, o: Result(Fetch.OK, orcid_rec()))
+    monkeypatch.setattr(res.dblp, "person", lambda http, p: Result(Fetch.OK, DblpPerson((), (), ())))
+    monkeypatch.setattr(res.openalex, "authors_by_orcid", lambda http, o: Result(Fetch.FAILED, None, "down"))
+    ident, orcid_result, person, lookup, _ = res.resolve(member(orcids=(ME,)), None, frozenset())  # type: ignore[arg-type]
+    assert ident.openalex == frozenset() and lookup is Fetch.FAILED
+    listing = disc.discover(ident, orcid_result, person, lookup, None, 2018)  # type: ignore[arg-type]
+    assert listing.fetch[Source.OPENALEX] is Fetch.FAILED
+    monkeypatch.setattr(
+        disc.openalex, "list_works", lambda http, ids, since: Result(Fetch.OK, claims(1, Source.OPENALEX))
+    )
+    listing = disc.discover(identity(), orcid_result, person, Fetch.FAILED, None, 2018)  # type: ignore[arg-type]
+    assert listing.fetch[Source.OPENALEX] is Fetch.FAILED and len(listing.claims) == 1
+
+
+def test_discover_window_compares_listings_over_the_same_years(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(disc.openalex, "list_works", lambda http, ids, since: Result(Fetch.OK, ()))
+    old = Result(Fetch.OK, DblpPerson((), (), claims(6, Source.DBLP, 2010)))
+    listing = disc.discover(identity(), None, old, Fetch.OK, None, 2018)  # type: ignore[arg-type]
+    assert listing.fetch == {Source.DBLP: Fetch.OK, Source.OPENALEX: Fetch.OK} and listing.claims == ()
+    recent = Result(Fetch.OK, DblpPerson((), (), claims(5, Source.DBLP, 2019)))
+    listing = disc.discover(identity(), None, recent, Fetch.OK, None, 2018)  # type: ignore[arg-type]
+    assert listing.fetch[Source.OPENALEX] is Fetch.FAILED
 
 
 def test_enrich_routes_misses(monkeypatch: pytest.MonkeyPatch) -> None:

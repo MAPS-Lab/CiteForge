@@ -80,7 +80,8 @@ A work has the same file name and the same bytes in every folder it appears in. 
 given, is kept while the first author's family name and the year stay the same.
 
 `state/works.jsonl` is the memory between runs. When a source fails, the person is marked
-partial: works can be added but none are removed. A file is removed only with complete
+partial: works can be added but none are removed. A person whose ORCID, DBLP pid or OpenAlex
+id is not found anywhere reads `no_profile` and is held the same way. A file is removed only with complete
 listings and a named reason, and never when a person would lose more than 20% of their
 entries at once.
 

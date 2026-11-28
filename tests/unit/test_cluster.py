@@ -6,7 +6,7 @@ from hypothesis import strategies as st
 
 from citeforge import cluster as cl
 from citeforge.curated import Curated
-from citeforge.http import Result
+from citeforge.http import Batch, Result
 from citeforge.ids import is_preprint_id, split_id
 from citeforge.model import Claim, Fetch, Kind, Record, Registries, Rel, Source
 from tests.factories import author, record
@@ -190,7 +190,7 @@ def test_search_unidentified(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cl.crossref, "search", fake_search)
     dblp_rec = record("dblp:conf/x/S23", source=Source.DBLP)
     groups, _ = cl.cluster([(ME, claim("dblp:conf/x/S23", source=Source.DBLP, rec=dblp_rec))], reg(), Curated())
-    out, events = cl.search_unidentified(groups, None, {ME: identity()})  # type: ignore[arg-type]
+    out, events = cl.search_unidentified(groups, None, {ME: identity()}, {})  # type: ignore[arg-type]
     assert seen == [(TITLE, "spadon", 2023)]
     assert [e.kind for e in events] == ["search_linked"]
     assert out[0].ids == {"dblp:conf/x/S23", "doi:10.1234/found"}
@@ -202,7 +202,7 @@ def test_search_unidentified(monkeypatch: pytest.MonkeyPatch) -> None:
             (dataclasses.replace(hit, title="Graph neural networks for vessel trajectory forecasting at scale"),),
         ),
     )
-    out, events = cl.search_unidentified(groups, None, {ME: identity()})  # type: ignore[arg-type]
+    out, events = cl.search_unidentified(groups, None, {ME: identity()}, {})  # type: ignore[arg-type]
     assert [e.kind for e in events] == ["search_review"]
     assert out == groups
 
@@ -214,5 +214,24 @@ def test_search_covers_a_listed_version_that_only_has_an_arxiv_id(monkeypatch: p
     corr = record("dblp:journals/corr/S23", "arxiv:2201.00002", source=Source.DBLP, kind=Kind.PREPRINT)
     pairs = [(ME, claim(*r.ids, source=Source.DBLP, rec=r)) for r in (listed, corr)]
     groups, _ = cl.cluster(pairs, reg(), Curated())
-    cl.search_unidentified(groups, None, {ME: identity()})  # type: ignore[arg-type]
+    cl.search_unidentified(groups, None, {ME: identity()}, {})  # type: ignore[arg-type]
     assert len(seen) == 1
+
+
+def test_a_link_from_the_last_run_is_checked_by_doi_instead_of_searched(monkeypatch: pytest.MonkeyPatch) -> None:
+    hit = record("doi:10.1234/found", year=2023)
+    searches, lookups = [], []
+    monkeypatch.setattr(cl.crossref, "search", lambda http, *a: searches.append(a) or Result(Fetch.OK, (hit,)))
+
+    def by_doi(http, ids):
+        lookups.append(list(ids))
+        return Batch({i: hit for i in ids if i == "doi:10.1234/found"}, frozenset(), frozenset())
+
+    monkeypatch.setattr(cl.crossref, "by_doi", by_doi)
+    dblp_rec = record("dblp:conf/x/S23", source=Source.DBLP)
+    groups, _ = cl.cluster([(ME, claim("dblp:conf/x/S23", source=Source.DBLP, rec=dblp_rec))], reg(), Curated())
+    cold = cl.search_unidentified(groups, None, {ME: identity()}, {})  # type: ignore[arg-type]
+    warm = cl.search_unidentified(groups, None, {ME: identity()}, {"dblp:conf/x/S23": "doi:10.1234/found"})  # type: ignore[arg-type]
+    assert warm == cold and len(searches) == 1 and lookups == [["doi:10.1234/found"]]
+    stale = cl.search_unidentified(groups, None, {ME: identity()}, {"dblp:conf/x/S23": "doi:10.1234/gone"})  # type: ignore[arg-type]
+    assert stale == cold and len(searches) == 2

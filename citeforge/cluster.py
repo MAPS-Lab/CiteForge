@@ -71,9 +71,10 @@ def verify(
                 case "detach":
                     claim = _strip_id(claim, work_id)
                     events.append(Event("doi_mismatch", member, work_id, f"{claim.title} | {record.title}"))
-                case "review":
+                case "review" | "group" as verdict:
                     hold = True
-                    events.append(Event("doi_review", member, work_id, f"{claim.title} | {record.title}"))
+                    kind = "doi_review" if verdict == "review" else "group_author"
+                    events.append(Event(kind, member, work_id, f"{claim.title} | {record.title}"))
                 case "ok":
                     pass
         if hold:
@@ -285,12 +286,30 @@ def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str
     return links
 
 
+def _search_hit(
+    profile: _Profile, identity: Identity, found: Sequence[Record]
+) -> tuple[Record, str, float, bool] | None:
+    if not found:
+        return None
+    best = max(found, key=lambda r: (ratio(profile.title, r.title), sorted(r.ids)))
+    score = ratio(profile.title, best.title)
+    doi = next((i for i in sorted(best.ids) if split_id(i)[0] == "doi"), None)
+    if doi is None or score < SEARCH_REVIEW:
+        return None
+    year_ok = profile.year is None or best.year is None or abs(best.year - profile.year) <= 1
+    named = any(name_matches(identity.names, a) for a in best.authors)
+    counts = [n for n in (len(profile.families), len(best.authors)) if n]
+    count_ok = len(counts) < 2 or min(counts) / max(counts) >= 0.5
+    return best, doi, score, score >= SEARCH_ACCEPT and year_ok and named and count_ok
+
+
 def search_unidentified(
-    groups: Sequence[Group], http: Http, identities: Mapping[str, Identity]
+    groups: Sequence[Group], http: Http, identities: Mapping[str, Identity], known: Mapping[str, str]
 ) -> tuple[list[Group], list[Event]]:
     events: list[Event] = []
     by_doi = {i: g.key for g in groups for i in g.ids if split_id(i)[0] == "doi"}
     merged: dict[str, Group] = {g.key: g for g in groups}
+    todo = []
     for g in groups:
         kinds = {split_id(i)[0] for i in g.ids}
         if "doi" in kinds or ("arxiv" in kinds and not _listed_version(g)) or not g.claims:
@@ -300,20 +319,21 @@ def search_unidentified(
         identity = identities.get(member)
         if profile is None or identity is None or not identity.names:
             continue
-        family = next(iter(sorted(identity.names[0].families, key=len, reverse=True)), "")
-        found = crossref.search(http, profile.title, family, profile.year)
-        if found.fetch is not Fetch.OK or not found.value:
-            continue
-        best = max(found.value, key=lambda r: (ratio(profile.title, r.title), sorted(r.ids)))
-        score = ratio(profile.title, best.title)
-        doi = next((i for i in sorted(best.ids) if split_id(i)[0] == "doi"), None)
-        if doi is None or score < SEARCH_REVIEW:
-            continue
-        year_ok = profile.year is None or best.year is None or abs(best.year - profile.year) <= 1
-        named = any(name_matches(identity.names, a) for a in best.authors)
-        counts = [n for n in (len(profile.families), len(best.authors)) if n]
-        count_ok = len(counts) < 2 or min(counts) / max(counts) >= 0.5
-        if score >= SEARCH_ACCEPT and year_ok and named and count_ok:
+        todo.append((g, profile, member, identity))
+    hinted = sorted({known[i] for g, *_ in todo for i in g.ids if i in known})
+    prior = crossref.by_doi(http, hinted).found if hinted else {}
+    for g, profile, member, identity in todo:
+        hit = _search_hit(profile, identity, [prior[known[i]] for i in sorted(g.ids) if known.get(i) in prior])
+        if hit is None or not hit[3]:
+            family = next(iter(sorted(identity.names[0].families, key=len, reverse=True)), "")
+            found = crossref.search(http, profile.title, family, profile.year)
+            if found.fetch is not Fetch.OK or not found.value:
+                continue
+            hit = _search_hit(profile, identity, found.value)
+            if hit is None:
+                continue
+        best, doi, score, accepted = hit
+        if accepted:
             events.append(Event("search_linked", member, g.key, doi))
             target_key = by_doi.get(doi)
             if target_key is not None and target_key in merged and target_key != g.key:
