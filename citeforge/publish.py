@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from citeforge.bibtex import FIELD_ORDER, STEM_MAX, read_entry, render
-from citeforge.model import Member, Source, Verdict
+from citeforge.model import Decision, Member, Source, Verdict, Work
 from citeforge.state import State, StateRow, atomic_write
 
 GROUP_DIR = "a2i2"
@@ -32,9 +32,12 @@ class Changes:
     removed: tuple[str, ...]
 
 
+def publishable(d: Decision | None, w: Work | None) -> bool:
+    return d is not None and d.verdict is Verdict.ACCEPT and w is not None and w.excluded is None
+
+
 def emitted(row: StateRow, member: str) -> bool:
-    d = row.members.get(member)
-    return d is not None and d.verdict is Verdict.ACCEPT and row.work.excluded is None and bool(row.names.stem)
+    return publishable(row.members.get(member), row.work) and bool(row.names.stem)
 
 
 def plan(
@@ -115,7 +118,10 @@ def check(files: Mapping[Path, str]) -> list[str]:
         for field, value in entry.items():
             if not _balanced(value):
                 problems.append(f"{path}: unbalanced braces in {field}")
-        for field in ("doi", "eprint"):
+        for field in ("author", "editor"):
+            if field in entry and any(p.strip() in ("", "{}") for p in f" {entry[field]} ".split(" and ")):
+                problems.append(f"{path}: empty name in {field}")
+        for field in ("ID", "doi", "eprint"):
             if field in entry:
                 key = (folder, field, entry[field].casefold())
                 if key in seen:

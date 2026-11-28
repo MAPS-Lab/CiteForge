@@ -75,6 +75,7 @@ def test_load_sample(tmp_path: Path) -> None:
         ("[[accept]]\nmember = 'x'\nid = 'doi:10.1234/x'\ntitle = 'y'\n", "unknown keys"),
         ("[[override]]\nid = 'doi:10.1234/x'\nfield = 'doi'\nvalue = 'z'\n", "cannot be overridden"),
         ("[lab]\nror = ['01e6qks80']\n", "ror.org"),
+        ("[lab]\nror = ['https://ror.org/not-a-ror']\n", "ror.org"),
         ("[stuff]\n", "unknown sections"),
         ("[[accept]]\nmember='m'\nid='doi:10.1234/x'\n[[reject]]\nmember='m'\nid='doi:10.1234/X'\n", "both accepts"),
         (
@@ -91,3 +92,8 @@ def test_load_sample(tmp_path: Path) -> None:
 def test_bad_curated_aborts(tmp_path: Path, text: str, message: str) -> None:
     with pytest.raises(CuratedError, match=message):
         load(write(tmp_path, text))
+
+
+def test_lab_rors_share_the_registry_form(tmp_path: Path) -> None:
+    c = load(write(tmp_path, "[lab]\nror = ['https://ror.org/01E6QKS80/']\n"))
+    assert c.lab_rors == {"https://ror.org/01e6qks80"}

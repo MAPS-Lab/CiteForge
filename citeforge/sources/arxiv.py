@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from citeforge.http import HOSTS, Batch, Http, ParseError
 from citeforge.ids import norm_arxiv, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Rel, Source, Status
-from citeforge.text import clean, is_affiliation, is_group, split_literal
+from citeforge.text import affiliation, clean, is_affiliation, is_group, split_literal
 
 if pyexpat.version_info < (2, 6, 0):
     raise ImportError(f"expat {pyexpat.version_info} is too old to parse arXiv XML safely; 2.6.0 or newer is required")
@@ -40,7 +40,7 @@ def _year(stamp: str) -> int | None:
 
 def _author(node: ET.Element) -> Author:
     name = _text(node, "a:name")
-    affiliations = tuple(a for e in node.findall("x:affiliation", NS) if (a := clean(e.text or "")))
+    affiliations = tuple(a for e in node.findall("x:affiliation", NS) if (a := affiliation(e.text or "")))
     if not name:
         raise ParseError("arxiv: author has no name")
     if is_group(name) or is_affiliation(name):

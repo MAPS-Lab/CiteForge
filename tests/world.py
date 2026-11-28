@@ -37,7 +37,7 @@ def person(name: str, orcid_id: str | None = None, **kw) -> Author:
 
 
 SP = person("Gabriel Spadon", SPADON_ORCID)
-SP_OA = dataclasses.replace(SP, openalex="A5023888391", rors=(LAB,))
+SP_OA = person("Gabriel Spadon", openalex="A5023888391", rors=(LAB,))
 MW = person("Stan Matwin")
 YE_AUTHOR = person("Xiang Ye", YE_ORCID)
 
@@ -128,7 +128,7 @@ def default_world() -> World:
         Kind.ARTICLE,
         "article",
         "Soil bacteria in tropical farms",
-        authors=(dataclasses.replace(person("Gabriel Spadon", STRANGER_ORCID), openalex="A5023888391"),),
+        authors=(person("Gabriel Spadon", openalex="A5023888391"),),
         year=2023,
         dates=(2023,),
     )

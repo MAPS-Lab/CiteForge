@@ -11,6 +11,7 @@ from citeforge.ids import (
     norm_doi,
     norm_openalex,
     norm_orcid,
+    norm_ror,
     to_id,
     work_key,
 )
@@ -27,6 +28,8 @@ dois = st.from_regex(r"10\.\d{4,9}/[A-Za-z0-9._;()/:-]{1,30}[A-Za-z0-9]", fullma
         ("  10.1093/nar/gkz935  ", "10.1093/nar/gkz935"),
         ("10.1007/978-3-319-93698-7\\_21", "10.1007/978-3-319-93698-7_21"),
         ("10.123/short", None),
+        ("10.1234/ab\x1bc", None),
+        ("10.1234/ab%00c", None),
         ("not a doi", None),
         ("", None),
     ],
@@ -112,3 +115,22 @@ def test_doi_bases_match() -> None:
     assert doi_bases_match("10.20944/preprints202304.0409.v1", "10.20944/preprints202304.0409.v2")
     assert not doi_bases_match("10.1/a", "10.1/b")
     assert not doi_bases_match("", "")
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("https://ror.org/01e6qks80", "https://ror.org/01e6qks80"),
+        ("https://ror.org/01e6qks80/", "https://ror.org/01e6qks80"),
+        ("https://www.ror.org/01E6QKS80", "https://ror.org/01e6qks80"),
+        ("  01e6qks80 ", "https://ror.org/01e6qks80"),
+        ("http://ror.org/01e6qks80", "https://ror.org/01e6qks80"),
+        ("0abcdefgh", None),
+        ("01i6qks80", None),
+        ("https://ror.org/01e6qks8", None),
+        ("https://example.org/01e6qks80", None),
+        ("", None),
+    ],
+)
+def test_norm_ror(raw: str, want: str | None) -> None:
+    assert norm_ror(raw) == want

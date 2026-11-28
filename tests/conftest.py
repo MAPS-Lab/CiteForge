@@ -13,9 +13,11 @@ from hypothesis import settings
 from citeforge.http import Http, _scrub_secrets
 
 FIXTURES = Path(__file__).parent / "fixtures"
-# The suite runs at nice 19 on a shared host, where a wall-clock deadline only measures the neighbours.
-settings.register_profile("citeforge", deadline=None)
-settings.load_profile("citeforge")
+
+# A loaded host (nice 19) makes single examples exceed the 200 ms default and fail at random.
+settings.register_profile("dev", deadline=None)
+if settings.get_current_profile_name() == "default":
+    settings.load_profile("dev")
 
 
 @pytest.fixture(autouse=True)

@@ -60,8 +60,8 @@ def test_recorded_repository_publisher_is_never_school(batch: Batch, work_id: st
 
 def test_recorded_version_and_identity_relations(batch: Batch) -> None:
     assert batch.found["doi:10.82444/warw.34422843.v1"].relations == {
-        (Rel.VERSION_OF, "doi:10.1140/epjc/s10052-025-14940-1"),
-        (Rel.VERSION_OF, "doi:10.82444/warw.34422843"),
+        (Rel.IDENTICAL, "doi:10.1140/epjc/s10052-025-14940-1"),
+        (Rel.IDENTICAL, "doi:10.82444/warw.34422843"),
     }
     assert batch.found["doi:10.5281/zenodo.24581518"].relations == {(Rel.VERSION_OF, "doi:10.5281/zenodo.24581517")}
     assert batch.found["doi:10.5281/zenodo.17069890"].relations == frozenset()
@@ -127,7 +127,7 @@ def test_thesis_parse() -> None:
     assert r.editors == (Author("Edgar", "Poe"),)
     assert r.relations == {
         (Rel.VERSION_OF, "doi:10.5555/thesis.0"),
-        (Rel.VERSION_OF, "arxiv:2101.00001"),
+        (Rel.IDENTICAL, "arxiv:2101.00001"),
         (Rel.TRANSLATION_OF, "doi:10.5555/these.1"),
         (Rel.HAS_TRANSLATION, "doi:10.5555/these.2"),
     }

@@ -6,6 +6,7 @@ from citeforge.model import Author, Kind, Names, Record, Work
 from citeforge.tables import (
     GENERIC_SERIES_NAMES,
     PREPRINT_ONLY_PUBLISHERS,
+    PREPRINT_SERVERS,
     PUBLISHER_CORRECTIONS,
     VENUE_CASE_CORRECTIONS,
 )
@@ -43,23 +44,7 @@ _ESCAPE_RE = re.compile(r"[\\~^&%$#_{}]")
 _PAGE_DASH = re.compile(r"\s*[-‐-―−]+\s*")  # noqa: RUF001
 _PAGE_PART_SPLIT = re.compile(r"[-–—,\s]+")  # noqa: RUF001
 _PARTICLES = frozenset({"de", "da", "do", "dos", "das", "van", "von", "der", "den", "du", "la", "le", "del", "di"})
-_PREPRINT_SERVERS = (
-    ("10.1101/", "bioRxiv"),
-    ("10.21203/rs.", "Research Square"),
-    ("10.31234/osf.io", "OSF Preprints"),
-    ("10.31219/osf.io", "OSF Preprints"),
-    ("10.26434/chemrxiv", "ChemRxiv"),
-    ("10.20944/preprints", "Preprints.org"),
-    ("10.2139/", "SSRN"),
-    ("10.64898/", "openRxiv"),
-    ("10.36227/techrxiv", "TechRxiv"),
-    ("10.5194/egusphere", "EGU"),
-    ("10.2172/", "OSTI"),
-    ("10.31220/agrirxiv", "agriRxiv"),
-    ("10.32388/", "Qeios"),
-    ("10.48448/", "Underline Science"),
-    ("10.13140/", "ResearchGate"),
-)
+_URL = re.compile(r"[^\s\x00-\x1f\x7f-\x9f]+")
 _FIELD_LINE = re.compile(r"  ([a-z]+) = \{(.*)\},?")
 _HEAD = re.compile(r"@([a-z]+)\{([^,\s]+),")
 
@@ -117,19 +102,21 @@ def _invalid_pages_reason(pages: str) -> tuple[str, int] | None:
 
 
 def format_pages(r: Record) -> str | None:
-    if r.pages and _invalid_pages_reason(r.pages.strip()) is None:
-        parts = [p for p in _PAGE_DASH.split(r.pages.strip()) if p]
+    pages, number = clean(r.pages or ""), clean(r.article_number or "")
+    if pages and _invalid_pages_reason(pages) is None:
+        parts = [p for p in _PAGE_DASH.split(pages) if p]
         if len(parts) == 2 and parts[0] == parts[1]:
             return parts[0]
         return "--".join(parts)
-    if r.article_number and re.fullmatch(r"[A-Za-z]?\d+[A-Za-z]?", r.article_number.strip()):
-        return r.article_number.strip()
+    if re.fullmatch(r"[A-Za-z]?\d+[A-Za-z]?", number):
+        return number
     return None
 
 
 def _name(a: Author) -> str:
-    if not a.family:
-        return "{" + escape(clean(a.literal or ""), "author") + "}"
+    if not clean(a.family):
+        literal = escape(clean(a.literal or a.given), "author")
+        return "{" + literal + "}" if literal else ""
     family = escape(clean(a.family), "author")
     words = family.split()
     if "," in family or (len(words) > 1 and not any(w in _PARTICLES for w in words)):
@@ -139,7 +126,7 @@ def _name(a: Author) -> str:
 
 
 def _names(authors: Sequence[Author]) -> str | None:
-    return " and ".join(_name(a) for a in authors) or None
+    return " and ".join(n for a in authors if (n := _name(a))) or None
 
 
 def venue_case(venue: str) -> str:
@@ -164,7 +151,7 @@ def preprint_server(r: Record) -> str | None:
         kind, value = split_id(work_id)
         if kind == "arxiv":
             return "arXiv"
-        for prefix, server in _PREPRINT_SERVERS:
+        for prefix, server in PREPRINT_SERVERS:
             if kind == "doi" and value.startswith(prefix):
                 return server
     return first_non_generic_container(r.container)
@@ -200,10 +187,10 @@ def fields(w: Work) -> dict[str, str]:
         "number": clean(r.number) if r.number else None,
         "pages": format_pages(r),
         "doi": doi,
-        "url": None if doi or not r.url else r.url.strip(),
+        "url": None if doi or not r.url or not _URL.fullmatch(r.url.strip()) else r.url.strip(),
         "eprint": arxiv,
         "archiveprefix": "arXiv" if arxiv else None,
-        "primaryclass": primary_class if arxiv else None,
+        "primaryclass": clean(primary_class) if arxiv and primary_class else None,
         "editor": _names(r.editors),
         "school": clean(r.school) if r.school and w.kind in (Kind.PHDTHESIS, Kind.MASTERSTHESIS) else None,
         "institution": clean(r.institution) if r.institution and w.kind is Kind.TECHREPORT else None,
@@ -243,15 +230,26 @@ def _stem_base(stem: str) -> str:
     return stem.split("-", 1)[0]
 
 
+def _claim(root: str, taken: set[str], limit: int | None) -> str:
+    name, suffix = root[:limit], ord("b")
+    while name.casefold() in taken:
+        tail = chr(suffix) if suffix <= ord("z") else str(suffix - ord("a"))
+        name = (root if limit is None else root[: limit - len(tail)]) + tail
+        suffix += 1
+    taken.add(name.casefold())
+    return name
+
+
 def assign_names(works: Sequence[Work], previous: Mapping[str, Names]) -> dict[str, Names]:
     ordered = sorted(works, key=lambda w: w.key)
     result: dict[str, Names] = {}
     taken: set[str] = set()
+    keys: set[str] = set()
     for w in ordered:
         prev = previous.get(w.key)
         if prev and _stem_base(prev.stem) == base_of(w) and prev.stem.casefold() not in taken:
-            result[w.key] = prev
             taken.add(prev.stem.casefold())
+            result[w.key] = Names(prev.stem, _claim(prev.citekey, keys, None))
     pending = [w for w in ordered if w.key not in result]
     words = {w.key: slug_words(w.primary.title) for w in pending}
     by_base: dict[str, list[Work]] = {}
@@ -264,15 +262,9 @@ def assign_names(works: Sequence[Work], previous: Mapping[str, Names]) -> dict[s
             rivals = [words[o.key] for o in group if o is not w and words[o.key] != mine]
             while n < len(mine) and any(r[:n] == mine[:n] for r in rivals):
                 n += 1
-            root = f"{base}-{''.join(mine[:n])}" if mine else base
-            root = root[:STEM_MAX]
-            stem, suffix = root, ord("b")
-            while stem.casefold() in taken:
-                tail = chr(suffix) if suffix <= ord("z") else str(suffix - ord("a"))
-                stem = root[: STEM_MAX - len(tail)] + tail
-                suffix += 1
-            taken.add(stem.casefold())
-            result[w.key] = Names(stem, f"{base}:{''.join(mine[:4])}" if mine else base)
+            stem = _claim(f"{base}-{''.join(mine[:n])}" if mine else base, taken, STEM_MAX)
+            citekey = _claim(f"{base}:{''.join(mine[: max(n, 4)])}" if mine else base, keys, None)
+            result[w.key] = Names(stem, citekey)
     return result
 
 

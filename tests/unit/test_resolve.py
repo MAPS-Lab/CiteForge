@@ -140,19 +140,30 @@ def test_enrich_routes_misses(monkeypatch: pytest.MonkeyPatch) -> None:
         batch(
             "crossref",
             ["doi:10.1234/cr"],
-            ["doi:10.1234/dc", "doi:10.1234/me", "doi:10.1234/dead"],
+            ["doi:10.1234/dc", "doi:10.1234/me", "doi:10.1234/dead", "doi:10.1234/ra"],
             ["doi:10.1234/down"],
         ),
     )
     monkeypatch.setattr(
         enr.datacite,
         "by_doi",
-        batch("datacite", ["doi:10.1234/dc"], ["doi:10.1234/me", "doi:10.1234/dead", "doi:10.1234/down"]),
+        batch(
+            "datacite",
+            ["doi:10.1234/dc"],
+            ["doi:10.1234/me", "doi:10.1234/dead", "doi:10.1234/down", "doi:10.1234/ra"],
+        ),
     )
+    agencies = {"doi:10.1234/me": "mEDRA", "doi:10.1234/dead": None, "doi:10.1234/ra": "KISTI"}
+    monkeypatch.setattr(enr.doiorg, "agency", lambda http, ids: Result(Fetch.OK, agencies))
     monkeypatch.setattr(
-        enr.doiorg, "agency", lambda http, ids: Result(Fetch.OK, {"doi:10.1234/me": "mEDRA", "doi:10.1234/dead": None})
+        enr.doiorg,
+        "csl",
+        lambda http, i: (
+            Result(Fetch.FAILED, None, "redirect_blocked")
+            if i == "doi:10.1234/ra"
+            else Result(Fetch.OK, record(i, source=Source.CSL))
+        ),
     )
-    monkeypatch.setattr(enr.doiorg, "csl", lambda http, i: Result(Fetch.OK, record(i, source=Source.CSL)))
     monkeypatch.setattr(enr.arxiv, "by_id", batch("arxiv", ["arxiv:2101.00001"], ["arxiv:2101.99999"]))
     monkeypatch.setattr(enr.openalex, "works_by_doi", batch("openalex", ["doi:10.1234/dc"]))
     ids = [
@@ -161,6 +172,7 @@ def test_enrich_routes_misses(monkeypatch: pytest.MonkeyPatch) -> None:
         "doi:10.1234/me",
         "doi:10.1234/dead",
         "doi:10.1234/down",
+        "doi:10.1234/ra",
         "arxiv:2101.00001",
         "arxiv:2101.99999",
         "doi:10.1234/cr",

@@ -1,14 +1,18 @@
 import dataclasses
+import functools
 import json
+import re
 from pathlib import Path
 
+import httpx
 import pytest
 
 from citeforge import cli
 from citeforge.bibtex import read_entry
-from citeforge.http import Result
+from citeforge.http import Http, Result
 from citeforge.model import Claim, Fetch, Kind, Record, Source, Status
 from citeforge.sources import crossref, openalex, orcid
+from tests.conftest import FakeClock
 from tests.world import (
     INPUT,
     MATWIN,
@@ -97,16 +101,68 @@ def test_rerun_and_shuffled_roster_are_byte_identical(workdir: Path, monkeypatch
     assert outputs(workdir) == first
 
 
+def _assert_outage_kept_everything(workdir: Path, before: dict[str, bytes]) -> dict:
+    assert tree(workdir / "output") == before
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert all(m["removed"] == [] for m in report["members"].values())
+    assert "shrink_guard" not in report["events"]["counts"]
+    assert report["members"][SPADON]["status"] == "complete"
+    return report
+
+
 def test_crossref_outage_removes_nothing(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     world = default_world()
     install(monkeypatch, world)
     assert cli.main([]) == 0
-    first = outputs(workdir)
+    before = tree(workdir / "output")
     world.crossref_down = True
     assert cli.main([]) == 0
-    assert tree(workdir / "output") == {
-        k.removeprefix("output/"): v for k, v in first.items() if k.startswith("output/")
-    }
+    assert world.calls["crossref.by_doi"] == 2
+    report = _assert_outage_kept_everything(workdir, before)
+    assert report["events"]["counts"]["pending"] >= 1
+
+
+def test_crossref_503_marks_the_host_down_and_exits_3(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_by_doi = crossref.by_doi
+    install(monkeypatch, default_world())
+    assert cli.main([]) == 0
+    before = tree(workdir / "output")
+    monkeypatch.setattr(crossref, "by_doi", real_by_doi)
+    clock = FakeClock()
+    unavailable = httpx.MockTransport(lambda r: httpx.Response(503, headers={"retry-after": "600"}))
+    monkeypatch.setattr(cli, "Http", functools.partial(Http, transport=unavailable, clock=clock, sleep=clock.sleep))
+    assert cli.main([]) == 3
+    report = _assert_outage_kept_everything(workdir, before)
+    assert report["sources"]["api.crossref.org"]["down"] == "retry_after 600s"
+    assert report["run"]["exit_code"] == 3
+
+
+def test_search_failure_keeps_the_linked_doi_and_ships_one_file(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install(monkeypatch, default_world())
+    linked = cr("doi:10.1145/3580305.1", "Maritime traffic graphs at scale", (SP, MW), year=2023)
+    monkeypatch.setattr(crossref, "search", lambda *a: Result(Fetch.OK, (linked,)))
+    assert cli.main([]) == 0
+
+    def maritime() -> list[str]:
+        folder = workdir / "output" / SPADON
+        return sorted(p.name for p in folder.glob("*.bib") if "Maritime traffic" in p.read_text(encoding="utf-8"))
+
+    assert maritime() == ["Spadon2023-MaritimeTraffic.bib"]
+    assert "10.1145/3580305.1" in (workdir / "output" / SPADON / "Spadon2023-MaritimeTraffic.bib").read_text()
+    first = tree(workdir / "output")
+    monkeypatch.setattr(crossref, "search", lambda *a: Result(Fetch.FAILED, None, "down"))
+    assert cli.main([]) == 0
+    assert tree(workdir / "output") == first
+    rows = [json.loads(line) for line in (workdir / "state/works.jsonl").read_text().splitlines()]
+    assert "dblp:conf/kdd/SpadonM23" not in {r["work"]["key"] for r in rows}
+
+
+def test_search_outage_on_a_new_group_marks_the_member_partial(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install(monkeypatch, default_world())
+    monkeypatch.setattr(crossref, "search", lambda *a: Result(Fetch.FAILED, None, "down"))
+    assert cli.main([]) == 3
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert report["members"][SPADON]["status"] == "partial:crossref"
 
 
 def test_dblp_challenge_keeps_every_entry_and_exits_3(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,3 +455,40 @@ def test_warm_run_reuses_search_links_and_writes_the_same_bytes(workdir: Path, m
     assert {k: v for k, v in warm.items() if k != "state/report.json"} == {
         k: v for k, v in cold.items() if k != "state/report.json"
     }
+
+
+def test_affiliation_emails_never_reach_state_report_or_output(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    gnn = "doi:10.1016/j.oceaneng.2024.117234"
+    home = "Dalhousie University, Halifax, Canada. Electronic address: someone@example.org"
+    raw = {
+        "DOI": gnn.removeprefix("doi:"),
+        "type": "journal-article",
+        "title": [world.crossref[gnn].title],
+        "author": [
+            {"given": "Gabriel", "family": "Spadon", "ORCID": f"https://orcid.org/{SPADON_ORCID}",
+             "affiliation": [{"name": home}]},
+            {"given": "Stan", "family": "Matwin", "affiliation": [{"name": "E-mail: other.person@example.org"}]},
+        ],
+        "issued": {"date-parts": [[2024]]},
+    }  # fmt: skip
+    world.crossref[gnn] = dataclasses.replace(world.crossref[gnn], authors=crossref.parse_work(raw).authors)
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    written = {**outputs(workdir), **{f"run/{k}": v for k, v in tree(workdir / "run").items()}}
+    email = re.compile(rb"[\w.+-]+@[\w-]+\.\w")
+    assert [k for k, v in written.items() if email.search(v)] == []
+    assert b"Dalhousie University, Halifax, Canada." in written["state/works.jsonl"]
+
+
+def test_orcid_work_without_an_identifier_is_counted(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    title = "Soft-sensing approach for predicting bovine respiratory disease"
+    world.orcid_works[SPADON_ORCID].append(Claim(Source.ORCID, frozenset(), title, 2024, by_self=True))
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    coverage = json.loads((workdir / "state/report.json").read_text())["coverage"]
+    assert {"member": SPADON, "id": "", "title": title, "reason": "no_identifier"} in coverage["items"]
+    assert coverage["unexplained"] == 0
+    assert coverage["claimed"] == coverage["emitted"] + len(coverage["items"])
+    assert f"{SPADON}: {title} (no_identifier)" in (workdir / "run/report.md").read_text()

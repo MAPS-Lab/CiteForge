@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 
 from citeforge.http import HOSTS, Http, ParseError, Reply, Result
-from citeforge.ids import norm_orcid, to_id
+from citeforge.ids import norm_orcid, norm_ror, to_id
 from citeforge.model import Claim, Fetch, Source
 from citeforge.text import clean
 
@@ -14,7 +14,6 @@ AFFILIATION_SECTIONS = (
     ("educations", "education-summary", "education"),
 )
 STATUS_REASONS = {9007: "deprecated", 9018: "locked", 9036: "unclaimed", 9044: "deactivated"}
-_ROR = re.compile(r"(?:https?://ror\.org/)?(0[a-z0-9]{6}\d{2})")
 _YEAR = re.compile(r"\d{4}")
 _ORCID_IN_TEXT = re.compile(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]")
 
@@ -57,9 +56,7 @@ def _items(node: object, *path: str) -> list[object]:
 def _ror(organization: object) -> str | None:
     if _text(organization, "disambiguated-organization", "disambiguation-source") != "ROR":
         return None
-    ident = _text(organization, "disambiguated-organization", "disambiguated-organization-identifier") or ""
-    m = _ROR.fullmatch(ident.lower())
-    return f"https://ror.org/{m.group(1)}" if m else None
+    return norm_ror(_text(organization, "disambiguated-organization", "disambiguated-organization-identifier") or "")
 
 
 def _affiliations(activities: object) -> tuple[Affiliation, ...]:
@@ -93,9 +90,9 @@ def _year(summary: object) -> int | None:
 def _claim(group: object, orcid: str) -> Claim | None:
     summaries = [s for s in _items(group, "work-summary") if isinstance(s, dict)]
     ids = frozenset(i for s in summaries for i in _ids(s))
-    if not ids:
-        return None
     title = next((t for s in summaries if (t := clean(_text(s, "title", "title", "value") or ""))), "")
+    if not ids and not title:
+        return None
     year = next((y for s in summaries if (y := _year(s)) is not None), None)
     by_self = any(_text(s, "source", "source-orcid", "path") == orcid for s in summaries)
     return Claim(Source.ORCID, ids, title, year, by_self=by_self)

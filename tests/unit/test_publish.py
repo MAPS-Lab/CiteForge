@@ -51,6 +51,10 @@ def test_plan_and_check() -> None:
         (lambda f, p: f.__setitem__(Path("a2i2/Spadon2023-A.bib"), f[p].replace("2023}", "2024}")), "differs"),
         (lambda f, p: f.__setitem__(p.with_name("Spadon2023-C.bib"), f[p]), "doi repeats"),
         (
+            lambda f, p: f.__setitem__(p.with_name("Spadon2023-C.bib"), f[p].replace("10.1234/a", "10.1234/c")),
+            "ID repeats",
+        ),
+        (
             lambda f, p: f.__setitem__(p.with_name("spadon2023-a.bib"), f[p].replace("10.1234/a", "10.1234/z")),
             "collides",
         ),

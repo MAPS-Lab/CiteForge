@@ -1,14 +1,21 @@
+import dataclasses
 import re
+from pathlib import Path
 
 import bibtexparser
+import pytest
 from bibtexparser.bparser import BibTexParser
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from pylatexenc.latex2text import LatexNodes2Text
 
-from citeforge.bibtex import assign_names, escape, protect, read_entry, render
+from citeforge import publish
+from citeforge.bibtex import assign_names, escape, preprint_server, protect, read_entry, render
+from citeforge.ids import is_preprint_doi
 from citeforge.model import Author, Kind, Names, Source
-from tests.factories import author, record, work
+from citeforge.tables import PREPRINT_SERVERS
+from citeforge.text import clean
+from tests.factories import author, bib_problems, record, work
 
 printable = st.text(
     st.characters(categories=["L", "N", "P", "S"], exclude_characters="\\\u02c6"), min_size=1, max_size=40
@@ -142,8 +149,20 @@ def test_every_render_parses(title: str, names: list[str]) -> None:
     text = render(work(record("doi:10.1234/z", title=title, authors=authors)), Names("a", "Key2023:A"))
     entry = parse(text)
     assert entry["ID"] == "Key2023:A"
-    assert len(split_authors(entry["author"])) == len(authors)
+    named = [a for a in authors if clean(a.family) or clean(a.given)]
+    if named:
+        assert len(split_authors(entry["author"])) == len(named)
+    else:
+        assert "author" not in entry
     read_entry(text)
+
+
+def test_blank_authors_are_skipped_and_checked() -> None:
+    authors = (Author("   ", " "), Author("", "", literal=" "), Author("Gabriel", "Spadon"))
+    text = render(work(record("doi:10.1234/z", authors=authors)), Names("a", "a"))
+    assert read_entry(text)["author"] == "Gabriel Spadon"
+    files = {Path("M (x)/a.bib"): text.replace("Gabriel Spadon", " and Gabriel Spadon")}
+    assert "M (x)/a.bib: empty name in author" in publish.check(files)
 
 
 def _w(doi: str, title: str, family: str = "Spadon", year: int = 2023):
@@ -169,6 +188,28 @@ def test_assign_names_collisions() -> None:
     assert names["doi:10.1234/f"].stem == "Spadon2023-DeterminingTopic"
     assert names["doi:10.1234/g"].stem == "Spadon2023-DeterminingTopicb"
     assert names["doi:10.1234/a"].citekey == "Spadon2023:VesselTrajectoryPrediction"
+
+
+def test_citekeys_unique_when_titles_share_four_words() -> None:
+    a = _w("10.1101/2024.03.06.24303776", "Genome-wide association study of hoarding symptoms", "Strom", 2024)
+    ocd = "Genome-wide association study of obsessive-compulsive symptoms"
+    b = _w("10.1038/s41380-024-02489-6", ocd, "Strom", 2024)
+    c = _w("10.1101/2024.07.03.24309466", ocd, "Strom", 2024)
+    names = assign_names([a, b, c], {})
+    assert len({n.citekey.casefold() for n in names.values()}) == 3
+    assert names[a.key].citekey == "Strom2024:GenomeWideAssociationStudyHoarding"
+    shared = Names("Strom2024-Old", "Strom2024:GenomeWideAssociationStudy")
+    kept = assign_names([a, b], {b.key: shared, a.key: dataclasses.replace(shared, stem="Strom2024-Older")})
+    assert kept[b.key] == shared
+    assert kept[a.key] == Names("Strom2024-Older", "Strom2024:GenomeWideAssociationStudyb")
+
+
+@pytest.mark.parametrize(("prefix", "server"), PREPRINT_SERVERS)
+def test_every_preprint_prefix_names_its_server(prefix: str, server: str) -> None:
+    doi = prefix + "x1"
+    r = record(f"doi:{doi}", kind=Kind.PREPRINT, container=("Some Container",))
+    assert is_preprint_doi(doi)
+    assert preprint_server(r) == ("arXiv" if prefix == "10.48550/arxiv" else server)
 
 
 def test_assign_names_keeps_previous_until_base_changes() -> None:
@@ -209,3 +250,28 @@ def test_assign_names_unique_deterministic_stable(ts: list[str], rnd) -> None:
     assert {k: v for k, v in assign_names([*ws, unrelated], names).items() if k != unrelated.key} == names
     for n in names.values():
         assert re.fullmatch(r"[A-Za-z0-9]+-?[A-Za-z0-9]*", n.stem)
+
+
+_texts = st.text(max_size=12)
+_people = st.lists(st.builds(Author, _texts, _texts, st.none() | _texts), max_size=3).map(tuple)
+
+
+@settings(max_examples=150, deadline=None)
+@given(
+    st.sampled_from(list(Kind)),
+    st.fixed_dictionaries({
+        f: st.none() | _texts
+        for f in ("event", "publisher", "volume", "number", "pages", "article_number", "url", "language", "school",
+                  "institution", "howpublished", "primary_class", "degree")
+    }),
+    _texts,
+    st.lists(_texts, max_size=2).map(tuple),
+    _people,
+    _people,
+    st.booleans(),
+)  # fmt: skip
+def test_any_record_renders_a_valid_entry(kind, fields, title, container, authors, editors, with_doi) -> None:
+    ids = ("doi:10.1234/z", "arxiv:2310.18948") if with_doi else ("arxiv:2310.18948",)
+    r = record(*ids, kind=kind, title=title or "T", container=container, editors=editors, **fields)
+    r = dataclasses.replace(r, authors=authors)
+    assert bib_problems(r) == []

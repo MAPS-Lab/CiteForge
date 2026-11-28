@@ -27,6 +27,7 @@ from citeforge.model import (
     Verdict,
     Work,
 )
+from citeforge.sources import pubmed
 from citeforge.state import State, StateRow
 
 MAX_WORKERS = 8
@@ -122,6 +123,20 @@ def _pairs(w: Work, g: Group, identities: Mapping[str, Identity], curated: Curat
     return out
 
 
+def _with_pubmed_dois(pairs: list[tuple[str, Claim]], http: Http) -> list[tuple[str, Claim]]:
+    def doi_less(c: Claim) -> bool:
+        return not any(split_id(i)[0] == "doi" for i in c.ids)
+
+    pmids = sorted({i for _, c in pairs if doi_less(c) for i in c.ids if split_id(i)[0] == "pmid"})
+    if not pmids:
+        return pairs
+    found = pubmed.dois(http, pmids).value or {}
+    return [
+        (m, dataclasses.replace(c, ids=c.ids | {found[i] for i in c.ids if i in found})) if doi_less(c) else (m, c)
+        for m, c in pairs
+    ]
+
+
 def _windowed(d: Decision, w: Work, s: Settings) -> Decision:
     if d.verdict is not Verdict.ACCEPT:
         return d
@@ -178,6 +193,7 @@ def run(
     for _, _, ev in resolved:
         events += ev
     pairs = sorted(((lst.member, c) for lst in listings.values() for c in lst.claims), key=_claim_order)
+    pairs = _with_pubmed_dois(pairs, http)
     wanted = {i for _, c in pairs for i in c.ids if split_id(i)[0] in ("doi", "arxiv")}
     wanted |= {i for link in curated.links for i in link}
     have = {
@@ -194,11 +210,13 @@ def run(
     held_ids: dict[str, set[str]] = defaultdict(set)
     for member, c in held:
         held_ids[member] |= c.ids
-    groups, ev = cluster.cluster(kept, reg, curated)
+    groups, ev = cluster.cluster(
+        kept, reg, curated, lambda gs: cluster.search_unidentified(gs, http, identities, s.min_year, previous)
+    )
     events += ev
-    known = {a: k for k, row in sorted(previous.items()) if split_id(k)[0] == "doi" for a in row.work.aliases if a != k}
-    groups, ev = cluster.search_unidentified(groups, http, identities, known)
-    events += ev
+    for name in sorted({e.member for e in ev if e.kind == "search_failed" and e.member in listings}):
+        listing = listings[name]
+        listings[name] = dataclasses.replace(listing, fetch={**listing.fetch, Source.CROSSREF: Fetch.FAILED})
     t = stage("cluster", t)
     built = [works.build(g, curated) for g in groups]
     for _, ev in built:
@@ -230,8 +248,6 @@ def run(
     t = stage("decide", t)
 
     failed_registry = {w.key for w in current if (w.aliases & reg.failed) and w.primary.source not in REGISTRIES}
-    # Until the registry answers again, such a work is judged as it was last published.
-    registry_held = {k: previous[k].work for k in failed_registry if k in previous}
     window_years = s.today.year - s.min_year + 1
     final: dict[str, dict[str, Decision]] = {}
     missing: dict[str, dict[str, int]] = defaultdict(dict)
@@ -246,7 +262,7 @@ def run(
         partial = Fetch.FAILED in listing.fetch.values() or Fetch.OK not in listing.fetch.values()
         mine = dict(decisions.get(name, {}))
         prev = {k: row for k, row in previous.items() if publish.emitted(row, name)}
-        accepted = [k for k, d in mine.items() if d.verdict is Verdict.ACCEPT and by_key[k].excluded is None]
+        accepted = [k for k, d in mine.items() if publish.publishable(d, by_key[k])]
         over_cap = len(accepted) > PER_YEAR_CAP * window_years
         if over_cap:
             guard = True
@@ -264,11 +280,17 @@ def run(
                 events.append(Event("pending", name, k, "pending:registry"))
         removals: dict[str, str] = {}
         for k, row in sorted(prev.items()):
-            now = mine.get(k)
-            w = registry_held.get(k) or by_key.get(k)
-            if now is not None and now.verdict is Verdict.ACCEPT and w is not None and w.excluded is None:
+            if k in failed_registry:
+                mine[k] = row.members[name]
                 continue
-            if partial or over_cap:
+            now = mine.get(k)
+            w = by_key.get(k)
+            if publish.publishable(now, w):
+                continue
+            heir = next((alias_owner[a] for a in sorted(row.work.aliases) if a in alias_owner), None)
+            if w is None and heir is not None and publish.publishable(mine.get(heir), by_key[heir]):
+                reason = f"merged_into:{heir}"
+            elif partial or over_cap:
                 reason = None
             elif w is not None and w.excluded is not None:
                 reason = w.excluded
@@ -300,20 +322,15 @@ def run(
             removals = {}
         final[name] = mine
         member_changes[name] = {"removed": sorted(removals.items())}
-        emitted = sum(
-            1
-            for k, d in mine.items()
-            if d.verdict is Verdict.ACCEPT
-            and (registry_held.get(k) or by_key.get(k) or carried_works[k]).excluded is None
-        )
+        emitted = sum(publish.publishable(d, carried_works.get(k) or by_key[k]) for k, d in mine.items())
         statuses[name] = _status(listing, over_cap, emitted)
     t = stage("failure_rules", t)
 
-    all_works = {**by_key, **carried_works, **registry_held}
-    emitted_keys = {
-        k for name, mine in final.items() for k, d in mine.items()
-        if d.verdict is Verdict.ACCEPT and all_works[k].excluded is None
-    }  # fmt: skip
+    all_works = {**by_key, **carried_works}
+    for k in failed_registry:
+        if k in previous:
+            all_works[k] = previous[k].work
+    emitted_keys = {k for mine in final.values() for k, d in mine.items() if publish.publishable(d, all_works[k])}
     prev_names = {k: row.names for k, row in previous.items() if row.names.stem}
     names = assign_names([all_works[k] for k in sorted(emitted_keys)], prev_names)
     new_state: dict[str, StateRow] = {}

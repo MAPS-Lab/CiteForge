@@ -159,7 +159,7 @@ def test_build_prefers_registry_and_fills_only_from_same_doi() -> None:
         pages="117234",
         volume="300",
         authors=(
-            author("Gabriel Spadon", orcid="0000-0002-1825-0097", rors=("https://ror.org/01e6qks80",)),
+            author("Gabriel Spadon", openalex="A5023888391", rors=("https://ror.org/01e6qks80",)),
             author("Stan Matwin"),
         ),
     )
@@ -170,7 +170,8 @@ def test_build_prefers_registry_and_fills_only_from_same_doi() -> None:
     assert w.primary.source is Source.CROSSREF
     assert w.key == doi
     assert w.primary.pages == "117234" and w.primary.volume == "300"
-    assert w.primary.authors[0].orcid == "0000-0002-1825-0097"
+    assert w.primary.authors[0].openalex == "A5023888391"
+    assert w.primary.authors[0].rors == ("https://ror.org/01e6qks80",)
     assert w.eprint is ax
     assert w.primary.primary_class is None
     assert dict(w.provenance)["pages"] is Source.OPENALEX

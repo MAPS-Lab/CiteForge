@@ -401,7 +401,7 @@ def test_relations_and_updates() -> None:
         "has-translation": [{"id-type": "uri", "id": "https://doi.org/10.1000/PT"}],
         "is-supplemented-by": [{"id-type": "doi", "id": "10.1000/data"}],
         "is-preprint-of": "not a list",
-        "is-identical-to": [{"id-type": "issn", "id": "1234-5678"}, "junk"],
+        "is-identical-to": [{"id-type": "issn", "id": "1234-5678"}, "junk", {"id-type": "doi", "id": "10.1000/same"}],
     }
     updates = [
         {"type": "Retration", "DOI": "10.1000/target1"},
@@ -419,6 +419,7 @@ def test_relations_and_updates() -> None:
         (Rel.RETRACTS, "doi:10.1000/target1"),
         (Rel.CORRECTS, "doi:10.1000/target2"),
         (Rel.VERSION_OF, "doi:10.1000/target3"),
+        (Rel.IDENTICAL, "doi:10.1000/same"),
     }
 
 

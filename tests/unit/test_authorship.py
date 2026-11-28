@@ -4,8 +4,11 @@ from typing import Any
 from citeforge.authorship import decide, is_own, own_slots
 from citeforge.curated import Curated
 from citeforge.model import Author, Claim, Identity, Kind, Source, Verdict
+from citeforge.sources import openalex
 from citeforge.text import name_key
 from tests.factories import author, member, record, work
+from tests.sources.test_openalex import authorship as oa_authorship
+from tests.sources.test_openalex import work as oa_work
 
 ME = "0000-0002-1825-0097"
 OTHER = "0000-0001-5109-3700"
@@ -61,8 +64,30 @@ def test_no_registry_is_review() -> None:
 def test_rule_2_orcid_bypasses_name_gate() -> None:
     married = w(author("Gabriela Souza", orcid=ME))
     assert verdict(identity(), married) == (Verdict.ACCEPT, "authorship_orcid")
-    via_claim = claim(Source.OPENALEX, record("doi:10.1234/w", authors=(author("G. Spadon", orcid=ME),)))
+    via_claim = claim(Source.DBLP, record("dblp:x/S23", source=Source.DBLP, authors=(author("G. Spadon", orcid=ME),)))
     assert verdict(identity(), w(), [via_claim]) == (Verdict.ACCEPT, "authorship_orcid")
+
+
+def _openalex_claim(institutions: list[dict[str, str]]) -> Claim:
+    rec = openalex.parse_work(oa_work(authorships=[
+        oa_authorship("Gabriel Spadon", id="https://openalex.org/A5023888391", orcid=f"https://orcid.org/{ME}",
+                      institutions=institutions),
+    ]))  # fmt: skip
+    return Claim(Source.OPENALEX, rec.ids, rec.title, rec.year, record=rec)
+
+
+def test_openalex_profile_orcid_is_not_authorship_proof() -> None:
+    abroad = [{"ror": "https://ror.org/02e91jd64", "display_name": "Universiti Putra Malaysia"}]
+    unlisted = w(author("Gabriel Spadon", affiliations=("Putra Business School, Universiti Putra Malaysia",)))
+    assert verdict(identity(), unlisted, [_openalex_claim(abroad)]) == (Verdict.REVIEW, "openalex_only")
+    home = [{"ror": LAB, "display_name": "Dalhousie University"}]
+    assert verdict(identity(), w(), [_openalex_claim(home)]) == (Verdict.ACCEPT, "openalex_affil")
+
+
+def test_registry_orcid_contradicts_openalex_profile() -> None:
+    abroad = [{"ror": "https://ror.org/034t30j35", "display_name": "Chinese Academy of Sciences"}]
+    other = w(author("Gabriel Spadon", orcid=OTHER))
+    assert verdict(identity(), other, [_openalex_claim(abroad)]) == (Verdict.REJECT, "orcid_contra")
 
 
 def test_rule_3_not_named() -> None:

@@ -5,9 +5,9 @@ from typing import Any
 from urllib.parse import quote
 
 from citeforge.http import HOSTS, Batch, Http, ParseError
-from citeforge.ids import norm_orcid, split_id, to_id
+from citeforge.ids import norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Rel, Source
-from citeforge.text import is_affiliation, is_group, split_literal
+from citeforge.text import affiliation, is_affiliation, is_group, split_literal
 from citeforge.works import DATACITE_KINDS
 
 HOST = HOSTS["api.datacite.org"]
@@ -16,7 +16,7 @@ RELATIONS: Mapping[str, Rel] = {
     "isversionof": Rel.VERSION_OF,
     "ispreviousversionof": Rel.VERSION_OF,
     "isnewversionof": Rel.VERSION_OF,
-    "isidenticalto": Rel.VERSION_OF,
+    "isidenticalto": Rel.IDENTICAL,
     "istranslationof": Rel.TRANSLATION_OF,
     "hastranslation": Rel.HAS_TRANSLATION,
 }
@@ -31,7 +31,6 @@ TEXT_TYPES = (
 )
 _PLACEHOLDER = re.compile(r"\(:[a-z]+\)", re.I)
 _YEAR = re.compile(r"(\d{4})(?:\D.*)?")
-_ROR = re.compile(r"(?:https?://ror\.org/)?(0[a-z0-9]{6}\d{2})", re.I)
 _PARENTHESISED = re.compile(r".*?\(([^()]+)\)\s*")
 _REPOSITORY = re.compile(r"repositor|archiv|librar|biblio|digital|commons|e-?prints?\b|scholarship|\w+space\b", re.I)
 
@@ -153,8 +152,8 @@ def _person(c: Mapping[str, Any]) -> Author | None:
     name, given, family = _text(c.get("name")), _text(c.get("givenName")), _text(c.get("familyName"))
     raw = c.get("affiliation")
     affiliations = [a if isinstance(a, dict) else {"name": a} for a in raw] if isinstance(raw, list) else []
-    rors = tuple(dict.fromkeys(r for a in affiliations if (r := _ror(a.get("affiliationIdentifier")))))
-    names = tuple(dict.fromkeys(n for a in affiliations if (n := _text(a.get("name")))))
+    rors = tuple(dict.fromkeys(r for a in affiliations if (r := norm_ror(_text(a.get("affiliationIdentifier")) or ""))))
+    names = tuple(dict.fromkeys(n for a in affiliations if (n := affiliation(_text(a.get("name")) or ""))))
     if not (name or family):
         return None
     if c.get("nameType") == "Organizational" or (not family and name and (is_group(name) or is_affiliation(name))):
@@ -200,11 +199,6 @@ def _text(value: Any) -> str | None:
 def _year(value: Any) -> int | None:
     m = _YEAR.fullmatch(_text(value) or "")
     return int(m.group(1)) if m and 1000 <= int(m.group(1)) <= 2999 else None
-
-
-def _ror(value: Any) -> str | None:
-    m = _ROR.fullmatch(_text(value) or "")
-    return f"https://ror.org/{m.group(1).lower()}" if m else None
 
 
 def _dict(value: Any) -> Mapping[str, Any]:

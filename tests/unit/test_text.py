@@ -6,6 +6,7 @@ from hypothesis import strategies as st
 
 from citeforge.model import Author
 from citeforge.text import (
+    affiliation,
     ascii_family,
     clean,
     family_keys,
@@ -103,3 +104,26 @@ def test_slug_and_family() -> None:
     assert ascii_family("Rau-Chaplin") == "RauChaplin"
     assert ascii_family("Müller") == "Muller"
     assert ascii_family("de la Fuente") == "DeLaFuente"
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("Dept of X, Dalhousie University, Halifax, Canada. Electronic address: jane.doe@example.org.",
+         "Dept of X, Dalhousie University, Halifax, Canada."),
+        ("Linnaeus University, Sweden. someone@example.se", "Linnaeus University, Sweden."),
+        ("E-mail: x@example.org; Some University", "Some University"),
+        ("University (bob@example.edu)", "University"),
+        ("Dept, email address: me@example.co.uk, Halifax", "Dept, Halifax"),
+        ("someone@example.org", ""),
+        ("Smith & Co @ Halifax", "Smith & Co @ Halifax"),
+        ("<sup>1</sup>Faculty of Computer Science", "1Faculty of Computer Science"),
+    ],
+)  # fmt: skip
+def test_affiliation_drops_email_addresses(raw: str, want: str) -> None:
+    assert affiliation(raw) == want
+
+
+@given(st.text(max_size=40), st.from_regex(r"[a-z0-9._%+-]{1,12}@[a-z0-9-]{1,10}(\.[a-z]{2,6}){1,2}", fullmatch=True))
+def test_affiliation_never_keeps_an_address(text: str, address: str) -> None:
+    assert address not in affiliation(f"{text} {address} {text}")

@@ -83,6 +83,24 @@ def test_timeout_is_retried(clock: FakeClock) -> None:
     assert http.stats()["api.crossref.org"]["retries"] == 2
 
 
+def test_corrupt_body_is_retried_then_failed(clock: FakeClock) -> None:
+    answers: list[bool] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        answers.append(True)
+        if len(answers) > limit:
+            return json_response({"ok": 1})
+        headers = {"content-type": "application/json", "content-encoding": "gzip"}
+        return httpx.Response(200, headers=headers, stream=httpx.ByteStream(b"not gzip"))
+
+    limit = 99
+    reply = make_http(handle, clock).get(CROSSREF, "/works")
+    assert (reply.fetch, reply.reason, len(answers)) == (Fetch.FAILED, "decode_error", 4)
+    answers.clear()
+    limit = 1
+    assert make_http(handle, clock).get(CROSSREF, "/works").fetch is Fetch.OK
+
+
 def test_circuit_breaker_after_five_failures(clock: FakeClock) -> None:
     handle, seen = sequence(json_response({}, 400))
     http = make_http(handle, clock)

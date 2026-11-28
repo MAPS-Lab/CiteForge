@@ -39,7 +39,8 @@ def fetch(ids: Iterable[str], http: Http, have: Mapping[str, Record]) -> Registr
                         found[work_id] = res.value
                     elif res.fetch is Fetch.NOT_FOUND:
                         dead.add(work_id)
-                    else:
+                    elif res.reason != "redirect_blocked":
+                        # an agency whose CSL host is off the allow-list fails the same way on every run
                         failed.add(work_id)
     arxivs = sorted(
         set(arxivs)
