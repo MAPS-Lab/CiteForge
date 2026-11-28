@@ -129,6 +129,11 @@ def is_secondary_doi(doi: str) -> bool:
     return is_preprint_doi(doi) or doi.lower().startswith(DATA_DOI_PREFIXES)
 
 
+def is_bare(ids: Iterable[str]) -> bool:
+    """True when every id is an ORCID put-code, which names a work that carries no identifier."""
+    return all(split_id(i)[0] == "orcidwork" for i in ids)
+
+
 def is_copy_id(work_id: str) -> bool:
     """True for an id that names a preprint or repository copy, never a version of record."""
     kind, value = split_id(work_id)

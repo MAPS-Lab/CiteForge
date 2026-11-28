@@ -9,7 +9,7 @@ from rapidfuzz import fuzz
 
 from citeforge.curated import Curated
 from citeforge.http import Http, Result, on_behalf_of
-from citeforge.ids import first_id, ids_of, is_copy_id, split_id, work_key
+from citeforge.ids import first_id, ids_of, is_bare, is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     SAME_OBJECT_RELS,
@@ -473,10 +473,6 @@ def _other_listing(listings: Mapping[str, frozenset[str]], own: frozenset[str], 
     return other[0] if own and other else None
 
 
-def _bare(ids: frozenset[str]) -> bool:
-    return all(split_id(i)[0] == "orcidwork" for i in ids)
-
-
 def search_unidentified(
     groups: Sequence[Group],
     http: Http,
@@ -499,7 +495,7 @@ def search_unidentified(
     listings = {i: keys for g in groups if (keys := _dblp_listings(g)) for i in g.ids}
     listed: dict[str, list[Record]] = defaultdict(list)
     for g in groups:
-        if not _bare(g.ids) and (p := _profile(g.records, g.claims)) is not None and p.record is not None:
+        if not is_bare(g.ids) and (p := _profile(g.records, g.claims)) is not None and p.record is not None:
             for m in sorted({m for m, _ in g.claims}):
                 listed[m].append(p.record)
     pending: list[tuple[str, Group, _Profile, Identity, tuple[str, str, int | None], Searched | None]] = []
@@ -523,7 +519,7 @@ def search_unidentified(
             events.append(Event(EventKind.SEARCH_LINKED, member, g.key, doi or ""))
             found.append((g.key, prior))
             continue
-        if _bare(g.ids):
+        if is_bare(g.ids):
             same = [r for r in listed[member] if _search_ok(profile, r, identity)]
             if len(same) == 1:
                 events.append(Event(EventKind.SEARCH_LINKED, member, g.key, f"listed {min(same[0].ids)}"))

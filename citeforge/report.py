@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from citeforge.ids import split_id
+from citeforge.ids import is_bare
 from citeforge.model import Claim, Decision, Event, EventKind, Verdict, Work
 from citeforge.publish import publishable
 from citeforge.state import StateRow, atomic_write
@@ -49,10 +49,6 @@ def _toml_line(section: str, member: str, work_id: str) -> str:
     return f'[[{section}]]\nmember = {json.dumps(member, ensure_ascii=False)}\nid = "{work_id}"'
 
 
-def _bare(ids: frozenset[str]) -> bool:
-    return all(split_id(i)[0] == "orcidwork" for i in ids)
-
-
 def _coverage(data: RunData) -> dict[str, Any]:
     owner = {a: k for k, w in sorted(data.works.items()) for a in w.aliases}
     titles = {
@@ -73,7 +69,7 @@ def _coverage(data: RunData) -> dict[str, Any]:
                 continue
             d = data.decisions.get(member, {}).get(key or "")
             work = data.works.get(key or "")
-            if _bare(c.ids) and (work is None or _bare(work.aliases)):
+            if is_bare(c.ids) and (work is None or is_bare(work.aliases)):
                 # a work with no identifier is explained by the member's list holding it by title, or by its search
                 listed = any(ratio(c.title, t) >= LISTED_TITLE for t in titles.get(member, ()))
                 reason = "no_identifier" if listed else searches.get(key or "", "unmatched")
@@ -88,7 +84,7 @@ def _coverage(data: RunData) -> dict[str, Any]:
             else:
                 reason = "unmatched"
             # a put-code means nothing to a reader, so a work without an identifier shows its title
-            shown = "" if _bare(c.ids) else key or min(c.ids, default="")
+            shown = "" if is_bare(c.ids) else key or min(c.ids, default="")
             items.append({"member": member, "id": shown, "title": c.title, "reason": reason})
     unexplained = sum(1 for i in items if i["reason"] == "unmatched")
     return {"claimed": claimed, "emitted": emitted, "unexplained": unexplained, "items": items}
@@ -149,12 +145,11 @@ def build(data: RunData) -> dict[str, Any]:
             "proposals": events_of(EventKind.LINK_PROPOSAL),
         },
         "coverage": _coverage(data),
-        "events": {"counts": dict(sorted(by_kind.items())), "items": [list(_event(e)) for e in data.events]},
+        "events": {
+            "counts": dict(sorted(by_kind.items())),
+            "items": [[e.kind, e.member, e.id, e.detail] for e in data.events],
+        },
     }
-
-
-def _event(e: Event) -> tuple[str, str | None, str | None, str]:
-    return e.kind, e.member, e.id, e.detail
 
 
 def _list(title: str, items: Sequence[str], limit: int | None = SHOW) -> list[str]:
