@@ -6,6 +6,7 @@ from citeforge.model import Author, Kind, Names, Record, Work
 from citeforge.tables import (
     GENERIC_SERIES_NAMES,
     PREPRINT_ONLY_PUBLISHERS,
+    PREPRINT_SERVERS,
     PUBLISHER_CORRECTIONS,
     VENUE_CASE_CORRECTIONS,
 )
@@ -43,23 +44,6 @@ _ESCAPE_RE = re.compile(r"[\\~^&%$#_{}]")
 _PAGE_DASH = re.compile(r"\s*[-‐-―−]+\s*")  # noqa: RUF001
 _PAGE_PART_SPLIT = re.compile(r"[-–—,\s]+")  # noqa: RUF001
 _PARTICLES = frozenset({"de", "da", "do", "dos", "das", "van", "von", "der", "den", "du", "la", "le", "del", "di"})
-_PREPRINT_SERVERS = (
-    ("10.1101/", "bioRxiv"),
-    ("10.21203/rs.", "Research Square"),
-    ("10.31234/osf.io", "OSF Preprints"),
-    ("10.31219/osf.io", "OSF Preprints"),
-    ("10.26434/chemrxiv", "ChemRxiv"),
-    ("10.20944/preprints", "Preprints.org"),
-    ("10.2139/", "SSRN"),
-    ("10.64898/", "openRxiv"),
-    ("10.36227/techrxiv", "TechRxiv"),
-    ("10.5194/egusphere", "EGU"),
-    ("10.2172/", "OSTI"),
-    ("10.31220/agrirxiv", "agriRxiv"),
-    ("10.32388/", "Qeios"),
-    ("10.48448/", "Underline Science"),
-    ("10.13140/", "ResearchGate"),
-)
 _FIELD_LINE = re.compile(r"  ([a-z]+) = \{(.*)\},?")
 _HEAD = re.compile(r"@([a-z]+)\{([^,\s]+),")
 
@@ -164,7 +148,7 @@ def preprint_server(r: Record) -> str | None:
         kind, value = split_id(work_id)
         if kind == "arxiv":
             return "arXiv"
-        for prefix, server in _PREPRINT_SERVERS:
+        for prefix, server in PREPRINT_SERVERS:
             if kind == "doi" and value.startswith(prefix):
                 return server
     return first_non_generic_container(r.container)

@@ -3,7 +3,7 @@ from collections.abc import Iterable
 from urllib.parse import unquote
 
 from citeforge.model import WORK_KEY_ORDER
-from citeforge.tables import DATA_DOI_PREFIXES, PREPRINT_DOI_PREFIXES
+from citeforge.tables import DATA_DOI_PREFIXES, PREPRINT_SERVERS
 
 _DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 _DOI_SHAPE = re.compile(r"10\.\d{4,9}/\S+")
@@ -20,6 +20,7 @@ _DBLP_KEY = re.compile(r"[a-z]+(?:/[A-Za-z0-9._-]+)+")
 _MANUAL = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _VERSION_SUFFIX = re.compile(r"\.v\d+$")
 _ARXIV_DOI = "10.48550/arxiv."
+_PREPRINT_DOI_PREFIXES = tuple(prefix for prefix, _ in PREPRINT_SERVERS)
 
 
 def norm_doi(s: str) -> str | None:
@@ -83,7 +84,7 @@ def split_id(work_id: str) -> tuple[str, str]:
 
 
 def is_preprint_doi(doi: str) -> bool:
-    return doi.lower().startswith(PREPRINT_DOI_PREFIXES)
+    return doi.lower().startswith(_PREPRINT_DOI_PREFIXES)
 
 
 def is_preprint_id(work_id: str) -> bool:
@@ -100,7 +101,7 @@ def work_key(ids: Iterable[str]) -> str:
 
 
 def is_secondary_doi(doi: str) -> bool:
-    return doi.lower().startswith(PREPRINT_DOI_PREFIXES + DATA_DOI_PREFIXES)
+    return doi.lower().startswith(_PREPRINT_DOI_PREFIXES + DATA_DOI_PREFIXES)
 
 
 def doi_bases_match(a: str, b: str) -> bool:
