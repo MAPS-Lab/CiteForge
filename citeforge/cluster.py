@@ -244,11 +244,15 @@ def _copy_group(ids: frozenset[str]) -> bool:
     return bool(version) and all(_is_copy(i) for i in version)
 
 
+def _listed_version(g: Group) -> bool:
+    return any(r.source in (Source.DBLP, Source.CURATED) and r.kind is not Kind.PREPRINT for r in g.records)
+
+
 def _published_group(g: Group) -> bool:
     version = _version_ids(g.ids)
-    if version:
-        return any(split_id(i)[0] == "doi" and not _is_copy(i) for i in version)
-    return any(r.kind is not Kind.PREPRINT for r in g.records)
+    if any(split_id(i)[0] == "doi" and not _is_copy(i) for i in version):
+        return True
+    return not any(split_id(i)[0] == "doi" for i in version) and _listed_version(g)
 
 
 def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str, str]]:
@@ -261,6 +265,8 @@ def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str
         assert pp is not None
         pk = title_key(pp.title)
         for q in pub:
+            if q.key == p.key:
+                continue
             qp = profiles[q.key]
             assert qp is not None
             score = fuzz.ratio(pk, title_key(qp.title), score_cutoff=FUZZY_PROPOSAL * 100) / 100
@@ -273,7 +279,7 @@ def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str
                 events.append(Event("link_proposal", None, p.key, f"{q.key} ratio={score:.2f}"))
     links = []
     for a, bs in sorted(partners.items()):
-        if len(bs) == 1 and len(partners.get(bs[0], [])) == 1 and _copy_group(frozenset({a})):
+        if len(bs) == 1 and _copy_group(frozenset({a})):
             links.append((a, bs[0]))
             events.append(Event("fuzzy_link", None, a, bs[0]))
     return links
@@ -286,7 +292,8 @@ def search_unidentified(
     by_doi = {i: g.key for g in groups for i in g.ids if split_id(i)[0] == "doi"}
     merged: dict[str, Group] = {g.key: g for g in groups}
     for g in groups:
-        if any(split_id(i)[0] in ("doi", "arxiv") for i in g.ids) or not g.claims:
+        kinds = {split_id(i)[0] for i in g.ids}
+        if "doi" in kinds or ("arxiv" in kinds and not _listed_version(g)) or not g.claims:
             continue
         profile = _profile(g.records, g.claims)
         member = g.claims[0][0]

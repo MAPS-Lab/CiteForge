@@ -114,6 +114,23 @@ def test_fuzzy_link_hides_copies_behind_the_published_version(copy, published) -
     assert g.fuzzy and g.ids == {copy[0], published[0]}
 
 
+def test_one_published_version_absorbs_several_copies() -> None:
+    authors = (author("Gabriel Spadon"), author("Stan Matwin"))
+    arx = record("arxiv:2201.00001", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors, year=2023)
+    ssrn = record("doi:10.2139/ssrn.1", kind=Kind.PREPRINT, authors=authors, year=2023)
+    pub = record("doi:10.1234/p", authors=authors, year=2024)
+    (g,) = cl.cluster([], reg(arx, ssrn, pub), Curated())[0]
+    assert g.ids == {"arxiv:2201.00001", "doi:10.2139/ssrn.1", "doi:10.1234/p"}
+
+
+def test_copy_with_two_published_partners_stays_apart() -> None:
+    authors = (author("Gabriel Spadon"), author("Stan Matwin"))
+    arx = record("arxiv:2201.00001", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors, year=2023)
+    conf = record("doi:10.1234/conf", authors=authors, year=2024, kind=Kind.INPROCEEDINGS)
+    journal = record("doi:10.1234/journal", authors=authors, year=2025)
+    assert len(cl.cluster([], reg(arx, conf, journal), Curated())[0]) == 3
+
+
 def test_dblp_preprint_is_not_a_published_version() -> None:
     authors = (author("Gabriel Spadon"),)
     a = record("arxiv:2201.00001", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors)
@@ -188,3 +205,14 @@ def test_search_unidentified(monkeypatch: pytest.MonkeyPatch) -> None:
     out, events = cl.search_unidentified(groups, None, {ME: identity()})  # type: ignore[arg-type]
     assert [e.kind for e in events] == ["search_review"]
     assert out == groups
+
+
+def test_search_covers_a_listed_version_that_only_has_an_arxiv_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+    monkeypatch.setattr(cl.crossref, "search", lambda http, *a: seen.append(a) or Result(Fetch.OK, ()))
+    listed = record("dblp:conf/nips/S23", "arxiv:2201.00001", source=Source.DBLP, kind=Kind.INPROCEEDINGS)
+    corr = record("dblp:journals/corr/S23", "arxiv:2201.00002", source=Source.DBLP, kind=Kind.PREPRINT)
+    pairs = [(ME, claim(*r.ids, source=Source.DBLP, rec=r)) for r in (listed, corr)]
+    groups, _ = cl.cluster(pairs, reg(), Curated())
+    cl.search_unidentified(groups, None, {ME: identity()})  # type: ignore[arg-type]
+    assert len(seen) == 1
