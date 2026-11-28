@@ -87,10 +87,14 @@ def _year(summary: object) -> int | None:
     return int(value) if value and _YEAR.fullmatch(value) else None
 
 
-def _claim(group: object) -> Claim | None:
+def _claim(group: object, orcid: str) -> Claim | None:
     summaries = [s for s in _items(group, "work-summary") if isinstance(s, dict)]
     ids = frozenset(i for s in summaries for i in _ids(s))
     title = next((t for s in summaries if (t := clean(_text(s, "title", "title", "value") or ""))), "")
+    codes = sorted(c for s in summaries if isinstance(c := s.get("put-code"), int) and not isinstance(c, bool))
+    if not ids and title and codes:
+        # a work with no identifier is named by its put-code, so a title search can still find its DOI
+        ids = frozenset({f"orcidwork:{orcid}/{codes[0]}"})
     if not ids and not title:
         return None
     year = next((y for s in summaries if (y := _year(s)) is not None), None)
@@ -116,7 +120,7 @@ def parse_record(body: bytes, orcid: str) -> OrcidRecord:
         credit=_text(name, "credit-name", "value"),
         other_names=tuple(dict.fromkeys(o for o in others if o)),
         affiliations=_affiliations(activities),
-        works=tuple(c for g in groups if (c := _claim(g)) is not None),
+        works=tuple(c for g in groups if (c := _claim(g, orcid)) is not None),
     )
 
 

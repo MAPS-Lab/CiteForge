@@ -109,7 +109,7 @@ def _base_kind(r: Record) -> Kind:
     return r.kind
 
 
-def _page_span(pages: str | None) -> int | None:
+def page_span(pages: str | None) -> int | None:
     m = _PAGE_RANGE.fullmatch((pages or "").strip())
     if m is None:
         return None
@@ -120,7 +120,7 @@ def _page_span(pages: str | None) -> int | None:
 
 
 def _research_paper(r: Record, kind: Kind) -> bool:
-    span = _page_span(r.pages)
+    span = page_span(r.pages)
     return kind in _PRIMARY_KIND_RANK and any(a.family for a in r.authors) and span is not None and span > 2
 
 
