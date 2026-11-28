@@ -13,6 +13,7 @@ from citeforge.model import (
     VERSION_RELS,
     Claim,
     Event,
+    EventKind,
     Fetch,
     Group,
     Identity,
@@ -73,7 +74,7 @@ def verify(
             if work_id in reg.dead:
                 detached |= {(work_id, i) for i in claim.ids - {work_id}}
                 claim = _strip_id(claim, work_id)
-                events.append(Event("doi_unresolved", member, work_id, claim.title))
+                events.append(Event(EventKind.DOI_DEAD, member, work_id, claim.title))
                 continue
             record = reg.found.get(work_id)
             if record is None:
@@ -82,10 +83,10 @@ def verify(
                 case "detach":
                     detached |= {(work_id, i) for i in claim.ids - {work_id}}
                     claim = _strip_id(claim, work_id)
-                    events.append(Event("doi_mismatch", member, work_id, f"{claim.title} | {record.title}"))
+                    events.append(Event(EventKind.DOI_DETACHED, member, work_id, f"{claim.title} | {record.title}"))
                 case "review" | "group" as verdict:
                     hold = True
-                    kind = "doi_review" if verdict == "review" else "group_author"
+                    kind = EventKind.DOI_REVIEW if verdict == "review" else EventKind.GROUP_AUTHOR
                     events.append(Event(kind, member, work_id, f"{claim.title} | {record.title}"))
                 case "ok":
                     pass
@@ -213,13 +214,13 @@ def cluster(
         forest.union(a, b, guard=False)
     for a, b in sorted(strong):
         if not forest.union(a, b):
-            events.append(Event("link_refused", None, a, b))
+            events.append(Event(EventKind.LINK_REFUSED, None, a, b))
     for a, b in curated.links:
         forest.union(a, b, guard=False)
     for a, b, source in sorted(crosswalk):
         ta, tb = _registry_title(reg, a), _registry_title(reg, b)
         if ta is None or tb is None or ratio(ta, tb) < CROSSWALK_MIN or not forest.union(a, b):
-            events.append(Event("crosswalk_rejected", None, a, f"{b} via {source}"))
+            events.append(Event(EventKind.CROSSWALK_REJECTED, None, a, f"{b} via {source}"))
     groups = _groups(forest, records, claims)
     if search is not None:
         found, ev = search(groups)
@@ -228,7 +229,7 @@ def cluster(
             records.setdefault((r.source, r.ids), r)
             for x in sorted(r.ids):
                 if not forest.union(key, x):
-                    events.append(Event("link_refused", None, key, x))
+                    events.append(Event(EventKind.LINK_REFUSED, None, key, x))
         groups = _groups(forest, records, claims)
     fuzzy = _fuzzy_links(groups, events, curated)
     for a, b in fuzzy:
@@ -334,16 +335,16 @@ def _fuzzy_links(groups: Sequence[Group], events: list[Event], curated: Curated)
             if score >= FUZZY_LINK and not _distinct_titles(pp.title, qp.title):
                 scored.append((score, q.key))
             else:
-                events.append(Event("link_proposal", None, p.key, f"{q.key} ratio={score:.2f}"))
+                events.append(Event(EventKind.LINK_PROPOSAL, None, p.key, f"{q.key} ratio={score:.2f}"))
         if not scored:
             continue
         best = max(score for score, _ in scored)
         tied = sorted(key for score, key in scored if best - score < FUZZY_MARGIN)
         if len(tied) == 1:
             links.append((p.key, tied[0]))
-            events.append(Event("fuzzy_link", None, p.key, tied[0]))
+            events.append(Event(EventKind.FUZZY_LINK, None, p.key, tied[0]))
         else:
-            events.append(Event("link_proposal", None, p.key, " ".join(tied)))
+            events.append(Event(EventKind.LINK_PROPOSAL, None, p.key, " ".join(tied)))
     return links
 
 
@@ -402,14 +403,16 @@ def search_unidentified(
         if prior is not None and (doi := _doi_of(prior)) is not None:
             prior = reg.found.get(doi) or (prior if doi in reg.failed else None)
         if prior is not None and _search_ok(profile, prior, identity):
-            events.append(Event("search_linked", member, g.key, _doi_of(prior) or ""))
+            events.append(Event(EventKind.SEARCH_LINKED, member, g.key, _doi_of(prior) or ""))
             found.append((g.key, prior))
             continue
         # Crossref requires every query.author word, so a hyphenated surname goes as its words, never joined
         family = fold(split_literal(identity.member.name)[1])
         result = crossref.search(http, profile.title, family, profile.year)
         if result.fetch is not Fetch.OK or result.value is None:
-            events += [Event("search_failed", m, g.key, result.reason) for m in sorted({m for m, _ in g.claims})]
+            events += [
+                Event(EventKind.SEARCH_FAILED, m, g.key, result.reason) for m in sorted({m for m, _ in g.claims})
+            ]
             continue
         scored = sorted(
             ((ratio(profile.title, r.title), doi, r) for r in result.value if (doi := _doi_of(r))),
@@ -422,11 +425,13 @@ def search_unidentified(
         rivals = {d for _, d in close if not is_copy_id(d)} - {doi}
         if rivals:
             events.append(
-                Event("search_review", member, g.key, f"{doi} ratio={score:.2f} rivals={' '.join(sorted(rivals))}")
+                Event(
+                    EventKind.SEARCH_REVIEW, member, g.key, f"{doi} ratio={score:.2f} rivals={' '.join(sorted(rivals))}"
+                )
             )
         elif _search_ok(profile, best, identity):
-            events.append(Event("search_linked", member, g.key, doi))
+            events.append(Event(EventKind.SEARCH_LINKED, member, g.key, doi))
             found.append((g.key, best))
         else:
-            events.append(Event("search_review", member, g.key, f"{doi} ratio={score:.2f}"))
+            events.append(Event(EventKind.SEARCH_REVIEW, member, g.key, f"{doi} ratio={score:.2f}"))
     return found, events

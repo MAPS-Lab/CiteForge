@@ -60,7 +60,7 @@ years.
 | 0 | complete |
 | 1 | unexpected error, traceback on stderr |
 | 2 | bad input, curated file or key, before any request |
-| 3 | written, but a person was partial, a source or registry lookup failed, or a guard held removals |
+| 3 | written, but a person was partial, a source or registry lookup failed, a guard held removals, or an untracked file was kept |
 
 ## Outputs
 
@@ -85,8 +85,10 @@ partial: works can be added but none are removed. When a registry or OpenAlex lo
 a work, that work keeps its last decision and record and the person reads `partial:registry`.
 A person whose ORCID, DBLP pid or OpenAlex
 id is not found anywhere reads `no_profile` and is held the same way. A file is removed only with complete
-listings and a named reason, and never when a person would lose more than 20% of their
-entries at once.
+listings and a named reason, and never when a person would lose at least 5 entries that are also
+more than 20% of their entries at once. Only a file an earlier run wrote is ever removed. A `.bib`
+file no state row accounts for (a first run, a lost `state/`, a file placed by hand) stays where it
+is, is listed under `untracked` in the report, and makes the run exit 3.
 
 ## Curated decisions
 

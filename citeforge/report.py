@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from citeforge.model import Claim, Decision, Event, Verdict, Work
+from citeforge.model import Claim, Decision, Event, EventKind, Verdict, Work
 from citeforge.publish import publishable
 from citeforge.state import StateRow, atomic_write
 
@@ -34,6 +34,7 @@ class RunData:
     events: Sequence[Event]
     orcid_claims: Mapping[str, Sequence[Claim]]
     registry_failed: frozenset[str]
+    untracked: Sequence[str]
     exit_code: int
 
 
@@ -44,7 +45,7 @@ def _toml_line(section: str, member: str, work_id: str) -> str:
 def _coverage(data: RunData) -> dict[str, Any]:
     owner = {a: k for k, w in sorted(data.works.items()) for a in w.aliases}
     held = {(m, i) for m, c in data.held for i in c.ids}
-    dropped = {(e.member, e.id): e.kind for e in data.events if e.kind in ("doi_mismatch", "doi_unresolved")}
+    dropped = {(e.member, e.id): e.kind for e in data.events if e.kind in (EventKind.DOI_DETACHED, EventKind.DOI_DEAD)}
     items = []
     claimed = emitted = 0
     for member, claims in sorted(data.orcid_claims.items()):
@@ -104,7 +105,7 @@ def build(data: RunData) -> dict[str, Any]:
                 )
     by_kind = Counter(e.kind for e in data.events)
 
-    def events_of(kind: str) -> list[dict[str, str | None]]:
+    def events_of(kind: EventKind) -> list[dict[str, str | None]]:
         return [{"member": e.member, "id": e.id, "detail": e.detail} for e in data.events if e.kind == kind]
 
     return {
@@ -115,16 +116,17 @@ def build(data: RunData) -> dict[str, Any]:
             "exit_code": data.exit_code,
             "registry_failed": sorted(data.registry_failed),
         },
+        "untracked": list(data.untracked),
         "timing": dict(data.stages),
         "sources": {h: {**dict(v), "down": data.down.get(h)} for h, v in sorted(data.sources.items())},
         "members": members,
         "review": review,
         "excluded": dict(sorted(Counter(r.work.excluded for r in data.state.values() if r.work.excluded).items())),
         "links": {
-            "doi_detached": events_of("doi_mismatch"),
-            "doi_dead": events_of("doi_unresolved"),
-            "fuzzy": events_of("fuzzy_link"),
-            "proposals": events_of("link_proposal"),
+            "doi_detached": events_of(EventKind.DOI_DETACHED),
+            "doi_dead": events_of(EventKind.DOI_DEAD),
+            "fuzzy": events_of(EventKind.FUZZY_LINK),
+            "proposals": events_of(EventKind.LINK_PROPOSAL),
         },
         "coverage": _coverage(data),
         "events": {"counts": dict(sorted(by_kind.items())), "items": [list(_event(e)) for e in data.events]},
@@ -159,9 +161,10 @@ def markdown(report: Mapping[str, Any]) -> str:
     down = [f"{h}: {v['down']}" for h, v in report["sources"].items() if v.get("down")]
     lines += _list("Hosts down", down, None)
     lines += _list("Registry lookups failed", report["run"]["registry_failed"])
+    lines += _list("Files no run wrote, kept in place", report["untracked"])
     partial = [f"{m}: {v['status']}" for m, v in members.items() if v["status"] != "complete"]
     lines += _list("Members not complete", partial, None)
-    orcid_status = [f"{m}: {i} is {d}" for k, m, i, d in report["events"]["items"] if k == "orcid_status"]
+    orcid_status = [f"{m}: {i} is {d}" for k, m, i, d in report["events"]["items"] if k == EventKind.ORCID_STATUS]
     lines += _list("ORCID records to fix in the roster", orcid_status, None)
     site = members.get(WEBSITE_DIR)
     if site:

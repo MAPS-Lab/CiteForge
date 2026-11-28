@@ -1,6 +1,6 @@
 from collections.abc import Iterable, Mapping, Sequence
 
-from citeforge.http import Http
+from citeforge.http import REDIRECT_BLOCKED, Http
 from citeforge.ids import split_id
 from citeforge.model import VERSION_RELS, Fetch, Record, Registries
 from citeforge.sources import arxiv, crossref, datacite, doiorg, openalex
@@ -36,7 +36,7 @@ def _by_doi(http: Http, dois: Sequence[str]) -> tuple[dict[str, Record], set[str
                         found[work_id] = res.value
                     elif res.fetch is Fetch.NOT_FOUND:
                         dead.add(work_id)
-                    elif res.reason != "redirect_blocked":
+                    elif res.reason != REDIRECT_BLOCKED:
                         # an agency whose CSL host is off the allow-list fails the same way on every run
                         failed.add(work_id)
     return found, dead, failed

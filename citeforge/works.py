@@ -10,6 +10,7 @@ from citeforge.model import (
     REGISTRIES,
     Author,
     Event,
+    EventKind,
     Group,
     Identity,
     Kind,
@@ -250,17 +251,17 @@ def _repair_order(primary: Record, candidates: Sequence[Record]) -> tuple[tuple[
     return None
 
 
-def clean_byline(authors: tuple[Author, ...]) -> tuple[tuple[Author, ...], list[str]]:
+def clean_byline(authors: tuple[Author, ...]) -> tuple[tuple[Author, ...], list[tuple[EventKind, str]]]:
     persons = any(a.family for a in authors)
     seen: set[tuple[str, str, str | None, tuple[str, ...]]] = set()
     out, dropped = [], []
     for a in authors:
         if a.literal and not a.family and persons and is_affiliation(a.literal):
-            dropped.append(f"author_affiliation_dropped:{a.literal}")
+            dropped.append((EventKind.AUTHOR_AFFILIATION_DROPPED, a.literal))
             continue
         key = (fold(a.given), fold(a.family or a.literal or ""), a.orcid, a.rors)
         if key in seen and (a.orcid or len(authors) >= 50):
-            dropped.append(f"author_repeat_dropped:{a.given} {a.family}".strip())
+            dropped.append((EventKind.AUTHOR_REPEAT_DROPPED, f"{a.given} {a.family}".strip()))
             continue
         seen.add(key)
         out.append(a)
@@ -358,7 +359,7 @@ def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
         aliases=g.ids,
         sources=frozenset(r.source for r in records) | frozenset(c.source for _, c in g.claims),
     )
-    return work, tuple(Event(d.partition(":")[0], None, work.key, d.partition(":")[2]) for d in dropped)
+    return work, tuple(Event(kind, None, work.key, detail) for kind, detail in dropped)
 
 
 def _keyable(r: Record) -> bool:

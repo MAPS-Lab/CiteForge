@@ -42,7 +42,7 @@ def test_verify_detaches_dead_and_mismatched_dois_and_holds_reviews() -> None:
     )
     assert [c.ids for _, c in kept] == [{"doi:10.1234/good"}, {"arxiv:2101.00001"}]
     assert [c.ids for _, c in held] == [{"doi:10.1234/mid"}]
-    assert [e.kind for e in events] == ["doi_mismatch", "doi_unresolved", "doi_review"]
+    assert [e.kind for e in events] == ["doi_detached", "doi_dead", "doi_review"]
 
 
 def test_a_doi_detached_from_an_openalex_claim_stays_apart_from_it() -> None:
@@ -52,7 +52,7 @@ def test_a_doi_detached_from_an_openalex_claim_stays_apart_from_it() -> None:
     kept, _, events, registries = cl.verify(
         [(ME, claim(*oa.ids, source=Source.OPENALEX, rec=oa))], registries, {ME: identity()}
     )
-    assert [e.kind for e in events] == ["doi_mismatch"]
+    assert [e.kind for e in events] == ["doi_detached"]
     groups, _ = cl.cluster(kept, registries, Curated())
     assert sorted(sorted(g.ids) for g in groups) == [["doi:10.1/wrong"], ["openalex:W1"]]
     assert [g.claims for g in groups if g.key == "doi:10.1/wrong"] == [()]

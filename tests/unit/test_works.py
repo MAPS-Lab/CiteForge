@@ -5,7 +5,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from citeforge.curated import Curated
-from citeforge.model import Author, Group, Kind, Record, Rel, Source, Status
+from citeforge.model import Author, EventKind, Group, Kind, Record, Rel, Source, Status
 from citeforge.text import name_key
 from citeforge.works import apply_links, build, classify, clean_byline, doi_agrees, year_of
 from tests.factories import author, record
@@ -262,7 +262,7 @@ def test_byline_rules() -> None:
     org = (author("Ana Lima"), Author("", "", literal="Dalhousie University"), Author("", "", literal="ATLAS Team"))
     kept, dropped = clean_byline(org)
     assert [a.literal for a in kept] == [None, "ATLAS Team"]
-    assert dropped == ["author_affiliation_dropped:Dalhousie University"]
+    assert dropped == [(EventKind.AUTHOR_AFFILIATION_DROPPED, "Dalhousie University")]
 
 
 def test_org_only_byline_takes_person_byline_and_sorted_byline_repair() -> None:

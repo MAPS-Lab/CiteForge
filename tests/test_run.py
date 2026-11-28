@@ -2,6 +2,7 @@ import dataclasses
 import functools
 import json
 import re
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -83,7 +84,7 @@ def test_first_run_end_to_end(workdir: Path, monkeypatch: pytest.MonkeyPatch) ->
     reasons = {i["id"]: i["reason"] for i in report["coverage"]["items"]}
     assert reasons["doi:10.1234/editorial"] == "kind:editorial"
     assert "doi:10.1234/old" not in reasons
-    assert reasons["doi:10.1234/wrong"] == "doi_mismatch"
+    assert reasons["doi:10.1234/wrong"] == "doi_detached"
     assert any(d["id"] == "doi:10.1234/wrong" for d in report["links"]["doi_detached"])
     assert (workdir / "run/report.md").read_text().startswith("## CiteForge refresh")
     rows = [json.loads(line) for line in (workdir / "state/works.jsonl").read_text().splitlines()]
@@ -228,6 +229,84 @@ def test_missing_counter_and_shrink_guard(workdir: Path, monkeypatch: pytest.Mon
     assert len(list(spadon_dir.glob("*.bib"))) == 7
     report = json.loads((workdir / "state/report.json").read_text())
     assert report["events"]["counts"]["shrink_guard"] == 1
+
+
+@pytest.mark.parametrize(
+    ("listed", "dropped", "guarded"),
+    [(8, 1, False), (8, 4, False), (12, 5, True), (24, 5, True), (25, 5, False)],
+)
+def test_shrink_guard_holds_at_least_five_removals_above_a_fifth(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch, listed: int, dropped: int, guarded: bool
+) -> None:
+    world = default_world()
+    bulk = listed - 2
+    for n in range(bulk):
+        doi = f"doi:10.1234/bulk{n}"
+        world.crossref[doi] = cr(doi, f"Ocean analog study number {n} on sea ice", (SP,), year=2022)
+    world.orcid_works[SPADON_ORCID] = [c for c in world.orcid_works[SPADON_ORCID] if "bulk" not in min(c.ids)] + [
+        Claim(Source.ORCID, frozenset({f"doi:10.1234/bulk{n}"}), f"Ocean analog study number {n} on sea ice", 2022)
+        for n in range(bulk)
+    ]
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    spadon_dir = workdir / "output" / SPADON
+    assert len(list(spadon_dir.glob("*.bib"))) == listed
+    gone = {f"doi:10.1234/bulk{n}" for n in range(dropped)}
+    world.orcid_works[SPADON_ORCID] = [c for c in world.orcid_works[SPADON_ORCID] if not c.ids & gone]
+    assert cli.main([]) == 0
+    assert cli.main([]) == (3 if guarded else 0)
+    assert len(list(spadon_dir.glob("*.bib"))) == (listed if guarded else listed - dropped)
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert ("shrink_guard" in report["events"]["counts"]) is guarded
+    assert len(report["members"][SPADON]["removed"]) == (0 if guarded else dropped)
+
+
+def test_files_no_state_owns_survive_a_cold_run_with_an_outage(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    world = default_world()
+    install(monkeypatch, world)
+    assert cli.main([]) == 0
+    before = tree(workdir / "output")
+    legacy = workdir / "output" / SPADON / "Spadon2019-LegacyEntry.bib"
+    legacy.write_text("@article{Spadon2019:Legacy,\n  title = {Legacy},\n  year = {2019}\n}\n", encoding="utf-8")
+    shutil.rmtree(workdir / "state")
+    world.crossref_down = True
+    assert cli.main([]) == 3
+    after = tree(workdir / "output")
+    assert {k for k in before if k.endswith(".bib")} <= set(after)
+    assert legacy.exists()
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert f"{SPADON}/Spadon2019-LegacyEntry.bib" in report["untracked"]
+    assert "### Files no run wrote, kept in place" in (workdir / "run/report.md").read_text()
+
+
+def test_a_file_on_disk_without_state_survives_a_failed_orcid_listing(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch, default_world())
+    monkeypatch.setattr(orcid, "record", lambda http, o: Result(Fetch.FAILED, None, "http_503"))
+    old = workdir / "output" / SPADON / "Old.bib"
+    old.parent.mkdir(parents=True)
+    old.write_text("@misc{Old,\n  title = {Old}\n}\n", encoding="utf-8")
+    assert cli.main([]) == 3
+    assert old.read_text(encoding="utf-8") == "@misc{Old,\n  title = {Old}\n}\n"
+
+
+def test_a_complete_run_keeps_unowned_files_and_replaces_one_it_now_writes(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(monkeypatch, default_world())
+    folder = workdir / "output" / SPADON
+    folder.mkdir(parents=True)
+    (folder / "Spadon2024-PhysicsInformed.bib").write_text("v1 bytes\n", encoding="utf-8")
+    (folder / "Hand2021-Placed.bib").write_text("@misc{Hand,\n  title = {Hand}\n}\n", encoding="utf-8")
+    assert cli.main([]) == 3
+    assert (folder / "Spadon2024-PhysicsInformed.bib").read_text(encoding="utf-8").startswith("@article{")
+    assert (folder / "Hand2021-Placed.bib").exists()
+    report = json.loads((workdir / "state/report.json").read_text())
+    assert report["untracked"] == [f"{SPADON}/Hand2021-Placed.bib"]
+    assert all(m["status"] == "complete" for n, m in report["members"].items() if n in (SPADON, MATWIN, YE))
+    (folder / "Hand2021-Placed.bib").unlink()
+    assert cli.main([]) == 0
 
 
 def test_over_cap_carries_previous_decisions(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:

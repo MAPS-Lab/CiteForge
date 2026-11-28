@@ -5,7 +5,7 @@ from collections.abc import Iterable
 
 from citeforge.authorship import is_own
 from citeforge.http import Http, Result
-from citeforge.model import Event, Fetch, Identity, Member, NameKey, Work
+from citeforge.model import Event, EventKind, Fetch, Identity, Member, NameKey, Work
 from citeforge.sources import dblp, openalex, orcid
 from citeforge.sources.dblp import DblpPerson
 from citeforge.sources.orcid import OrcidRecord
@@ -54,7 +54,7 @@ def resolve(
     events: list[Event] = []
     results = [orcid.record(http, o) for o in m.orcids]
     events += [
-        Event("orcid_status", m.dirname, o, r.reason)
+        Event(EventKind.ORCID_STATUS, m.dirname, o, r.reason)
         for o, r in zip(m.orcids, results, strict=True)
         if r.fetch is Fetch.FAILED and r.reason.partition(":")[0] in orcid.STATUS_REASONS.values()
     ]
@@ -70,17 +70,17 @@ def resolve(
     for pinned in m.openalex:
         res = openalex.author(http, pinned)
         if res.fetch is Fetch.NOT_FOUND:
-            events.append(Event("openalex_id_deleted", m.dirname, pinned, ""))
+            events.append(Event(EventKind.OPENALEX_ID_DELETED, m.dirname, pinned, ""))
             continue
         if res.value is None:
             author_ids.add(pinned)
             continue
         current, author_orcid = res.value
         if author_orcid and m.orcids and author_orcid not in m.orcids:
-            events.append(Event("openalex_orcid_conflict", m.dirname, pinned, author_orcid))
+            events.append(Event(EventKind.OPENALEX_ORCID_CONFLICT, m.dirname, pinned, author_orcid))
             continue
         if current != pinned:
-            events.append(Event("openalex_id_merged", m.dirname, pinned, current))
+            events.append(Event(EventKind.OPENALEX_ID_MERGED, m.dirname, pinned, current))
         author_ids.add(current)
     rec = orcid_result.value if orcid_result else None
     affiliations = rec.affiliations if rec else ()

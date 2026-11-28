@@ -17,6 +17,7 @@ from citeforge.model import (
     Claim,
     Decision,
     Event,
+    EventKind,
     Fetch,
     Group,
     Identity,
@@ -93,6 +94,7 @@ class Settings:
 class RunResult:
     state: dict[str, StateRow]
     files: dict[Path, str]
+    stale: frozenset[Path]
     report: dict
     exit_code: int
 
@@ -153,15 +155,81 @@ def _windowed(d: Decision, w: Work, s: Settings) -> Decision:
     return d
 
 
-def _status(listing: Listing, over_cap: bool, emitted: int, registry_failed: bool) -> str:
-    if over_cap:
-        return "over_cap"
-    failed = sorted(s.value for s, f in listing.fetch.items() if f is Fetch.FAILED) + ["registry"] * registry_failed
+def _held_because(listing: Listing, registry_failed: bool) -> str | None:
+    """Why removals are held for this member this run, or None when every listing and registry lookup came back."""
+    failed = sorted(s.value for s, f in listing.fetch.items() if f is Fetch.FAILED)
+    if registry_failed:
+        failed.append("registry")
     if failed:
         return "partial:" + ",".join(failed)
     if Fetch.OK not in listing.fetch.values():
         return "no_profile"
-    return "complete" if emitted else "no_works_in_window"
+    return None
+
+
+@dataclasses.dataclass(slots=True)
+class _Kept:
+    decisions: dict[str, Decision] = dataclasses.field(default_factory=dict)
+    works: dict[str, Work] = dataclasses.field(default_factory=dict)
+    removals: dict[str, str] = dataclasses.field(default_factory=dict)
+    missing: dict[str, int] = dataclasses.field(default_factory=dict)
+    shrink_held: int = 0
+
+
+def _judge_previous(
+    name: str,
+    prev: Mapping[str, StateRow],
+    mine: Mapping[str, Decision],
+    by_key: Mapping[str, Work],
+    alias_owner: Mapping[str, str],
+    unreadable: frozenset[str],
+    held_ids: frozenset[str],
+    hold: bool,
+) -> _Kept:
+    """Keep or remove each work the member had last run; `unreadable` aliases failed a registry lookup."""
+    out = _Kept()
+    for k, row in sorted(prev.items()):
+        if row.work.aliases & unreadable or (k in by_key and by_key[k].aliases & unreadable):
+            out.decisions[k] = row.members[name]
+            out.works[k] = row.work
+            continue
+        now = mine.get(k)
+        w = by_key.get(k)
+        if publish.publishable(now, w):
+            continue
+        heir = next((alias_owner[a] for a in sorted(row.work.aliases) if a in alias_owner), None)
+        if w is None and heir is not None and publish.publishable(mine.get(heir), by_key[heir]):
+            reason = f"merged_into:{heir}"
+        elif hold:
+            reason = None
+        elif w is not None and w.excluded is not None:
+            reason = w.excluded
+        elif w is None and k in alias_owner:
+            reason = f"merged_into:{alias_owner[k]}"
+        elif now is not None and now.verdict is Verdict.REJECT:
+            reason = now.rule
+        elif now is None and row.work.aliases & held_ids:
+            reason = None
+        elif now is None:
+            count = row.missing.get(name, 0) + 1
+            out.missing[k] = count
+            reason = "missing" if count >= MISSING_RUNS else None
+        else:
+            reason = None
+        if reason is None:
+            out.decisions[k] = row.members[name]
+            if w is None:
+                out.works[k] = row.work
+        else:
+            out.removals[k] = reason
+    if len(out.removals) >= SHRINK_MIN and len(out.removals) > SHRINK_SHARE * len(prev):
+        out.shrink_held = len(out.removals)
+        for k in out.removals:
+            out.decisions[k] = prev[k].members[name]
+            if k not in by_key:
+                out.works[k] = prev[k].work
+        out.removals = {}
+    return out
 
 
 def run(
@@ -171,7 +239,9 @@ def run(
     curated: Curated,
     http: Http,
     previous: State,
+    existing: frozenset[Path],
 ) -> RunResult:
+    """Build the next state and its files; `existing` is every .bib on disk in the member and group folders."""
     started = time.monotonic()
     stages: dict[str, float] = {}
 
@@ -221,7 +291,7 @@ def run(
         kept, reg, curated, lambda gs: cluster.search_unidentified(gs, http, identities, s.min_year, linked, reg)
     )
     events += ev
-    for name in sorted({e.member for e in ev if e.kind == "search_failed" and e.member in listings}):
+    for name in sorted({e.member for e in ev if e.kind is EventKind.SEARCH_FAILED and e.member in listings}):
         listing = listings[name]
         listings[name] = dataclasses.replace(listing, fetch={**listing.fetch, Source.CROSSREF: Fetch.FAILED})
     t = stage("cluster", t)
@@ -261,18 +331,18 @@ def run(
     missing: dict[str, dict[str, int]] = defaultdict(dict)
     carried_works: dict[str, Work] = {}
     statuses: dict[str, str] = {}
-    guard = False
+    held_any = guard = False
     alias_owner = {a: w.key for w in current for a in w.aliases}
     member_changes: dict[str, dict[str, list]] = {}
     for m in members:
         name = m.dirname
-        listing = listings[name]
         mine = dict(decisions.get(name, {}))
         prev = {k: row for k, row in previous.items() if publish.emitted(row, name)}
         registry_failed = bool(registry_held & (mine.keys() | prev.keys())) or any(
             row.work.aliases & reg.failed for row in prev.values()
         )
-        partial = registry_failed or Fetch.FAILED in listing.fetch.values() or Fetch.OK not in listing.fetch.values()
+        held_because = _held_because(listings[name], registry_failed)
+        held_any |= held_because is not None
         accepted = [k for k, d in mine.items() if publish.publishable(d, by_key[k])]
         over_cap = len(accepted) > PER_YEAR_CAP * window_years
         if over_cap:
@@ -288,55 +358,22 @@ def run(
                     mine[k] = previous[k].members[name]
             else:
                 mine.pop(k)
-                events.append(Event("pending", name, k, "pending:registry"))
-        removals: dict[str, str] = {}
-        for k, row in sorted(prev.items()):
-            # a work whose registry or donor lookup failed is judged on last run's record, never removed
-            if k in registry_held or row.work.aliases & reg.failed:
-                mine[k] = row.members[name]
-                carried_works[k] = row.work
-                continue
-            now = mine.get(k)
-            w = by_key.get(k)
-            if publish.publishable(now, w):
-                continue
-            heir = next((alias_owner[a] for a in sorted(row.work.aliases) if a in alias_owner), None)
-            if w is None and heir is not None and publish.publishable(mine.get(heir), by_key[heir]):
-                reason = f"merged_into:{heir}"
-            elif partial or over_cap:
-                reason = None
-            elif w is not None and w.excluded is not None:
-                reason = w.excluded
-            elif w is None and k in alias_owner:
-                reason = f"merged_into:{alias_owner[k]}"
-            elif now is not None and now.verdict is Verdict.REJECT:
-                reason = now.rule
-            elif now is None and row.work.aliases & held_ids[name]:
-                reason = None
-            elif now is None:
-                count = row.missing.get(name, 0) + 1
-                missing[k][name] = count
-                reason = "missing" if count >= MISSING_RUNS else None
-            else:
-                reason = None
-            if reason is None:
-                mine[k] = row.members[name]
-                if w is None:
-                    carried_works[k] = row.work
-            else:
-                removals[k] = reason
-        if len(removals) >= SHRINK_MIN and len(removals) > SHRINK_SHARE * len(prev):
+                events.append(Event(EventKind.PENDING, name, k, "pending:registry"))
+        kept = _judge_previous(
+            name, prev, mine, by_key, alias_owner, reg.failed, frozenset(held_ids[name]),
+            held_because is not None or over_cap,
+        )  # fmt: skip
+        if kept.shrink_held:
             guard = True
-            events.append(Event("shrink_guard", name, None, f"{len(removals)} of {len(prev)} removals held"))
-            for k in removals:
-                mine[k] = prev[k].members[name]
-                if k not in by_key:
-                    carried_works[k] = prev[k].work
-            removals = {}
+            events.append(Event(EventKind.SHRINK_GUARD, name, None, f"{kept.shrink_held} of {len(prev)} removals held"))
+        mine.update(kept.decisions)
+        carried_works.update(kept.works)
+        for k, count in kept.missing.items():
+            missing[k][name] = count
         final[name] = mine
-        member_changes[name] = {"removed": sorted(removals.items())}
+        member_changes[name] = {"removed": sorted(kept.removals.items())}
         emitted = sum(publish.publishable(d, carried_works.get(k) or by_key[k]) for k, d in mine.items())
-        statuses[name] = _status(listing, over_cap, emitted, registry_failed)
+        statuses[name] = "over_cap" if over_cap else held_because or ("complete" if emitted else "no_works_in_window")
     t = stage("failure_rules", t)
 
     all_works = {**by_key, **carried_works}
@@ -361,6 +398,10 @@ def run(
     problems = publish.check(files)
     if problems:
         raise publish.PlanError("; ".join(problems[:20]))
+    owned = publish.bib_paths(previous, members, group).keys()
+    stale = frozenset(owned - files.keys())
+    # a file no state row ever emitted (a first run, a lost state/, a hand-placed file) is kept and reported
+    untracked = sorted(p.as_posix() for p in existing - owned - files.keys())
     t = stage("publish_plan", t)
 
     for name in member_changes:
@@ -371,8 +412,7 @@ def run(
             (k, before[k], after[k]) for k in after.keys() & before.keys() if before[k] != after[k]
         )
     down = {h: r for h in sorted(HOSTS) if (r := http.down(HOSTS[h]))}
-    partial_any = any(st.startswith("partial") or st == "no_profile" for st in statuses.values())
-    exit_code = 3 if partial_any or down or guard or reg.failed else 0
+    exit_code = 3 if held_any or down or guard or reg.failed or untracked else 0
     data = report.RunData(
         min_year=s.min_year,
         stages=stages,
@@ -392,7 +432,8 @@ def run(
             for n, lst in listings.items()
         },
         registry_failed=reg.failed,
+        untracked=untracked,
         exit_code=exit_code,
     )
     stage("total", started)
-    return RunResult(new_state, files, report.build(data), exit_code)
+    return RunResult(new_state, files, stale, report.build(data), exit_code)

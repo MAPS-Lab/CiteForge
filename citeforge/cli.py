@@ -54,14 +54,16 @@ def _build(ns: argparse.Namespace) -> int:
     curated = curated_mod.load(settings.curated)
     curated.check_members(members)
     previous = state.load(settings.state)
+    folders = [*(m.dirname for m in members), publish.GROUP_DIR]
+    existing = publish.on_disk(settings.output, folders)
     settings.run.mkdir(parents=True, exist_ok=True)
     with (settings.run / "requests.jsonl").open("w", encoding="utf-8") as log:
         http = Http(log, {"api.openalex.org": settings.openalex_key})
         try:
-            result = run(settings, members, group, curated, http, previous)
+            result = run(settings, members, group, curated, http, previous, existing)
         finally:
             http.close()
-    publish.write(settings.output, result.files, [*(m.dirname for m in members), publish.GROUP_DIR])
+    publish.write(settings.output, result.files, result.stale)
     report.write(result.report, settings.run, settings.state)
     state.save(settings.state, result.state)
     return result.exit_code

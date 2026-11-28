@@ -24,7 +24,7 @@ This repository is public. Treat anything that could commit an API key, an email
 
 Invariants a change must not break:
 - Determinism. The same responses give byte-identical output/ and state/. Every collection that reaches output is sorted.
-- Failure never reads as empty. A FAILED fetch keeps the previous state record and never removes a file. Removals need complete listings and a named reason, and the shrink guard holds a member that would lose more than 20 percent and at least 5 entries.
+- Failure never reads as empty. A FAILED fetch keeps the previous state record and never removes a file. Removals need complete listings and a named reason, and the shrink guard holds a member that would lose more than 20 percent and at least 5 entries. Only a file the previous state emitted is ever deleted; a .bib file no state row owns is kept and reported.
 - One work gives the same bytes in every folder, and a file name is unique across the corpus.
 - Attribution follows the ordered rule table in citeforge/authorship.py. A name alone never creates an author-work pair.
 - Human decisions live only in data/curated.toml, keyed by work id.

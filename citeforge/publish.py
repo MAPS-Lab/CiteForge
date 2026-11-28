@@ -32,30 +32,37 @@ def emitted(row: StateRow, member: str) -> bool:
     return publishable(row.members.get(member), row.work) and bool(row.names.stem)
 
 
+def bib_paths(state: State, members: Sequence[Member], group: Sequence[Member]) -> dict[Path, str]:
+    """Every .bib path the state emits, in member folders and the group folder, mapped to its work key."""
+    out: dict[Path, str] = {}
+    group_names = {m.dirname for m in group}
+    for key in sorted(state):
+        row = state[key]
+        folders = [m.dirname for m in members if emitted(row, m.dirname)]
+        if group_names.intersection(folders):
+            folders.append(GROUP_DIR)
+        for folder in folders:
+            out[Path(folder) / f"{row.names.stem}.bib"] = key
+    return out
+
+
 def plan(
     state: State, members: Sequence[Member], group: Sequence[Member], output_name: str = "output"
 ) -> dict[Path, str]:
     files: dict[Path, str] = {}
+    texts: dict[str, str] = {}
     summary: list[list[str]] = []
     counts: Counter[str] = Counter()
-    group_names = {m.dirname for m in group}
-    for key in sorted(state):
+    for path, key in bib_paths(state, members, group).items():
         row = state[key]
-        text = None
-        in_group = False
-        for m in members:
-            if not emitted(row, m.dirname):
-                continue
-            text = text or render(row.work, row.names)
-            path = Path(m.dirname) / f"{row.names.stem}.bib"
-            files[path] = text
-            counts[m.dirname] += 1
+        if key not in texts:
+            texts[key] = render(row.work, row.names)
+        files[path] = texts[key]
+        folder = path.parent.as_posix()
+        counts[folder] += 1
+        if folder != GROUP_DIR:
             flags = [int(s in row.work.sources) for s in FLAGS]
             summary.append([f"{output_name}/{path.as_posix()}", str(sum(flags)), *map(str, flags)])
-            in_group |= m.dirname in group_names
-        if in_group and text is not None:
-            files[Path(GROUP_DIR) / f"{row.names.stem}.bib"] = text
-            counts[GROUP_DIR] += 1
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(["file_path", "trust_hits", *(s.value for s in FLAGS)])
@@ -133,18 +140,26 @@ def check(files: Mapping[Path, str]) -> list[str]:
     return problems
 
 
-def write(output: Path, files: Mapping[Path, str], folders: Iterable[str]) -> None:
+def on_disk(output: Path, folders: Iterable[str]) -> frozenset[Path]:
+    """The .bib files under output in the given folders, skipping a symlinked folder."""
+    found: set[Path] = set()
+    for folder in set(folders):
+        directory = output / folder
+        if directory.is_dir() and not directory.is_symlink():
+            found.update(p.relative_to(output) for p in directory.glob("*.bib"))
+    return frozenset(found)
+
+
+def write(output: Path, files: Mapping[Path, str], stale: Iterable[Path]) -> None:
+    """Write the planned files and delete the stale ones; a .bib file no state row owned is never named stale."""
     for rel, text in sorted(files.items()):
         path = output / rel
         if not path.exists() or path.read_text(encoding="utf-8") != text:
             atomic_write(path, text)
-    for folder in sorted(set(folders)):
-        directory = output / folder
-        if not directory.is_dir() or directory.is_symlink():
+    for rel in sorted(set(stale) - files.keys()):
+        directory = output / rel.parent
+        if directory.is_symlink() or not directory.is_dir():
             continue
-        for path in sorted(directory.glob("*.bib")):
-            rel = path.relative_to(output)
-            if rel not in files:
-                path.unlink()
+        (output / rel).unlink(missing_ok=True)
         if not any(directory.iterdir()):
             directory.rmdir()

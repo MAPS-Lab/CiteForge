@@ -200,9 +200,31 @@ class Names:
     citekey: str
 
 
+class EventKind(StrEnum):
+    AUTHOR_AFFILIATION_DROPPED = "author_affiliation_dropped"
+    AUTHOR_REPEAT_DROPPED = "author_repeat_dropped"
+    CROSSWALK_REJECTED = "crosswalk_rejected"
+    DOI_DEAD = "doi_dead"
+    DOI_DETACHED = "doi_detached"
+    DOI_REVIEW = "doi_review"
+    FUZZY_LINK = "fuzzy_link"
+    GROUP_AUTHOR = "group_author"
+    LINK_PROPOSAL = "link_proposal"
+    LINK_REFUSED = "link_refused"
+    OPENALEX_ID_DELETED = "openalex_id_deleted"
+    OPENALEX_ID_MERGED = "openalex_id_merged"
+    OPENALEX_ORCID_CONFLICT = "openalex_orcid_conflict"
+    ORCID_STATUS = "orcid_status"
+    PENDING = "pending"
+    SEARCH_FAILED = "search_failed"
+    SEARCH_LINKED = "search_linked"
+    SEARCH_REVIEW = "search_review"
+    SHRINK_GUARD = "shrink_guard"
+
+
 @dataclass(frozen=True, slots=True)
 class Event:
-    kind: str
+    kind: EventKind
     member: str | None
     id: str | None
     detail: str

@@ -59,6 +59,11 @@ FIXED_PARAMS: Mapping[str, Mapping[str, str]] = {
 }
 
 
+REDIRECT = "redirect"
+REDIRECT_BLOCKED = "redirect_blocked"
+REDIRECT_LIMIT = "redirect_limit"
+
+
 @dataclass(frozen=True, slots=True)
 class Reply:
     fetch: Fetch
@@ -187,7 +192,7 @@ class Http:
         query = {**params, **FIXED_PARAMS.get(host.name, {})}
         if host.key_param and (key := self._keys.get(host.name)):
             query[host.key_param] = key
-        blocked = Reply(Fetch.FAILED, None, {}, b"", "redirect_blocked")
+        blocked = Reply(Fetch.FAILED, None, {}, b"", REDIRECT_BLOCKED)
         try:
             target = httpx.URL(host.base + path).copy_merge_params(query)
         except httpx.InvalidURL:
@@ -199,17 +204,17 @@ class Http:
                     reply = dataclasses.replace(blocked, url=str(target))
                     break
                 reply = dataclasses.replace(self._attempts(host, st, target, headers), url=str(target))
-                if reply.reason != "redirect" or not reply.location or not follow_redirects:
+                if reply.reason != REDIRECT or not reply.location or not follow_redirects:
                     break
                 if hop == MAX_REDIRECTS:
-                    reply = dataclasses.replace(reply, reason="redirect_limit")
+                    reply = dataclasses.replace(reply, reason=REDIRECT_LIMIT)
                     break
                 target = target.join(reply.location)
                 if target.host == host.name:
                     target = target.copy_merge_params(query)
             if (
                 reply.fetch is Fetch.FAILED
-                and not reply.reason.startswith("redirect")
+                and reply.reason not in (REDIRECT, REDIRECT_BLOCKED, REDIRECT_LIMIT)
                 and reply.status not in RECORD_STATUS
             ):
                 st.failures += 1
@@ -289,7 +294,7 @@ class Http:
             st.counts["not_found"] += 1
             return Reply(Fetch.NOT_FOUND, status, hdrs, body, "not_found"), 0.0
         if 300 <= status < 400:
-            return Reply(Fetch.FAILED, status, hdrs, body, "redirect"), 0.0
+            return Reply(Fetch.FAILED, status, hdrs, body, REDIRECT), 0.0
         if status == 429:
             st.counts["429"] += 1
         elif status >= 500:

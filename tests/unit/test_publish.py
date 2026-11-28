@@ -68,21 +68,25 @@ def test_check_catches_violations(mutate, message: str) -> None:
     assert any(message in p for p in publish.check(files))
 
 
-def test_write_replaces_and_prunes_only_member_folders(tmp_path: Path) -> None:
+def test_write_replaces_and_deletes_only_stale_files(tmp_path: Path) -> None:
     out = tmp_path / "output"
     (out / "Spadon (bfdGsGUAAAAJ)").mkdir(parents=True)
     (out / "Spadon (bfdGsGUAAAAJ)/Stale2019-X.bib").write_text("old")
-    (out / "Gone (x)").mkdir()
-    (out / "Gone (x)/Keep.bib").write_text("not ours")
+    (out / "Spadon (bfdGsGUAAAAJ)/Hand2019-Y.bib").write_text("not ours")
     files = publish.plan(state(), [SP, MW], [MW])
-    publish.write(out, files, ["Spadon (bfdGsGUAAAAJ)", "Matwin (rCoJeuYAAAAJ)", "a2i2"])
+    publish.write(out, files, [Path("Spadon (bfdGsGUAAAAJ)/Stale2019-X.bib")])
     assert not (out / "Spadon (bfdGsGUAAAAJ)/Stale2019-X.bib").exists()
-    assert (out / "Gone (x)/Keep.bib").exists()
+    assert (out / "Spadon (bfdGsGUAAAAJ)/Hand2019-Y.bib").exists()
     written = {path: path.stat().st_mtime_ns for path in out.rglob("*.bib")}
-    publish.write(out, files, ["Spadon (bfdGsGUAAAAJ)"])
+    publish.write(out, files, [])
     assert {path: path.stat().st_mtime_ns for path in out.rglob("*.bib")} == written
-    empty = publish.plan({}, [SP], [])
-    publish.write(out, empty, ["Spadon (bfdGsGUAAAAJ)", "Matwin (rCoJeuYAAAAJ)", "a2i2"])
+    planned = {p for p in files if p.suffix == ".bib"}
+    assert publish.on_disk(out, ["Spadon (bfdGsGUAAAAJ)", "Matwin (rCoJeuYAAAAJ)", "a2i2"]) == planned | {
+        Path("Spadon (bfdGsGUAAAAJ)/Hand2019-Y.bib")
+    }
+    assert set(publish.bib_paths(state(), [SP, MW], [MW])) == planned
+    (out / "Spadon (bfdGsGUAAAAJ)/Hand2019-Y.bib").unlink()
+    publish.write(out, publish.plan({}, [SP], []), planned)
     assert not (out / "Spadon (bfdGsGUAAAAJ)").exists()
 
 
@@ -91,6 +95,7 @@ def test_markdown_is_capped() -> None:
                              "renamed": []} for i in range(100)}  # fmt: skip
     report = {
         "run": {"exit_code": 0, "min_year": 2020, "registry_failed": []},
+        "untracked": [],
         "sources": {},
         "members": members,
         "review": [],
@@ -139,5 +144,6 @@ def test_write_never_prunes_through_a_symlinked_member_folder(tmp_path: Path) ->
     output = tmp_path / "output"
     output.mkdir()
     (output / SP.dirname).symlink_to(outside, target_is_directory=True)
-    publish.write(output, {}, [SP.dirname])
+    publish.write(output, {}, [Path(SP.dirname) / "Keep2020-A.bib"])
     assert (outside / "Keep2020-A.bib").exists()
+    assert publish.on_disk(output, [SP.dirname]) == frozenset()
