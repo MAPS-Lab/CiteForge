@@ -20,6 +20,7 @@ class Proposal:
     employment: bool
     accept: bool
     note: str
+    failed: bool = False
 
 
 def _dois(claims: Sequence) -> set[str]:
@@ -31,7 +32,7 @@ def propose(members: Sequence[Member], http: Http, lab_rors: frozenset[str]) -> 
     for m in sorted(members, key=lambda m: m.dirname):
         person = dblp.person(http, m.dblp) if m.dblp else None
         if person is not None and person.fetch is Fetch.FAILED:
-            out.append(Proposal(m.dirname, None, (), False, 0, False, False, f"dblp {person.reason}"))
+            out.append(Proposal(m.dirname, None, (), False, 0, False, False, f"dblp {person.reason}", True))
             continue
         dblp_orcids = set(person.value.orcids) if person and person.value else set()
         dblp_dois = _dois(person.value.claims) if person and person.value else set()
@@ -43,7 +44,7 @@ def propose(members: Sequence[Member], http: Http, lab_rors: frozenset[str]) -> 
             rec = orcid.record(http, candidate)
             if rec.value is None:
                 out.append(Proposal(m.dirname, candidate, (), candidate in dblp_orcids, 0, False, False,
-                                    f"orcid {rec.reason}"))  # fmt: skip
+                                    f"orcid {rec.reason}", rec.fetch is Fetch.FAILED))  # fmt: skip
                 continue
             overlap = len(_dois(rec.value.works) & dblp_dois)
             employment = any(a.kind == "employment" and a.ror in lab_rors for a in rec.value.affiliations)
@@ -53,7 +54,12 @@ def propose(members: Sequence[Member], http: Http, lab_rors: frozenset[str]) -> 
             authors = openalex.authors_by_orcid(http, [candidate]) if accept else None
             ids = authors.value.get(candidate, ()) if authors and authors.value else ()
             note = "pinned" if candidate in m.orcids else ("accepted" if accept else "below threshold")
-            out.append(Proposal(m.dirname, candidate, tuple(sorted(ids)), listed, overlap, employment, accept, note))
+            failed = False
+            if authors is not None and authors.fetch is Fetch.FAILED:
+                accept, note, failed = False, f"openalex {authors.reason}", True
+            out.append(
+                Proposal(m.dirname, candidate, tuple(sorted(ids)), listed, overlap, employment, accept, note, failed)
+            )
     return out
 
 

@@ -41,10 +41,11 @@ def _identify(ns: argparse.Namespace) -> int:
     with open(os.devnull, "w", encoding="utf-8") as log:
         http = Http(log, {"api.openalex.org": settings.openalex_key})
         try:
-            identify.print_table(identify.propose(members, http, lab), sys.stdout)
+            proposals = identify.propose(members, http, lab)
         finally:
             http.close()
-    return 0
+    identify.print_table(proposals, sys.stdout)
+    return 3 if any(p.failed for p in proposals) else 0
 
 
 def _build(ns: argparse.Namespace) -> int:

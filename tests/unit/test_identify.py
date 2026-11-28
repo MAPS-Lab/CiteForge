@@ -69,6 +69,23 @@ def test_failures_never_accept(
     serve(monkeypatch, dblp, orcid)
     (p,) = identify.propose([member()], None, frozenset({LAB}))  # type: ignore[arg-type]
     assert (p.orcid, p.accept, p.openalex, p.note) == (orcid_id, False, (), note)
+    assert p.failed is (dblp.fetch is Fetch.FAILED)
+
+
+def test_an_openalex_failure_is_named_and_never_reads_as_no_author(
+    workdir: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serve(monkeypatch, Result(Fetch.OK, DblpPerson((), (), ())), orcid_ok(0, True))
+    monkeypatch.setattr(identify.openalex, "authors_by_orcid", lambda h, o: Result(Fetch.FAILED, None, "http_503"))
+    (p,) = identify.propose([member(orcids=(CANDIDATE,))], None, frozenset({LAB}))  # type: ignore[arg-type]
+    assert (p.orcid, p.openalex, p.accept, p.note, p.failed) == (CANDIDATE, (), False, "openalex http_503", True)
+    install(monkeypatch, default_world())
+    monkeypatch.setattr(identify.openalex, "authors_by_orcid", lambda h, o: Result(Fetch.FAILED, None, "http_503"))
+    assert cli.main(["identify"]) == 3
+    rows = capsys.readouterr().out.splitlines()[1:]
+    assert any(r.startswith(SPADON) and r.endswith("\tfalse\topenalex http_503") for r in rows)
 
 
 def test_cli_identify_prints_one_row_per_candidate(
