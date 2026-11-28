@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/synthetic</id>
+  <title>arXiv Query</title>
+  <opensearch:totalResults>5</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2101.00001v3</id>
+    <title>Learning   $O(n)$ &amp;lt;b&amp;gt;the
+      {AIS} &lt;i&gt;Graph&lt;/i&gt; Model</title>
+    <published>2021-01-01T00:00:00Z</published>
+    <updated>2022-05-02T10:00:00Z</updated>
+    <arxiv:comment>v3 adds experiments; not withdrawnish</arxiv:comment>
+    <arxiv:doi>https://doi.org/10.1234/Example.2022.</arxiv:doi>
+    <arxiv:primary_category term="cs.LG"/>
+    <author><name>Ana Lima</name><arxiv:affiliation>Dalhousie University</arxiv:affiliation></author>
+    <author><name>Souza, João</name></author>
+    <author><name>LIGO Scientific Collaboration</name></author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2101.00002v1</id>
+    <title>Initial as family name</title>
+    <published>2021-01-02T00:00:00Z</published>
+    <updated>2021-01-02T00:00:00Z</updated>
+    <author><name>Wei Z.</name></author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2101.00003v2</id>
+    <title>   </title>
+    <published>2021-01-03T00:00:00Z</published>
+    <author><name>Ana Lima</name></author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2101.00004v2</id>
+    <title>Pulled by its authors</title>
+    <published>2020-12-30T00:00:00Z</published>
+    <updated>2021-02-01T00:00:00Z</updated>
+    <arxiv:comment>This paper has been WITHDRAWN by the author</arxiv:comment>
+    <arxiv:doi>10.48550/arXiv.2101.00004</arxiv:doi>
+    <author><name>Ana Lima</name></author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2101.00005v1</id>
+    <title>No byline</title>
+    <published>2021-01-05T00:00:00Z</published>
+  </entry>
+</feed>

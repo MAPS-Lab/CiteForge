@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/synthetic</id>
+  <title>arXiv Query</title>
+  <opensearch:totalResults>2</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2101.00001v1</id>
+    <title>A complete entry</title>
+    <published>2021-01-01T00:00:00Z</published>
+    <updated>2021-01-01T00:00:00Z</updated>
+    <author><name>Ana Lima</name></author>
+  </entry>
+</feed>

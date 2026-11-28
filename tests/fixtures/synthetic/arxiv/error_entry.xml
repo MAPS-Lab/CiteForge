@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/synthetic</id>
+  <title>arXiv Query</title>
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <entry>
+    <id>https://arxiv.org/api/errors#incorrect_id_format_for_notanid</id>
+    <title>Error</title>
+    <summary>incorrect id format for notanid</summary>
+    <author><name>arXiv api core</name></author>
+  </entry>
+</feed>
