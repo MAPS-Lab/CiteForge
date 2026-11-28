@@ -8,10 +8,14 @@ from pathlib import Path
 
 import httpx
 import pytest
+from hypothesis import settings
 
 from citeforge.http import Http, _scrub_secrets
 
 FIXTURES = Path(__file__).parent / "fixtures"
+# The suite runs at nice 19 on a shared host, where a wall-clock deadline only measures the neighbours.
+settings.register_profile("citeforge", deadline=None)
+settings.load_profile("citeforge")
 
 
 @pytest.fixture(autouse=True)

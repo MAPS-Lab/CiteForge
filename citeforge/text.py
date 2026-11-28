@@ -13,6 +13,13 @@ from citeforge.tables import ACRONYM_CASE_CORRECTIONS, AUTHOR_NAME_SUFFIXES, STO
 
 _TAG = re.compile(r"</?[A-Za-z][\w:.-]*(?:\s[^<>]*)?/?>")
 _LATEX_SPECIAL = re.compile(r"(?<!\\)([%$&#_])")
+_MATH_SPECIAL = re.compile(r"(?<!\\)([%&#])")
+# Pandoc's rule for $...$: opens before a non-space, closes after one, not followed by a digit; $$...$$ is free.
+_MATH = re.compile(
+    r"\$\$(?=[^$]*(?:[^\W_]|\\))([^$]+?)\$\$|(?<!\$)\$(?=[^\s$])(?=[^$]*(?:[^\W_]|\\))([^$]*?[^\s$])\$(?![\d$])"
+)
+_ESCAPED_DOLLAR = re.compile(r"(?<!\\)((?:\\\\)*)\\\$")
+_MATH_ALNUM = re.compile("[\U0001d400-\U0001d7ff]")
 _INVISIBLE = dict.fromkeys(map(ord, "­​‌‍⁠﻿"))
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 _PARTICLES = frozenset({"de", "da", "do", "dos", "das", "van", "von", "der", "den", "du", "la", "le", "del", "di"})
@@ -40,10 +47,33 @@ def _strip_markup(s: str) -> str:
         s = stripped
 
 
+def _latex_source(s: str) -> str:
+    s = _ESCAPED_DOLLAR.sub(r"\1$", s)
+    parts, last = [], 0
+    for m in _MATH.finditer(s):
+        parts += [
+            _LATEX_SPECIAL.sub(r"\\\1", s[last : m.start()]),
+            "$",
+            _MATH_SPECIAL.sub(r"\\\1", m.group(1) or m.group(2)),
+            "$",
+        ]
+        last = m.end()
+    return "".join(parts) + _LATEX_SPECIAL.sub(r"\\\1", s[last:])
+
+
 def clean(s: str) -> str:
+    out = _clean_once(s)
+    # Dollars a pass leaves as text can pair into math once braces between them are gone.
+    while (again := _clean_once(out)) != out:
+        out = again
+    return out
+
+
+def _clean_once(s: str) -> str:
     s = _strip_markup(s)
-    if "\\" in s or "{" in s or "}" in s:
-        s = _latex.latex_to_text(_LATEX_SPECIAL.sub(r"\\\1", s))
+    if "\\" in s or "{" in s or "}" in s or "$" in s:
+        s = _latex.latex_to_text(_latex_source(s))
+    s = _MATH_ALNUM.sub(lambda m: unicodedata.normalize("NFKC", m.group(0)), s)
     s = unicodedata.normalize("NFC", s).translate(_INVISIBLE)
     s = "".join(" " if unicodedata.category(c) == "Cc" else c for c in s)
     s = s.replace("{", "").replace("}", "").replace("\\", "")

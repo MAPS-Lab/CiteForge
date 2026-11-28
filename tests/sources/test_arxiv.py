@@ -136,7 +136,7 @@ def test_entry_shapes_and_per_entry_failures() -> None:
     assert not batch.missing
 
     rich = batch.found["arxiv:2101.00001"]
-    assert rich.title == "Learning $O(n)$ the AIS Graph Model"
+    assert rich.title == "Learning O(n) the AIS Graph Model"
     assert (rich.year, rich.dates) == (2021, (2021, 2022))
     assert rich.authors == (
         Author("Ana", "Lima", affiliations=("Dalhousie University",)),
