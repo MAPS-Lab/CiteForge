@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from citeforge.model import Claim, Decision, Event, Verdict, Work
+from citeforge.publish import publishable
 from citeforge.state import StateRow, atomic_write
 
 WEBSITE_DIR = "Spadon (bfdGsGUAAAAJ)"
@@ -39,12 +40,6 @@ def _toml_line(section: str, member: str, work_id: str) -> str:
     return f'[[{section}]]\nmember = {json.dumps(member, ensure_ascii=False)}\nid = "{work_id}"'
 
 
-def _emitted(data: RunData, member: str, key: str) -> bool:
-    d = data.decisions.get(member, {}).get(key)
-    w = data.works.get(key)
-    return d is not None and d.verdict is Verdict.ACCEPT and w is not None and w.excluded is None
-
-
 def _coverage(data: RunData) -> dict[str, Any]:
     owner = {a: k for k, w in sorted(data.works.items()) for a in w.aliases}
     held = {(m, i) for m, c in data.held for i in c.ids}
@@ -55,7 +50,7 @@ def _coverage(data: RunData) -> dict[str, Any]:
         for c in sorted(claims, key=lambda c: sorted(c.ids)):
             claimed += 1
             key = next((owner[i] for i in sorted(c.ids) if i in owner), None)
-            if key is not None and _emitted(data, member, key):
+            if key is not None and publishable(data.decisions.get(member, {}).get(key), data.works.get(key)):
                 emitted += 1
                 continue
             d = data.decisions.get(member, {}).get(key or "")
@@ -80,7 +75,7 @@ def build(data: RunData) -> dict[str, Any]:
     review = []
     for member, status in sorted(data.statuses.items()):
         mine = data.decisions.get(member, {})
-        accepted = Counter(d.rule for k, d in mine.items() if _emitted(data, member, k))
+        accepted = Counter(d.rule for k, d in mine.items() if publishable(d, data.works.get(k)))
         changes = data.changes.get(member, {})
         members[member] = {
             "status": status,

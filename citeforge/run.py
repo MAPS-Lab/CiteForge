@@ -243,7 +243,7 @@ def run(
         partial = any(f is Fetch.FAILED for f in listing.fetch.values()) or not listing.fetch
         mine = dict(decisions.get(name, {}))
         prev = {k: row for k, row in previous.items() if publish.emitted(row, name)}
-        accepted = [k for k, d in mine.items() if d.verdict is Verdict.ACCEPT and by_key[k].excluded is None]
+        accepted = [k for k, d in mine.items() if publish.publishable(d, by_key[k])]
         over_cap = len(accepted) > PER_YEAR_CAP * window_years
         if over_cap:
             guard = True
@@ -263,7 +263,7 @@ def run(
         for k, row in sorted(prev.items()):
             now = mine.get(k)
             w = by_key.get(k)
-            if now is not None and now.verdict is Verdict.ACCEPT and w is not None and w.excluded is None:
+            if publish.publishable(now, w):
                 continue
             if partial or over_cap:
                 reason = None
@@ -297,11 +297,7 @@ def run(
             removals = {}
         final[name] = mine
         member_changes[name] = {"removed": sorted(removals.items())}
-        emitted = sum(
-            1
-            for k, d in mine.items()
-            if d.verdict is Verdict.ACCEPT and (by_key.get(k) or carried_works[k]).excluded is None
-        )
+        emitted = sum(publish.publishable(d, by_key.get(k) or carried_works[k]) for k, d in mine.items())
         statuses[name] = _status(listing, over_cap, emitted)
     t = stage("failure_rules", t)
 
@@ -309,10 +305,7 @@ def run(
     for k in failed_registry:
         if k in previous:
             all_works[k] = previous[k].work
-    emitted_keys = {
-        k for name, mine in final.items() for k, d in mine.items()
-        if d.verdict is Verdict.ACCEPT and all_works[k].excluded is None
-    }  # fmt: skip
+    emitted_keys = {k for mine in final.values() for k, d in mine.items() if publish.publishable(d, all_works[k])}
     prev_names = {k: row.names for k, row in previous.items() if row.names.stem}
     names = assign_names([all_works[k] for k in sorted(emitted_keys)], prev_names)
     new_state: dict[str, StateRow] = {}
