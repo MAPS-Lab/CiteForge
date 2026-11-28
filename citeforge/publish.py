@@ -115,7 +115,7 @@ def check(files: Mapping[Path, str]) -> list[str]:
         for field, value in entry.items():
             if not _balanced(value):
                 problems.append(f"{path}: unbalanced braces in {field}")
-        for field in ("doi", "eprint"):
+        for field in ("ID", "doi", "eprint"):
             if field in entry:
                 key = (folder, field, entry[field].casefold())
                 if key in seen:

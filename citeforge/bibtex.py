@@ -227,15 +227,26 @@ def _stem_base(stem: str) -> str:
     return stem.split("-", 1)[0]
 
 
+def _claim(root: str, taken: set[str], limit: int | None) -> str:
+    name, suffix = root[:limit], ord("b")
+    while name.casefold() in taken:
+        tail = chr(suffix) if suffix <= ord("z") else str(suffix - ord("a"))
+        name = (root if limit is None else root[: limit - len(tail)]) + tail
+        suffix += 1
+    taken.add(name.casefold())
+    return name
+
+
 def assign_names(works: Sequence[Work], previous: Mapping[str, Names]) -> dict[str, Names]:
     ordered = sorted(works, key=lambda w: w.key)
     result: dict[str, Names] = {}
     taken: set[str] = set()
+    keys: set[str] = set()
     for w in ordered:
         prev = previous.get(w.key)
         if prev and _stem_base(prev.stem) == base_of(w) and prev.stem.casefold() not in taken:
-            result[w.key] = prev
             taken.add(prev.stem.casefold())
+            result[w.key] = Names(prev.stem, _claim(prev.citekey, keys, None))
     pending = [w for w in ordered if w.key not in result]
     words = {w.key: slug_words(w.primary.title) for w in pending}
     by_base: dict[str, list[Work]] = {}
@@ -248,15 +259,9 @@ def assign_names(works: Sequence[Work], previous: Mapping[str, Names]) -> dict[s
             rivals = [words[o.key] for o in group if o is not w and words[o.key] != mine]
             while n < len(mine) and any(r[:n] == mine[:n] for r in rivals):
                 n += 1
-            root = f"{base}-{''.join(mine[:n])}" if mine else base
-            root = root[:STEM_MAX]
-            stem, suffix = root, ord("b")
-            while stem.casefold() in taken:
-                tail = chr(suffix) if suffix <= ord("z") else str(suffix - ord("a"))
-                stem = root[: STEM_MAX - len(tail)] + tail
-                suffix += 1
-            taken.add(stem.casefold())
-            result[w.key] = Names(stem, f"{base}:{''.join(mine[:4])}" if mine else base)
+            stem = _claim(f"{base}-{''.join(mine[:n])}" if mine else base, taken, STEM_MAX)
+            citekey = _claim(f"{base}:{''.join(mine[: max(n, 4)])}" if mine else base, keys, None)
+            result[w.key] = Names(stem, citekey)
     return result
 
 
