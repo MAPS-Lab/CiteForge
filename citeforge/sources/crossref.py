@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import batched
 from typing import Any
@@ -12,6 +13,7 @@ from citeforge.text import affiliation, clean, fold
 
 HOST = HOSTS["api.crossref.org"]
 CHUNK = 50
+_CONFERENCE = re.compile(r"\b(proceedings|conference|workshop|symposium)\b", re.IGNORECASE)
 SEARCH_ROWS = 5
 KINDS: Mapping[str, Kind] = {
     "journal-article": Kind.ARTICLE,
@@ -180,7 +182,12 @@ def _kind(
 ) -> Kind:
     if source_type == "edited-book" and authors and not editors:
         return Kind.BOOK
-    if source_type == "book-chapter" and (event or any(c.strip().lower() in GENERIC_SERIES_NAMES for c in container)):
+    # an edited volume with no authors of its own is the proceedings, whichever book type the publisher chose
+    if source_type == "book" and editors and not authors:
+        return Kind.PROCEEDINGS
+    if source_type == "book-chapter" and (
+        event or any(c.strip().lower() in GENERIC_SERIES_NAMES or _CONFERENCE.search(c) for c in container)
+    ):
         return Kind.INPROCEEDINGS
     return KINDS.get(source_type, Kind.OTHER)
 

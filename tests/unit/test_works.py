@@ -6,6 +6,7 @@ from hypothesis import strategies as st
 
 from citeforge.curated import Curated
 from citeforge.model import Author, Group, Kind, Record, Rel, Source, Status
+from citeforge.sources import crossref
 from citeforge.text import name_key
 from citeforge.works import apply_links, build, classify, clean_byline, doi_agrees, year_of
 from tests.factories import author, record
@@ -183,10 +184,16 @@ def test_build_names_the_source_that_filled_author_affiliations() -> None:
     oa = record(doi, "openalex:W9", source=Source.OPENALEX, authors=(author("Ana Lima", affiliations=("Toronto",)),))
     w, _ = build(_group(cr, oa), Curated())
     assert w.primary.authors[0].affiliations == ("Toronto",)
-    assert dict(w.provenance)["author_affiliations"] is Source.OPENALEX
+    assert dict(w.provenance)["author_affiliations:0"] is Source.OPENALEX
     ids_only = dataclasses.replace(oa, authors=(author("Ana Lima", orcid="0000-0002-1825-0097"),))
     w, _ = build(_group(cr, ids_only), Curated())
-    assert "author_affiliations" not in dict(w.provenance) and dict(w.provenance)["author_ids"] is Source.OPENALEX
+    assert not any(k.startswith("author_affiliations") for k, _ in w.provenance)
+    assert dict(w.provenance)["author_ids"] is Source.OPENALEX
+    stated = dataclasses.replace(cr, authors=(author("Ana Lima", affiliations=("Sri Ramachandra Medical College",)),))
+    ror = dataclasses.replace(oa, authors=(author("Ana Lima", rors=("https://ror.org/01e6qks80",)),))
+    w, _ = build(_group(stated, ror), Curated())
+    assert dict(w.provenance)["author_rors:0"] is Source.OPENALEX
+    assert "author_affiliations:0" not in dict(w.provenance)
 
 
 def test_build_prefers_registry_and_fills_only_from_same_doi() -> None:
@@ -326,6 +333,32 @@ def test_crossref_other_with_a_container_takes_the_openalex_kind() -> None:
     assert build(_group(cr), Curated())[0].excluded == "kind:other"
     bare = dataclasses.replace(cr, container=())
     assert build(_group(bare, dataclasses.replace(oa, container=())), Curated())[0].excluded == "kind:other"
+
+
+def test_a_typed_datacite_record_keeps_its_kind_over_the_openalex_donor() -> None:
+    doi = "doi:10.48448/1vag-qn48"
+    talk = record(
+        doi, source=Source.DATACITE, source_type="Audiovisual", kind=Kind.OTHER, container=("Underline Science",)
+    )
+    oa = dataclasses.replace(talk, source=Source.OPENALEX, ids=frozenset({doi, "openalex:W2"}), kind=Kind.PREPRINT)
+    assert build(_group(talk, oa), Curated())[0].excluded == "kind:other"
+    text = dataclasses.replace(talk, source_type="Text")
+    assert build(_group(text, oa), Curated())[0].kind is Kind.PREPRINT
+
+
+def test_a_chapter_dblp_lists_as_a_conference_paper_is_inproceedings() -> None:
+    doi = "doi:10.1007/978-3-030-1_1"
+    chapter = record(doi, source_type="book-chapter", kind=Kind.INCOLLECTION, container=("Data Mining Advances",))
+    listed = record(doi, "dblp:conf/x/S20", source=Source.DBLP, kind=Kind.INPROCEEDINGS)
+    assert build(_group(chapter), Curated())[0].kind is Kind.INCOLLECTION
+    assert build(_group(chapter, listed), Curated())[0].kind is Kind.INPROCEEDINGS
+
+
+def test_an_editor_only_springer_book_is_an_excluded_proceedings_volume() -> None:
+    item = {"DOI": "10.1007/978-3-030-61527-7", "type": "book", "title": ["Discovery Science"],
+            "editor": [{"given": "Stan", "family": "Matwin"}], "issued": {"date-parts": [[2020]]}}  # fmt: skip
+    r = crossref.parse_work(item)
+    assert build(_group(r), Curated())[0].excluded == "kind:proceedings"
 
 
 def test_edited_book_with_no_registry_byline_is_never_made_a_book_by_a_filled_byline() -> None:

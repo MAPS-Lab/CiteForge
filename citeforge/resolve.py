@@ -9,7 +9,7 @@ from citeforge.model import Event, Fetch, Identity, Member, NameKey, Work
 from citeforge.sources import dblp, openalex, orcid
 from citeforge.sources.dblp import DblpPerson
 from citeforge.sources.orcid import OrcidRecord
-from citeforge.text import fold, name_key, split_literal
+from citeforge.text import family_keys, fold, name_key, split_literal
 
 LEARN_MIN_WORKS = 3
 STRONG_RULES = frozenset({"curated", "authorship_orcid", "dblp_listed"})
@@ -41,7 +41,12 @@ def _names(m: Member, rec: OrcidRecord | None, person: DblpPerson | None) -> tup
     raw = [split_literal(m.name)]
     if rec is not None:
         raw.append((rec.given, rec.family))
-        raw += [split_literal(n) for n in (*rec.other_names, *((rec.credit,) if rec.credit else ()))]
+        surnames = family_keys(raw[0][1]) | family_keys(rec.family)
+        # an other-name on another surname, such as "Suresh Raja" for Suresh Raja Neethirajan, is a given-name variant
+        others = [split_literal(n) for n in rec.other_names]
+        raw += [(g, f) for g, f in others if family_keys(f) & surnames]
+        if rec.credit:
+            raw.append(split_literal(rec.credit))
     if person is not None:
         raw += [split_literal(_HOMONYM.sub("", n)) for n in person.names]
     keys = [name_key(g, f) for g, f in raw if f]

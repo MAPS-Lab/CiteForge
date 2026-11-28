@@ -6,7 +6,7 @@ from rapidfuzz import fuzz
 
 from citeforge.curated import Curated
 from citeforge.http import Http
-from citeforge.ids import is_copy_id, split_id, work_key
+from citeforge.ids import first_id, ids_of, is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     SAME_OBJECT_RELS,
@@ -41,7 +41,7 @@ type Search = Callable[[Sequence[Group]], tuple[list[tuple[str, Record]], list[E
 
 
 def _version_ids(ids: frozenset[str]) -> list[str]:
-    return sorted(i for i in ids if split_id(i)[0] in ("doi", "arxiv"))
+    return ids_of(ids, "doi", "arxiv")
 
 
 def _anchor(ids: frozenset[str]) -> str:
@@ -69,7 +69,7 @@ def verify(
     detached: set[tuple[str, str]] = set()
     for member, claim in claims:
         hold = False
-        for work_id in sorted(i for i in claim.ids if split_id(i)[0] == "doi"):
+        for work_id in ids_of(claim.ids, "doi"):
             if work_id in reg.dead:
                 detached |= {(work_id, i) for i in claim.ids - {work_id}}
                 claim = _strip_id(claim, work_id)
@@ -292,9 +292,10 @@ def _listed_version(g: Group) -> bool:
 
 def _published_group(g: Group) -> bool:
     version = _version_ids(g.ids)
-    if any(split_id(i)[0] == "doi" and not is_copy_id(i) for i in version):
+    dois = ids_of(version, "doi")
+    if not all(map(is_copy_id, dois)):
         return True
-    return not any(split_id(i)[0] == "doi" for i in version) and _listed_version(g)
+    return not dois and _listed_version(g)
 
 
 def _distinct_titles(a: str, b: str) -> bool:
@@ -356,10 +357,6 @@ def _search_ok(profile: _Profile, found: Record, identity: Identity) -> bool:
     return title_ok and year_ok and named and count_ok
 
 
-def _doi_of(r: Record) -> str | None:
-    return next((i for i in sorted(r.ids) if split_id(i)[0] == "doi"), None)
-
-
 def previous_links(previous: State) -> dict[str, Record]:
     """Map each alias of a work an earlier run linked by search to the Crossref record of its DOI."""
     out: dict[str, Record] = {}
@@ -387,8 +384,7 @@ def search_unidentified(
     events: list[Event] = []
     found: list[tuple[str, Record]] = []
     for g in groups:
-        kinds = {split_id(i)[0] for i in g.ids}
-        if "doi" in kinds or ("arxiv" in kinds and not _listed_version(g)) or not g.claims:
+        if ids_of(g.ids, "doi") or (ids_of(g.ids, "arxiv") and not _listed_version(g)) or not g.claims:
             continue
         profile = _profile(g.records, g.claims)
         member = g.claims[0][0]
@@ -399,10 +395,10 @@ def search_unidentified(
         if profile.year is not None and profile.year < min_year - 1:
             continue
         prior = next((linked[i] for i in sorted(g.ids) if i in linked), None)
-        if prior is not None and (doi := _doi_of(prior)) is not None:
+        if prior is not None and (doi := first_id(prior.ids, "doi")) is not None:
             prior = reg.found.get(doi) or (prior if doi in reg.failed else None)
         if prior is not None and _search_ok(profile, prior, identity):
-            events.append(Event("search_linked", member, g.key, _doi_of(prior) or ""))
+            events.append(Event("search_linked", member, g.key, first_id(prior.ids, "doi") or ""))
             found.append((g.key, prior))
             continue
         # Crossref requires every query.author word, so a hyphenated surname goes as its words, never joined
@@ -412,7 +408,7 @@ def search_unidentified(
             events += [Event("search_failed", m, g.key, result.reason) for m in sorted({m for m, _ in g.claims})]
             continue
         scored = sorted(
-            ((ratio(profile.title, r.title), doi, r) for r in result.value if (doi := _doi_of(r))),
+            ((ratio(profile.title, r.title), doi, r) for r in result.value if (doi := first_id(r.ids, "doi"))),
             key=lambda t: (-t[0], is_copy_id(t[1]), t[1]),
         )
         close = [(score, doi) for score, doi, _ in scored if score >= SEARCH_REVIEW]

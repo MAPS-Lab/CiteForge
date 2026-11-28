@@ -34,7 +34,7 @@ _GROUP = re.compile(
 )
 _AFFILIATION = re.compile(
     r"\b(university|universit[éàäy]|school of|department|faculty|institute|laborator(?:y|ies)|college|hospital"
-    r"|agency|office|cent(?:er|re)|inc\.?|ltd\.?)(?=\W|$)",
+    r"|agency|office|cent(?:er|re)|association|society|inc\.?|ltd\.?)(?=\W|$)",
     re.IGNORECASE,
 )
 _ACRONYMS = [(re.compile(rf"\b{re.escape(k)}\b"), v) for k, v in ACRONYM_CASE_CORRECTIONS.items()]
@@ -43,6 +43,7 @@ _EMAIL = re.compile(
     r"(?:\b(?:electronic address|e-?mail(?: address)?)\s*[:.]?\s*)?[\w.%+-]+@[\w-]+(?:\.[\w-]+)+\.?", re.I
 )
 _EMPTY_PART = re.compile(r"\(\s*\)|\[\s*\]|(?<=[,;])\s*[,;]")
+_GIVEN_TOKEN = re.compile(r"[^\W\d_]+")
 _LEADING_WORD = re.compile(r"\s*([^\W\d_]+)\.?(?![^\W\d_])\s*")
 _latex = LatexNodes2Text()
 
@@ -126,12 +127,17 @@ def word_prefix(a: str, b: str, min_words: int = 3) -> bool:
     return len(short) >= min_words and long[: len(short)] == short
 
 
-def family_keys(family: str) -> frozenset[str]:
+def _family_parts(family: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Return the whole-surname keys and the single surname tokens of a family name."""
     tokens = fold(family).split()
     core = [t for t in tokens if t not in _PARTICLES and t not in AUTHOR_NAME_SUFFIXES] or tokens
-    keys = {"".join(tokens), "".join(core)} | {t for t in core if len(t) >= 3}
-    keys.discard("")
-    return frozenset(keys)
+    whole = {"".join(tokens), "".join(core)} - {""}
+    return frozenset(whole), frozenset(t for t in core if len(t) >= 3)
+
+
+def family_keys(family: str) -> frozenset[str]:
+    whole, tokens = _family_parts(family)
+    return whole | tokens
 
 
 def _title_word(given: str) -> re.Match[str] | None:
@@ -140,14 +146,29 @@ def _title_word(given: str) -> re.Match[str] | None:
     return m if m and given[m.end() :] and fold(m[1]) in NAME_HONORIFICS and not m[1].isupper() else None
 
 
-def initials(given: str) -> str:
+def _untitled(given: str) -> str:
     while m := _title_word(given):
         given = given[m.end() :]
-    return "".join(t[0] for t in fold(given).split() if t not in AUTHOR_NAME_SUFFIXES)
+    return given
+
+
+def initials(given: str) -> str:
+    return "".join(t[0] for t in fold(_untitled(given)).split() if t not in AUTHOR_NAME_SUFFIXES)
+
+
+def first_given(given: str) -> str:
+    """The folded first given name when it is written out; "" for an initial, "GS" or "Md"."""
+    m = _GIVEN_TOKEN.search(_untitled(given))
+    if m is None:
+        return ""
+    token, folded = m[0], fold(m[0])
+    written = len(folded) >= 2 and not token.isupper() and any(c in "aeiouy" for c in folded)
+    return folded if written else ""
 
 
 def name_key(given: str, family: str) -> NameKey:
-    return NameKey(family_keys(family), initials(given))
+    whole, tokens = _family_parts(family)
+    return NameKey(whole | tokens, initials(given), whole, first_given(given))
 
 
 def split_literal(name: str) -> tuple[str, str]:
@@ -173,12 +194,28 @@ def name_matches(names: Iterable[NameKey], a: Author, swapped: bool = False) -> 
     keys = [author_key(a)]
     if swapped and a.given and a.family:
         keys.append(name_key(a.family, a.given))
-    return any(
-        n.families & k.families and _initials_compatible(n.initials, k.initials)
-        for k in keys
-        if k is not None
-        for n in names
-    )
+    names = list(names)
+    firsts = {n.first for n in names if n.first}
+    for k in keys:
+        if k is None:
+            continue
+        # a written given name must agree with one the member is known by, whichever name variant the surname hit
+        given_ok = bool(k.first) and any(_given_agrees(k.first, f) for f in firsts)
+        if k.first and firsts and not given_ok:
+            continue
+        # one token of a compound surname names the member only beside an agreeing written given name
+        if any(
+            n.families & k.families and _initials_compatible(n.initials, k.initials) and (n.whole & k.whole or given_ok)
+            for n in names
+        ):
+            return True
+    return False
+
+
+def _given_agrees(a: str, b: str) -> bool:
+    short, long = sorted((a, b), key=len)
+    # Stan and Stanislaw agree; Gabriel and Gabriela, or Lu and Lucas, are two names
+    return short == long or (len(short) >= 3 and long.startswith(short) and len(long) - len(short) >= 2)
 
 
 def _initials_compatible(a: str, b: str) -> bool:

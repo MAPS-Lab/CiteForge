@@ -7,6 +7,7 @@ from citeforge.http import Batch, Result
 from citeforge.model import Claim, Fetch, Source
 from citeforge.sources.dblp import DblpPerson
 from citeforge.sources.orcid import Affiliation, OrcidRecord
+from citeforge.text import name_matches
 from tests.factories import author, member, record, work
 from tests.unit.test_authorship import identity
 
@@ -63,6 +64,16 @@ def test_resolve_without_orcid_or_dblp(monkeypatch: pytest.MonkeyPatch) -> None:
     ident, orcid_result, person, _, _ = res.resolve(member(), None, frozenset())  # type: ignore[arg-type]
     assert orcid_result is None and person is not None and person.fetch is Fetch.FAILED
     assert ident.names and ident.openalex == frozenset()
+
+
+def test_an_orcid_other_name_on_another_surname_is_dropped() -> None:
+    rec = OrcidRecord(
+        "Suresh", "Neethirajan", None, ("Suresh Raja", "Suresh Raja Neethirajan", "Neethirajan, S"), (), ()
+    )
+    names = res._names(member(name="Suresh Neethirajan"), rec, None)
+    assert all("neethirajan" in k.families for k in names)
+    assert not name_matches(names, author("Sanjay Raja")) and not name_matches(names, author("S. Raja"))
+    assert name_matches(names, author("Suresh Raja Neethirajan"))
 
 
 def test_learn_institutions_needs_three_strong_works() -> None:
@@ -140,7 +151,14 @@ def test_enrich_routes_misses(monkeypatch: pytest.MonkeyPatch) -> None:
         batch(
             "crossref",
             ["doi:10.1234/cr"],
-            ["doi:10.1234/dc", "doi:10.1234/me", "doi:10.1234/dead", "doi:10.1234/ra"],
+            [
+                "doi:10.1234/dc",
+                "doi:10.1234/me",
+                "doi:10.1234/dead",
+                "doi:10.1234/ra",
+                "doi:10.5072/t",
+                "doi:10.1234/lag",
+            ],
             ["doi:10.1234/down"],
         ),
     )
@@ -150,10 +168,23 @@ def test_enrich_routes_misses(monkeypatch: pytest.MonkeyPatch) -> None:
         batch(
             "datacite",
             ["doi:10.1234/dc"],
-            ["doi:10.1234/me", "doi:10.1234/dead", "doi:10.1234/down", "doi:10.1234/ra"],
+            [
+                "doi:10.1234/me",
+                "doi:10.1234/dead",
+                "doi:10.1234/down",
+                "doi:10.1234/ra",
+                "doi:10.5072/t",
+                "doi:10.1234/lag",
+            ],
         ),
     )
-    agencies = {"doi:10.1234/me": "mEDRA", "doi:10.1234/dead": None, "doi:10.1234/ra": "KISTI"}
+    agencies = {
+        "doi:10.1234/me": "mEDRA",
+        "doi:10.1234/dead": None,
+        "doi:10.1234/ra": "KISTI",
+        "doi:10.5072/t": "DataCite",
+        "doi:10.1234/lag": "Crossref",
+    }
     monkeypatch.setattr(enr.doiorg, "agency", lambda http, ids: Result(Fetch.OK, agencies))
     monkeypatch.setattr(
         enr.doiorg,
@@ -173,6 +204,8 @@ def test_enrich_routes_misses(monkeypatch: pytest.MonkeyPatch) -> None:
         "doi:10.1234/dead",
         "doi:10.1234/down",
         "doi:10.1234/ra",
+        "doi:10.5072/t",
+        "doi:10.1234/lag",
         "arxiv:2101.00001",
         "arxiv:2101.99999",
         "doi:10.1234/cr",
@@ -182,6 +215,8 @@ def test_enrich_routes_misses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert set(r.found) == {"doi:10.1234/cr", "doi:10.1234/dc", "doi:10.1234/me", "arxiv:2101.00001"}
     assert r.found["doi:10.1234/me"].source is Source.CSL
     assert r.dead == {"doi:10.1234/dead", "arxiv:2101.99999"}
-    assert r.failed == {"doi:10.1234/down"}
+    # DataCite's API omits a DOI that is not findable, so its absence is final; Crossref's only lags
+    assert r.failed == {"doi:10.1234/down", "doi:10.1234/lag"}
+    assert r.unlisted == {"doi:10.5072/t"}
     assert "doi:10.1234/cr" not in calls["openalex"] and "doi:10.1234/dead" not in calls["openalex"]
     assert set(r.openalex) == {"doi:10.1234/cr", "doi:10.1234/dc"}

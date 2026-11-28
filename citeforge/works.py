@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from citeforge.authorship import is_own
 from citeforge.curated import Curated
-from citeforge.ids import is_copy_id, split_id, work_key
+from citeforge.ids import first_id, ids_of, is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     Author,
@@ -174,11 +174,6 @@ def _record_order(r: Record) -> tuple[str, str]:
     return r.source.value, min(r.ids, default="")
 
 
-def _doi(r: Record) -> str | None:
-    dois = sorted(i for i in r.ids if split_id(i)[0] == "doi")
-    return dois[0] if dois else None
-
-
 def _primary(records: Sequence[Record]) -> Record:
     def rank(r: Record) -> tuple[int, int, int, str]:
         kind = classify(r)
@@ -186,7 +181,7 @@ def _primary(records: Sequence[Record]) -> Record:
         # a DBLP listing carries the arXiv id of its paper, so only a copy DOI or a variant relation marks a copy
         secondary = (
             kind is Kind.PREPRINT
-            or any(is_copy_id(i) for i in r.ids if split_id(i)[0] == "doi")
+            or any(map(is_copy_id, ids_of(r.ids, "doi")))
             or any(rel is Rel.VARIANT_OF for rel, _ in r.relations)
         )
         if r.source in REGISTRIES and not secondary:
@@ -283,7 +278,7 @@ def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
     primary = _primary(records)
     own_authors = primary.authors
     provenance: dict[str, Source] = {"title": primary.source, "authors": primary.source}
-    doi = _doi(primary)
+    doi = first_id(primary.ids, "doi")
     donors = sorted(
         (r for r in records if r is not primary and doi and doi in r.ids),
         key=lambda r: (_FILL_ORDER.index(r.source) if r.source in _FILL_ORDER else 99, _record_order(r)),
@@ -313,8 +308,11 @@ def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
         updates["authors"] = authors
     for d in donors:
         if (merged := _merge_author_ids(authors, d.authors)) is not None and merged != authors:
-            if any((m.rors, m.affiliations) != (a.rors, a.affiliations) for m, a in zip(merged, authors, strict=True)):
-                provenance.setdefault("author_affiliations", d.source)
+            for n, (m, a) in enumerate(zip(merged, authors, strict=True)):
+                if m.rors != a.rors:
+                    provenance.setdefault(f"author_rors:{n}", d.source)
+                if m.affiliations != a.affiliations:
+                    provenance.setdefault(f"author_affiliations:{n}", d.source)
             authors = updates["authors"] = merged
             provenance.setdefault("author_ids", d.source)
     primary = dataclasses.replace(primary, **updates)
@@ -329,14 +327,21 @@ def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
             if name == "year":
                 year = int(value)
     eprint = None
-    if not g.fuzzy and not any(split_id(i)[0] == "arxiv" for i in primary.ids):
-        arxiv = [r for r in records if r is not primary and any(split_id(i)[0] == "arxiv" for i in r.ids)]
+    if not g.fuzzy and not ids_of(primary.ids, "arxiv"):
+        arxiv = [r for r in records if r is not primary and ids_of(r.ids, "arxiv")]
         arxiv.sort(key=lambda r: (r.source is not Source.ARXIV, _record_order(r)))
         eprint = arxiv[0] if arxiv else None
     # kind rules read the primary record's own byline, never one filled in from another source
     kind = classify(dataclasses.replace(primary, authors=own_authors))
-    if kind is Kind.OTHER and primary.container:
+    # only an untyped record takes the OpenAlex kind; a DataCite type such as Audiovisual stays what it says
+    if (
+        kind is Kind.OTHER
+        and primary.container
+        and (primary.source is not Source.DATACITE or primary.source_type == "Text")
+    ):
         kind = next((k for d in donors if d.source is Source.OPENALEX and (k := classify(d)) is not Kind.OTHER), kind)
+    if kind is Kind.INCOLLECTION and any(d.source is Source.DBLP and d.kind is Kind.INPROCEEDINGS for d in donors):
+        kind = Kind.INPROCEEDINGS
     status = primary.status
     excluded = None
     if kind in EXCLUDED_KINDS:

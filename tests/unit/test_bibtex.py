@@ -210,12 +210,12 @@ def test_citekeys_unique_when_titles_share_four_words() -> None:
     assert kept[a.key] == Names("Strom2024-Older", "Strom2024:GenomeWideAssociationStudyb")
 
 
-@pytest.mark.parametrize(("prefix", "server"), PREPRINT_SERVERS)
-def test_every_preprint_prefix_names_its_server(prefix: str, server: str) -> None:
-    doi = prefix + "x1"
+@pytest.mark.parametrize(("pattern", "server"), PREPRINT_SERVERS)
+def test_every_preprint_pattern_names_its_server(pattern: str, server: str) -> None:
+    doi = "10.1101/2024.03.06.24303776" if server == "bioRxiv" else pattern.replace("\\", "") + "x1"
     r = record(f"doi:{doi}", kind=Kind.PREPRINT, container=("Some Container",))
     assert is_preprint_doi(doi)
-    assert preprint_server(r) == ("arXiv" if prefix == "10.48550/arxiv" else server)
+    assert preprint_server(r) == server
 
 
 def test_assign_names_keeps_previous_until_base_changes() -> None:
@@ -281,3 +281,12 @@ def test_any_record_renders_a_valid_entry(kind, fields, title, container, author
     r = record(*ids, kind=kind, title=title or "T", container=container, editors=editors, **fields)
     r = dataclasses.replace(r, authors=authors)
     assert bib_problems(r) == []
+
+
+def test_cold_spring_harbor_journal_keeps_its_publisher_and_a_research_square_article_drops_it() -> None:
+    gr = record("doi:10.1101/gr.095612.109", container=("Genome Research",), publisher="Cold Spring Harbor Laboratory")
+    assert "publisher = {Cold Spring Harbor Laboratory}" in render(
+        work(gr), Names("Beiko2009-GenGIS", "Beiko2009:GenGIS")
+    )
+    rs = record("doi:10.21203/rs.3.rs-1/v1", container=("Some Journal",), publisher="Research Square")
+    assert "publisher" not in render(work(rs), Names("Lima2023-X", "Lima2023:X"))

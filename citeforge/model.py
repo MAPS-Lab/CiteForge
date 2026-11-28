@@ -143,6 +143,8 @@ class Claim:
 class NameKey:
     families: frozenset[str]
     initials: str
+    whole: frozenset[str]
+    first: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,4 +215,5 @@ class Registries:
     found: Mapping[str, Record] = field(default_factory=dict)
     dead: frozenset[str] = frozenset()
     failed: frozenset[str] = frozenset()
+    unlisted: frozenset[str] = frozenset()
     openalex: Mapping[str, Record] = field(default_factory=dict)

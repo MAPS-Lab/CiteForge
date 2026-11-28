@@ -186,6 +186,18 @@ def test_copy_links_to_its_clearly_closest_partner_and_never_to_a_notice_or_abst
     ]
 
 
+def test_a_cold_spring_harbor_journal_article_is_a_version_of_record() -> None:
+    authors = (author("Robert G. Beiko"), author("Ana Lima"), author("Jo Park"))
+    title = "Fast phylogenetic placement of metagenomic reads"
+    gr = record("doi:10.1101/gr.278000.123", title=title, authors=authors, year=2024, container=("Genome Research",))
+    conf = record("doi:10.1007/978-3-031-00001-1_5", title=title, authors=authors, year=2024, kind=Kind.INPROCEEDINGS)
+    arx = record("arxiv:2301.01234", source=Source.ARXIV, kind=Kind.PREPRINT, title=title, authors=authors, year=2023)
+    groups, _ = cl.cluster([], reg(gr, conf), Curated())
+    assert sorted(g.ids for g in groups) == [{"doi:10.1007/978-3-031-00001-1_5"}, {"doi:10.1101/gr.278000.123"}]
+    groups, _ = cl.cluster([], reg(gr, arx), Curated())
+    assert [g.ids for g in groups] == [{"arxiv:2301.01234", "doi:10.1101/gr.278000.123"}]
+
+
 def test_copy_with_partners_closer_than_the_margin_is_only_proposed() -> None:
     authors = (author("Gabriel Spadon"), author("Stan Matwin"))
     arx = record("arxiv:2201.00001", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors, year=2023)

@@ -182,7 +182,8 @@ def markdown(report: Mapping[str, Any]) -> str:
     lines += _list("Not emitted", [f"{i['member']}: {i['id'] or i['title']} ({i['reason']})" for i in cov["items"]])
     text = "\n".join(lines)
     if len(text) > MARKDOWN_MAX:
-        text = text[: MARKDOWN_MAX - 40].rsplit("\n", 1)[0] + "\n\nThe report was cut at 60000 characters.\n"
+        notice = f"\n\nThe report was cut at {MARKDOWN_MAX} characters.\n"
+        text = text[: MARKDOWN_MAX - len(notice)].rsplit("\n", 1)[0] + notice
     return text
 
 

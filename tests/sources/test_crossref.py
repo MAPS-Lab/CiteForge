@@ -505,6 +505,49 @@ EDITOR = [{"given": "Stan", "family": "Matwin"}]
         ("book-chapter", {"container-title": ["Lecture Notes in Computer Science"]}, Kind.INPROCEEDINGS),
         ("book-chapter", {"event": {"name": "KDD 2023"}}, Kind.INPROCEEDINGS),
         ("book-chapter", {"container-title": ["Handbook of Things"]}, Kind.INCOLLECTION),
+        (
+            "book-chapter",
+            {"container-title": ["SpringerBriefs in Computer Science", "Generative Methods"]},
+            Kind.INCOLLECTION,
+        ),
+        (
+            "book-chapter",
+            {"container-title": ["2021 Proceedings of the Workshop on Algorithm Engineering and Experiments (ALENEX)"]},
+            Kind.INPROCEEDINGS,
+        ),
+        (
+            "book-chapter",
+            {
+                "container-title": [
+                    "IFIP Advances in Information and Communication Technology",
+                    "Advances in Production Management Systems",
+                ]
+            },
+            Kind.INPROCEEDINGS,
+        ),
+        (
+            "book-chapter",
+            {
+                "container-title": [
+                    "Smart Innovation, Systems and Technologies",
+                    "Advances in Tourism, Technology and Smart Systems",
+                ]
+            },
+            Kind.INPROCEEDINGS,
+        ),
+        (
+            "book-chapter",
+            {
+                "container-title": [
+                    "Springer Proceedings in Information and Communication Technologies",
+                    "International Conference on Smart Agriculture",
+                ]
+            },
+            Kind.INPROCEEDINGS,
+        ),
+        ("book", {}, Kind.BOOK),
+        ("book", {"author": [], "editor": EDITOR}, Kind.PROCEEDINGS),
+        ("book", {"editor": EDITOR}, Kind.BOOK),
         ("monograph", {}, Kind.BOOK),
         ("edited-book", {}, Kind.BOOK),
         ("edited-book", {"editor": EDITOR}, Kind.PROCEEDINGS),
