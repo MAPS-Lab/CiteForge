@@ -7,6 +7,7 @@ from citeforge.tables import DATA_DOI_PREFIXES, PREPRINT_DOI_PREFIXES
 
 _DOI_PREFIX = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 _DOI_SHAPE = re.compile(r"10\.\d{4,9}/\S+")
+_TEX_ESCAPE = re.compile(r"\\([_&%#$])")
 _ARXIV_PREFIX = re.compile(r"^(?:https?://(?:export\.)?arxiv\.org/(?:abs|pdf)/|arxiv:\s*)", re.IGNORECASE)
 _ARXIV_NEW = re.compile(r"(\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?", re.IGNORECASE)
 _ARXIV_OLD = re.compile(r"([a-z-]+)(\.[a-z]{2})?/(\d{7})(?:v\d+)?(?:\.pdf)?", re.IGNORECASE)
@@ -23,7 +24,7 @@ _ARXIV_DOI = "10.48550/arxiv."
 
 def norm_doi(s: str) -> str | None:
     d = _DOI_PREFIX.sub("", s.strip()).strip()
-    d = unquote(d).lower().removesuffix(".")
+    d = _TEX_ESCAPE.sub(r"\1", unquote(d)).lower().removesuffix(".")
     return d if _DOI_SHAPE.fullmatch(d) else None
 
 
