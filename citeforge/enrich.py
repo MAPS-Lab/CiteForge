@@ -1,17 +1,18 @@
 from collections.abc import Iterable, Mapping, Sequence
 
 from citeforge.http import REDIRECT_BLOCKED, Http
-from citeforge.ids import split_id
+from citeforge.ids import ids_of
 from citeforge.model import VERSION_RELS, Fetch, Record, Registries
 from citeforge.sources import arxiv, crossref, datacite, doiorg, openalex
 
 REGISTERED = frozenset({"crossref", "datacite"})
 
 
-def _by_doi(http: Http, dois: Sequence[str]) -> tuple[dict[str, Record], set[str], set[str]]:
+def _by_doi(http: Http, dois: Sequence[str]) -> tuple[dict[str, Record], set[str], set[str], set[str]]:
     found: dict[str, Record] = {}
     dead: set[str] = set()
     failed: set[str] = set()
+    unlisted: set[str] = set()
     cr = crossref.by_doi(http, dois)
     found |= cr.found
     rest = sorted(cr.missing | cr.failed)
@@ -28,6 +29,9 @@ def _by_doi(http: Http, dois: Sequence[str]) -> tuple[dict[str, Record], set[str
                 agency = agencies.value.get(work_id, "")
                 if agency is None:
                     dead.add(work_id)
+                elif agency.strip().lower() == "datacite":
+                    # the DataCite API serves findable DOIs only, so a registered or draft one stays absent
+                    unlisted.add(work_id)
                 elif agency.strip().lower() in REGISTERED or not agency:
                     failed.add(work_id)
                 else:
@@ -39,18 +43,18 @@ def _by_doi(http: Http, dois: Sequence[str]) -> tuple[dict[str, Record], set[str
                     elif res.reason != REDIRECT_BLOCKED:
                         # an agency whose CSL host is off the allow-list fails the same way on every run
                         failed.add(work_id)
-    return found, dead, failed
+    return found, dead, failed, unlisted
 
 
 def _versions(records: Iterable[Record], kind: str) -> set[str]:
-    return {t for r in records for rel, t in r.relations if rel in VERSION_RELS and split_id(t)[0] == kind}
+    return set(ids_of((t for r in records for rel, t in r.relations if rel in VERSION_RELS), kind))
 
 
 def fetch(ids: Iterable[str], http: Http, have: Mapping[str, Record]) -> Registries:
     ids = sorted(set(ids))
-    dois = [i for i in ids if split_id(i)[0] == "doi"]
-    found, dead, failed = _by_doi(http, dois)
-    ax = arxiv.by_id(http, sorted({i for i in ids if split_id(i)[0] == "arxiv"} | _versions(found.values(), "arxiv")))
+    dois = ids_of(ids, "doi")
+    found, dead, failed, unlisted = _by_doi(http, dois)
+    ax = arxiv.by_id(http, sorted({*ids_of(ids, "arxiv"), *_versions(found.values(), "arxiv")}))
     found |= ax.found
     dead |= ax.missing
     failed |= ax.failed
@@ -61,10 +65,12 @@ def fetch(ids: Iterable[str], http: Http, have: Mapping[str, Record]) -> Registr
         found |= more[0]
         dead |= more[1]
         failed |= more[2]
+        unlisted |= more[3]
     oa = openalex.works_by_doi(http, [d for d in (*dois, *later) if d not in have and d not in dead])
     return Registries(
         found=found,
         dead=frozenset(dead),
         failed=frozenset(failed | oa.failed),
+        unlisted=frozenset(unlisted),
         openalex={**have, **oa.found},
     )

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import TextIO
 
 from citeforge.http import Http
-from citeforge.ids import split_id
+from citeforge.ids import ids_of
 from citeforge.model import Fetch, Member
 from citeforge.sources import dblp, openalex, orcid
 
@@ -23,10 +23,6 @@ class Proposal:
     failed: bool = False
 
 
-def _dois(claims: Sequence) -> set[str]:
-    return {i for c in claims for i in c.ids if split_id(i)[0] == "doi"}
-
-
 def propose(members: Sequence[Member], http: Http, lab_rors: frozenset[str]) -> list[Proposal]:
     out: list[Proposal] = []
     for m in sorted(members, key=lambda m: m.dirname):
@@ -35,7 +31,7 @@ def propose(members: Sequence[Member], http: Http, lab_rors: frozenset[str]) -> 
             out.append(Proposal(m.dirname, None, (), False, 0, False, False, f"dblp {person.reason}", True))
             continue
         dblp_orcids = set(person.value.orcids) if person and person.value else set()
-        dblp_dois = _dois(person.value.claims) if person and person.value else set()
+        dblp_dois = {i for c in person.value.claims for i in ids_of(c.ids, "doi")} if person and person.value else set()
         candidates = sorted(set(m.orcids) | dblp_orcids)
         if not candidates:
             out.append(Proposal(m.dirname, None, (), False, 0, False, False, "no ORCID candidate"))
@@ -46,7 +42,7 @@ def propose(members: Sequence[Member], http: Http, lab_rors: frozenset[str]) -> 
                 out.append(Proposal(m.dirname, candidate, (), candidate in dblp_orcids, 0, False, False,
                                     f"orcid {rec.reason}", rec.fetch is Fetch.FAILED))  # fmt: skip
                 continue
-            overlap = len(_dois(rec.value.works) & dblp_dois)
+            overlap = len({i for c in rec.value.works for i in ids_of(c.ids, "doi")} & dblp_dois)
             employment = any(a.kind == "employment" and a.ror in lab_rors for a in rec.value.affiliations)
             listed = candidate in dblp_orcids
             # Every candidate is pinned or listed by DBLP, so the DBLP overlap is the one test an unpinned iD meets.

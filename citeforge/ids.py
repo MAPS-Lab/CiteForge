@@ -28,7 +28,7 @@ _PMID = re.compile(r"[1-9]\d{0,8}")
 _DBLP_KEY = re.compile(r"[a-z]+(?:/[A-Za-z0-9._-]+)+")
 _MANUAL = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _ARXIV_DOI = "10.48550/arxiv."
-_PREPRINT_DOI_PREFIXES = tuple(prefix for prefix, _ in PREPRINT_SERVERS)
+_PREPRINT_DOIS = tuple((re.compile(pattern), server) for pattern, server in PREPRINT_SERVERS)
 
 
 def norm_doi(s: str) -> str | None:
@@ -100,8 +100,21 @@ def split_id(work_id: str) -> tuple[str, str]:
     return kind, value
 
 
+def ids_of(ids: Iterable[str], *kinds: str) -> list[str]:
+    return sorted(i for i in ids if split_id(i)[0] in kinds)
+
+
+def first_id(ids: Iterable[str], kind: str) -> str | None:
+    return min((i for i in ids if split_id(i)[0] == kind), default=None)
+
+
+def preprint_server_of(doi: str) -> str | None:
+    d = doi.lower()
+    return next((server for pattern, server in _PREPRINT_DOIS if pattern.match(d)), None)
+
+
 def is_preprint_doi(doi: str) -> bool:
-    return doi.lower().startswith(_PREPRINT_DOI_PREFIXES)
+    return preprint_server_of(doi) is not None
 
 
 def work_key(ids: Iterable[str]) -> str:
@@ -113,7 +126,7 @@ def work_key(ids: Iterable[str]) -> str:
 
 
 def is_secondary_doi(doi: str) -> bool:
-    return doi.lower().startswith(_PREPRINT_DOI_PREFIXES + DATA_DOI_PREFIXES)
+    return is_preprint_doi(doi) or doi.lower().startswith(DATA_DOI_PREFIXES)
 
 
 def is_copy_id(work_id: str) -> bool:

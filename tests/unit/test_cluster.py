@@ -222,6 +222,18 @@ def test_copy_links_to_its_clearly_closest_partner_and_never_to_a_notice_or_abst
     ]
 
 
+def test_a_cold_spring_harbor_journal_article_is_a_version_of_record() -> None:
+    authors = (author("Robert G. Beiko"), author("Ana Lima"), author("Jo Park"))
+    title = "Fast phylogenetic placement of metagenomic reads"
+    gr = record("doi:10.1101/gr.278000.123", title=title, authors=authors, year=2024, container=("Genome Research",))
+    conf = record("doi:10.1007/978-3-031-00001-1_5", title=title, authors=authors, year=2024, kind=Kind.INPROCEEDINGS)
+    arx = record("arxiv:2301.01234", source=Source.ARXIV, kind=Kind.PREPRINT, title=title, authors=authors, year=2023)
+    groups, _ = cl.cluster([], reg(gr, conf), Curated())
+    assert sorted(g.ids for g in groups) == [{"doi:10.1007/978-3-031-00001-1_5"}, {"doi:10.1101/gr.278000.123"}]
+    groups, _ = cl.cluster([], reg(gr, arx), Curated())
+    assert [g.ids for g in groups] == [{"arxiv:2301.01234", "doi:10.1101/gr.278000.123"}]
+
+
 def test_copy_with_partners_closer_than_the_margin_joins_one_and_is_proposed() -> None:
     authors = (author("Gabriel Spadon"), author("Stan Matwin"))
     arx = record("arxiv:2201.00001", source=Source.ARXIV, kind=Kind.PREPRINT, authors=authors, year=2023)
@@ -664,8 +676,8 @@ def test_byline_fit_links_a_reordered_byline_and_proposes_a_new_lead(pre, pub, f
 def test_reordered_byline_links_and_an_organiser_never_leads() -> None:
     title = "Interpreting the Effects of Quantization on LLMs"
     acl = Author("", "", literal="Association for Computational Linguistics 2025")
-    talk = record(
-        "doi:10.48448/1vag-qn48",
+    deposit = record(
+        "doi:10.5281/zenodo.1302573",
         source=Source.DATACITE,
         kind=Kind.OTHER,
         title=title,
@@ -679,10 +691,10 @@ def test_reordered_byline_links_and_an_organiser_never_leads() -> None:
         authors=(author("Manpreet Singh"), author("Hassan Sajjad")),
         year=2025,
     )
-    (g,), events = cl.cluster([], reg(talk, paper), Curated())
+    (g,), events = cl.cluster([], reg(deposit, paper), Curated())
     assert g.fuzzy and [e.kind for e in events] == ["fuzzy_link"]
     reordered = dataclasses.replace(paper, authors=(author("Manpreet Singh"), author("Ana Lima")))
-    groups, events = cl.cluster([], reg(talk, reordered), Curated())
+    groups, events = cl.cluster([], reg(deposit, reordered), Curated())
     assert len(groups) == 2 and [e.kind for e in events] == ["link_proposal"]
 
 

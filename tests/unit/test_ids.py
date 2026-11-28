@@ -4,6 +4,8 @@ from hypothesis import strategies as st
 
 from citeforge.ids import (
     ARXIV_OLD_ARCHIVES,
+    first_id,
+    ids_of,
     is_copy_id,
     is_preprint_doi,
     is_secondary_doi,
@@ -12,6 +14,7 @@ from citeforge.ids import (
     norm_openalex,
     norm_orcid,
     norm_ror,
+    preprint_server_of,
     to_id,
     work_key,
 )
@@ -131,6 +134,32 @@ def test_preprint_and_secondary_dois() -> None:
     assert is_copy_id("doi:10.21203/rs.3.rs-123/v1")
     assert not is_copy_id("doi:10.1016/j.oceaneng.2024.118303")
     assert not is_copy_id("dblp:conf/x/Y21")
+
+
+@pytest.mark.parametrize(
+    ("doi", "copy"),
+    [
+        ("10.1101/2021.01.16.21249943", True),
+        ("10.1101/2020.05.01.072983v2", True),
+        ("10.1101/012345", True),
+        ("10.1101/gr.095612.109", False),
+        ("10.1101/gad.350000.122", False),
+        ("10.1101/lm.053781.123", False),
+        ("10.1101/cshperspect.a041234", False),
+        ("10.1101/pdb.prot5678", False),
+    ],
+)
+def test_only_biorxiv_numbering_marks_a_cold_spring_harbor_doi_a_copy(doi: str, copy: bool) -> None:
+    assert is_copy_id(f"doi:{doi}") is copy
+    assert (preprint_server_of(doi) == "bioRxiv") is copy
+
+
+def test_ids_of_and_first_id() -> None:
+    ids = {"doi:10.2/b", "arxiv:2101.00001", "doi:10.1/a", "pmid:1"}
+    assert ids_of(ids, "doi") == ["doi:10.1/a", "doi:10.2/b"]
+    assert ids_of(ids, "doi", "arxiv") == ["arxiv:2101.00001", "doi:10.1/a", "doi:10.2/b"]
+    assert first_id(ids, "doi") == "doi:10.1/a"
+    assert first_id(ids, "dblp") is None
 
 
 @pytest.mark.parametrize(

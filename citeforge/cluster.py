@@ -9,7 +9,7 @@ from rapidfuzz import fuzz
 
 from citeforge.curated import Curated
 from citeforge.http import Http, Result
-from citeforge.ids import is_copy_id, split_id, work_key
+from citeforge.ids import first_id, ids_of, is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     SAME_OBJECT_RELS,
@@ -51,7 +51,7 @@ type RecordKey = tuple[Source, frozenset[str]]
 
 
 def _version_ids(ids: frozenset[str]) -> list[str]:
-    return sorted(i for i in ids if split_id(i)[0] in ("doi", "arxiv"))
+    return ids_of(ids, "doi", "arxiv")
 
 
 def _anchor(ids: frozenset[str]) -> str:
@@ -79,7 +79,7 @@ def verify(
     detached: set[tuple[str, str]] = set()
     for member, claim in claims:
         hold = False
-        for work_id in sorted(i for i in claim.ids if split_id(i)[0] == "doi"):
+        for work_id in ids_of(claim.ids, "doi"):
             if work_id in reg.dead:
                 detached |= {(work_id, i) for i in claim.ids - {work_id}}
                 claim = _strip_id(claim, work_id)
@@ -214,7 +214,7 @@ def _variants(records: Mapping[RecordKey, Record]) -> dict[RecordKey, Record]:
     revisions: dict[str, list[tuple[int, RecordKey, Record]]] = defaultdict(list)
     prints: dict[tuple[str, str, tuple[str, ...], str], Record] = {}
     for k, r in sorted(records.items(), key=lambda kv: sorted(kv[0][1])):
-        doi = _doi_of(r)
+        doi = first_id(r.ids, "doi")
         if r.source is not Source.CROSSREF or doi is None:
             continue
         if r.kind is Kind.ARTICLE:
@@ -239,7 +239,7 @@ def _variants(records: Mapping[RecordKey, Record]) -> dict[RecordKey, Record]:
             ),
             None,
         )
-        if article is not None and (doi := _doi_of(article)) is not None:
+        if article is not None and (doi := first_id(article.ids, "doi")) is not None:
             out[k] = dataclasses.replace(r, relations=r.relations | {(Rel.VARIANT_OF, doi)})
     for stem, revs in revisions.items():
         revs.sort(key=lambda t: -t[0])
@@ -247,7 +247,7 @@ def _variants(records: Mapping[RecordKey, Record]) -> dict[RecordKey, Record]:
         chapter = stem.rpartition("_")[2]
         container = title_key(latest.container[0]) if latest.container else ""
         lead = prints.get((chapter, title_key(latest.title), _families(latest), container)) or latest
-        lead_doi = _doi_of(lead)
+        lead_doi = first_id(lead.ids, "doi")
         for _, k, r in revs:
             if r is not lead and lead_doi is not None:
                 out[k] = dataclasses.replace(r, relations=r.relations | {(Rel.VARIANT_OF, lead_doi)})
@@ -362,7 +362,7 @@ def _listed_version(g: Group) -> bool:
 
 def _published_group(g: Group) -> bool:
     # DBLP often files an SSRN or Zenodo DOI under the journal record it lists, which stays published
-    return _listed_version(g) or any(split_id(i)[0] == "doi" and not is_copy_id(i) for i in g.ids)
+    return _listed_version(g) or not all(map(is_copy_id, ids_of(g.ids, "doi")))
 
 
 def _copy_group(g: Group) -> bool:
@@ -455,10 +455,6 @@ def _search_ok(profile: _Profile, found: Record, identity: Identity) -> bool:
     return title_ok and year_ok and named and count_ok
 
 
-def _doi_of(r: Record) -> str | None:
-    return next((i for i in sorted(r.ids) if split_id(i)[0] == "doi"), None)
-
-
 def previous_links(previous: State) -> dict[str, Record]:
     """Map each alias of a work an earlier run linked by search to the Crossref record of its DOI."""
     out: dict[str, Record] = {}
@@ -472,7 +468,7 @@ def previous_links(previous: State) -> dict[str, Record]:
 
 def _dblp_listings(g: Group) -> frozenset[str]:
     listed = (r for r in g.records if r.source is Source.DBLP and r.kind is not Kind.PREPRINT)
-    return frozenset(i for r in listed for i in r.ids if split_id(i)[0] == "dblp")
+    return frozenset(i for r in listed for i in ids_of(r.ids, "dblp"))
 
 
 def _other_listing(listings: Mapping[str, frozenset[str]], own: frozenset[str], doi: str) -> str | None:
@@ -507,8 +503,7 @@ def search_unidentified(
     results: dict[tuple[str, str, int | None], Result[tuple[Record, ...]]] = {}
     listings = {i: keys for g in groups if (keys := _dblp_listings(g)) for i in g.ids}
     for g in groups:
-        kinds = {split_id(i)[0] for i in g.ids}
-        if "doi" in kinds or ("arxiv" in kinds and not _listed_version(g)) or not g.claims:
+        if ids_of(g.ids, "doi") or (ids_of(g.ids, "arxiv") and not _listed_version(g)) or not g.claims:
             continue
         profile = _profile(g.records, g.claims)
         member = g.claims[0][0]
@@ -520,9 +515,9 @@ def search_unidentified(
             continue
         own = _dblp_listings(g)
         prior = next((linked[i] for i in sorted(g.ids) if i in linked), None)
-        if prior is not None and (doi := _doi_of(prior)) is not None:
+        if prior is not None and (doi := first_id(prior.ids, "doi")) is not None:
             prior = reg.found.get(doi) or (prior if doi in reg.failed else None)
-        doi = _doi_of(prior) if prior is not None else None
+        doi = first_id(prior.ids, "doi") if prior is not None else None
         if prior is not None and _search_ok(profile, prior, identity) and not _other_listing(listings, own, doi or ""):
             events.append(Event(EventKind.SEARCH_LINKED, member, g.key, doi or ""))
             found.append((g.key, prior))
@@ -546,7 +541,7 @@ def search_unidentified(
                 keep[g.key] = before
             continue
         scored = sorted(
-            ((ratio(profile.title, r.title), doi, r) for r in result.value if (doi := _doi_of(r))),
+            ((ratio(profile.title, r.title), doi, r) for r in result.value if (doi := first_id(r.ids, "doi"))),
             key=lambda t: (-t[0], is_copy_id(t[1]), t[1]),
         )
         close = [(score, doi) for score, doi, _ in scored if score >= SEARCH_REVIEW]

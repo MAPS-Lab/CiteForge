@@ -11,7 +11,7 @@ from citeforge import authorship, cluster, discover, enrich, publish, report, re
 from citeforge.bibtex import assign_names
 from citeforge.curated import Curated
 from citeforge.http import HOSTS, Http
-from citeforge.ids import split_id
+from citeforge.ids import ids_of
 from citeforge.model import (
     REGISTRIES,
     Claim,
@@ -128,9 +128,9 @@ def _pairs(w: Work, g: Group, identities: Mapping[str, Identity], curated: Curat
 
 def _with_pubmed_dois(pairs: list[tuple[str, Claim]], http: Http) -> tuple[list[tuple[str, Claim]], frozenset[str]]:
     def doi_less(c: Claim) -> bool:
-        return not any(split_id(i)[0] == "doi" for i in c.ids)
+        return not ids_of(c.ids, "doi")
 
-    pmids = sorted({i for _, c in pairs if doi_less(c) for i in c.ids if split_id(i)[0] == "pmid"})
+    pmids = sorted({i for _, c in pairs if doi_less(c) for i in ids_of(c.ids, "pmid")})
     if not pmids:
         return pairs, frozenset()
     res = pubmed.dois(http, pmids)
@@ -270,18 +270,18 @@ def run(
     pairs = sorted(((lst.member, c) for lst in listings.values() for c in lst.claims), key=_claim_order)
     pairs, pubmed_failed = _with_pubmed_dois(pairs, http)
     linked = cluster.previous_links(previous)
-    wanted = {i for _, c in pairs for i in c.ids if split_id(i)[0] in ("doi", "arxiv")}
+    wanted = {i for _, c in pairs for i in ids_of(c.ids, "doi", "arxiv")}
     wanted |= {i for link in curated.links for i in link}
-    wanted |= {i for _, c in pairs for a in c.ids & linked.keys() for i in linked[a].ids if split_id(i)[0] == "doi"}
+    wanted |= {i for _, c in pairs for a in c.ids & linked.keys() for i in ids_of(linked[a].ids, "doi")}
     have = {
         i: c.record
         for _, c in pairs
         if c.source is Source.OPENALEX and c.record is not None
-        for i in c.record.ids
-        if split_id(i)[0] == "doi"
+        for i in ids_of(c.record.ids, "doi")
     }
     reg = enrich.fetch(wanted, http, have)
     reg = dataclasses.replace(reg, failed=reg.failed | pubmed_failed)
+    events += [Event(EventKind.DOI_UNLISTED, None, i, "") for i in sorted(reg.unlisted)]
     t = stage("enrich", t)
     kept, held, ev, reg = cluster.verify(pairs, reg, identities)
     events += ev
@@ -316,7 +316,7 @@ def run(
         out: dict[str, dict[str, Decision]] = defaultdict(dict)
         for key, per_member_claims in pair_claims.items():
             for member, claims in per_member_claims.items():
-                out[member][key] = authorship.decide(ids[member], by_key[key], claims, curated)
+                out[member][key] = authorship.decide(ids[member], by_key[key], claims, curated, group_of[key].records)
         return out
 
     first = decide_all(identities)

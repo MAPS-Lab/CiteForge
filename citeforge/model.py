@@ -143,6 +143,8 @@ class Claim:
 class NameKey:
     families: frozenset[str]
     initials: str
+    whole: frozenset[str]
+    first: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +209,7 @@ class EventKind(StrEnum):
     DOI_DEAD = "doi_dead"
     DOI_DETACHED = "doi_detached"
     DOI_REVIEW = "doi_review"
+    DOI_UNLISTED = "doi_unlisted"
     FUZZY_LINK = "fuzzy_link"
     GROUP_AUTHOR = "group_author"
     LINK_PROPOSAL = "link_proposal"
@@ -235,4 +238,5 @@ class Registries:
     found: Mapping[str, Record] = field(default_factory=dict)
     dead: frozenset[str] = frozenset()
     failed: frozenset[str] = frozenset()
+    unlisted: frozenset[str] = frozenset()
     openalex: Mapping[str, Record] = field(default_factory=dict)

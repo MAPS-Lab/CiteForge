@@ -1,28 +1,27 @@
+# Each pattern is matched at the start of a lower-cased DOI.
 PREPRINT_SERVERS: tuple[tuple[str, str], ...] = (
-    ("10.48550/arxiv", "arXiv"),
-    ("10.21203/rs.", "Research Square"),
-    ("10.31234/osf.io", "OSF Preprints"),
-    ("10.31219/osf.io", "OSF Preprints"),
-    ("10.1101/", "bioRxiv"),
-    ("10.26434/chemrxiv", "ChemRxiv"),
-    ("10.20944/preprints", "Preprints.org"),
-    ("10.2196/preprints.", "JMIR Preprints"),
-    ("10.2139/", "SSRN"),
-    ("10.13140/", "ResearchGate"),
-    ("10.64898/", "openRxiv"),
-    ("10.36227/techrxiv", "TechRxiv"),
-    ("10.33774/", "Cambridge Open Engage"),
-    ("10.5194/egusphere", "EGU"),
-    ("10.2172/", "OSTI"),
-    ("10.31220/agrirxiv", "agriRxiv"),
-    ("10.32388/", "Qeios"),
-    ("10.48448/", "Underline Science"),
-    ("10.32920/", "Toronto Metropolitan University"),
+    (r"10\.48550/arxiv", "arXiv"),
+    (r"10\.21203/rs\.", "Research Square"),
+    (r"10\.31234/osf\.io", "OSF Preprints"),
+    (r"10\.31219/osf\.io", "OSF Preprints"),
+    # Cold Spring Harbor journals share 10.1101, so only the bioRxiv and medRxiv numbering marks a preprint
+    (r"10\.1101/(?:\d{4}\.\d{2}\.\d{2}\.)?\d+(?:v\d+)?$", "bioRxiv"),
+    (r"10\.26434/chemrxiv", "ChemRxiv"),
+    (r"10\.20944/preprints", "Preprints.org"),
+    (r"10\.2196/preprints\.", "JMIR Preprints"),
+    (r"10\.2139/", "SSRN"),
+    (r"10\.13140/", "ResearchGate"),
+    (r"10\.64898/", "openRxiv"),
+    (r"10\.36227/techrxiv", "TechRxiv"),
+    (r"10\.33774/", "Cambridge Open Engage"),
+    (r"10\.5194/egusphere", "EGU"),
+    (r"10\.2172/", "OSTI"),
+    (r"10\.31220/agrirxiv", "agriRxiv"),
+    (r"10\.32388/", "Qeios"),
+    (r"10\.32920/", "Toronto Metropolitan University"),
 )
 
-PREPRINT_ONLY_PUBLISHERS: frozenset[str] = frozenset(
-    ["authorea, inc.", "cold spring harbor laboratory", "openrxiv", "research square", "techrxiv"]
-)
+PREPRINT_ONLY_PUBLISHERS: frozenset[str] = frozenset(["authorea, inc.", "openrxiv", "research square", "techrxiv"])
 
 CONFERENCE_AS_JOURNAL: frozenset[str] = frozenset(
     ["canada human-computer communications society", "ijcnlp-aacl", "software engineering"]
@@ -102,6 +101,7 @@ GENERIC_SERIES_NAMES: frozenset[str] = frozenset(
         "advances in intelligent systems and computing",
         "communications in computer and information science",
         "dagstuhl seminar proceedings",
+        "ifip advances in information and communication technology",
         "lecture notes in artificial intelligence",
         "lecture notes in business information processing",
         "lecture notes in computer science",
@@ -109,6 +109,7 @@ GENERIC_SERIES_NAMES: frozenset[str] = frozenset(
         "leibniz international proceedings in informatics",
         "lipics: leibniz international proceedings in informatics",
         "oasics: open access series in informatics",
+        "smart innovation, systems and technologies",
         "studies in health technology and informatics",
     ]
 )

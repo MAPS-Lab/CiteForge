@@ -1,7 +1,8 @@
+import dataclasses
 from collections.abc import Iterable
 
 from citeforge.curated import Curated
-from citeforge.model import REGISTRIES, Author, Claim, Decision, Identity, Source, Verdict, Work
+from citeforge.model import REGISTRIES, Author, Claim, Decision, Identity, Record, Source, Verdict, Work
 from citeforge.text import fold, is_group, name_matches
 
 
@@ -32,15 +33,30 @@ def _affil(i: Identity, slots: Iterable[Author]) -> tuple[bool, bool]:
 
 
 def _registry_slots(i: Identity, w: Work) -> list[Author]:
-    """The member's slots on a Crossref or DataCite byline whose affiliations no other source filled in."""
-    filled = dict(w.provenance).get("author_affiliations")
+    """The member's slots on a Crossref or DataCite byline, holding only the affiliations that registry stated."""
+    provenance = dict(w.provenance)
     registry = (Source.CROSSREF, Source.DATACITE)
-    if w.primary.source not in registry or (filled is not None and filled not in registry):
+    if w.primary.source not in registry or provenance.get("authors", w.primary.source) not in registry:
         return []
-    return [a for a in w.primary.authors if is_own(i, a)]
+
+    def stated(n: int, part: str) -> bool:
+        return provenance.get(f"author_{part}:{n}", w.primary.source) in registry
+
+    return [
+        dataclasses.replace(
+            a,
+            rors=a.rors if stated(n, "rors") else (),
+            affiliations=a.affiliations if stated(n, "affiliations") else (),
+        )
+        for n, a in enumerate(w.primary.authors)
+        if is_own(i, a)
+    ]
 
 
-def decide(i: Identity, w: Work, claims: Iterable[Claim], curated: Curated) -> Decision:
+def decide(
+    i: Identity, w: Work, claims: Iterable[Claim], curated: Curated, versions: Iterable[Record] = ()
+) -> Decision:
+    """Judge the member's authorship; versions are the other records of the work's group."""
     claims = list(claims)
     if (decision := curated.decision(i.member.dirname, w.aliases)) is not None:
         return decision
@@ -64,6 +80,14 @@ def decide(i: Identity, w: Work, claims: Iterable[Claim], curated: Curated) -> D
     if not named and not listed_named and (persons or not listed):
         if listed and w.primary.source not in REGISTRIES | {Source.CURATED}:
             return Decision(Verdict.REVIEW, "not_named_unregistered", frozenset(s.value for s in listed))
+        # a registry record of another version of the work, such as its preprint, may name the member
+        on_version = {
+            min(r.ids)
+            for r in versions
+            if r.source in REGISTRIES and any(name_matches(i.names, a, swapped=bool(claims)) for a in r.authors)
+        }
+        if on_version:
+            return Decision(Verdict.REVIEW, "named_on_version", frozenset(on_version))
         return Decision(Verdict.REJECT, "not_named", frozenset())
     if i.orcids and named and all(a.orcid and a.orcid not in i.orcids for a in named) and not _affil(i, named)[0]:
         return Decision(Verdict.REJECT, "orcid_contra", frozenset(a.orcid for a in named if a.orcid))

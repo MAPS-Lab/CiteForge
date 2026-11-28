@@ -107,6 +107,40 @@ def test_group_and_affiliation() -> None:
     assert is_affiliation("Acme Inc.")
     assert not is_affiliation("University Hospital Study Group")
     assert not is_affiliation("Gabriel Spadon")
+    assert is_affiliation("Association for Computational Linguistics 2025")
+    assert is_affiliation("Canadian Society for Epidemiology")
+
+
+@pytest.mark.parametrize(
+    ("member", "slot", "same"),
+    [
+        (("Gabriel", "Spadon de Souza"), ("Gustavo", "Souza"), False),
+        (("Gabriel", "Spadon de Souza"), ("Gabriela", "de Souza"), False),
+        (("Gabriel", "Spadon de Souza"), ("Gabriel", "Souza"), True),
+        (("Gabriel", "Spadon de Souza"), ("G.", "Souza"), False),
+        (("Gabriel", "Spadon de Souza"), ("G. S.", "Spadon de Souza"), True),
+        (("Carlos", "Hernandez-Castillo"), ("Cristina", "Castillo"), False),
+        (("Carlos", "Hernandez-Castillo"), ("Carlos", "Hernández"), True),
+        (("Carlos", "Hernandez-Castillo"), ("Carlos R.", "Hernandez Castillo"), True),
+        (("Andrew", "Rau-Chaplin"), ("Anna", "Rau"), False),
+        (("Suresh", "Neethirajan"), ("Soma Ganesh Raja", "Neethirajan"), False),
+        (("Suresh", "Neethirajan"), ("S.", "Neethirajan"), True),
+        (("Meng", "He"), ("Ming", "He"), False),
+        (("Stan", "Matwin"), ("Stanislaw", "Matwin"), True),
+        (("Alex", "Brodsky"), ("Alexander", "Brodsky"), True),
+        (("Lu", "Yang"), ("Lucas", "Yang"), False),
+        (("Masud", "Rahman"), ("Md", "Rahman"), True),
+        (("FE", "Bordeleau"), ("Francis", "Bordeleau"), True),
+    ],
+)
+def test_a_written_given_name_must_agree(member: tuple[str, str], slot: tuple[str, str], same: bool) -> None:
+    assert name_matches([name_key(*member)], Author(*slot)) is same
+
+
+def test_a_known_given_name_variant_is_checked_across_every_name_of_the_member() -> None:
+    spadon = [name_key("Gabriel", "Spadon"), name_key("GS", "Souza")]
+    assert name_matches(spadon, Author("G.", "Souza"))
+    assert not name_matches(spadon, Author("Gustavo", "Souza"))
 
 
 def test_recase_title() -> None:

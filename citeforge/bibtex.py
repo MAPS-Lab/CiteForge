@@ -1,12 +1,11 @@
 import re
 from collections.abc import Iterable, Mapping, Sequence
 
-from citeforge.ids import split_id
+from citeforge.ids import first_id, preprint_server_of, split_id
 from citeforge.model import Author, Kind, Names, Record, Source, Work
 from citeforge.tables import (
     GENERIC_SERIES_NAMES,
     PREPRINT_ONLY_PUBLISHERS,
-    PREPRINT_SERVERS,
     PUBLISHER_CORRECTIONS,
     VENUE_CASE_CORRECTIONS,
 )
@@ -156,15 +155,13 @@ def preprint_server(r: Record) -> str | None:
         kind, value = split_id(work_id)
         if kind == "arxiv":
             return "arXiv"
-        for prefix, server in PREPRINT_SERVERS:
-            if kind == "doi" and value.startswith(prefix):
-                return server
+        if kind == "doi" and (server := preprint_server_of(value)):
+            return server
     return first_non_generic_container(r.container)
 
 
-def _first(ids: frozenset[str], kind: str) -> str | None:
-    values = sorted(v for k, v in map(split_id, ids) if k == kind)
-    return values[0] if values else None
+def _value(work_id: str | None) -> str | None:
+    return split_id(work_id)[1] if work_id else None
 
 
 def fields(w: Work) -> dict[str, str]:
@@ -181,9 +178,9 @@ def fields(w: Work) -> dict[str, str]:
         booktitle = container or (clean(r.event) if r.event else None)
     elif w.kind is Kind.PREPRINT:
         howpublished = preprint_server(r)
-    arxiv = _first(w.eprint.ids if w.eprint else r.ids, "arxiv")
+    arxiv = _value(first_id(w.eprint.ids if w.eprint else r.ids, "arxiv"))
     primary_class = (w.eprint or r).primary_class
-    doi = _first(r.ids, "doi")
+    doi = _value(first_id(r.ids, "doi"))
     out = {
         "title": protect(escape(recase_title(clean(r.title)), "title")),
         "author": _names(r.authors),

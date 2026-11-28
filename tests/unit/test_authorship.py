@@ -138,14 +138,41 @@ def test_orcid_listed_work_is_held_only_on_registry_affiliations_of_a_member_wit
     abroad = author("Gabriel Spadon", affiliations=("University of British Columbia",))
     no_affiliations = identity(inst_names=frozenset())
     assert verdict(no_affiliations, w(abroad), [claim(Source.ORCID)]) == (Verdict.ACCEPT, "orcid_claim")
-    filled = dataclasses.replace(w(abroad), provenance=(("author_affiliations", Source.OPENALEX),))
+    filled = dataclasses.replace(w(abroad), provenance=(("author_affiliations:0", Source.OPENALEX),))
     assert verdict(identity(), filled, [claim(Source.ORCID)]) == (Verdict.ACCEPT, "orcid_claim")
+    # a ROR another source put beside the registry's own contradicting string never cancels the hold
+    lab_ror = dataclasses.replace(
+        w(dataclasses.replace(abroad, rors=(LAB,))), provenance=(("author_rors:0", Source.OPENALEX),)
+    )
+    assert verdict(identity(), lab_ror, [claim(Source.ORCID)]) == (Verdict.REVIEW, "orcid_affil_contra")
+    other_slot = dataclasses.replace(
+        w(abroad, author("Ana Lima", affiliations=("Toronto",))),
+        provenance=(("author_affiliations:1", Source.OPENALEX),),
+    )
+    assert verdict(identity(), other_slot, [claim(Source.ORCID)]) == (Verdict.REVIEW, "orcid_affil_contra")
+    donor_byline = dataclasses.replace(w(abroad), provenance=(("authors", Source.OPENALEX),))
+    assert verdict(identity(), donor_byline, [claim(Source.ORCID)]) == (Verdict.ACCEPT, "orcid_claim")
     oa = record("doi:10.1234/w", source=Source.OPENALEX, authors=(abroad,))
     assert verdict(identity(), w(), [claim(Source.ORCID), claim(Source.OPENALEX, oa)]) == (
         Verdict.ACCEPT,
         "orcid_claim",
     )
     assert verdict(identity(), w(abroad), [claim(Source.ORCID)]) == (Verdict.REVIEW, "orcid_affil_contra")
+
+
+def test_a_member_named_only_on_another_registry_version_is_held_for_review() -> None:
+    i = identity(names=(name_key("Finlay", "Maguire"),), orcids=frozenset())
+    journal = w(author("Ana Sivakumar"), author("Jo Willows"))
+    preprint = record(
+        "doi:10.21203/rs.3.rs-2313951/v1",
+        kind=Kind.PREPRINT,
+        authors=(author("Ana Sivakumar"), author("Finlay Maguire")),
+    )
+    assert verdict(i, journal, [claim(Source.ORCID)]) == (Verdict.REJECT, "not_named")
+    d = decide(i, journal, [claim(Source.ORCID)], NO_CURATION, (preprint,))
+    assert (d.verdict, d.rule, d.evidence) == (Verdict.REVIEW, "named_on_version", {"doi:10.21203/rs.3.rs-2313951/v1"})
+    oa = dataclasses.replace(preprint, source=Source.OPENALEX)
+    assert decide(i, journal, [claim(Source.ORCID)], NO_CURATION, (oa,)).rule == "not_named"
 
 
 def test_dblp_primary_and_curated_record_are_registries_enough() -> None:

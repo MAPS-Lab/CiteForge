@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from citeforge import identify, publish
+from citeforge import report as report_module
 from citeforge.http import Result
 from citeforge.model import Claim, Decision, Fetch, Names, Source, Verdict
-from citeforge.report import MARKDOWN_MAX, markdown
+from citeforge.report import MARKDOWN_MAX, WEBSITE_DIR, markdown
 from citeforge.sources.dblp import DblpPerson
 from citeforge.sources.orcid import Affiliation, OrcidRecord
 from citeforge.state import StateRow
@@ -90,9 +91,10 @@ def test_write_replaces_and_deletes_only_stale_files(tmp_path: Path) -> None:
     assert not (out / "Spadon (bfdGsGUAAAAJ)").exists()
 
 
-def test_markdown_is_capped() -> None:
-    members = {f"M{i} (x)": {"status": "complete", "added": [["doi:10.1/" + "x" * 200, "S"]] * 50, "removed": [],
-                             "renamed": []} for i in range(100)}  # fmt: skip
+def test_markdown_is_capped_on_a_whole_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the website member's changes are listed in full, so they are what can push the report past the cap
+    added = [[f"doi:10.1/{n}" + "x" * 120, "S"] for n in range(500)]
+    members = {WEBSITE_DIR: {"status": "complete", "added": added, "removed": [], "renamed": []}}
     report = {
         "run": {"exit_code": 0, "min_year": 2020, "registry_failed": []},
         "untracked": [],
@@ -104,7 +106,11 @@ def test_markdown_is_capped() -> None:
         "coverage": {"claimed": 0, "emitted": 0, "unexplained": 0, "items": []},
         "events": {"counts": {}, "items": []},
     }
-    assert len(markdown(report)) <= MARKDOWN_MAX
+    text = markdown(report)
+    notice = f"\n\nThe report was cut at {MARKDOWN_MAX} characters.\n"
+    assert text.endswith(notice) and len(text) <= MARKDOWN_MAX
+    monkeypatch.setattr(report_module, "MARKDOWN_MAX", 10**9)
+    assert markdown(report).startswith(text.removesuffix(notice) + "\n")
 
 
 def test_identify_proposals(monkeypatch: pytest.MonkeyPatch) -> None:
