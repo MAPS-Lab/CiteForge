@@ -1,0 +1,7 @@
+{
+ "status": 200,
+ "headers": {
+  "content-type": "application/vnd.orcid+xml;qs=5"
+ },
+ "body": "<?xml version=\"1.0\"?><record:record/>"
+}

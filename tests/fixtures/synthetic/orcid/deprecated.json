@@ -1,0 +1,8 @@
+{
+ "status": 301,
+ "headers": {
+  "content-type": "application/json;charset=UTF-8",
+  "location": "https://pub.orcid.org/v3.0/0000-0002-0000-0001/record"
+ },
+ "body": "{\"response-code\": 301, \"developer-message\": \"301 Moved Permanently: This account is deprecated. Please refer to account: 0000-0002-0000-0001. ORCID 0000-0002-1825-0097\", \"error-code\": 9007}"
+}
