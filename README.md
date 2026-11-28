@@ -60,7 +60,7 @@ years.
 | 0 | complete |
 | 1 | unexpected error, traceback on stderr |
 | 2 | bad input, curated file or key, before any request |
-| 3 | written, but a person was partial, a source was down or a guard held removals |
+| 3 | written, but a person was partial, a source or registry lookup failed, or a guard held removals |
 
 ## Outputs
 

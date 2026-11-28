@@ -19,7 +19,6 @@ _OPENALEX_PREFIX = re.compile(r"^(?:https?://(?:api\.)?openalex\.org/(?:authors/
 _PMID = re.compile(r"[1-9]\d{0,8}")
 _DBLP_KEY = re.compile(r"[a-z]+(?:/[A-Za-z0-9._-]+)+")
 _MANUAL = re.compile(r"[a-z0-9][a-z0-9._-]*")
-_VERSION_SUFFIX = re.compile(r"\.v\d+$")
 _ARXIV_DOI = "10.48550/arxiv."
 _PREPRINT_DOI_PREFIXES = tuple(prefix for prefix, _ in PREPRINT_SERVERS)
 
@@ -93,11 +92,6 @@ def is_preprint_doi(doi: str) -> bool:
     return doi.lower().startswith(_PREPRINT_DOI_PREFIXES)
 
 
-def is_preprint_id(work_id: str) -> bool:
-    kind, value = split_id(work_id)
-    return kind == "arxiv" or (kind == "doi" and is_preprint_doi(value))
-
-
 def work_key(ids: Iterable[str]) -> str:
     def rank(work_id: str) -> tuple[int, bool, str]:
         kind, value = split_id(work_id)
@@ -110,7 +104,7 @@ def is_secondary_doi(doi: str) -> bool:
     return doi.lower().startswith(_PREPRINT_DOI_PREFIXES + DATA_DOI_PREFIXES)
 
 
-def doi_bases_match(a: str, b: str) -> bool:
-    base_a = _VERSION_SUFFIX.sub("", a.lower().strip())
-    base_b = _VERSION_SUFFIX.sub("", b.lower().strip())
-    return bool(base_a) and base_a == base_b
+def is_copy_id(work_id: str) -> bool:
+    """True for an id that names a preprint or repository copy, never a version of record."""
+    kind, value = split_id(work_id)
+    return kind == "arxiv" or (kind == "doi" and is_secondary_doi(value))

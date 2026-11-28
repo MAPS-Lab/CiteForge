@@ -3,9 +3,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from citeforge.ids import (
-    doi_bases_match,
+    is_copy_id,
     is_preprint_doi,
-    is_preprint_id,
     is_secondary_doi,
     norm_arxiv,
     norm_doi,
@@ -107,14 +106,11 @@ def test_preprint_and_secondary_dois() -> None:
     assert is_preprint_doi("10.13140/rg.2.2.1")
     assert not is_preprint_doi("10.1016/j.oceaneng.2024.118303")
     assert is_secondary_doi("10.5281/zenodo.123")
-    assert is_preprint_id("arxiv:2101.00001")
-    assert not is_preprint_id("dblp:conf/x/Y21")
-
-
-def test_doi_bases_match() -> None:
-    assert doi_bases_match("10.20944/preprints202304.0409.v1", "10.20944/preprints202304.0409.v2")
-    assert not doi_bases_match("10.1/a", "10.1/b")
-    assert not doi_bases_match("", "")
+    assert is_copy_id("arxiv:2101.00001")
+    assert is_copy_id("doi:10.5281/zenodo.123")
+    assert is_copy_id("doi:10.21203/rs.3.rs-123/v1")
+    assert not is_copy_id("doi:10.1016/j.oceaneng.2024.118303")
+    assert not is_copy_id("dblp:conf/x/Y21")
 
 
 @pytest.mark.parametrize(

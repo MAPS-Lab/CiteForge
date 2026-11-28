@@ -106,7 +106,8 @@ def _assert_outage_kept_everything(workdir: Path, before: dict[str, bytes]) -> d
     report = json.loads((workdir / "state/report.json").read_text())
     assert all(m["removed"] == [] for m in report["members"].values())
     assert "shrink_guard" not in report["events"]["counts"]
-    assert report["members"][SPADON]["status"] == "complete"
+    assert report["members"][SPADON]["status"] == "partial:registry"
+    assert report["run"]["exit_code"] == 3
     return report
 
 
@@ -116,7 +117,7 @@ def test_crossref_outage_removes_nothing(workdir: Path, monkeypatch: pytest.Monk
     assert cli.main([]) == 0
     before = tree(workdir / "output")
     world.crossref_down = True
-    assert cli.main([]) == 0
+    assert cli.main([]) == 3
     assert world.calls["crossref.by_doi"] == 2
     report = _assert_outage_kept_everything(workdir, before)
     assert report["events"]["counts"]["pending"] >= 1
@@ -384,12 +385,12 @@ def test_registry_outage_holds_new_works_as_pending(workdir: Path, monkeypatch: 
         Claim(Source.DBLP, late.ids, late.title, 2024, record=late),
     ]
     for _ in range(3):
-        cli.main([])
+        assert cli.main([]) == 3
         assert tree(workdir / "output") == before
     report = json.loads((workdir / "state/report.json").read_text())
     assert ["pending", SPADON, "doi:10.1234/late", "pending:registry"] in report["events"]["items"]
     world.crossref_down = False
-    cli.main([])
+    assert cli.main([]) == 0
     assert (workdir / "output" / SPADON / "Spadon2024-LatePaper.bib").exists()
 
 
@@ -455,6 +456,30 @@ def test_warm_run_reuses_search_links_and_writes_the_same_bytes(workdir: Path, m
     assert {k: v for k, v in warm.items() if k != "state/report.json"} == {
         k: v for k, v in cold.items() if k != "state/report.json"
     }
+
+
+def test_a_search_linked_doi_is_fetched_again_and_its_retraction_applies(
+    workdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = default_world()
+    doi = "doi:10.1145/3580305.1"
+    early = cr(doi, "Maritime traffic graphs at scale", (SP, MW), year=2023, volume=None, pages=None)
+    install(monkeypatch, world)
+    world.crossref[doi] = early
+    asked: list[str] = []
+    real = crossref.by_doi
+    monkeypatch.setattr(crossref, "by_doi", lambda http, ids: (asked.extend(ids), real(http, ids))[1])
+    monkeypatch.setattr(crossref, "search", lambda *a: Result(Fetch.OK, (early,)))
+    assert cli.main([]) == 0
+    path = workdir / "output" / SPADON / "Spadon2023-MaritimeTraffic.bib"
+    assert path.exists()
+    world.crossref[doi] = dataclasses.replace(early, volume="17", pages="1-9")
+    asked.clear()
+    assert cli.main([]) == 0
+    assert doi in asked and "17" in read_entry(path.read_text())["volume"]
+    world.crossref[doi] = dataclasses.replace(world.crossref[doi], status=Status.RETRACTED)
+    assert cli.main([]) == 0
+    assert not path.exists()
 
 
 def test_affiliation_emails_never_reach_state_report_or_output(workdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:

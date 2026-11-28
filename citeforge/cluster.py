@@ -1,11 +1,12 @@
 import dataclasses
+import re
 from collections.abc import Callable, Mapping, Sequence
 
 from rapidfuzz import fuzz
 
 from citeforge.curated import Curated
 from citeforge.http import Http
-from citeforge.ids import is_preprint_id, is_secondary_doi, split_id, work_key
+from citeforge.ids import is_copy_id, split_id, work_key
 from citeforge.model import (
     REGISTRIES,
     VERSION_RELS,
@@ -22,16 +23,18 @@ from citeforge.model import (
 )
 from citeforge.sources import crossref
 from citeforge.state import State
-from citeforge.text import family_keys, fold, name_matches, ratio, title_key
-from citeforge.works import doi_agrees
+from citeforge.text import family_keys, fold, name_matches, ratio, split_literal, title_key
+from citeforge.works import EXCLUDED_KINDS, build, doi_agrees
 
 CROSSWALK_MIN = 0.90
 FUZZY_LINK = 0.92
 FUZZY_PROPOSAL = 0.80
+FUZZY_MARGIN = 0.02
 SEARCH_ACCEPT = 0.95
 SEARCH_REVIEW = 0.85
 PREPRINT_YEARS = 3
 POSTPRINT_YEARS = 2
+_NUMERAL = re.compile(r"\d+|x{0,3}(?:ix|iv|v?i{0,3})")
 
 type Pair = tuple[str, Claim]
 type Search = Callable[[Sequence[Group]], tuple[list[tuple[str, Record]], list[Event]]]
@@ -98,7 +101,7 @@ class _Forest:
         if x not in self.parent:
             self.parent[x] = x
             kind, value = split_id(x)
-            published = kind == "doi" and not is_preprint_id(x)
+            published = kind == "doi" and not is_copy_id(x)
             self.dois[x] = frozenset({value}) if published else frozenset()
 
     def find(self, x: str) -> str:
@@ -134,7 +137,15 @@ class _Profile:
 
 
 def _profile(records: Sequence[Record], claims: Sequence[Pair]) -> _Profile | None:
-    ranked = sorted(records, key=lambda r: (r.source not in REGISTRIES, r.source is not Source.ARXIV, min(r.ids)))
+    ranked = sorted(
+        records,
+        key=lambda r: (
+            r.source not in REGISTRIES,
+            r.source is not Source.ARXIV,
+            r.kind is Kind.PREPRINT or any(map(is_copy_id, r.ids)),
+            min(r.ids),
+        ),
+    )
     for r in ranked:
         if r.title:
             return _Profile(r.title, r.year, tuple(fold(a.family or a.literal or "") for a in r.authors))
@@ -215,7 +226,7 @@ def cluster(
                 if not forest.union(key, x):
                     events.append(Event("link_refused", None, key, x))
         groups = _groups(forest, records, claims)
-    fuzzy = _fuzzy_links(groups, events)
+    fuzzy = _fuzzy_links(groups, events, curated)
     for a, b in fuzzy:
         forest.union(a, b, guard=False)
     if fuzzy:
@@ -266,14 +277,9 @@ def _groups(
     return sorted(out, key=lambda g: g.key)
 
 
-def _is_copy(work_id: str) -> bool:
-    kind, value = split_id(work_id)
-    return is_preprint_id(work_id) or (kind == "doi" and is_secondary_doi(value))
-
-
 def _copy_group(ids: frozenset[str]) -> bool:
     version = _version_ids(ids)
-    return bool(version) and all(_is_copy(i) for i in version)
+    return bool(version) and all(map(is_copy_id, version))
 
 
 def _listed_version(g: Group) -> bool:
@@ -282,20 +288,37 @@ def _listed_version(g: Group) -> bool:
 
 def _published_group(g: Group) -> bool:
     version = _version_ids(g.ids)
-    if any(split_id(i)[0] == "doi" and not _is_copy(i) for i in version):
+    if any(split_id(i)[0] == "doi" and not is_copy_id(i) for i in version):
         return True
     return not any(split_id(i)[0] == "doi" for i in version) and _listed_version(g)
 
 
-def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str, str]]:
+def _distinct_titles(a: str, b: str) -> bool:
+    """True when near-equal titles still name two papers: a part number differs, or one word is swapped for another."""
+    wa, wb = title_key(a).split(), title_key(b).split()
+    if any(_NUMERAL.fullmatch(t) for t in set(wa) ^ set(wb)):
+        return True
+    swaps = [(x, y) for x, y in zip(wa, wb, strict=True) if x != y] if len(wa) == len(wb) else []
+    if len(swaps) != 1:
+        return False
+    x, y = swaps[0]
+    # a same-length word on another stem (minimum, maximum) names a sibling paper; retitles swap unlike words
+    return len(x) == len(y) and x[:4] != y[:4]
+
+
+def _fuzzy_links(groups: Sequence[Group], events: list[Event], curated: Curated) -> list[tuple[str, str]]:
     profiles = {g.key: _profile(g.records, g.claims) for g in groups}
     pre = [g for g in groups if _copy_group(g.ids) and profiles[g.key]]
-    pub = [g for g in groups if _published_group(g) and profiles[g.key]]
-    partners: dict[str, list[str]] = {}
+    # a notice, an abstract or front matter never absorbs a preprint, however close its title
+    pub = [
+        g for g in groups if _published_group(g) and profiles[g.key] and build(g, curated)[0].kind not in EXCLUDED_KINDS
+    ]
+    links = []
     for p in pre:
         pp = profiles[p.key]
         assert pp is not None
         pk = title_key(pp.title)
+        scored: list[tuple[float, str]] = []
         for q in pub:
             if q.key == p.key:
                 continue
@@ -304,20 +327,19 @@ def _fuzzy_links(groups: Sequence[Group], events: list[Event]) -> list[tuple[str
             score = fuzz.ratio(pk, title_key(qp.title), score_cutoff=FUZZY_PROPOSAL * 100) / 100
             if score < FUZZY_PROPOSAL or not _fuzzy_ok(pp, qp):
                 continue
-            if score >= FUZZY_LINK:
-                partners.setdefault(p.key, []).append(q.key)
-                partners.setdefault(q.key, []).append(p.key)
+            if score >= FUZZY_LINK and not _distinct_titles(pp.title, qp.title):
+                scored.append((score, q.key))
             else:
                 events.append(Event("link_proposal", None, p.key, f"{q.key} ratio={score:.2f}"))
-    links = []
-    for a, bs in sorted(partners.items()):
-        if not _copy_group(frozenset({a})):
+        if not scored:
             continue
-        if len(bs) == 1:
-            links.append((a, bs[0]))
-            events.append(Event("fuzzy_link", None, a, bs[0]))
+        best = max(score for score, _ in scored)
+        tied = sorted(key for score, key in scored if best - score < FUZZY_MARGIN)
+        if len(tied) == 1:
+            links.append((p.key, tied[0]))
+            events.append(Event("fuzzy_link", None, p.key, tied[0]))
         else:
-            events.append(Event("link_proposal", None, a, " ".join(sorted(bs))))
+            events.append(Event("link_proposal", None, p.key, " ".join(tied)))
     return links
 
 
@@ -326,14 +348,16 @@ def _search_ok(profile: _Profile, found: Record, identity: Identity) -> bool:
     named = any(name_matches(identity.names, a) for a in found.authors)
     counts = [n for n in (len(profile.families), len(found.authors)) if n]
     count_ok = len(counts) < 2 or min(counts) / max(counts) >= 0.5
-    return ratio(profile.title, found.title) >= SEARCH_ACCEPT and year_ok and named and count_ok
+    title_ok = ratio(profile.title, found.title) >= SEARCH_ACCEPT and not _distinct_titles(profile.title, found.title)
+    return title_ok and year_ok and named and count_ok
 
 
 def _doi_of(r: Record) -> str | None:
     return next((i for i in sorted(r.ids) if split_id(i)[0] == "doi"), None)
 
 
-def _previous_links(previous: State) -> dict[str, Record]:
+def previous_links(previous: State) -> dict[str, Record]:
+    """Map each alias of a work an earlier run linked by search to the Crossref record of its DOI."""
     out: dict[str, Record] = {}
     for key, row in sorted(previous.items()):
         primary = row.work.primary
@@ -344,12 +368,20 @@ def _previous_links(previous: State) -> dict[str, Record]:
 
 
 def search_unidentified(
-    groups: Sequence[Group], http: Http, identities: Mapping[str, Identity], min_year: int, previous: State
+    groups: Sequence[Group],
+    http: Http,
+    identities: Mapping[str, Identity],
+    min_year: int,
+    linked: Mapping[str, Record],
+    reg: Registries,
 ) -> tuple[list[tuple[str, Record]], list[Event]]:
-    """Find the Crossref DOI of each DOI-less listed group, reusing the DOI an earlier run linked it to."""
+    """Find the Crossref DOI of each DOI-less listed group, reusing the DOI an earlier run linked it to.
+
+    A reused DOI is judged on the record fetched this run, so later metadata and retractions apply; the stored
+    record stands in only while the registry fails for that DOI.
+    """
     events: list[Event] = []
     found: list[tuple[str, Record]] = []
-    linked = _previous_links(previous)
     for g in groups:
         kinds = {split_id(i)[0] for i in g.ids}
         if "doi" in kinds or ("arxiv" in kinds and not _listed_version(g)) or not g.claims:
@@ -363,24 +395,27 @@ def search_unidentified(
         if profile.year is not None and profile.year < min_year - 1:
             continue
         prior = next((linked[i] for i in sorted(g.ids) if i in linked), None)
+        if prior is not None and (doi := _doi_of(prior)) is not None:
+            prior = reg.found.get(doi) or (prior if doi in reg.failed else None)
         if prior is not None and _search_ok(profile, prior, identity):
             events.append(Event("search_linked", member, g.key, _doi_of(prior) or ""))
             found.append((g.key, prior))
             continue
-        family = next(iter(sorted(identity.names[0].families, key=len, reverse=True)), "")
+        # Crossref requires every query.author word, so a hyphenated surname goes as its words, never joined
+        family = fold(split_literal(identity.member.name)[1])
         result = crossref.search(http, profile.title, family, profile.year)
         if result.fetch is not Fetch.OK or result.value is None:
             events += [Event("search_failed", m, g.key, result.reason) for m in sorted({m for m, _ in g.claims})]
             continue
         scored = sorted(
             ((ratio(profile.title, r.title), doi, r) for r in result.value if (doi := _doi_of(r))),
-            key=lambda t: (-t[0], is_secondary_doi(split_id(t[1])[1]), t[1]),
+            key=lambda t: (-t[0], is_copy_id(t[1]), t[1]),
         )
         close = [(score, doi) for score, doi, _ in scored if score >= SEARCH_REVIEW]
         if not close:
             continue
         score, doi, best = scored[0]
-        rivals = {d for _, d in close if not is_secondary_doi(split_id(d)[1])} - {doi}
+        rivals = {d for _, d in close if not is_copy_id(d)} - {doi}
         if rivals:
             events.append(
                 Event("search_review", member, g.key, f"{doi} ratio={score:.2f} rivals={' '.join(sorted(rivals))}")
