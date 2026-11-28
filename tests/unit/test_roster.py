@@ -27,7 +27,6 @@ def test_committed_data_loads_for_identify() -> None:
     _committed(strict=False)
 
 
-@pytest.mark.xfail(raises=RosterError, strict=True, reason="data/input.csv gains ORCID and OpenAlex with the seeding")
 def test_committed_data_loads_for_a_build() -> None:
     _committed(strict=True)
 
