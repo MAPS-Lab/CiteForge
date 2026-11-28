@@ -54,6 +54,7 @@ def _record(d: Mapping[str, Any]) -> Record:
         "container": tuple(d["container"]),
         "relations": frozenset((Rel(r), t) for r, t in d["relations"]),
         "status": Status(d["status"]),
+        "alt_titles": tuple(d.get("alt_titles", ())),
     }
     return Record(**values)
 

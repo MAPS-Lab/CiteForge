@@ -272,3 +272,43 @@ def test_unusable_item_fails_in_batch(clock: FakeClock) -> None:
     )
     b = datacite.by_doi(http, ["doi:10.5555/bad", "doi:10.5555/good", "doi:10.5555/gone"])
     assert (set(b.found), b.failed, b.missing) == ({"doi:10.5555/good"}, {"doi:10.5555/bad"}, {"doi:10.5555/gone"})
+
+
+def _one(**attrs: object) -> dict[str, object]:
+    base = {
+        "doi": "10.5281/zenodo.1",
+        "titles": [{"title": "A"}],
+        "creators": [{"familyName": "Doe", "name": "Doe, J"}],
+    }
+    return {"data": [{"id": "10.5281/zenodo.1", "attributes": {**base, **attrs}}]}
+
+
+@pytest.mark.parametrize(
+    ("general", "kind"),
+    [("Dataset", Kind.DATASET), ("ConferencePaper", Kind.INPROCEEDINGS), ("Conference Paper", Kind.INPROCEEDINGS),
+     ("Text", Kind.OTHER), ("Audiovisual", Kind.OTHER)],
+)  # fmt: skip
+def test_kind_by_resource_type_general(general: str, kind: Kind) -> None:
+    records, _ = datacite.parse_dois(json.dumps(_one(types={"resourceTypeGeneral": general})).encode())
+    assert records["doi:10.5281/zenodo.1"].kind is kind
+
+
+@pytest.mark.parametrize("field", ["relatedIdentifiers", "creators", "titles", "dates", "contributors"])
+@pytest.mark.parametrize("value", [5, {"name": "Doe, J", "familyName": "Doe"}, "x"])
+def test_a_field_that_is_not_a_list_makes_the_record_unreadable(field: str, value: object) -> None:
+    records, unreadable = datacite.parse_dois(json.dumps(_one(**{field: value})).encode())
+    assert (records, unreadable) == ({}, {"doi:10.5281/zenodo.1"})
+
+
+def test_repository_copy_is_a_variant_of_the_publisher_doi() -> None:
+    related = [
+        {"relationType": "IsVariantFormOf", "relatedIdentifier": "10.1038/s41588-025-02485-8",
+         "relatedIdentifierType": "DOI"},
+        {"relationType": "IsOriginalFormOf", "relatedIdentifier": "10.1038/s41586-025-09820-3",
+         "relatedIdentifierType": "DOI"},
+    ]  # fmt: skip
+    records, _ = datacite.parse_dois(json.dumps(_one(relatedIdentifiers=related)).encode())
+    assert records["doi:10.5281/zenodo.1"].relations == {
+        (Rel.VARIANT_OF, "doi:10.1038/s41588-025-02485-8"),
+        (Rel.IDENTICAL, "doi:10.1038/s41586-025-09820-3"),
+    }

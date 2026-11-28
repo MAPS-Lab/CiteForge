@@ -124,6 +124,30 @@ def test_rules_5_to_8() -> None:
     assert verdict(identity(), w(), []) == (Verdict.REJECT, "no_evidence")
 
 
+def test_affiliation_names_match_whole_words_only() -> None:
+    western = identity(rors=frozenset({LAB}), inst_names=frozenset({"western university"}))
+    abroad = author(
+        "Gabriel Spadon", openalex="A5023888391", affiliations=("Feinberg School, Northwestern University",)
+    )
+    assert verdict(western, w(abroad), [claim(Source.OPENALEX)]) == (Verdict.REVIEW, "openalex_only")
+    home = author("Gabriel Spadon", openalex="A5023888391", affiliations=("Dept. of CS, Western University, Canada",))
+    assert verdict(western, w(home), [claim(Source.OPENALEX)]) == (Verdict.ACCEPT, "openalex_affil")
+
+
+def test_orcid_listed_work_is_held_only_on_registry_affiliations_of_a_member_with_known_institutions() -> None:
+    abroad = author("Gabriel Spadon", affiliations=("University of British Columbia",))
+    no_affiliations = identity(inst_names=frozenset())
+    assert verdict(no_affiliations, w(abroad), [claim(Source.ORCID)]) == (Verdict.ACCEPT, "orcid_claim")
+    filled = dataclasses.replace(w(abroad), provenance=(("author_affiliations", Source.OPENALEX),))
+    assert verdict(identity(), filled, [claim(Source.ORCID)]) == (Verdict.ACCEPT, "orcid_claim")
+    oa = record("doi:10.1234/w", source=Source.OPENALEX, authors=(abroad,))
+    assert verdict(identity(), w(), [claim(Source.ORCID), claim(Source.OPENALEX, oa)]) == (
+        Verdict.ACCEPT,
+        "orcid_claim",
+    )
+    assert verdict(identity(), w(abroad), [claim(Source.ORCID)]) == (Verdict.REVIEW, "orcid_affil_contra")
+
+
 def test_dblp_primary_and_curated_record_are_registries_enough() -> None:
     dblp_only = work(record("dblp:conf/x/S23", source=Source.DBLP, kind=Kind.INPROCEEDINGS))
     assert verdict(identity(), dblp_only, [claim(Source.DBLP)]) == (Verdict.ACCEPT, "dblp_listed")

@@ -8,15 +8,30 @@ from citeforge.http import HOSTS, Batch, Http, ParseError
 from citeforge.ids import norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Rel, Source
 from citeforge.text import affiliation, is_affiliation, is_group, split_literal
-from citeforge.works import DATACITE_KINDS
 
 HOST = HOSTS["api.datacite.org"]
 CHUNK = 100
+KINDS: Mapping[str, Kind] = {
+    "journalarticle": Kind.ARTICLE,
+    "conferencepaper": Kind.INPROCEEDINGS,
+    "bookchapter": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "conferenceproceeding": Kind.PROCEEDINGS,
+    "report": Kind.TECHREPORT,
+    "dissertation": Kind.PHDTHESIS,
+    "preprint": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "software": Kind.SOFTWARE,
+    "component": Kind.COMPONENT,
+    "peerreview": Kind.PEER_REVIEW,
+}
 RELATIONS: Mapping[str, Rel] = {
     "isversionof": Rel.VERSION_OF,
     "ispreviousversionof": Rel.VERSION_OF,
     "isnewversionof": Rel.VERSION_OF,
     "isidenticalto": Rel.IDENTICAL,
+    "isvariantformof": Rel.VARIANT_OF,
+    "isoriginalformof": Rel.IDENTICAL,
     "istranslationof": Rel.TRANSLATION_OF,
     "hastranslation": Rel.HAS_TRANSLATION,
 }
@@ -118,7 +133,7 @@ def parse_work(work_id: str, attrs: Mapping[str, Any]) -> Record:
     return Record(
         source=Source.DATACITE,
         ids=frozenset({work_id}),
-        kind=DATACITE_KINDS.get(source_type.lower(), Kind.OTHER),
+        kind=KINDS.get(source_type.lower().replace(" ", ""), Kind.OTHER),
         source_type=source_type,
         title=title,
         authors=_people(attrs.get("creators")),
@@ -206,10 +221,8 @@ def _dict(value: Any) -> Mapping[str, Any]:
 
 
 def _dicts(value: Any) -> list[Mapping[str, Any]]:
-    return (
-        [v for v in value if isinstance(v, dict)]
-        if isinstance(value, list | tuple)
-        else (
-            [v for v in value if isinstance(v, dict)] if value is not None and not isinstance(value, str | dict) else []
-        )
-    )
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ParseError(f"expected a list, got {type(value).__name__}")
+    return [v for v in value if isinstance(v, dict)]

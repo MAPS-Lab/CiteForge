@@ -1,6 +1,6 @@
 import dataclasses
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Literal
 
 from citeforge.authorship import is_own
@@ -22,7 +22,6 @@ from citeforge.model import (
 from citeforge.tables import (
     ACM_JOURNAL_PROCEEDINGS,
     CONFERENCE_AS_JOURNAL,
-    GENERIC_SERIES_NAMES,
     INSTITUTIONAL_REPOSITORIES,
     JOURNALS_NAMED_PROCEEDINGS,
     PROCEEDINGS_SERIES_AS_JOURNAL,
@@ -45,57 +44,6 @@ EXCLUDED_KINDS = frozenset(
     {Kind.PROCEEDINGS, Kind.DATASET, Kind.SOFTWARE, Kind.PATENT, Kind.EDITORIAL, Kind.FRONT_MATTER, Kind.ABSTRACT,
      Kind.NOTICE, Kind.PEER_REVIEW, Kind.COMPONENT, Kind.OTHER}
 )  # fmt: skip
-CROSSREF_KINDS: Mapping[str, Kind] = {
-    "journal-article": Kind.ARTICLE,
-    "proceedings-article": Kind.INPROCEEDINGS,
-    "book-chapter": Kind.INCOLLECTION,
-    "book-part": Kind.INCOLLECTION,
-    "book-section": Kind.INCOLLECTION,
-    "book": Kind.BOOK,
-    "monograph": Kind.BOOK,
-    "reference-book": Kind.BOOK,
-    "edited-book": Kind.PROCEEDINGS,
-    "proceedings": Kind.PROCEEDINGS,
-    "journal-issue": Kind.PROCEEDINGS,
-    "journal": Kind.PROCEEDINGS,
-    "report": Kind.TECHREPORT,
-    "dissertation": Kind.PHDTHESIS,
-    "posted-content": Kind.PREPRINT,
-    "dataset": Kind.DATASET,
-    "component": Kind.COMPONENT,
-    "peer-review": Kind.PEER_REVIEW,
-    "editorial": Kind.EDITORIAL,
-}
-DATACITE_KINDS: Mapping[str, Kind] = {
-    "journalarticle": Kind.ARTICLE,
-    "conferencepaper": Kind.INPROCEEDINGS,
-    "bookchapter": Kind.INCOLLECTION,
-    "book": Kind.BOOK,
-    "conferenceproceeding": Kind.PROCEEDINGS,
-    "report": Kind.TECHREPORT,
-    "dissertation": Kind.PHDTHESIS,
-    "preprint": Kind.PREPRINT,
-    "dataset": Kind.DATASET,
-    "software": Kind.SOFTWARE,
-    "component": Kind.COMPONENT,
-    "peerreview": Kind.PEER_REVIEW,
-    "text": Kind.OTHER,
-    "other": Kind.OTHER,
-}
-CSL_KINDS: Mapping[str, Kind] = {
-    "article-journal": Kind.ARTICLE,
-    "article": Kind.ARTICLE,
-    "paper-conference": Kind.INPROCEEDINGS,
-    "chapter": Kind.INCOLLECTION,
-    "book": Kind.BOOK,
-    "report": Kind.TECHREPORT,
-    "thesis": Kind.PHDTHESIS,
-    "posted-content": Kind.PREPRINT,
-    "dataset": Kind.DATASET,
-    "software": Kind.SOFTWARE,
-    "patent": Kind.PATENT,
-    "review": Kind.PEER_REVIEW,
-}
 _EDITORIAL = re.compile(r"^((guest|series) )?editorial\b", re.IGNORECASE)
 _FRONT = re.compile(
     r"^(preface\b|foreword\b|front matter\b|message from\b|welcome(?![-\w])|table of contents\b"
@@ -153,25 +101,9 @@ VENUE_RULES: tuple[tuple[frozenset[Kind], Callable[[str], bool], Kind], ...] = (
 
 
 def _base_kind(r: Record) -> Kind:
-    source_type = r.source_type.strip().lower()
-    match r.source:
-        case Source.CROSSREF:
-            kind = CROSSREF_KINDS.get(source_type, Kind.OTHER)
-            if source_type == "edited-book" and r.authors and not r.editors:
-                return Kind.BOOK
-            if source_type == "book-chapter" and (
-                r.event or any(c.strip().lower() in GENERIC_SERIES_NAMES for c in r.container)
-            ):
-                return Kind.INPROCEEDINGS
-        case Source.DATACITE:
-            kind = DATACITE_KINDS.get(source_type.replace(" ", ""), Kind.OTHER)
-        case Source.CSL:
-            kind = CSL_KINDS.get(source_type, Kind.OTHER)
-        case _:
-            kind = r.kind
-    if kind is Kind.PHDTHESIS and r.degree and "master" in r.degree.lower():
+    if r.kind is Kind.PHDTHESIS and r.degree and "master" in r.degree.lower():
         return Kind.MASTERSTHESIS
-    return kind
+    return r.kind
 
 
 def classify(r: Record) -> Kind:
@@ -203,13 +135,14 @@ def year_of(records: Sequence[Record]) -> int | None:
 
 
 def doi_agrees(claim_title: str, member: Identity, reg: Record) -> Literal["ok", "review", "group", "detach"]:
-    title_score = token_set(claim_title, reg.title)
-    title_ok = title_score >= 0.90 or ratio(claim_title, reg.title) >= 0.85 or word_prefix(claim_title, reg.title)
+    titles = (reg.title, *reg.alt_titles)
+    title_score = max(token_set(claim_title, t) for t in titles)
+    title_ok = title_score >= 0.90 or any(ratio(claim_title, t) >= 0.85 or word_prefix(claim_title, t) for t in titles)
     people = [a for a in reg.authors if a.family or a.literal]
     # A foreign ORCID on a named slot is an authorship question for decide, not a sign of a wrong DOI.
     named = any(is_own(member, a) or name_matches(member.names, a) for a in people)
     if title_score < 0.60:
-        return "detach"
+        return "review" if named else "detach"
     if people and not named:
         return "group" if title_ok and any(a.literal and is_group(a.literal) for a in people) else "detach"
     return "ok" if title_ok else "review"
@@ -228,12 +161,16 @@ def _primary(records: Sequence[Record]) -> Record:
     def rank(r: Record) -> tuple[int, int, int, str]:
         kind = classify(r)
         kind_rank = _PRIMARY_KIND_RANK.index(kind) if kind in _PRIMARY_KIND_RANK else len(_PRIMARY_KIND_RANK)
-        preprint = kind is Kind.PREPRINT or any(k == "doi" and is_secondary_doi(v) for k, v in map(split_id, r.ids))
-        if r.source in REGISTRIES and not preprint:
+        secondary = (
+            kind is Kind.PREPRINT
+            or any(k == "doi" and is_secondary_doi(v) for k, v in map(split_id, r.ids))
+            or any(rel is Rel.VARIANT_OF for rel, _ in r.relations)
+        )
+        if r.source in REGISTRIES and not secondary:
             tier = 0
         elif r.source is Source.CURATED:
             tier = 1
-        elif r.source is Source.DBLP and not preprint:
+        elif r.source is Source.DBLP and not secondary:
             tier = 2
         elif r.source in REGISTRIES:
             tier = 3
@@ -352,6 +289,8 @@ def build(g: Group, curated: Curated) -> tuple[Work, tuple[Event, ...]]:
         updates["authors"] = authors
     for d in donors:
         if (merged := _merge_author_ids(authors, d.authors)) is not None and merged != authors:
+            if any((m.rors, m.affiliations) != (a.rors, a.affiliations) for m, a in zip(merged, authors, strict=True)):
+                provenance.setdefault("author_affiliations", d.source)
             authors = updates["authors"] = merged
             provenance.setdefault("author_ids", d.source)
     primary = dataclasses.replace(primary, **updates)

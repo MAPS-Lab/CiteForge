@@ -13,40 +13,21 @@ from tests.unit.test_authorship import identity
 
 
 @pytest.mark.parametrize(
-    ("source", "source_type", "extra", "kind"),
+    ("base", "extra", "kind"),
     [
-        (Source.CROSSREF, "journal-article", {}, Kind.ARTICLE),
-        (Source.CROSSREF, "proceedings-article", {}, Kind.INPROCEEDINGS),
-        (Source.CROSSREF, "book-chapter", {"container": ("Lecture Notes in Computer Science",)}, Kind.INPROCEEDINGS),
-        (Source.CROSSREF, "book-chapter", {"event": "KDD 2023"}, Kind.INPROCEEDINGS),
-        (Source.CROSSREF, "book-chapter", {"container": ("Handbook of Things",)}, Kind.INCOLLECTION),
-        (Source.CROSSREF, "monograph", {}, Kind.BOOK),
-        (Source.CROSSREF, "edited-book", {}, Kind.BOOK),
-        (Source.CROSSREF, "edited-book", {"editors": (author("Stan Matwin"),)}, Kind.PROCEEDINGS),
-        (Source.CROSSREF, "report", {}, Kind.TECHREPORT),
-        (Source.CROSSREF, "dissertation", {"degree": "Master of Science"}, Kind.MASTERSTHESIS),
-        (Source.CROSSREF, "dissertation", {}, Kind.PHDTHESIS),
-        (Source.CROSSREF, "posted-content", {}, Kind.PREPRINT),
-        (Source.CROSSREF, "peer-review", {}, Kind.PEER_REVIEW),
-        (Source.CROSSREF, "weird-new-type", {}, Kind.OTHER),
-        (Source.DATACITE, "Dataset", {}, Kind.DATASET),
-        (Source.DATACITE, "ConferencePaper", {}, Kind.INPROCEEDINGS),
-        (Source.CSL, "paper-conference", {}, Kind.INPROCEEDINGS),
-        (Source.CROSSREF, "journal-article", {"container": ("Procedia Computer Science",)}, Kind.INPROCEEDINGS),
-        (Source.CROSSREF, "journal-article", {"container": ("Proceedings of the IEEE",)}, Kind.ARTICLE),
-        (Source.CROSSREF, "journal-article", {"container": ("Proceedings of the 5th Conference",)}, Kind.INPROCEEDINGS),
-        (
-            Source.CROSSREF,
-            "proceedings-article",
-            {"container": ("Proceedings of the ACM on Human-Computer Interaction",)},
-            Kind.ARTICLE,
-        ),
-        (Source.CROSSREF, "journal-article", {"container": ("eScholarship",)}, Kind.PREPRINT),
-        (Source.CROSSREF, "proceedings-article", {"container": ("UWSpace",)}, Kind.PHDTHESIS),
+        (Kind.ARTICLE, {}, Kind.ARTICLE),
+        (Kind.PHDTHESIS, {"degree": "Master of Science"}, Kind.MASTERSTHESIS),
+        (Kind.PHDTHESIS, {}, Kind.PHDTHESIS),
+        (Kind.ARTICLE, {"container": ("Procedia Computer Science",)}, Kind.INPROCEEDINGS),
+        (Kind.ARTICLE, {"container": ("Proceedings of the IEEE",)}, Kind.ARTICLE),
+        (Kind.ARTICLE, {"container": ("Proceedings of the 5th Conference",)}, Kind.INPROCEEDINGS),
+        (Kind.INPROCEEDINGS, {"container": ("Proceedings of the ACM on Human-Computer Interaction",)}, Kind.ARTICLE),
+        (Kind.ARTICLE, {"container": ("eScholarship",)}, Kind.PREPRINT),
+        (Kind.INPROCEEDINGS, {"container": ("UWSpace",)}, Kind.PHDTHESIS),
     ],
 )
-def test_kind_map(source: Source, source_type: str, extra: dict, kind: Kind) -> None:
-    assert classify(record("doi:10.1234/k", source=source, source_type=source_type, **extra)) is kind
+def test_kind_refines_the_source_kind(base: Kind, extra: dict, kind: Kind) -> None:
+    assert classify(record("doi:10.1234/k", kind=base, **extra)) is kind
 
 
 @pytest.mark.parametrize(
@@ -128,11 +109,20 @@ def test_doi_agrees_bands() -> None:
     assert doi_agrees("Graph Neural Networks for Vessel Trajectory Forecasting", me, reg) == "ok"
     assert doi_agrees("Graph neural networks for vessel trajectory forecasting in the Arctic sea ice", me, reg) == "ok"
     assert doi_agrees("Graph networks for ship trajectory forecasts at sea", me, reg) == "review"
-    assert doi_agrees("Protein folding with diffusion", me, reg) == "detach"
+    assert doi_agrees("Protein folding with diffusion", me, reg) == "review"
+    assert doi_agrees("Protein folding with diffusion", me, dataclasses.replace(reg, authors=())) == "detach"
     stranger = dataclasses.replace(reg, authors=(author("Ana Lima"),))
     assert doi_agrees(reg.title, me, stranger) == "detach"
     foreign = dataclasses.replace(reg, authors=(author("Gabriel Spadon", orcid="0000-0001-5109-3700"),))
     assert doi_agrees(reg.title, me, foreign) == "ok"
+
+
+def test_doi_agrees_reads_every_language_of_a_bilingual_record() -> None:
+    english = "Expert participation in the health technology assessment process: a scoping review"
+    portuguese = "Participação de especialistas no processo de avaliação de tecnologias em saúde: revisão de escopo"
+    reg = record("doi:10.1590/0034-7167-2025-0157", title=english, alt_titles=(portuguese,))
+    assert doi_agrees(portuguese, identity(), reg) == "ok"
+    assert doi_agrees(portuguese, identity(), dataclasses.replace(reg, alt_titles=())) == "review"
 
 
 def test_doi_agrees_holds_a_consortium_byline_instead_of_detaching() -> None:
@@ -147,6 +137,18 @@ def test_doi_agrees_holds_a_consortium_byline_instead_of_detaching() -> None:
 def _group(*records: Record, fuzzy: bool = False) -> Group:
     ids = frozenset(i for r in records for i in r.ids)
     return Group(min(ids), ids, records, (), fuzzy)
+
+
+def test_build_names_the_source_that_filled_author_affiliations() -> None:
+    doi = "doi:10.31219/osf.io/z79vk_v1"
+    cr = record(doi, authors=(author("Ana Lima"),), source_type="posted-content", kind=Kind.PREPRINT)
+    oa = record(doi, "openalex:W9", source=Source.OPENALEX, authors=(author("Ana Lima", affiliations=("Toronto",)),))
+    w, _ = build(_group(cr, oa), Curated())
+    assert w.primary.authors[0].affiliations == ("Toronto",)
+    assert dict(w.provenance)["author_affiliations"] is Source.OPENALEX
+    ids_only = dataclasses.replace(oa, authors=(author("Ana Lima", orcid="0000-0002-1825-0097"),))
+    w, _ = build(_group(cr, ids_only), Curated())
+    assert "author_affiliations" not in dict(w.provenance) and dict(w.provenance)["author_ids"] is Source.OPENALEX
 
 
 def test_build_prefers_registry_and_fills_only_from_same_doi() -> None:
@@ -274,7 +276,7 @@ def test_name_key_reexport_sanity() -> None:
 def test_crossref_other_with_a_container_takes_the_openalex_kind() -> None:
     doi = "doi:10.1002/9781119675525.ch1"
     book = ("Communication Networks and Service Management in the Era of Artificial Intelligence and Machine Learning",)
-    cr = record(doi, title="Overview of Network and Service Management", source_type="other", container=book)
+    cr = record(doi, title="Overview of Network and Service Management", kind=Kind.OTHER, container=book)
     oa = dataclasses.replace(
         cr,
         source=Source.OPENALEX,
@@ -297,7 +299,7 @@ def test_chapters_of_an_authored_book_fold_into_the_book() -> None:
                 "doi:10.1093/oso/9780192869364.001.0001",
                 title=title,
                 authors=me,
-                source_type="edited-book",
+                kind=Kind.BOOK,
                 container=(),
             )
         ),
@@ -310,7 +312,7 @@ def test_chapters_of_an_authored_book_fold_into_the_book() -> None:
                 "doi:10.1093/oso/9780192869364.003.0001",
                 title="Introduction and outlook",
                 authors=me,
-                source_type="book-chapter",
+                kind=Kind.INCOLLECTION,
                 container=(title,),
             )
         ),
@@ -322,7 +324,7 @@ def test_chapters_of_an_authored_book_fold_into_the_book() -> None:
                 "doi:10.1093/oso/9780192869364.003.0099",
                 title="A guest chapter",
                 authors=(*me, author("Ana Lima")),
-                source_type="book-chapter",
+                kind=Kind.INCOLLECTION,
                 container=(title,),
             )
         ),

@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 from citeforge.http import USER_AGENT, Http, ParseError
 from citeforge.model import Fetch, Kind, Rel, Source, Status
 from citeforge.sources import crossref
+from citeforge.works import classify
 from tests.conftest import FIXTURES, FakeClock, Handler, fixture_transport, json_response, make_http
 
 SYNTHETIC = FIXTURES / "synthetic" / "crossref"
@@ -122,7 +123,7 @@ def test_recorded_rors_groups_and_series(clock: FakeClock) -> None:
         "Lecture Notes in Networks and Systems",
         "Artificial Intelligence Algorithm Design for Systems",
     )
-    assert chapter.kind is Kind.INCOLLECTION
+    assert chapter.kind is Kind.INPROCEEDINGS
 
 
 def test_recorded_fixtures_hold_no_abstracts_or_references() -> None:
@@ -463,7 +464,7 @@ def test_venue_fields_and_school_by_type() -> None:
     )
     assert (chapter.pages, chapter.article_number, chapter.language) == ("3-19", "e42", "en")
     assert chapter.school is None and chapter.institution is None
-    assert chapter.kind is Kind.INCOLLECTION
+    assert chapter.kind is Kind.INPROCEEDINGS
     thesis = crossref.parse_work(item("10.1000/a", type="dissertation", **fields))
     assert (thesis.school, thesis.degree, thesis.institution) == ("Dalhousie University", "Master of Science", None)
     report = crossref.parse_work(item("10.1000/a", type="report", **fields))
@@ -501,3 +502,40 @@ def test_parse_work_only_raises_parse_error(overrides: dict[str, Any]) -> None:
 def test_arbitrary_body_never_escapes_as_another_error(value: object) -> None:
     batch = crossref.by_doi(make_http(respond(value)), ["doi:10.1000/a"])
     assert batch.found.keys() | batch.missing | batch.failed == {"doi:10.1000/a"}
+
+
+EDITOR = [{"given": "Stan", "family": "Matwin"}]
+
+
+@pytest.mark.parametrize(
+    ("source_type", "extra", "kind"),
+    [
+        ("journal-article", {}, Kind.ARTICLE),
+        ("proceedings-article", {}, Kind.INPROCEEDINGS),
+        ("book-chapter", {"container-title": ["Lecture Notes in Computer Science"]}, Kind.INPROCEEDINGS),
+        ("book-chapter", {"event": {"name": "KDD 2023"}}, Kind.INPROCEEDINGS),
+        ("book-chapter", {"container-title": ["Handbook of Things"]}, Kind.INCOLLECTION),
+        ("monograph", {}, Kind.BOOK),
+        ("edited-book", {}, Kind.BOOK),
+        ("edited-book", {"editor": EDITOR}, Kind.PROCEEDINGS),
+        ("edited-book", {"author": [], "editor": EDITOR}, Kind.PROCEEDINGS),
+        ("report", {}, Kind.TECHREPORT),
+        ("dissertation", {"degree": ["Master of Science"]}, Kind.MASTERSTHESIS),
+        ("dissertation", {}, Kind.PHDTHESIS),
+        ("posted-content", {}, Kind.PREPRINT),
+        ("peer-review", {}, Kind.PEER_REVIEW),
+        ("weird-new-type", {}, Kind.OTHER),
+    ],
+)
+def test_kind_by_type(source_type: str, extra: dict[str, Any], kind: Kind) -> None:
+    assert classify(crossref.parse_work(item("10.1000/k", type=source_type, **extra))) is kind
+
+
+def test_bilingual_titles_are_kept_as_alternates() -> None:
+    english = "Expert participation in the health technology assessment process: a scoping review"
+    portuguese = "Participação de especialistas no processo de avaliação de tecnologias em saúde: revisão de escopo"
+    r = crossref.parse_work(item("10.1590/0034-7167-2025-0157", title=[english], **{"original-title": [portuguese]}))
+    assert (r.title, r.alt_titles) == (english, (portuguese,))
+    two = crossref.parse_work(item("10.1590/x", title=["Main", "Principal"], subtitle=["A sub"]))
+    assert (two.title, two.alt_titles) == ("Main: A sub", ("Principal",))
+    assert crossref.parse_work(item("10.1590/y", **{"original-title": ["", "Graph neural networks"]})).alt_titles == ()

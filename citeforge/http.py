@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import random
 import re
@@ -19,8 +20,12 @@ USER_AGENT = "CiteForge/2.0 (+https://github.com/gabrielspadon/CiteForge)"
 MAX_ATTEMPTS = 4
 BACKOFF_S = (1.0, 2.0, 4.0)
 MAX_RETRY_AFTER_S = 120.0
+MAX_RETRY_WAIT_S = 300.0
+MAX_REDIRECTS = 3
 CIRCUIT_FAILURES = 5
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+# Statuses that answer for one record (a malformed query, an ORCID deprecated or locked) and say nothing of host health.
+RECORD_STATUS = frozenset({400, 409})
 _SECRET_QS = re.compile(r"(?i)([?&](?:access_token|api_key|apikey|api-key|token|key)=)[^&#\s'\"\\)]+")
 
 
@@ -61,6 +66,7 @@ class Reply:
     headers: Mapping[str, str]
     body: bytes
     reason: str
+    url: str = ""
 
     @property
     def location(self) -> str | None:
@@ -124,6 +130,7 @@ class _HostState:
         self.down: str | None = None
         self.counts: Counter[str] = Counter()
         self.max_retry_after = 0.0
+        self.waited = 0.0
 
 
 class Http:
@@ -173,21 +180,38 @@ class Http:
         path: str,
         params: Mapping[str, str] = {},
         headers: Mapping[str, str] = {},
-        url: str | None = None,
+        follow_redirects: bool = False,
     ) -> Reply:
+        """GET host.base + path; with follow_redirects, Location is followed up to MAX_REDIRECTS hops."""
         st = self._states[host.name]
         query = {**params, **FIXED_PARAMS.get(host.name, {})}
         if host.key_param and (key := self._keys.get(host.name)):
             query[host.key_param] = key
+        blocked = Reply(Fetch.FAILED, None, {}, b"", "redirect_blocked")
         try:
-            target = httpx.URL(url or host.base + path).copy_merge_params(query)
+            target = httpx.URL(host.base + path).copy_merge_params(query)
         except httpx.InvalidURL:
-            return Reply(Fetch.FAILED, None, {}, b"", "redirect_blocked")
-        if target.scheme != "https" or target.host not in ALLOWED:
-            return Reply(Fetch.FAILED, None, {}, b"", "redirect_blocked")
+            return blocked
+        reply = blocked
         with st.lock:
-            reply = self._attempts(host, st, target, headers)
-            if reply.fetch is Fetch.FAILED and reply.reason != "redirect":
+            for hop in range(MAX_REDIRECTS + 1):
+                if target.scheme != "https" or target.host not in ALLOWED or target.port is not None:
+                    reply = dataclasses.replace(blocked, url=str(target))
+                    break
+                reply = dataclasses.replace(self._attempts(host, st, target, headers), url=str(target))
+                if reply.reason != "redirect" or not reply.location or not follow_redirects:
+                    break
+                if hop == MAX_REDIRECTS:
+                    reply = dataclasses.replace(reply, reason="redirect_limit")
+                    break
+                target = target.join(reply.location)
+                if target.host == host.name:
+                    target = target.copy_merge_params(query)
+            if (
+                reply.fetch is Fetch.FAILED
+                and not reply.reason.startswith("redirect")
+                and reply.status not in RECORD_STATUS
+            ):
                 st.failures += 1
                 if st.failures >= CIRCUIT_FAILURES and st.down is None:
                     st.down = "circuit"
@@ -223,10 +247,16 @@ class Http:
             if retry_after > MAX_RETRY_AFTER_S:
                 st.down = f"retry_after {retry_after:.0f}s"
                 return reply
+            backoff = BACKOFF_S[attempt - 1] * self._rng.uniform(0.75, 1.25) if attempt < MAX_ATTEMPTS else 0.0
+            delay = retry_after or backoff
+            # The wait outlives this call, so the next request to the host also honours it.
+            st.next_at = max(st.next_at, self._clock() + delay)
+            st.waited += delay
+            if st.waited > MAX_RETRY_WAIT_S:
+                st.down = f"retry_wait {st.waited:.0f}s"
+                return reply
             if attempt == MAX_ATTEMPTS:
                 break
-            delay = retry_after or BACKOFF_S[attempt - 1] * self._rng.uniform(0.75, 1.25)
-            st.next_at = max(st.next_at, self._clock() + delay)
         return reply
 
     def _once(self, host: Host, st: _HostState, target: httpx.URL, headers: Mapping[str, str]) -> tuple[Reply, float]:

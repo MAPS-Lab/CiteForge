@@ -1,7 +1,7 @@
 import dataclasses
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import quote
 
@@ -14,8 +14,21 @@ from citeforge.text import clean
 
 HOST = HOSTS["doi.org"]
 RA_BATCH = 20
-MAX_HOPS = 3
 CSL_ACCEPT = {"Accept": "application/vnd.citationstyles.csl+json"}
+KINDS: Mapping[str, Kind] = {
+    "article-journal": Kind.ARTICLE,
+    "article": Kind.ARTICLE,
+    "paper-conference": Kind.INPROCEEDINGS,
+    "chapter": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "report": Kind.TECHREPORT,
+    "thesis": Kind.PHDTHESIS,
+    "posted-content": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "software": Kind.SOFTWARE,
+    "patent": Kind.PATENT,
+    "review": Kind.PEER_REVIEW,
+}
 _NO_DOI = frozenset({"doi does not exist", "invalid doi"})
 _YEAR = re.compile(r"\b(\d{4})\b")
 
@@ -137,7 +150,7 @@ def parse_csl(body: bytes) -> Record:
     return Record(
         source=Source.CSL,
         ids=frozenset({doi} if doi else ()),
-        kind=Kind.OTHER,
+        kind=KINDS.get(source_type.strip().lower(), Kind.OTHER),
         source_type=source_type,
         title=title,
         authors=_people(item.get("author")),
@@ -159,22 +172,15 @@ def parse_csl(body: bytes) -> Record:
 
 
 def csl(http: Http, work_id: str) -> Result[Record]:
-    """Fetch CSL JSON for a doi: id, following at most 3 redirects by hand through Http.get(url=...).
+    """Fetch CSL JSON for a doi: id, following the registration agency's redirects.
 
     Only a 404 from doi.org itself means the DOI does not exist; a 404 further along the chain is FAILED.
     """
-    start = url = httpx.URL(HOST.base + "/" + _path(split_id(work_id)[1]))
-    for _ in range(MAX_HOPS + 1):
-        reply = http.get(HOST, "", headers=CSL_ACCEPT, url=str(url))
-        if reply.reason != "redirect":
-            break
-        if not reply.location:
-            return Result(Fetch.FAILED, None, "parse_error")
-        url = url.join(reply.location)
-    else:
-        return Result(Fetch.FAILED, None, "redirect_limit")
+    path = "/" + _path(split_id(work_id)[1])
+    reply = http.get(HOST, path, headers=CSL_ACCEPT, follow_redirects=True)
     if reply.fetch is Fetch.NOT_FOUND:
-        return Result(Fetch.NOT_FOUND if url == start else Fetch.FAILED, None, "not_found")
+        dead = reply.url == str(httpx.URL(HOST.base + path))
+        return Result(Fetch.NOT_FOUND if dead else Fetch.FAILED, None, "not_found")
     if reply.fetch is not Fetch.OK:
         return Result(Fetch.FAILED, None, reply.reason)
     try:

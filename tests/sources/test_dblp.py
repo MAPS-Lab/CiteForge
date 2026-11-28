@@ -6,7 +6,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from citeforge.http import USER_AGENT, Http, ParseError
+from citeforge.http import MAX_REDIRECTS, USER_AGENT, Http, ParseError
 from citeforge.model import Author, Claim, Fetch, Kind, Record, Rel, Source, Status
 from citeforge.sources import dblp
 from tests.conftest import FIXTURES, FakeClock, fixture_transport, make_http
@@ -231,10 +231,10 @@ def test_redirect_off_allowlist_is_blocked():
 
 
 def test_redirect_loop_stops():
-    loop = [httpx.Response(301, headers={"location": "/pid/00/0001.xml"}) for _ in range(dblp.MAX_REDIRECTS + 1)]
+    loop = [httpx.Response(301, headers={"location": "/pid/00/0001.xml"}) for _ in range(MAX_REDIRECTS + 1)]
     http, seen, _ = serving(*loop)
-    assert dblp.person(http, "00/0001") == dblp.Result(Fetch.FAILED, None, "redirect")
-    assert len(seen) == dblp.MAX_REDIRECTS + 1
+    assert dblp.person(http, "00/0001") == dblp.Result(Fetch.FAILED, None, "redirect_limit")
+    assert len(seen) == MAX_REDIRECTS + 1
 
 
 @given(st.binary(max_size=512))
