@@ -18,21 +18,22 @@ def discover(
     http: Http,
     since_year: int,
 ) -> Listing:
-    claims: dict[Source, tuple[Claim, ...]] = {}
+    raw: dict[Source, tuple[Claim, ...]] = {}
     fetch: dict[Source, Fetch] = {}
     if orcid is not None:
         fetch[Source.ORCID] = orcid.fetch
-        claims[Source.ORCID] = _since(orcid.value.works, since_year) if orcid.value else ()
+        raw[Source.ORCID] = orcid.value.works if orcid.value else ()
     if dblp is not None:
         fetch[Source.DBLP] = dblp.fetch
-        claims[Source.DBLP] = _since(dblp.value.claims, since_year) if dblp.value else ()
+        raw[Source.DBLP] = dblp.value.claims if dblp.value else ()
     if identity.openalex:
         listed = openalex.list_works(http, sorted(identity.openalex), since_year)
         fetch[Source.OPENALEX] = listed.fetch
-        claims[Source.OPENALEX] = _since(listed.value, since_year) if listed.value else ()
-    most = max((len(c) for c in claims.values()), default=0)
-    for source, found in claims.items():
-        if not found and fetch[source] is not Fetch.FAILED and most >= SUSPECT_OTHER_MIN:
+        raw[Source.OPENALEX] = listed.value or ()
+    most = max((len(c) for c in raw.values()), default=0)
+    for source, found in raw.items():
+        # A parsed ORCID record with no works is the owner's own empty list, not a silent failure.
+        if not found and source is not Source.ORCID and fetch[source] is not Fetch.FAILED and most >= SUSPECT_OTHER_MIN:
             fetch[source] = Fetch.FAILED
-    ordered = tuple(c for source in sorted(claims) for c in claims[source])
+    ordered = tuple(c for source in sorted(raw) for c in _since(raw[source], since_year))
     return Listing(identity.member.dirname, ordered, fetch)

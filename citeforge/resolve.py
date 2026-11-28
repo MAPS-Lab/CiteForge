@@ -67,7 +67,7 @@ def resolve(
             author_ids.add(pinned)
             continue
         current, author_orcid = res.value
-        if author_orcid and author_orcid not in m.orcids:
+        if author_orcid and m.orcids and author_orcid not in m.orcids:
             events.append(Event("openalex_orcid_conflict", m.dirname, pinned, author_orcid))
             continue
         if current != pinned:

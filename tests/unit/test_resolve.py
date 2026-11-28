@@ -49,6 +49,13 @@ def test_resolve_merges_identity_and_checks_pinned_ids(monkeypatch: pytest.Monke
     assert person is not None and person.fetch is Fetch.OK
 
 
+def test_pinned_id_kept_when_member_lists_no_orcid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(res.dblp, "person", lambda http, p: Result(Fetch.OK, DblpPerson(("Gabriel Spadon",), (), ())))
+    monkeypatch.setattr(res.openalex, "author", lambda http, a: Result(Fetch.OK, ("A3000003", ME)))
+    ident, _, _, events = res.resolve(member(openalex=("A3000003",)), None, frozenset())  # type: ignore[arg-type]
+    assert ident.openalex == {"A3000003"} and not events
+
+
 def test_resolve_without_orcid_or_dblp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(res.dblp, "person", lambda http, p: Result(Fetch.FAILED, None, "challenge"))
     ident, orcid_result, person, _ = res.resolve(member(), None, frozenset())  # type: ignore[arg-type]
@@ -77,6 +84,10 @@ def test_discover_filters_years_and_suspects_empty_listing(monkeypatch: pytest.M
     listing = disc.discover(identity(), orcid, dblp, None, 2018)  # type: ignore[arg-type]
     assert len(listing.claims) == 8
     assert listing.fetch == {Source.ORCID: Fetch.OK, Source.DBLP: Fetch.OK, Source.OPENALEX: Fetch.FAILED}
+    empty_orcid = Result(Fetch.OK, orcid_rec())
+    old_dblp = Result(Fetch.OK, DblpPerson((), (), claims(6, Source.DBLP, 2010)))
+    listing = disc.discover(identity(openalex=frozenset()), empty_orcid, old_dblp, None, 2018)  # type: ignore[arg-type]
+    assert listing.fetch == {Source.ORCID: Fetch.OK, Source.DBLP: Fetch.OK} and listing.claims == ()
     listing = disc.discover(identity(openalex=frozenset()), None, Result(Fetch.FAILED, None, "challenge"), None, 2018)  # type: ignore[arg-type]
     assert listing.fetch == {Source.DBLP: Fetch.FAILED} and listing.claims == ()
 
