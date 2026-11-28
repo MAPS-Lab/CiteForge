@@ -1,7 +1,8 @@
 import dataclasses
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
+from itertools import batched
 from typing import Any
 from urllib.parse import quote
 
@@ -10,25 +11,12 @@ import httpx
 from citeforge.http import HOSTS, Http, ParseError, Result
 from citeforge.ids import norm_doi, norm_orcid, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Source
+from citeforge.tables import CSL_KINDS
 from citeforge.text import clean
 
 HOST = HOSTS["doi.org"]
 RA_BATCH = 20
 CSL_ACCEPT = {"Accept": "application/vnd.citationstyles.csl+json"}
-KINDS: Mapping[str, Kind] = {
-    "article-journal": Kind.ARTICLE,
-    "article": Kind.ARTICLE,
-    "paper-conference": Kind.INPROCEEDINGS,
-    "chapter": Kind.INCOLLECTION,
-    "book": Kind.BOOK,
-    "report": Kind.TECHREPORT,
-    "thesis": Kind.PHDTHESIS,
-    "posted-content": Kind.PREPRINT,
-    "dataset": Kind.DATASET,
-    "software": Kind.SOFTWARE,
-    "patent": Kind.PATENT,
-    "review": Kind.PEER_REVIEW,
-}
 _NO_DOI = frozenset({"doi does not exist", "invalid doi"})
 _YEAR = re.compile(r"\b(\d{4})\b")
 
@@ -60,15 +48,11 @@ def parse_agencies(body: bytes) -> dict[str, str | None]:
 
 
 def agency(http: Http, ids: Sequence[str]) -> Result[dict[str, str | None]]:
-    """Map doi: ids to their registration agency name, 20 per call; None means the DOI does not exist.
-
-    An id whose chunk failed, or that the reply leaves out, is absent from the mapping.
-    """
+    """Map doi: ids to their registration agency, None for a DOI that does not exist, absent for a failed chunk."""
     wanted = sorted({i for i in ids if split_id(i)[0] == "doi"})
     found: dict[str, str | None] = {}
     reason = "ok"
-    for start in range(0, len(wanted), RA_BATCH):
-        chunk = wanted[start : start + RA_BATCH]
+    for chunk in batched(wanted, RA_BATCH, strict=False):
         reply = http.get(HOST, "/ra/" + ",".join(_path(split_id(i)[1]) for i in chunk))
         if reply.fetch is not Fetch.OK:
             reason = reply.reason
@@ -149,7 +133,7 @@ def parse_csl(body: bytes) -> Record:
     return Record(
         source=Source.CSL,
         ids=frozenset({doi} if doi else ()),
-        kind=KINDS.get(source_type.strip().lower(), Kind.OTHER),
+        kind=CSL_KINDS.get(source_type.strip().lower(), Kind.OTHER),
         source_type=source_type,
         title=title,
         authors=_people(item.get("author")),
@@ -170,10 +154,7 @@ def parse_csl(body: bytes) -> Record:
 
 
 def csl(http: Http, work_id: str) -> Result[Record]:
-    """Fetch CSL JSON for a doi: id, following the registration agency's redirects.
-
-    Only a 404 from doi.org itself means the DOI does not exist; a 404 further along the chain is FAILED.
-    """
+    """Fetch CSL JSON through the agency's redirects; only a 404 from doi.org itself means the DOI does not exist."""
     path = "/" + _path(split_id(work_id)[1])
     reply = http.get(HOST, path, headers=CSL_ACCEPT, follow_redirects=True)
     if reply.fetch is Fetch.NOT_FOUND:

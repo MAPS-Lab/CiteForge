@@ -1,3 +1,8 @@
+import re
+from collections.abc import Mapping
+
+from citeforge.model import Kind, Rel
+
 # Each pattern is matched at the start of a lower-cased DOI.
 PREPRINT_SERVERS: tuple[tuple[str, str], ...] = (
     (r"10\.48550/arxiv", "arXiv"),
@@ -142,3 +147,159 @@ STOPWORDS: frozenset[str] = frozenset(
 CSL_HOSTS: frozenset[str] = frozenset({"data.medra.org", "japanlinkcenter.org", "ra.publications.europa.eu"})
 
 DATA_DOI_PREFIXES: tuple[str, ...] = ("10.6084/m9.figshare", "10.5281/zenodo")
+
+ENTRY_TYPES: Mapping[Kind, str] = {
+    Kind.ARTICLE: "article",
+    Kind.INPROCEEDINGS: "inproceedings",
+    Kind.INCOLLECTION: "incollection",
+    Kind.BOOK: "book",
+    Kind.PHDTHESIS: "phdthesis",
+    Kind.MASTERSTHESIS: "mastersthesis",
+    Kind.TECHREPORT: "techreport",
+}
+
+BIBTEX_ESCAPES = {
+    "\\": r"\textbackslash{}",
+    "~": r"\textasciitilde{}",
+    "^": r"\textasciicircum{}",
+    "&": r"\&",
+    "%": r"\%",
+    "$": r"\$",
+    "#": r"\#",
+    "_": r"\_",
+    "{": r"\{",
+    "}": r"\}",
+}
+
+DBLP_KINDS = {
+    "article": Kind.ARTICLE,
+    "inproceedings": Kind.INPROCEEDINGS,
+    "incollection": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "proceedings": Kind.PROCEEDINGS,
+    "phdthesis": Kind.PHDTHESIS,
+    "mastersthesis": Kind.MASTERSTHESIS,
+    "data": Kind.DATASET,
+}
+
+OPENALEX_KINDS: Mapping[str, Kind] = {
+    "article": Kind.ARTICLE,
+    "review": Kind.ARTICLE,
+    "letter": Kind.ARTICLE,
+    "software-paper": Kind.ARTICLE,
+    "conference-paper": Kind.INPROCEEDINGS,
+    "book-chapter": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "dissertation": Kind.PHDTHESIS,
+    "report": Kind.TECHREPORT,
+    "preprint": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "editorial": Kind.EDITORIAL,
+    "paratext": Kind.FRONT_MATTER,
+    "erratum": Kind.NOTICE,
+    "retraction": Kind.NOTICE,
+    "peer-review": Kind.PEER_REVIEW,
+    "supplementary-materials": Kind.COMPONENT,
+}
+
+CSL_KINDS: Mapping[str, Kind] = {
+    "article-journal": Kind.ARTICLE,
+    "article": Kind.ARTICLE,
+    "paper-conference": Kind.INPROCEEDINGS,
+    "chapter": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "report": Kind.TECHREPORT,
+    "thesis": Kind.PHDTHESIS,
+    "posted-content": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "software": Kind.SOFTWARE,
+    "patent": Kind.PATENT,
+    "review": Kind.PEER_REVIEW,
+}
+
+DATACITE_KINDS: Mapping[str, Kind] = {
+    "journalarticle": Kind.ARTICLE,
+    "conferencepaper": Kind.INPROCEEDINGS,
+    "bookchapter": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "conferenceproceeding": Kind.PROCEEDINGS,
+    "report": Kind.TECHREPORT,
+    "dissertation": Kind.PHDTHESIS,
+    "preprint": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "software": Kind.SOFTWARE,
+    "component": Kind.COMPONENT,
+    "peerreview": Kind.PEER_REVIEW,
+}
+
+DATACITE_RELATIONS: Mapping[str, Rel] = {
+    "isversionof": Rel.VERSION_OF,
+    "ispreviousversionof": Rel.VERSION_OF,
+    "isnewversionof": Rel.VERSION_OF,
+    "isidenticalto": Rel.IDENTICAL,
+    "isvariantformof": Rel.VARIANT_OF,
+    "isoriginalformof": Rel.IDENTICAL,
+    "istranslationof": Rel.TRANSLATION_OF,
+    "hastranslation": Rel.HAS_TRANSLATION,
+}
+
+# Schema 4.3 and older carry the real type only in the free-text resourceType of a Text record.
+DATACITE_TEXT_TYPES = (
+    (re.compile(r"thes[ie]s|dissertation", re.I), "Dissertation"),
+    (re.compile(r"preprint", re.I), "Preprint"),
+    (re.compile(r"conference", re.I), "ConferencePaper"),
+    (re.compile(r"chapter", re.I), "BookChapter"),
+    (re.compile(r"report|working paper", re.I), "Report"),
+    (re.compile(r"article|journal", re.I), "JournalArticle"),
+)
+
+CROSSREF_KINDS: Mapping[str, Kind] = {
+    "journal-article": Kind.ARTICLE,
+    "proceedings-article": Kind.INPROCEEDINGS,
+    "book-chapter": Kind.INCOLLECTION,
+    "book-part": Kind.INCOLLECTION,
+    "book-section": Kind.INCOLLECTION,
+    "book": Kind.BOOK,
+    "monograph": Kind.BOOK,
+    "reference-book": Kind.BOOK,
+    "edited-book": Kind.PROCEEDINGS,
+    "proceedings": Kind.PROCEEDINGS,
+    "journal-issue": Kind.PROCEEDINGS,
+    "journal": Kind.PROCEEDINGS,
+    "report": Kind.TECHREPORT,
+    "dissertation": Kind.PHDTHESIS,
+    "posted-content": Kind.PREPRINT,
+    "dataset": Kind.DATASET,
+    "component": Kind.COMPONENT,
+    "peer-review": Kind.PEER_REVIEW,
+    "editorial": Kind.EDITORIAL,
+}
+
+CROSSREF_RELATIONS: Mapping[str, Rel] = {
+    "has-preprint": Rel.HAS_PREPRINT,
+    "is-preprint-of": Rel.PREPRINT_OF,
+    "is-version-of": Rel.VERSION_OF,
+    "has-version": Rel.VERSION_OF,
+    "is-identical-to": Rel.IDENTICAL,
+    "is-same-as": Rel.IDENTICAL,
+    "is-translation-of": Rel.TRANSLATION_OF,
+    "has-translation": Rel.HAS_TRANSLATION,
+}
+
+# Crossmark update types as deposited, including the misspellings the registry holds.
+CROSSREF_UPDATES: Mapping[str, Rel] = {
+    "retraction": Rel.RETRACTS,
+    "retration": Rel.RETRACTS,
+    "retracion": Rel.RETRACTS,
+    "withdrawal": Rel.WITHDRAWS,
+    "removal": Rel.WITHDRAWS,
+    "correction": Rel.CORRECTS,
+    "erratum": Rel.CORRECTS,
+    "err": Rel.CORRECTS,
+    "corrigendum": Rel.CORRECTS,
+    "addendum": Rel.CORRECTS,
+    "clarification": Rel.CORRECTS,
+    "expression_of_concern": Rel.CORRECTS,
+    "partial_retraction": Rel.CORRECTS,
+    "new_version": Rel.VERSION_OF,
+}

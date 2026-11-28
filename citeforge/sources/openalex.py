@@ -1,11 +1,13 @@
 import json
 import re
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from itertools import batched
 from typing import Any
 
-from citeforge.http import HOSTS, Batch, Http, ParseError, Reply, Result
+from citeforge.http import HOSTS, Batch, Http, ParseError, Reply, Result, parsed
 from citeforge.ids import is_preprint_doi, norm_openalex, norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Claim, Fetch, Kind, Record, Source, Status
+from citeforge.tables import OPENALEX_KINDS
 from citeforge.text import affiliation, clean, is_affiliation, is_group, split_literal
 
 HOST = HOSTS["api.openalex.org"]
@@ -16,35 +18,11 @@ WORK_FIELDS = (
     "id,doi,ids,title,publication_year,type,authorships,is_authors_truncated,primary_location,locations,biblio,"
     "language,is_retracted"
 )
-TYPE_KINDS: Mapping[str, Kind] = {
-    "article": Kind.ARTICLE,
-    "review": Kind.ARTICLE,
-    "letter": Kind.ARTICLE,
-    "software-paper": Kind.ARTICLE,
-    "conference-paper": Kind.INPROCEEDINGS,
-    "book-chapter": Kind.INCOLLECTION,
-    "book": Kind.BOOK,
-    "dissertation": Kind.PHDTHESIS,
-    "report": Kind.TECHREPORT,
-    "preprint": Kind.PREPRINT,
-    "dataset": Kind.DATASET,
-    "editorial": Kind.EDITORIAL,
-    "paratext": Kind.FRONT_MATTER,
-    "erratum": Kind.NOTICE,
-    "retraction": Kind.NOTICE,
-    "peer-review": Kind.PEER_REVIEW,
-    "supplementary-materials": Kind.COMPONENT,
-}
 _PMID = re.compile(r"(\d+)/?$")
 
 
 def _fail[T](reply: Reply) -> Result[T]:
     return Result(reply.fetch, None, reply.reason)
-
-
-def _chunks(items: Sequence[str], size: int) -> Iterator[list[str]]:
-    for start in range(0, len(items), size):
-        yield list(items[start : start + size])
 
 
 def _object(value: object, what: str) -> Mapping[str, Any]:
@@ -143,7 +121,7 @@ def _kind(source_type: str, ids: frozenset[str], venue_type: str | None) -> Kind
     dois = [split_id(i)[1] for i in ids if split_id(i)[0] == "doi"]
     if "arxiv" in kinds or any(is_preprint_doi(d) for d in dois):
         return Kind.PREPRINT
-    kind = TYPE_KINDS.get(source_type, Kind.OTHER)
+    kind = OPENALEX_KINDS.get(source_type, Kind.OTHER)
     if kind is Kind.ARTICLE and venue_type == "conference":
         return Kind.INPROCEEDINGS
     return kind
@@ -214,7 +192,7 @@ def authors_by_orcid(http: Http, orcids: Sequence[str]) -> Result[dict[str, tupl
     """Map each ORCID to the OpenAlex author ids that carry it, 50 ORCIDs per call."""
     wanted = sorted(set(orcids))
     found: dict[str, set[str]] = {}
-    for chunk in _chunks(wanted, ORCIDS_PER_CALL):
+    for chunk in batched(wanted, ORCIDS_PER_CALL, strict=False):
         res = _pages(http, "/authors", {"filter": "orcid:" + _or(chunk), "select": "id,orcid"})
         if res.value is None:
             return Result(res.fetch, None, res.reason)
@@ -230,13 +208,7 @@ def authors_by_orcid(http: Http, orcids: Sequence[str]) -> Result[dict[str, tupl
 
 def author(http: Http, aid: str) -> Result[tuple[str, str | None]]:
     """Return (current author id after any merge, ORCID or None) for one author id."""
-    reply = http.get(HOST, f"/authors/{aid}", {"select": "id,orcid"})
-    if reply.fetch is not Fetch.OK:
-        return _fail(reply)
-    try:
-        return Result(Fetch.OK, parse_author(reply.body))
-    except ParseError:
-        return Result(Fetch.FAILED, None, "parse_error")
+    return parsed(http.get(HOST, f"/authors/{aid}", {"select": "id,orcid"}), parse_author)
 
 
 def _claim(item: Mapping[str, Any]) -> Claim | None:
@@ -278,7 +250,7 @@ def _full_byline(http: Http, item: Mapping[str, Any], author_ids: frozenset[str]
 def list_works(http: Http, author_ids: Sequence[str], since_year: int) -> Result[tuple[Claim, ...]]:
     """Cursor-page every work of the authors from since_year; each Claim carries its Record."""
     claims: dict[str, Claim] = {}
-    for chunk in _chunks(sorted(set(author_ids)), IDS_PER_CALL):
+    for chunk in batched(sorted(set(author_ids)), IDS_PER_CALL, strict=False):
         flt = f"authorships.author.id:{_or(chunk)},from_publication_date:{since_year}-01-01"
         res = _pages(http, "/works", {"filter": flt, "select": WORK_FIELDS})
         if res.value is None:
@@ -298,7 +270,7 @@ def works_by_doi(http: Http, ids: Sequence[str]) -> Batch:
     wanted = sorted({i for i in ids if split_id(i)[0] == "doi"})
     found: dict[str, Record] = {}
     failed: set[str] = set()
-    for chunk in _chunks(wanted, IDS_PER_CALL):
+    for chunk in batched(wanted, IDS_PER_CALL, strict=False):
         res = _pages(http, "/works", {"filter": "doi:" + _or(split_id(i)[1] for i in chunk), "select": WORK_FIELDS})
         if res.value is None:
             failed |= set(chunk)

@@ -1,49 +1,18 @@
 import json
 import re
 from collections.abc import Mapping, Sequence
+from itertools import batched
 from typing import Any
 from urllib.parse import quote
 
 from citeforge.http import HOSTS, Batch, Http, ParseError
 from citeforge.ids import norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Rel, Source
+from citeforge.tables import DATACITE_KINDS, DATACITE_RELATIONS, DATACITE_TEXT_TYPES
 from citeforge.text import affiliation, is_affiliation, is_group, split_literal
 
 HOST = HOSTS["api.datacite.org"]
 CHUNK = 100
-KINDS: Mapping[str, Kind] = {
-    "journalarticle": Kind.ARTICLE,
-    "conferencepaper": Kind.INPROCEEDINGS,
-    "bookchapter": Kind.INCOLLECTION,
-    "book": Kind.BOOK,
-    "conferenceproceeding": Kind.PROCEEDINGS,
-    "report": Kind.TECHREPORT,
-    "dissertation": Kind.PHDTHESIS,
-    "preprint": Kind.PREPRINT,
-    "dataset": Kind.DATASET,
-    "software": Kind.SOFTWARE,
-    "component": Kind.COMPONENT,
-    "peerreview": Kind.PEER_REVIEW,
-}
-RELATIONS: Mapping[str, Rel] = {
-    "isversionof": Rel.VERSION_OF,
-    "ispreviousversionof": Rel.VERSION_OF,
-    "isnewversionof": Rel.VERSION_OF,
-    "isidenticalto": Rel.IDENTICAL,
-    "isvariantformof": Rel.VARIANT_OF,
-    "isoriginalformof": Rel.IDENTICAL,
-    "istranslationof": Rel.TRANSLATION_OF,
-    "hastranslation": Rel.HAS_TRANSLATION,
-}
-# Schema 4.3 and older carry the real type only in the free-text resourceType of a Text record.
-TEXT_TYPES = (
-    (re.compile(r"thes[ie]s|dissertation", re.I), "Dissertation"),
-    (re.compile(r"preprint", re.I), "Preprint"),
-    (re.compile(r"conference", re.I), "ConferencePaper"),
-    (re.compile(r"chapter", re.I), "BookChapter"),
-    (re.compile(r"report|working paper", re.I), "Report"),
-    (re.compile(r"article|journal", re.I), "JournalArticle"),
-)
 _PLACEHOLDER = re.compile(r"\(:[a-z]+\)", re.I)
 _YEAR = re.compile(r"(\d{4})(?:\D.*)?")
 _PARENTHESISED = re.compile(r".*?\(([^()]+)\)\s*")
@@ -57,7 +26,7 @@ def by_doi(http: Http, ids: Sequence[str]) -> Batch:
     missing = {i for i in ids if split_id(i)[0] != "doi"}
     failed: set[str] = set()
     listed = [i for i in wanted if "," not in i]
-    chunks = [listed[n : n + CHUNK] for n in range(0, len(listed), CHUNK)]
+    chunks = [list(c) for c in batched(listed, CHUNK, strict=False)]
     chunks += [[i] for i in wanted if "," in i]
     for chunk in chunks:
         values = [split_id(i)[1] for i in chunk]
@@ -120,7 +89,7 @@ def parse_work(work_id: str, attrs: Mapping[str, Any]) -> Record:
     source_type = _text(types.get("resourceTypeGeneral")) or "Text"
     resource_type = _text(types.get("resourceType"))
     if source_type == "Text" and resource_type:
-        source_type = next((t for pattern, t in TEXT_TYPES if pattern.search(resource_type)), source_type)
+        source_type = next((t for pattern, t in DATACITE_TEXT_TYPES if pattern.search(resource_type)), source_type)
     title = _title(attrs.get("titles"))
     if not title:
         raise ParseError(f"{work_id}: no title")
@@ -132,7 +101,7 @@ def parse_work(work_id: str, attrs: Mapping[str, Any]) -> Record:
     return Record(
         source=Source.DATACITE,
         ids=frozenset({work_id}),
-        kind=KINDS.get(source_type.lower().replace(" ", ""), Kind.OTHER),
+        kind=DATACITE_KINDS.get(source_type.lower().replace(" ", ""), Kind.OTHER),
         source_type=source_type,
         title=title,
         authors=_people(attrs.get("creators")),
@@ -186,7 +155,7 @@ def _person(c: Mapping[str, Any]) -> Author | None:
 def _relations(work_id: str, related: Any) -> set[tuple[Rel, str]]:
     out = set()
     for r in _dicts(related):
-        rel = RELATIONS.get(str(r.get("relationType") or "").lower())
+        rel = DATACITE_RELATIONS.get(str(r.get("relationType") or "").lower())
         raw = str(r.get("relatedIdentifier") or "")
         kind = {"DOI": "doi", "ARXIV": "arxiv", "PMID": "pmid"}.get(str(r.get("relatedIdentifierType") or "").upper())
         target = to_id(kind, raw) if kind else to_id("doi", raw) or to_id("arxiv", raw)

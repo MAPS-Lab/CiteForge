@@ -8,57 +8,15 @@ from citeforge.ids import norm_ror, split_id, to_id
 from citeforge.model import Author, Decision, Kind, Member, Record, Source, Verdict
 from citeforge.text import clean, split_literal
 
-OVERRIDE_FIELDS = frozenset(
-    {
-        "title",
-        "year",
-        "journal",
-        "booktitle",
-        "howpublished",
-        "publisher",
-        "volume",
-        "number",
-        "pages",
-        "school",
-        "institution",
-        "language",
-        "url",
-    }
-)
-RECORD_KINDS = frozenset(
-    {
-        Kind.ARTICLE,
-        Kind.INPROCEEDINGS,
-        Kind.INCOLLECTION,
-        Kind.BOOK,
-        Kind.PHDTHESIS,
-        Kind.MASTERSTHESIS,
-        Kind.TECHREPORT,
-        Kind.PREPRINT,
-    }
-)
-_SECTIONS = {
-    "lab": {"ror"},
-    "accept": {"member", "id"},
-    "reject": {"member", "id", "reason"},
-    "link": {"preprint", "published"},
-    "override": {"id", "field", "value"},
-    "record": {
-        "id",
-        "kind",
-        "title",
-        "authors",
-        "year",
-        "members",
-        "school",
-        "institution",
-        "url",
-        "journal",
-        "booktitle",
-        "publisher",
-        "howpublished",
-    },
-}
+OVERRIDE_FIELDS = frozenset({
+    "title", "year", "journal", "booktitle", "howpublished", "publisher", "volume", "number", "pages", "school",
+    "institution", "language", "url",
+})  # fmt: skip
+RECORD_KINDS = frozenset({
+    Kind.ARTICLE, Kind.INPROCEEDINGS, Kind.INCOLLECTION, Kind.BOOK, Kind.PHDTHESIS, Kind.MASTERSTHESIS,
+    Kind.TECHREPORT, Kind.PREPRINT,
+})  # fmt: skip
+_RECORD_OPTIONAL = {"school", "institution", "url", "journal", "booktitle", "publisher", "howpublished"}
 _REQUIRED = {
     "accept": {"member", "id"},
     "reject": {"member", "id"},
@@ -66,6 +24,8 @@ _REQUIRED = {
     "override": {"id", "field", "value"},
     "record": {"id", "kind", "title", "authors", "year", "members"},
 }
+_SECTIONS = {**_REQUIRED, "lab": {"ror"}, "reject": {"member", "id", "reason"}}
+_SECTIONS["record"] = _REQUIRED["record"] | _RECORD_OPTIONAL
 
 
 class CuratedError(ValueError):

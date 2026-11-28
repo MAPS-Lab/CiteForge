@@ -4,6 +4,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from citeforge.ids import first_id, preprint_server_of, split_id
 from citeforge.model import Author, Kind, Names, Record, Source, Work
 from citeforge.tables import (
+    BIBTEX_ESCAPES,
+    ENTRY_TYPES,
     GENERIC_SERIES_NAMES,
     PREPRINT_ONLY_PUBLISHERS,
     PUBLISHER_CORRECTIONS,
@@ -15,30 +17,9 @@ FIELD_ORDER = (
     "title", "author", "year", "journal", "booktitle", "howpublished", "publisher", "volume", "number", "pages",
     "doi", "url", "eprint", "archiveprefix", "primaryclass", "editor", "school", "institution", "language",
 )  # fmt: skip
-ENTRY_TYPES: Mapping[Kind, str] = {
-    Kind.ARTICLE: "article",
-    Kind.INPROCEEDINGS: "inproceedings",
-    Kind.INCOLLECTION: "incollection",
-    Kind.BOOK: "book",
-    Kind.PHDTHESIS: "phdthesis",
-    Kind.MASTERSTHESIS: "mastersthesis",
-    Kind.TECHREPORT: "techreport",
-}
 STEM_MAX = 60
 FAMILY_MAX = 40
 PAGES_MAX_DIGITS = 8
-_ESCAPES = {
-    "\\": r"\textbackslash{}",
-    "~": r"\textasciitilde{}",
-    "^": r"\textasciicircum{}",
-    "&": r"\&",
-    "%": r"\%",
-    "$": r"\$",
-    "#": r"\#",
-    "_": r"\_",
-    "{": r"\{",
-    "}": r"\}",
-}
 _ESCAPE_RE = re.compile(r"[\\~^&%$#_{}]")
 _PAGE_DASH = re.compile(r"\s*[-‐-―−]+\s*")  # noqa: RUF001
 _PAGE_PART_SPLIT = re.compile(r"[-–—,\s]+")  # noqa: RUF001
@@ -52,7 +33,7 @@ def escape(value: str, field: str) -> str:
         return value
     if field == "url":
         return value.replace("{", "%7B").replace("}", "%7D")
-    return _ESCAPE_RE.sub(lambda m: _ESCAPES[m.group(0)], value)
+    return _ESCAPE_RE.sub(lambda m: BIBTEX_ESCAPES[m.group(0)], value)
 
 
 def _needs_brace(segment: str) -> bool:

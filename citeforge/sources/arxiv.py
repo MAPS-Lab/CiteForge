@@ -2,6 +2,7 @@ import pyexpat
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
+from itertools import batched
 
 from citeforge.http import HOSTS, Batch, Http, ParseError
 from citeforge.ids import norm_arxiv, split_id, to_id
@@ -130,7 +131,7 @@ def by_id(http: Http, ids: Sequence[str]) -> Batch:
     found: dict[str, Record] = {}
     failed: set[str] = set()
     forms = list(wanted)
-    chunks = [forms[start : start + CHUNK] for start in range(0, len(forms), CHUNK)]
+    chunks = [list(c) for c in batched(forms, CHUNK, strict=False)]
     while chunks:
         chunk = chunks.pop(0)
         asked = [i for f in chunk for i in wanted[f]]

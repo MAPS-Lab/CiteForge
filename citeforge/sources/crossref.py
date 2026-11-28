@@ -8,61 +8,13 @@ from urllib.parse import quote
 from citeforge.http import HOSTS, Batch, Http, ParseError, Result
 from citeforge.ids import norm_orcid, norm_ror, split_id, to_id
 from citeforge.model import Author, Fetch, Kind, Record, Rel, Source, Status
-from citeforge.tables import GENERIC_SERIES_NAMES
+from citeforge.tables import CROSSREF_KINDS, CROSSREF_RELATIONS, CROSSREF_UPDATES, GENERIC_SERIES_NAMES
 from citeforge.text import affiliation, clean, fold
 
 HOST = HOSTS["api.crossref.org"]
 CHUNK = 50
 _CONFERENCE = re.compile(r"\b(proceedings|conference|workshop|symposium)\b", re.IGNORECASE)
 SEARCH_ROWS = 5
-KINDS: Mapping[str, Kind] = {
-    "journal-article": Kind.ARTICLE,
-    "proceedings-article": Kind.INPROCEEDINGS,
-    "book-chapter": Kind.INCOLLECTION,
-    "book-part": Kind.INCOLLECTION,
-    "book-section": Kind.INCOLLECTION,
-    "book": Kind.BOOK,
-    "monograph": Kind.BOOK,
-    "reference-book": Kind.BOOK,
-    "edited-book": Kind.PROCEEDINGS,
-    "proceedings": Kind.PROCEEDINGS,
-    "journal-issue": Kind.PROCEEDINGS,
-    "journal": Kind.PROCEEDINGS,
-    "report": Kind.TECHREPORT,
-    "dissertation": Kind.PHDTHESIS,
-    "posted-content": Kind.PREPRINT,
-    "dataset": Kind.DATASET,
-    "component": Kind.COMPONENT,
-    "peer-review": Kind.PEER_REVIEW,
-    "editorial": Kind.EDITORIAL,
-}
-_RELATIONS: Mapping[str, Rel] = {
-    "has-preprint": Rel.HAS_PREPRINT,
-    "is-preprint-of": Rel.PREPRINT_OF,
-    "is-version-of": Rel.VERSION_OF,
-    "has-version": Rel.VERSION_OF,
-    "is-identical-to": Rel.IDENTICAL,
-    "is-same-as": Rel.IDENTICAL,
-    "is-translation-of": Rel.TRANSLATION_OF,
-    "has-translation": Rel.HAS_TRANSLATION,
-}
-# Crossmark update types as deposited, including the misspellings the registry holds.
-_UPDATES: Mapping[str, Rel] = {
-    "retraction": Rel.RETRACTS,
-    "retration": Rel.RETRACTS,
-    "retracion": Rel.RETRACTS,
-    "withdrawal": Rel.WITHDRAWS,
-    "removal": Rel.WITHDRAWS,
-    "correction": Rel.CORRECTS,
-    "erratum": Rel.CORRECTS,
-    "err": Rel.CORRECTS,
-    "corrigendum": Rel.CORRECTS,
-    "addendum": Rel.CORRECTS,
-    "clarification": Rel.CORRECTS,
-    "expression_of_concern": Rel.CORRECTS,
-    "partial_retraction": Rel.CORRECTS,
-    "new_version": Rel.VERSION_OF,
-}
 _STATUS = {Rel.RETRACTS: Status.RETRACTED, Rel.WITHDRAWS: Status.WITHDRAWN}
 # issued is Crossref's earliest publication date; approved and posted stand in when a deposit leaves it empty.
 _YEAR_FIELDS = (("published-print",), ("journal-issue", "published-print"), ("issued",), ("approved",), ("posted",))
@@ -189,7 +141,7 @@ def _kind(
         event or any(c.strip().lower() in GENERIC_SERIES_NAMES or _CONFERENCE.search(c) for c in container)
     ):
         return Kind.INPROCEEDINGS
-    return KINDS.get(source_type, Kind.OTHER)
+    return CROSSREF_KINDS.get(source_type, Kind.OTHER)
 
 
 def _items(body: bytes) -> tuple[list[Mapping[str, Any]], bool]:
@@ -299,7 +251,7 @@ def _relations(value: object, own: str) -> set[tuple[Rel, str]]:
     if not isinstance(value, Mapping):
         return out
     for name, targets in value.items():
-        rel = _RELATIONS.get(str(name).lower())
+        rel = CROSSREF_RELATIONS.get(str(name).lower())
         if rel is None or not isinstance(targets, list):
             continue
         for t in targets:
@@ -324,7 +276,7 @@ def _target(t: Mapping[str, Any]) -> str | None:
 def _update_kind(u: object) -> tuple[Rel, str] | None:
     if not isinstance(u, Mapping):
         return None
-    rel = _UPDATES.get(_str(u.get("type")).strip().lower().replace("-", "_"))
+    rel = CROSSREF_UPDATES.get(_str(u.get("type")).strip().lower().replace("-", "_"))
     target = to_id("doi", _str(u.get("DOI")))
     return (rel, target) if rel and target else None
 

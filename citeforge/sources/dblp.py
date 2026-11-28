@@ -4,9 +4,10 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from citeforge.http import HOSTS, Http, ParseError, Result
+from citeforge.http import HOSTS, Http, ParseError, Result, parsed
 from citeforge.ids import norm_orcid, to_id
-from citeforge.model import Author, Claim, Fetch, Kind, Record, Rel, Source, Status
+from citeforge.model import Author, Claim, Kind, Record, Rel, Source, Status
+from citeforge.tables import DBLP_KINDS
 from citeforge.text import split_literal
 
 # Expat 2.6 bounds entity amplification and token size, which makes the stdlib parser safe on untrusted XML.
@@ -16,16 +17,6 @@ if pyexpat.version_info < (2, 6, 0):
 HOST = HOSTS["dblp.org"]
 MAX_BODY_BYTES = 50 * 1024 * 1024
 
-_KINDS = {
-    "article": Kind.ARTICLE,
-    "inproceedings": Kind.INPROCEEDINGS,
-    "incollection": Kind.INCOLLECTION,
-    "book": Kind.BOOK,
-    "proceedings": Kind.PROCEEDINGS,
-    "phdthesis": Kind.PHDTHESIS,
-    "mastersthesis": Kind.MASTERSTHESIS,
-    "data": Kind.DATASET,
-}
 _HOMONYM = re.compile(r"\s+\d{4}$")
 _NON_LINK_HOSTS = frozenset({"doi.org", "dx.doi.org", "doi.ieeecomputersociety.org", "arxiv.org", "www.wikidata.org"})
 
@@ -38,13 +29,7 @@ class DblpPerson:
 
 
 def person(http: Http, pid: str) -> Result[DblpPerson]:
-    reply = http.get(HOST, f"/pid/{pid}.xml", follow_redirects=True)
-    if reply.fetch is not Fetch.OK:
-        return Result(reply.fetch, None, reply.reason)
-    try:
-        return Result(Fetch.OK, parse_person(reply.body))
-    except ParseError:
-        return Result(Fetch.FAILED, None, "parse_error")
+    return parsed(http.get(HOST, f"/pid/{pid}.xml", follow_redirects=True), parse_person)
 
 
 def parse_person(body: bytes) -> DblpPerson:
@@ -105,7 +90,7 @@ def _link_ids(link: str) -> list[str | None]:
 
 
 def _claim(el: ET.Element) -> Claim | None:
-    kind = _KINDS.get(el.tag)
+    kind = DBLP_KINDS.get(el.tag)
     title = _text(el.find("title")).removesuffix(".").strip()
     if kind is None or not title:
         return None
