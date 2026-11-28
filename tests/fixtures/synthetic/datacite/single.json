@@ -1,0 +1,3 @@
+{"data": {"id": "10.5555/a,b", "attributes": {"doi": "10.5555/a,b", "types": {"resourceTypeGeneral": "Preprint"},
+ "titles": [{"title": "A DOI with a comma"}], "creators": [{"nameType": "Organizational", "name": "ICES Working Group"}],
+ "publicationYear": 2023}}}

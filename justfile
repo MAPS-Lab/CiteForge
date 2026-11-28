@@ -1,3 +1,7 @@
-# Pre-PR gate: the unit selection required CI runs, without the live scholarly-API tests.
-test-pr:
-    .venv/bin/pytest -m 'not live' -q
+test:
+    uv run pytest
+
+lint:
+    uv run ruff check citeforge tests
+    uv run ruff format --check citeforge tests
+    uv run pyrefly check

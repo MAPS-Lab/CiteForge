@@ -1,0 +1,7 @@
+{
+ "status": 409,
+ "headers": {
+  "content-type": "application/json;charset=UTF-8"
+ },
+ "body": "{\"response-code\": 409, \"developer-message\": \"409 Conflict: The ORCID record is locked and cannot be edited. ORCID 0000-0002-1825-0097\", \"error-code\": 9018}"
+}

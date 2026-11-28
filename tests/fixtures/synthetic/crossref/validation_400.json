@@ -1,0 +1,7 @@
+{
+ "status": 400,
+ "headers": {
+  "content-type": "application/json"
+ },
+ "body": "{\"status\": \"failed\", \"message-type\": \"validation-failure\", \"message\": [{\"type\": \"doi-not-valid\", \"value\": \"not-a-doi\", \"message\": \"DOI specified as not-a-doi but must be of the form: 10.prefix/suffix where prefix is 4 or more digits and suffix  is a string\"}]}"
+}

@@ -1,0 +1,7 @@
+{
+ "status": 200,
+ "headers": {
+  "content-type": "text/html"
+ },
+ "body": "<!DOCTYPE html><html><body>Just a moment...</body></html>"
+}

@@ -1,0 +1,112 @@
+import dataclasses
+import re
+from collections import Counter
+from collections.abc import Iterable
+
+from citeforge.authorship import is_own
+from citeforge.http import Http, Result
+from citeforge.model import Event, EventKind, Fetch, Identity, Member, NameKey, Work
+from citeforge.sources import dblp, openalex, orcid
+from citeforge.sources.dblp import DblpPerson
+from citeforge.sources.orcid import OrcidRecord
+from citeforge.text import family_keys, fold, name_key, split_literal
+
+LEARN_MIN_WORKS = 3
+STRONG_RULES = frozenset({"curated", "authorship_orcid", "dblp_listed"})
+_HOMONYM = re.compile(r"\s+\d{4}$")
+
+
+def _merge_orcid(results: list[Result[OrcidRecord]]) -> Result[OrcidRecord] | None:
+    if not results:
+        return None
+    values = [r.value for r in results if r.value is not None]
+    failed = next((r for r in results if r.fetch is Fetch.FAILED), None)
+    if not values:
+        return failed or results[0]
+    first = values[0]
+    merged = dataclasses.replace(
+        first,
+        other_names=tuple(
+            dict.fromkeys(n for v in values for n in (v.other_names + ((v.credit,) if v.credit else ())))
+        ),
+        affiliations=tuple(dict.fromkeys(a for v in values for a in v.affiliations)),
+        works=tuple(w for v in values for w in v.works),
+    )
+    if failed is not None:
+        return Result(Fetch.FAILED, merged, failed.reason)
+    return Result(Fetch.OK, merged)
+
+
+def _names(m: Member, rec: OrcidRecord | None, person: DblpPerson | None) -> tuple[NameKey, ...]:
+    raw = [split_literal(m.name)]
+    if rec is not None:
+        raw.append((rec.given, rec.family))
+        surnames = family_keys(raw[0][1]) | family_keys(rec.family)
+        # an other-name on another surname, such as "Suresh Raja" for Suresh Raja Neethirajan, is a given-name variant
+        others = [split_literal(n) for n in rec.other_names]
+        raw += [(g, f) for g, f in others if family_keys(f) & surnames]
+        if rec.credit:
+            raw.append(split_literal(rec.credit))
+    if person is not None:
+        raw += [split_literal(_HOMONYM.sub("", n)) for n in person.names]
+    keys = [name_key(g, f) for g, f in raw if f]
+    return tuple(dict.fromkeys(k for k in keys if k.families))
+
+
+def resolve(
+    m: Member, http: Http, lab_rors: frozenset[str]
+) -> tuple[Identity, Result[OrcidRecord] | None, Result[DblpPerson] | None, Fetch | None, tuple[Event, ...]]:
+    events: list[Event] = []
+    results = [orcid.record(http, o) for o in m.orcids]
+    events += [
+        Event(EventKind.ORCID_STATUS, m.dirname, o, r.reason)
+        for o, r in zip(m.orcids, results, strict=True)
+        if r.fetch is Fetch.FAILED and r.reason.partition(":")[0] in orcid.STATUS_REASONS.values()
+    ]
+    orcid_result = _merge_orcid(results)
+    person = dblp.person(http, m.dblp) if m.dblp else None
+    author_ids: set[str] = set()
+    lookup = None
+    if m.orcids:
+        found = openalex.authors_by_orcid(http, m.orcids)
+        lookup = found.fetch
+        if found.value:
+            author_ids |= {a for ids in found.value.values() for a in ids}
+    # a pinned id the ORCID filter returned is current and carries the member's ORCID, so it needs no lookup
+    for pinned in (p for p in m.openalex if p not in author_ids):
+        res = openalex.author(http, pinned)
+        if res.fetch is Fetch.NOT_FOUND:
+            events.append(Event(EventKind.OPENALEX_ID_DELETED, m.dirname, pinned, ""))
+            continue
+        if res.value is None:
+            author_ids.add(pinned)
+            continue
+        current, author_orcid = res.value
+        if author_orcid and m.orcids and author_orcid not in m.orcids:
+            events.append(Event(EventKind.OPENALEX_ORCID_CONFLICT, m.dirname, pinned, author_orcid))
+            continue
+        if current != pinned:
+            events.append(Event(EventKind.OPENALEX_ID_MERGED, m.dirname, pinned, current))
+        author_ids.add(current)
+    rec = orcid_result.value if orcid_result else None
+    affiliations = rec.affiliations if rec else ()
+    identity = Identity(
+        member=m,
+        orcids=frozenset(m.orcids),
+        openalex=frozenset(author_ids),
+        dblp=m.dblp,
+        names=_names(m, rec, person.value if person else None),
+        rors=lab_rors | {a.ror for a in affiliations if a.ror},
+        inst_names=frozenset(f for a in affiliations if (f := fold(a.name))),
+    )
+    return identity, orcid_result, person, lookup, tuple(events)
+
+
+def learn_institutions(identity: Identity, accepted: Iterable[tuple[Work, str]]) -> Identity:
+    counts: Counter[str] = Counter()
+    for work, rule in accepted:
+        if rule not in STRONG_RULES:
+            continue
+        counts.update({r for a in work.primary.authors if is_own(identity, a) for r in a.rors})
+    learned = {ror for ror, n in counts.items() if n >= LEARN_MIN_WORKS}
+    return dataclasses.replace(identity, rors=identity.rors | learned) if learned - identity.rors else identity

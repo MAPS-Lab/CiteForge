@@ -1,0 +1,186 @@
+import unicodedata
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
+from citeforge.model import Author
+from citeforge.text import (
+    affiliation,
+    ascii_family,
+    clean,
+    family_keys,
+    fold,
+    initials,
+    is_affiliation,
+    is_group,
+    name_key,
+    name_matches,
+    ratio,
+    recase_title,
+    slug_words,
+    token_set,
+    word_prefix,
+)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Deep &amp;amp; &lt;i&gt;Wide&lt;/i&gt; nets", "Deep & Wide nets"),
+        ("CO<sub>2</sub> capture", "CO2 capture"),
+        ("<jats:title>A <mml:math><mml:mi>k</mml:mi></mml:math>-NN study</jats:title>", "A k-NN study"),
+        (r"{SAR} images at 100% and \$5", "SAR images at 100% and $5"),
+        (r"M\'{a}rquez and G\"odel", "Márquez and Gödel"),
+        ("a < b and c > d", "a < b and c > d"),
+        ("Q&A with {AIS}", "Q&A with AIS"),
+        (r"R&D for \emph{x}", "R&D for x"),
+        (r"{a_b} X", "a_b X"),
+        (r"C# in {GPU}", "C# in GPU"),
+        (r"Tom \& {Jerry}", "Tom & Jerry"),
+        ("line\nbreak\ttab​zero", "line break tabzero"),
+        ("Café", "Café"),
+        ("Adaptive 360$^{\\circ }$ Video", "Adaptive 360° Video"),
+        ("a $\\sim$10x speedup", "a \u223c10x speedup"),
+        ("Graphene/$\\text{MoS}_2$ layers", "Graphene/MoS₂ layers"),
+        ("$10^{6}$ points at $10^{-3}$ and $x^{n}_{i}$", "10⁶ points at 10⁻³ and xⁿᵢ"),
+        ("$k^{th}$ order and $a\\_b$", "kth order and a_b"),
+        ("between $5 and $10", "between $5 and $10"),
+    ],
+)
+def test_clean(raw: str, expected: str) -> None:
+    assert clean(raw) == expected
+
+
+@given(st.text(max_size=80))
+def test_clean_idempotent_and_safe(raw: str) -> None:
+    once = clean(raw)
+    assert clean(once) == once
+    assert "\n" not in once
+    assert not any(unicodedata.category(c) == "Cc" for c in once)
+    assert unicodedata.is_normalized("NFC", once)
+
+
+def test_fold_and_similarity() -> None:
+    assert fold("Müller-Lüdenscheidt, Ç.") == "muller ludenscheidt c"
+    assert ratio("Vessel  Trajectory", "vessel trajectory") == 1.0
+    assert token_set("Deep learning for AIS", "AIS deep learning") == 1.0
+    assert word_prefix("Graph neural networks", "Graph neural networks for maritime traffic")
+    assert not word_prefix("Graph neural", "Graph neural networks")
+
+
+def test_names() -> None:
+    assert family_keys("de Souza") == {"desouza", "souza"}
+    assert "chaplin" in family_keys("Rau-Chaplin")
+    assert initials("J.-P.") == "jp"
+    assert initials("Md Mahbub") == "mm"
+    spadon = [name_key("Gabriel", "Spadon")]
+    assert name_matches(spadon, Author("G.", "Spadon"))
+    assert name_matches(spadon, Author("", "Spadon"))
+    assert not name_matches(spadon, Author("Marcos", "Spadon"))
+    assert name_matches(spadon, Author("", "", literal="Gabriel Spadon"))
+    assert not name_matches(spadon, Author("", "", literal="Spadon Research Group"))
+    assert name_matches([name_key("Anna", "de Souza")], Author("A.", "Souza"))
+
+
+@pytest.mark.parametrize(
+    ("given", "want"),
+    [("Dr. Evangelos E.", "ee"), ("Dr.Evangelos.E.", "ee"), ("Prof. Dr. Evangelos", "e"), ("Ms. Ana", "a"),
+     ("DR", "d"), ("M S", "ms"), ("Dr", "d"), ("Sirius", "s"), ("Mr", "m")],
+)  # fmt: skip
+def test_initials_skip_a_leading_title_but_keep_upper_case_initials(given: str, want: str) -> None:
+    assert initials(given) == want
+
+
+def test_swapped_given_and_family_match_only_when_asked() -> None:
+    he = [name_key("Meng", "He")]
+    assert not name_matches(he, Author("He", "Meng"))
+    assert name_matches(he, Author("He", "Meng"), swapped=True)
+    assert not name_matches(he, Author("He", "Chuan"), swapped=True)
+    assert not name_matches(he, Author("", "Meng"), swapped=True)
+
+
+def test_group_and_affiliation() -> None:
+    assert is_group("The ATLAS Collaboration")
+    assert is_group("COVID-19 Genomics UK Consortium")
+    assert is_affiliation("Dalhousie University")
+    assert is_affiliation("Acme Inc.")
+    assert not is_affiliation("University Hospital Study Group")
+    assert not is_affiliation("Gabriel Spadon")
+    assert is_affiliation("Association for Computational Linguistics 2025")
+    assert is_affiliation("Canadian Society for Epidemiology")
+
+
+@pytest.mark.parametrize(
+    ("member", "slot", "same"),
+    [
+        (("Gabriel", "Spadon de Souza"), ("Gustavo", "Souza"), False),
+        (("Gabriel", "Spadon de Souza"), ("Gabriela", "de Souza"), False),
+        (("Gabriel", "Spadon de Souza"), ("Gabriel", "Souza"), True),
+        (("Gabriel", "Spadon de Souza"), ("G.", "Souza"), False),
+        (("Gabriel", "Spadon de Souza"), ("G. S.", "Spadon de Souza"), True),
+        (("Carlos", "Hernandez-Castillo"), ("Cristina", "Castillo"), False),
+        (("Carlos", "Hernandez-Castillo"), ("Carlos", "Hernández"), True),
+        (("Carlos", "Hernandez-Castillo"), ("Carlos R.", "Hernandez Castillo"), True),
+        (("Andrew", "Rau-Chaplin"), ("Anna", "Rau"), False),
+        (("Suresh", "Neethirajan"), ("Soma Ganesh Raja", "Neethirajan"), False),
+        (("Suresh", "Neethirajan"), ("S.", "Neethirajan"), True),
+        (("Meng", "He"), ("Ming", "He"), False),
+        (("Stan", "Matwin"), ("Stanislaw", "Matwin"), True),
+        (("Alex", "Brodsky"), ("Alexander", "Brodsky"), True),
+        (("Lu", "Yang"), ("Lucas", "Yang"), False),
+        (("Masud", "Rahman"), ("Md", "Rahman"), True),
+        (("FE", "Bordeleau"), ("Francis", "Bordeleau"), True),
+    ],
+)
+def test_a_written_given_name_must_agree(member: tuple[str, str], slot: tuple[str, str], same: bool) -> None:
+    assert name_matches([name_key(*member)], Author(*slot)) is same
+
+
+def test_a_known_given_name_variant_is_checked_across_every_name_of_the_member() -> None:
+    spadon = [name_key("Gabriel", "Spadon"), name_key("GS", "Souza")]
+    assert name_matches(spadon, Author("G.", "Souza"))
+    assert not name_matches(spadon, Author("Gustavo", "Souza"))
+
+
+def test_recase_title() -> None:
+    assert recase_title("DEEP LEARNING FOR IOT AND AI") == "Deep Learning for IoT and AI"
+    assert recase_title("Normal Title with SAR") == "Normal Title with SAR"
+    assert recase_title("ABC") == "ABC"
+
+
+@given(st.text(max_size=60))
+def test_slug_words_ascii(title: str) -> None:
+    for w in slug_words(title):
+        assert w.isascii() and w.isalnum()
+
+
+def test_slug_and_family() -> None:
+    expected = ["Enhancing", "Short", "Term", "Vessel", "Trajectory"]
+    assert slug_words("Enhancing short-term vessel trajectory") == expected
+    assert ascii_family("Rau-Chaplin") == "RauChaplin"
+    assert ascii_family("Müller") == "Muller"
+    assert ascii_family("de la Fuente") == "DeLaFuente"
+
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ("Dept of X, Dalhousie University, Halifax, Canada. Electronic address: jane.doe@example.org.",
+         "Dept of X, Dalhousie University, Halifax, Canada."),
+        ("Linnaeus University, Sweden. someone@example.se", "Linnaeus University, Sweden."),
+        ("E-mail: x@example.org; Some University", "Some University"),
+        ("University (bob@example.edu)", "University"),
+        ("Dept, email address: me@example.co.uk, Halifax", "Dept, Halifax"),
+        ("someone@example.org", ""),
+        ("Smith & Co @ Halifax", "Smith & Co @ Halifax"),
+        ("<sup>1</sup>Faculty of Computer Science", "1Faculty of Computer Science"),
+    ],
+)  # fmt: skip
+def test_affiliation_drops_email_addresses(raw: str, want: str) -> None:
+    assert affiliation(raw) == want
+
+
+@given(st.text(max_size=40), st.from_regex(r"[a-z0-9._%+-]{1,12}@[a-z0-9-]{1,10}(\.[a-z]{2,6}){1,2}", fullmatch=True))
+def test_affiliation_never_keeps_an_address(text: str, address: str) -> None:
+    assert address not in affiliation(f"{text} {address} {text}")

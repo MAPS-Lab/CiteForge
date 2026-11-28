@@ -1,0 +1,7 @@
+{
+ "status": 200,
+ "headers": {
+  "content-type": "application/json;charset=UTF-8"
+ },
+ "body": "{\"orcid-identifier\": {\"path\": \"0000-0002-1825-0097\"}, \"person\": null, \"activities-summary\": {\"works\": {\"group\": []}}}"
+}

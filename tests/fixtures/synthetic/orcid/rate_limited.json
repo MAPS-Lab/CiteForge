@@ -1,0 +1,8 @@
+{
+ "status": 429,
+ "headers": {
+  "content-type": "application/json;charset=UTF-8",
+  "retry-after": "6626"
+ },
+ "body": "{\"response-code\": 429, \"developer-message\": \"Too Many Requests\", \"error-code\": 0}"
+}

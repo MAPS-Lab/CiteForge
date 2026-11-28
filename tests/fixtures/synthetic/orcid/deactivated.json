@@ -1,0 +1,7 @@
+{
+ "status": 409,
+ "headers": {
+  "content-type": "application/json;charset=UTF-8"
+ },
+ "body": "{\"response-code\": 409, \"developer-message\": \"409 Conflict: The ORCID record is deactivated and cannot be edited.\", \"error-code\": 9044}"
+}

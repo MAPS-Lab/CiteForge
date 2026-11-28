@@ -1,0 +1,24 @@
+{
+  "type": "thesis",
+  "genre": "Master's thesis",
+  "DOI": "10.48550/arXiv.2310.18948",
+  "title": ["", "Vessel &amp; <i>port</i> forecasting"],
+  "author": [
+    {"literal": "MAPS Lab Consortium"},
+    {"family": "Gogh", "non-dropping-particle": "van", "given": "Vincent", "ORCID": "https://orcid.org/0000-0002-1825-0097"},
+    {"family": "Souza", "given": "Ana", "dropping-particle": "de"}
+  ],
+  "editor": [{"family": "Matwin", "given": "Stan"}],
+  "issued": {"date-parts": [["2021", 5]]},
+  "published-online": {"raw": "2020-11-03"},
+  "published-print": {"date-parts": [[null]]},
+  "container-title": [],
+  "collection-title": "Lecture Notes",
+  "event-title": "Workshop on Ocean Data",
+  "publisher": "Dalhousie University",
+  "volume": 12,
+  "issue": "3",
+  "page": "101-115",
+  "article-number": "e42",
+  "language": "en"
+}
