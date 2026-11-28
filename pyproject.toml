@@ -15,7 +15,7 @@ dev = [
     "pytest==9.2.0",
     "hypothesis==6.170.22",
     "pytest-cov==7.1.0",
-    "bibtexparser==1.4.4",
+    "bibtexparser==2.1.0",
     "ruff==0.17.6",
     "pyrefly==1.5.0",
 ]
