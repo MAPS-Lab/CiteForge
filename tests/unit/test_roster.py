@@ -38,6 +38,11 @@ def test_dirname_fallbacks() -> None:
     assert format_author_dirname("", "42-3005") == "42-3005"
     assert format_author_dirname("..", "") == "unknown"
     assert format_author_dirname("A/B", "x") == "A-B (x)"
+    assert format_author_dirname("Robert Smith Jr", "abcdefXYZ") == "Smith (abcdefXYZ)"
+    assert format_author_dirname("Martin Luther King III", "abcdefXYZ") == "King (abcdefXYZ)"
+    assert format_author_dirname("Ana Unknown", "x") == "Unknown (x)"
+    assert format_author_dirname("Unknown", "") == "Unknown"
+    assert format_author_dirname(None, "") == "unknown"
 
 
 def test_load_valid_roster(tmp_path: Path) -> None:

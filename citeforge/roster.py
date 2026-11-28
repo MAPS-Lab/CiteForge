@@ -7,6 +7,7 @@ from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
 from citeforge.ids import norm_openalex, norm_orcid
 from citeforge.model import Member
+from citeforge.text import split_literal
 
 COLUMNS = ("Name", "Scholar Link", "DBLP Link", "ORCID", "OpenAlex", "Enabled", "Exclusion Reason")
 _SCHOLAR_HOSTS = frozenset({"scholar.google.com", "scholar.google.ca"})
@@ -27,26 +28,14 @@ def normalize_name(name: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", name).split()).casefold()
 
 
-def extract_last_name(full_name: str | None) -> str:
-    name = (full_name or "").strip()
-    if not name:
-        return "Unknown"
-    if "," in name and (last := name.split(",", 1)[0].strip()):
-        return last
-    tokens = name.split()
-    return tokens[-1] if tokens else name
-
-
 def format_author_dirname(author_name: str | None, author_id: str) -> str:
-    last_name = _DIRNAME_UNSAFE.sub("-", extract_last_name(author_name))
-    if not last_name.strip(". "):
-        last_name = ""
+    family = _DIRNAME_UNSAFE.sub("-", split_literal((author_name or "").strip())[1])
+    if not family.strip(". "):
+        family = ""
     sanitized_id = _DIRNAME_UNSAFE.sub("-", author_id)
-    if not sanitized_id:
-        return last_name if last_name and last_name != "Unknown" else "unknown"
-    if last_name and last_name != "Unknown":
-        return f"{last_name} ({sanitized_id})"
-    return sanitized_id
+    if family and sanitized_id:
+        return f"{family} ({sanitized_id})"
+    return family or sanitized_id or "unknown"
 
 
 def _unsafe(value: str) -> bool:
