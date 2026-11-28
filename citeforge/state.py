@@ -1,14 +1,18 @@
+import builtins
 import json
 import os
 import tempfile
+from collections import abc
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date
 from enum import Enum
+from functools import cache
 from pathlib import Path
-from typing import Any
+from types import NoneType, UnionType
+from typing import Any, get_args, get_origin, get_type_hints
 
-from citeforge.model import Author, Decision, Kind, Names, Record, Rel, Source, Status, Verdict, Work
+from citeforge.model import Decision, Names, Work
 
 STATE_FILE = "works.jsonl"
 
@@ -50,41 +54,31 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _author(d: Mapping[str, Any]) -> Author:
-    values: dict[str, Any] = {**d, "rors": tuple(d["rors"]), "affiliations": tuple(d["affiliations"])}
-    return Author(**values)
+@cache
+def _hints(tp: type) -> dict[str, Any]:
+    return get_type_hints(tp)
 
 
-def _record(d: Mapping[str, Any]) -> Record:
-    values: dict[str, Any] = {
-        **d,
-        "source": Source(d["source"]),
-        "ids": frozenset(d["ids"]),
-        "kind": Kind(d["kind"]),
-        "authors": tuple(map(_author, d["authors"])),
-        "editors": tuple(map(_author, d["editors"])),
-        "container": tuple(d["container"]),
-        "relations": frozenset((Rel(r), t) for r, t in d["relations"]),
-        "status": Status(d["status"]),
-        "alt_titles": tuple(d.get("alt_titles", ())),
-    }
-    return Record(**values)
-
-
-def _work(d: Mapping[str, Any]) -> Work:
-    return Work(
-        key=d["key"],
-        primary=_record(d["primary"]),
-        eprint=_record(d["eprint"]) if d["eprint"] else None,
-        linked=frozenset(d["linked"]),
-        kind=Kind(d["kind"]),
-        status=Status(d["status"]),
-        year=d["year"],
-        excluded=d["excluded"],
-        provenance=tuple((f, Source(s)) for f, s in d["provenance"]),
-        aliases=frozenset(d["aliases"]),
-        sources=frozenset(map(Source, d["sources"])),
-    )
+def _read(tp: Any, value: Any) -> Any:
+    """Rebuild a value _plain wrote, led by its annotation: a dataclass, enum, date, collection or optional."""
+    args = get_args(tp)
+    if isinstance(tp, UnionType):
+        return None if value is None else _read(next(a for a in args if a is not NoneType), value)
+    if is_dataclass(tp):
+        hints = _hints(tp)
+        return tp(**{f.name: _read(hints[f.name], value[f.name]) for f in fields(tp) if f.name in value})
+    if isinstance(tp, type) and issubclass(tp, Enum | date):
+        return tp(value) if issubclass(tp, Enum) else date.fromisoformat(value)
+    match get_origin(tp):
+        case builtins.frozenset:
+            return frozenset(_read(args[0], v) for v in value)
+        case builtins.tuple if args[-1:] == (Ellipsis,):
+            return tuple(_read(args[0], v) for v in value)
+        case builtins.tuple:
+            return tuple(_read(a, v) for a, v in zip(args, value, strict=True))
+        case abc.Mapping | builtins.dict:
+            return {k: _read(args[1], v) for k, v in value.items()}
+    return value
 
 
 def encode(row: StateRow) -> str:
@@ -92,19 +86,7 @@ def encode(row: StateRow) -> str:
 
 
 def decode(line: str) -> StateRow:
-    d = json.loads(line)
-    return StateRow(
-        work=_work(d["work"]),
-        names=Names(**d["names"]),
-        members={
-            m: Decision(Verdict(x["verdict"]), x["rule"], frozenset(x["evidence"])) for m, x in d["members"].items()
-        },
-        missing=dict(d["missing"]),
-        searches={
-            k: Searched((x["query"][0], x["query"][1], x["query"][2]), x["review"], date.fromisoformat(x["on"]))
-            for k, x in d.get("searches", {}).items()
-        },
-    )
+    return _read(StateRow, json.loads(line))
 
 
 def load(directory: Path) -> dict[str, StateRow]:
