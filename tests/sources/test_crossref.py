@@ -519,6 +519,7 @@ EDITOR = [{"given": "Stan", "family": "Matwin"}]
         ("edited-book", {}, Kind.BOOK),
         ("edited-book", {"editor": EDITOR}, Kind.PROCEEDINGS),
         ("edited-book", {"author": [], "editor": EDITOR}, Kind.PROCEEDINGS),
+        ("edited-book", {"author": []}, Kind.PROCEEDINGS),
         ("report", {}, Kind.TECHREPORT),
         ("dissertation", {"degree": ["Master of Science"]}, Kind.MASTERSTHESIS),
         ("dissertation", {}, Kind.PHDTHESIS),

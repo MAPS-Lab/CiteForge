@@ -75,10 +75,12 @@ def test_write_replaces_and_prunes_only_member_folders(tmp_path: Path) -> None:
     (out / "Gone (x)").mkdir()
     (out / "Gone (x)/Keep.bib").write_text("not ours")
     files = publish.plan(state(), [SP, MW], [MW])
-    changes = publish.write(out, files, ["Spadon (bfdGsGUAAAAJ)", "Matwin (rCoJeuYAAAAJ)", "a2i2"])
-    assert changes.removed == ("Spadon (bfdGsGUAAAAJ)/Stale2019-X.bib",)
+    publish.write(out, files, ["Spadon (bfdGsGUAAAAJ)", "Matwin (rCoJeuYAAAAJ)", "a2i2"])
+    assert not (out / "Spadon (bfdGsGUAAAAJ)/Stale2019-X.bib").exists()
     assert (out / "Gone (x)/Keep.bib").exists()
-    assert publish.write(out, files, ["Spadon (bfdGsGUAAAAJ)"]) == publish.Changes((), (), ())
+    written = {path: path.stat().st_mtime_ns for path in out.rglob("*.bib")}
+    publish.write(out, files, ["Spadon (bfdGsGUAAAAJ)"])
+    assert {path: path.stat().st_mtime_ns for path in out.rglob("*.bib")} == written
     empty = publish.plan({}, [SP], [])
     publish.write(out, empty, ["Spadon (bfdGsGUAAAAJ)", "Matwin (rCoJeuYAAAAJ)", "a2i2"])
     assert not (out / "Spadon (bfdGsGUAAAAJ)").exists()
@@ -137,6 +139,5 @@ def test_write_never_prunes_through_a_symlinked_member_folder(tmp_path: Path) ->
     output = tmp_path / "output"
     output.mkdir()
     (output / SP.dirname).symlink_to(outside, target_is_directory=True)
-    changes = publish.write(output, {}, [SP.dirname])
+    publish.write(output, {}, [SP.dirname])
     assert (outside / "Keep2020-A.bib").exists()
-    assert changes.removed == ()

@@ -4,7 +4,6 @@ import json
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 from citeforge.bibtex import FIELD_ORDER, STEM_MAX, read_entry, render
@@ -23,13 +22,6 @@ _ALLOWED_FIELDS = frozenset(FIELD_ORDER) | {"ENTRYTYPE", "ID"}
 
 class PlanError(RuntimeError):
     pass
-
-
-@dataclass(frozen=True, slots=True)
-class Changes:
-    added: tuple[str, ...]
-    changed: tuple[str, ...]
-    removed: tuple[str, ...]
 
 
 def publishable(d: Decision | None, w: Work | None) -> bool:
@@ -141,17 +133,11 @@ def check(files: Mapping[Path, str]) -> list[str]:
     return problems
 
 
-def write(output: Path, files: Mapping[Path, str], folders: Iterable[str]) -> Changes:
-    added, changed, removed = [], [], []
+def write(output: Path, files: Mapping[Path, str], folders: Iterable[str]) -> None:
     for rel, text in sorted(files.items()):
         path = output / rel
-        if path.exists():
-            if path.read_text(encoding="utf-8") == text:
-                continue
-            changed.append(rel.as_posix())
-        else:
-            added.append(rel.as_posix())
-        atomic_write(path, text)
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            atomic_write(path, text)
     for folder in sorted(set(folders)):
         directory = output / folder
         if not directory.is_dir() or directory.is_symlink():
@@ -160,7 +146,5 @@ def write(output: Path, files: Mapping[Path, str], folders: Iterable[str]) -> Ch
             rel = path.relative_to(output)
             if rel not in files:
                 path.unlink()
-                removed.append(rel.as_posix())
         if not any(directory.iterdir()):
             directory.rmdir()
-    return Changes(tuple(added), tuple(changed), tuple(removed))
