@@ -153,7 +153,7 @@ def _windowed(d: Decision, w: Work, s: Settings) -> Decision:
     return d
 
 
-def _status(listing: Listing, over_cap: bool, registry_failed: bool, emitted: int) -> str:
+def _status(listing: Listing, over_cap: bool, emitted: int, registry_failed: bool) -> str:
     if over_cap:
         return "over_cap"
     failed = sorted(s.value for s, f in listing.fetch.items() if f is Fetch.FAILED) + ["registry"] * registry_failed
@@ -198,8 +198,10 @@ def run(
         events += ev
     pairs = sorted(((lst.member, c) for lst in listings.values() for c in lst.claims), key=_claim_order)
     pairs, pubmed_failed = _with_pubmed_dois(pairs, http)
+    linked = cluster.previous_links(previous)
     wanted = {i for _, c in pairs for i in c.ids if split_id(i)[0] in ("doi", "arxiv")}
     wanted |= {i for link in curated.links for i in link}
+    wanted |= {i for _, c in pairs for a in c.ids & linked.keys() for i in linked[a].ids if split_id(i)[0] == "doi"}
     have = {
         i: c.record
         for _, c in pairs
@@ -216,7 +218,7 @@ def run(
     for member, c in held:
         held_ids[member] |= c.ids
     groups, ev = cluster.cluster(
-        kept, reg, curated, lambda gs: cluster.search_unidentified(gs, http, identities, s.min_year, previous)
+        kept, reg, curated, lambda gs: cluster.search_unidentified(gs, http, identities, s.min_year, linked, reg)
     )
     events += ev
     for name in sorted({e.member for e in ev if e.kind == "search_failed" and e.member in listings}):
@@ -265,10 +267,12 @@ def run(
     for m in members:
         name = m.dirname
         listing = listings[name]
-        partial = Fetch.FAILED in listing.fetch.values() or Fetch.OK not in listing.fetch.values()
         mine = dict(decisions.get(name, {}))
-        registry_failed = False
         prev = {k: row for k, row in previous.items() if publish.emitted(row, name)}
+        registry_failed = bool(registry_held & (mine.keys() | prev.keys())) or any(
+            row.work.aliases & reg.failed for row in prev.values()
+        )
+        partial = registry_failed or Fetch.FAILED in listing.fetch.values() or Fetch.OK not in listing.fetch.values()
         accepted = [k for k, d in mine.items() if publish.publishable(d, by_key[k])]
         over_cap = len(accepted) > PER_YEAR_CAP * window_years
         if over_cap:
@@ -285,7 +289,6 @@ def run(
             else:
                 mine.pop(k)
                 events.append(Event("pending", name, k, "pending:registry"))
-                registry_failed = True
         removals: dict[str, str] = {}
         for k, row in sorted(prev.items()):
             # a work whose registry or donor lookup failed is judged on last run's record, never removed
@@ -333,8 +336,7 @@ def run(
         final[name] = mine
         member_changes[name] = {"removed": sorted(removals.items())}
         emitted = sum(publish.publishable(d, carried_works.get(k) or by_key[k]) for k, d in mine.items())
-        registry_failed |= any((carried_works.get(k) or by_key[k]).aliases & reg.failed for k in mine)
-        statuses[name] = _status(listing, over_cap, registry_failed, emitted)
+        statuses[name] = _status(listing, over_cap, emitted, registry_failed)
     t = stage("failure_rules", t)
 
     all_works = {**by_key, **carried_works}

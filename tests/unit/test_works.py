@@ -61,10 +61,44 @@ def test_kind_map(source: Source, source_type: str, extra: dict, kind: Kind) -> 
         ("Correction to: Vessel tracks", Kind.NOTICE),
         ("Erratum", Kind.NOTICE),
         ("Welcome-based routing", Kind.ARTICLE),
+        ("Welcome to the Jungle: Teaching listening through songs", Kind.ARTICLE),
+        ("Welcome message from the program chairs", Kind.FRONT_MATTER),
+        ("Welcome to the 45th International Conference on Software Engineering", Kind.FRONT_MATTER),
+        ("Welcome!", Kind.FRONT_MATTER),
+        ("Retraction note: Vessel tracks", Kind.NOTICE),
     ],
 )
 def test_title_patterns(title: str, kind: Kind) -> None:
     assert classify(record("doi:10.1234/t", title=title)) is kind
+
+
+@pytest.mark.parametrize(
+    ("doi", "title", "pages"),
+    [
+        (
+            "10.1016/j.medcle.2024.07.015",
+            "Retraction of publications in Spain: A retrospective analysis using the Retraction Watch database",
+            "626-633",
+        ),
+        (
+            "10.17398/1988-8430.44.227",
+            "Welcome to the Jungle: An Empirical Study on Teaching Listening Through Songs",
+            "227-263",
+        ),
+        (
+            "10.1007/s10750-023-05356-7",
+            "Welcome to the jungle!: An overview of modern taxonomy of cyanobacteria",
+            "1063-77",
+        ),
+    ],
+)
+def test_research_articles_with_notice_like_titles_stay_articles(doi: str, title: str, pages: str) -> None:
+    assert classify(record("doi:" + doi, title=title, pages=pages)) is Kind.ARTICLE
+
+
+@pytest.mark.parametrize("pages", ["626-626", "626", None, "626-7"])
+def test_a_short_or_unpaged_retraction_is_a_notice(pages: str | None) -> None:
+    assert classify(record("doi:10.1234/r", title="Retraction of: Vessel tracks at scale", pages=pages)) is Kind.NOTICE
 
 
 @pytest.mark.parametrize(
@@ -290,6 +324,17 @@ def test_crossref_other_with_a_container_takes_the_openalex_kind() -> None:
     assert build(_group(cr), Curated())[0].excluded == "kind:other"
     bare = dataclasses.replace(cr, container=())
     assert build(_group(bare, dataclasses.replace(oa, container=())), Curated())[0].excluded == "kind:other"
+
+
+def test_edited_book_with_no_registry_byline_is_never_made_a_book_by_a_filled_byline() -> None:
+    doi = "doi:10.3390/books978-3-0365-0027-0"
+    reprint = dataclasses.replace(
+        record(doi, title="Sensing and Signal Processing", source_type="edited-book"), authors=()
+    )
+    oa = record(doi, source=Source.OPENALEX, title="Sensing and Signal Processing", authors=(author("Wenbing Zhao"),))
+    w = build(_group(reprint, oa), Curated())[0]
+    assert dict(w.provenance)["authors"] is Source.OPENALEX
+    assert (w.kind, w.excluded) == (Kind.PROCEEDINGS, "kind:proceedings")
 
 
 def test_chapters_of_an_authored_book_fold_into_the_book() -> None:
