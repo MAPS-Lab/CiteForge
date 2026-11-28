@@ -27,6 +27,7 @@ from citeforge.model import (
     Verdict,
     Work,
 )
+from citeforge.sources import pubmed
 from citeforge.state import State, StateRow
 
 MAX_WORKERS = 8
@@ -123,6 +124,20 @@ def _pairs(w: Work, g: Group, identities: Mapping[str, Identity], curated: Curat
     return out
 
 
+def _with_pubmed_dois(pairs: list[tuple[str, Claim]], http: Http) -> list[tuple[str, Claim]]:
+    def doi_less(c: Claim) -> bool:
+        return not any(split_id(i)[0] == "doi" for i in c.ids)
+
+    pmids = sorted({i for _, c in pairs if doi_less(c) for i in c.ids if split_id(i)[0] == "pmid"})
+    if not pmids:
+        return pairs
+    found = pubmed.dois(http, pmids).value or {}
+    return [
+        (m, dataclasses.replace(c, ids=c.ids | {found[i] for i in c.ids if i in found})) if doi_less(c) else (m, c)
+        for m, c in pairs
+    ]
+
+
 def _windowed(d: Decision, w: Work, s: Settings) -> Decision:
     if d.verdict is not Verdict.ACCEPT:
         return d
@@ -178,6 +193,7 @@ def run(
     for _, _, ev in resolved:
         events += ev
     pairs = sorted(((lst.member, c) for lst in listings.values() for c in lst.claims), key=_claim_order)
+    pairs = _with_pubmed_dois(pairs, http)
     wanted = {i for _, c in pairs for i in c.ids if split_id(i)[0] in ("doi", "arxiv")}
     wanted |= {i for link in curated.links for i in link}
     have = {
