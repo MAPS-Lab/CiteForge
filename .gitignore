@@ -12,7 +12,6 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-data/api_cache/
 downloads/
 eggs/
 lib/
@@ -53,15 +52,6 @@ keys/
 *.tmp
 temp/
 tmp/
-
-# Pipeline run artifacts (generated logs must never be committed)
-output/run.log
-output/**/*.log
-
-# Build artifacts
-third-party/*
-ruff-report.json
-
 
 # Run artifacts
 run/
